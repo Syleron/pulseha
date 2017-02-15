@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package requester;
+
+service Requester {
+    rpc Process (Config) returns (Response) {}
+}
+
+message Config {
+    string name = 1;
+}
+
+message Response {
+    string message = 1;
+}
