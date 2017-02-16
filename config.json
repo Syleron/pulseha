@@ -1,15 +1,21 @@
 {
-  "Client": {
-    "port": 8000
+  "general": {
+    "interval": 1000,
+    "retries": 3,
+    "use_add_health": true,
+    "client_port": "8000",
+    "server_port": "50051"
   },
-  "Cluster": {
+  "cluster": {
     "master": {
       "ip": "127.0.0.1",
-      "port": "50051"
+      "port": "50051",
+      "health": ["http", "icmp"]
     },
     "slave": {
       "ip": "127.0.0.1",
-      "port": "50051"
+      "port": "50051",
+      "health": ["icmp"]
     }
   }
 }

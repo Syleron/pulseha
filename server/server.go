@@ -1,18 +1,22 @@
 package server
 
 import (
-	"log"
+	log "github.com/Sirupsen/logrus"
 	"net"
-
 	pb "github.com/syleron/pulse/pulse"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"sync"
-	"fmt"
+	"github.com/syleron/pulse/structures"
+	"github.com/syleron/pulse/utils"
 )
 
 const (
 	port = ":50051"
+)
+
+var (
+	Config	structures.Configuration
 )
 
 type server struct{}
@@ -25,11 +29,16 @@ func (s *server) Process(ctx context.Context, in *pb.Config) (*pb.Response, erro
  * Setup Function used to initialise the server
  */
 func Setup(wg *sync.WaitGroup) {
-	fmt.Println("Initialising server..")
+	log.Info("Initialising server..")
+
+	// Load the config and validate
+	Config = utils.LoadConfig()
+	Config.Validate()
+
 	defer wg.Done()
-	lis, err := net.Listen("tcp", port)
+	lis, err := net.Listen("tcp", ":" + Config.General.ServerPort)
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Error("failed to listen: %v", err)
 	}
 	s := grpc.NewServer()
 	pb.RegisterRequesterServer(s, &server{})

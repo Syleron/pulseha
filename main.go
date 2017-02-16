@@ -4,18 +4,18 @@ import (
 	"github.com/syleron/pulse/client"
 	"github.com/syleron/pulse/server"
 	"sync"
-	"fmt"
+	log "github.com/Sirupsen/logrus"
 )
 
 func main() {
-	fmt.Println("Pulse started..\nLoading Config..")
+	log.Info("Pulse started..")
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
-	//Setup Server
+	// Setup Server
 	go server.Setup(&wg)
 	// Server Client
 	client.Setup()
-	// Wait for waitgroup to finish
+	// Wait for wait group to finish
 	wg.Wait()
 }
