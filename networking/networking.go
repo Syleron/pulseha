@@ -1,6 +1,11 @@
 package networking
 
-import "github.com/syleron/pulse/utils"
+import (
+	log "github.com/Sirupsen/logrus"
+	"github.com/syleron/pulse/utils"
+	"fmt"
+	"net"
+)
 
 // Required System Calls to correctly Function
 // arp-scan
@@ -22,6 +27,94 @@ func SendGARP() error {
 func AssignFloatingIP() {
 
 }
+
+/**
+ * Checks to see what status a network interface is currently.
+ * Possible responses are either up or down.
+ */
+func _netInterfaceStatus(iface string) {
+	args := []string{
+		"/sys/class/net/"+iface+"operstate",
+	}
+
+	output, err := utils.Execute("cat", args)
+
+	if err != nil {
+		return err.Error();
+	}
+
+	log.Debug(output)
+
+	return true
+
+}
+
+/**
+ * Local function to see if an interface with name iface exists
+ */
+func _ifaceExist(iface string) bool {
+	ifaces, _ := net.Interfaces()
+
+	// TODO: handle err
+
+	for _, i := range ifaces {
+		if i.Name == iface {
+			return true
+		}
+	}
+
+	return false
+}
+
+/**
+ * This function is to bring up a network interface
+ */
+func BringIPup(iface string) bool{
+	if !_ifaceExist(iface) {
+		// TODO: Error log
+		return false
+	}
+
+	args := []string{
+		iface,
+	}
+
+	output, err := utils.Execute("ifup", args)
+
+	if err != nil {
+		return err.Error();
+	}
+
+	log.Debug(output)
+
+	return true
+}
+
+/**
+ * This function is to bring down a network interface
+ */
+func BringIPdown(iface string) bool{
+	if !_ifaceExist(iface) {
+		// TODO: Error log
+		return false
+	}
+
+	args := []string{
+		iface,
+	}
+
+	output, err := utils.Execute("ifdown", args)
+
+	if err != nil {
+		return err.Error();
+	}
+
+	log.Debug(output)
+
+	return true
+}
+
+
 
 /**
  * TODO: This function should probably return a boolean on weather the request was successful or not

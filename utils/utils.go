@@ -6,23 +6,15 @@ import (
 	"os/exec"
 	"net"
 	"io/ioutil"
-	"fmt"
 )
 
 /**
  * This function is to be used to load our JSON based config and decode it as a struct!
  */
 func LoadConfig() structures.Configuration {
-	//file, _ := os.Open("config.json")
 	c, _ := ioutil.ReadFile("config.json")
-	//decoder := json.NewDecoder(file)
 	configuration := structures.Configuration{}
-
 	json.Unmarshal([]byte(c), &configuration)
-
-	fmt.Printf("%+v", configuration)
-
-	//err := decoder.Decode(&configuration)
 
 	// We had an error attempting to decode the json into our struct! oops!
 	//if err != nil {
@@ -32,7 +24,7 @@ func LoadConfig() structures.Configuration {
 	//}
 
 	// Validate our config to ensure that there nothing obviously wrong.
-	//configuration.Validate()
+	configuration.Validate()
 
 	return configuration
 }

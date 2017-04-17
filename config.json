@@ -1,19 +1,24 @@
 {
-  "general": {
+  "local": {
     "interval": 1000,
     "retries": 3,
     "use_add_health": true,
     "role": "master",
-    "tls": false
+    "tls": false,
+    "interface": "ens3"
   },
   "cluster": {
-    "master": {
-      "ip": "127.0.0.1",
-      "port": "50051"
-    },
-    "slave": {
-      "ip": "127.0.0.1",
-      "port": "50051"
+    "status": "status",
+    "last_response": "time",
+    "nodes": {
+      "master": {
+        "ip": "127.0.0.1",
+        "port": "50051"
+      },
+      "slave": {
+        "ip": "127.0.0.1",
+        "port": "50051"
+      }
     }
   }
 }

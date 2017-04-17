@@ -8,22 +8,19 @@ import (
 	"github.com/syleron/pulse/structures"
 	"github.com/syleron/pulse/utils"
 	"context"
-	"fmt"
-	"os"
-)
-
-const (
-	address     = "localhost:50051"
 )
 
 var (
 	Config		structures.Configuration
 	Connection	pb.RequesterClient
+
+	// Peer's Connection Details
+	PeerIP		string
+	PeerPort	string
 )
 
 /*
  * Setup Function used to initialise the client
- * TODO: Must be a better way of accessing the config!
  */
 func Setup() {
 	log.Info("Initialising client..")
@@ -32,13 +29,11 @@ func Setup() {
 	Config = utils.LoadConfig()
 	Config.Validate()
 
-	// debug
-
-	fmt.Print(Config)
-	os.Exit(0);
+	// Set all the local variables from the config.
+	setupLocalVariables()
 
 	// Schedule the health checks to ensure each member within the cluster still exists!
-	scheduler(roundRobinHealthCheck, time.Duration(Config.General.Interval) * time.Millisecond)
+	scheduler(roundRobinHealthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 }
 
 /**
@@ -58,7 +53,7 @@ func roundRobinHealthCheck() {
 	var opts []grpc.DialOption
 
 	// setup TLS stuff
-	if Config.General.TLS {
+	if Config.Local.TLS {
 		//var sn string
 		//var creds credentials.TransportAuthenticator
 		//creds = credentials.NewClientTLSFromCert(nil, sn)
@@ -67,7 +62,7 @@ func roundRobinHealthCheck() {
 		opts = append(opts, grpc.WithInsecure())
 	}
 
-	conn, err := grpc.Dial(address, opts...)
+	conn, err := grpc.Dial(PeerIP+":"+PeerPort, opts...)
 	if err != nil {
 		log.Error("Connection Error: %v", err)
 	}
@@ -82,4 +77,17 @@ func roundRobinHealthCheck() {
 	}
 
 	log.Printf("Response: %s", r.Message)
+}
+
+func setupLocalVariables() {
+	switch Config.Local.Role {
+	case "master":
+		PeerIP = Config.Cluster.Nodes.Slave.IP
+		PeerPort = Config.Cluster.Nodes.Slave.Port
+	case "slave":
+		PeerIP = Config.Cluster.Nodes.Master.IP
+		PeerPort = Config.Cluster.Nodes.Master.Port
+	default:
+		panic("Unable to initiate due to invalid role set in configuration.")
+	}
 }
