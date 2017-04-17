@@ -1,10 +1,11 @@
 package networking
 
+import "github.com/syleron/pulse/utils"
+
 // Required System Calls to correctly Function
 // arp-scan
 // arping
 // ping
-// ping6
 
 /**
  * Send Gratuitous ARP to automagically tell the router who has the new floating IP
@@ -37,7 +38,7 @@ func Curl(httpRequestURL string) {
 		httpRequestURL,
 	}
 
-	output, err := Execute("curl", args)
+	output, err := utils.Execute("curl", args)
 
 	if err != nil {
 		return err.Error();
@@ -51,7 +52,7 @@ func Curl(httpRequestURL string) {
  */
 func ICMPIPv4(Ipv4Addr string) string {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if validIPv4(Ipv4Addr) {
+	if utils.ValidIPv4(Ipv4Addr) {
 		return	""
 	}
 
@@ -61,31 +62,7 @@ func ICMPIPv4(Ipv4Addr string) string {
 		Ipv4Addr,
 	}
 
-	output, err := Execute("ping", args)
-
-	if err != nil {
-		return err.Error();
-	}
-
-	return output
-}
-
-/**
- *
- */
-func ICMPIPv6(Ipv6Addr string) string {
-	// Validate the IP address to ensure it's an IPv4 addr.
-	if validIPv6(Ipv6Addr) {
-		return	""
-	}
-
-	// Create list of commands to execute
-	args := []string{
-		"ping6",
-		Ipv6Addr,
-	}
-
-	output, err := Execute("ping6", args)
+	output, err := utils.Execute("ping", args)
 
 	if err != nil {
 		return err.Error();
@@ -104,7 +81,7 @@ func arpScan(addrWSubnet string) string{
 		addrWSubnet,
 	}
 
-	output, err := Execute("arp-scan", args)
+	output, err := utils.Execute("arp-scan", args)
 
 	if err != nil {
 		return err.Error();

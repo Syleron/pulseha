@@ -17,6 +17,8 @@ const (
 
 var (
 	Config	structures.Configuration
+	Role	string
+	ServerPort int
 )
 
 type server struct{}
@@ -35,8 +37,17 @@ func Setup(wg *sync.WaitGroup) {
 	Config = utils.LoadConfig()
 	Config.Validate()
 
+	// Are we master or slave?
+
+	switch Config.General.Role {
+	case "master":
+	case "slave":
+	default:
+		panic("Unable to initiate due to invalid role set in configuration.")
+	}
+
 	defer wg.Done()
-	lis, err := net.Listen("tcp", ":" + Config.General.ServerPort)
+	lis, err := net.Listen("tcp", ":" + "4000")
 	if err != nil {
 		log.Error("failed to listen: %v", err)
 	}

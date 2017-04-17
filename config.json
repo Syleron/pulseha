@@ -3,19 +3,17 @@
     "interval": 1000,
     "retries": 3,
     "use_add_health": true,
-    "client_port": "8000",
-    "server_port": "50051"
+    "role": "master",
+    "tls": false
   },
   "cluster": {
     "master": {
       "ip": "127.0.0.1",
-      "port": "50051",
-      "health": ["http", "icmp"]
+      "port": "50051"
     },
     "slave": {
       "ip": "127.0.0.1",
-      "port": "50051",
-      "health": ["icmp"]
+      "port": "50051"
     }
   }
 }
