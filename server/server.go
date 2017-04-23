@@ -3,7 +3,7 @@ package server
 import (
 	log "github.com/Sirupsen/logrus"
 	"net"
-	pb "github.com/syleron/pulse/pulse"
+	pb "github.com/syleron/pulse/proto"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"sync"
