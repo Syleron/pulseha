@@ -2,14 +2,13 @@ package client
 
 import (
 	log "github.com/Sirupsen/logrus"
-	pb "github.com/syleron/pulse/pulse"
+	pb "github.com/syleron/pulse/proto"
 	"google.golang.org/grpc"
 	"time"
 	"github.com/syleron/pulse/structures"
 	"github.com/syleron/pulse/utils"
 	"context"
 )
-
 var (
 	Config		structures.Configuration
 	Connection	pb.RequesterClient
@@ -31,6 +30,26 @@ func Setup() {
 
 	// Set all the local variables from the config.
 	setupLocalVariables()
+
+	// Check to see what role we are
+	if (Config.Local.Role == "master") {
+		// We are the master.
+		// Are we in a configured state?
+		if (Config.Local.Configured) {
+			// Start the health check scheduler
+		} else {
+
+		}
+	} else {
+		// We are the slave.
+		// Are we in a configured state?
+		if (Config.Local.Configured) {
+			// check to see when the last time we received a health check
+			// Do we need to failover?
+		} else {
+			// We have not been configured yet. Sit and listen
+		}
+	}
 
 	// Schedule the health checks to ensure each member within the cluster still exists!
 	scheduler(roundRobinHealthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
@@ -71,12 +90,51 @@ func roundRobinHealthCheck() {
 	c := pb.NewRequesterClient(conn)
 
 	name := "world"
+
 	r, err := c.Process(context.Background(), &pb.Config{Name: name})
+
+	r, err := c.Process(context.Background(), &pb.)
+
 	if err != nil {
 		log.Fatalf("could not greet: %v", err)
 	}
 
 	log.Printf("Response: %s", r.Message)
+}
+
+func sendSetup() {
+	var opts []grpc.DialOption
+
+	// setup TLS stuff
+	if Config.Local.TLS {
+		//var sn string
+		//var creds credentials.TransportAuthenticator
+		//creds = credentials.NewClientTLSFromCert(nil, sn)
+		//opts = append(opts, grpc.WithTransportCredentials(creds))
+	} else {
+		opts = append(opts, grpc.WithInsecure())
+	}
+
+	conn, err := grpc.Dial(PeerIP+":"+PeerPort, opts...)
+
+	if err != nil {
+		log.Error("Connection Error: %v", err)
+	}
+
+	defer conn.Close()
+
+	c := pb.NewRequesterClient(conn)
+
+	name := "world"
+
+	r, err := c.Process(context.Background(), &pb.Config{Name: name})
+
+	if err != nil {
+		log.Fatalf("could not greet: %v", err)
+	}
+
+	log.Printf("Response: %s", r.Message)
+
 }
 
 func setupLocalVariables() {

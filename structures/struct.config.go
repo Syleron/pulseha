@@ -12,6 +12,7 @@ type Configuration struct {
 			UseAddHealth bool `json:"use_add_health"`
 			Role string `json:"role"`
 			TLS bool `json:"tls"`
+			Configured bool `json:"configured"`
 	       } `json:"local"`
 	//Cluster map[string]ServerID `json:"cluster"`
 	Cluster Cluster `json:"cluster"`

@@ -39,7 +39,7 @@ func Setup(wg *sync.WaitGroup) {
 
 	// Are we master or slave?
 
-	switch Config.General.Role {
+	switch Config.Local.Role {
 	case "master":
 	case "slave":
 	default:
@@ -47,11 +47,16 @@ func Setup(wg *sync.WaitGroup) {
 	}
 
 	defer wg.Done()
+
 	lis, err := net.Listen("tcp", ":" + "4000")
+
 	if err != nil {
 		log.Error("failed to listen: %v", err)
 	}
+
 	s := grpc.NewServer()
+
 	pb.RegisterRequesterServer(s, &server{})
+
 	s.Serve(lis)
 }

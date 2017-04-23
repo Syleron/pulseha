@@ -5,7 +5,8 @@
     "use_add_health": true,
     "role": "master",
     "tls": false,
-    "interface": "ens3"
+    "interface": "ens3",
+    "configured": false
   },
   "cluster": {
     "status": "status",
