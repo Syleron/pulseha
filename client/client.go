@@ -79,22 +79,9 @@ func monitorResponses() {
 
 /**
  * Function to handle health checks across the cluster
- * TODO: Update this function to perform a health check that is secure.
  */
 func healthCheck() {
-	var opts []grpc.DialOption
-
-	// setup TLS stuff
-	if Config.Local.TLS {
-		//var sn string
-		//var creds credentials.TransportAuthenticator
-		//creds = credentials.NewClientTLSFromCert(nil, sn)
-		//opts = append(opts, grpc.WithTransportCredentials(creds))
-	} else {
-		opts = append(opts, grpc.WithInsecure())
-	}
-
-	conn, err := grpc.Dial(PeerIP+":"+PeerPort, opts...)
+	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
 
 	if err != nil {
 		log.Error("Connection Error: %v", err)
@@ -109,32 +96,22 @@ func healthCheck() {
 	})
 
 	if err != nil {
-		log.Fatalf("could not greet: %v", err)
-	} else {
-		log.Printf("Response: %s", r.Status)
+		// Oops we couldn't connect... let's try again!
+		time.Sleep(time.Second * 5)
+		healthCheck()
 	}
+
+	log.Printf("Response: %s", r.Status)
 }
 
 /**
  * Function to setup cluster as a master.
  */
 func sendSetup() {
-	var opts []grpc.DialOption
-
-	// setup TLS stuff
-	if Config.Local.TLS {
-		//var sn string
-		//var creds credentials.TransportAuthenticator
-		//creds = credentials.NewClientTLSFromCert(nil, sn)
-		//opts = append(opts, grpc.WithTransportCredentials(creds))
-	} else {
-		opts = append(opts, grpc.WithInsecure())
-	}
-
-	conn, err := grpc.Dial(PeerIP+":"+PeerPort, opts...)
+	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
 
 	if err != nil {
-		log.Error("Connection Error: %v", err)
+		//log.Error("Connection Error: %v", err)
 	}
 
 	defer conn.Close()
@@ -146,7 +123,9 @@ func sendSetup() {
 	})
 
 	if err != nil {
-		log.Fatalf("could not greet: %v", err)
+		// Oops we couldn't connect... let's try again!
+		time.Sleep(time.Second * 5)
+		sendSetup()
 	}
 
 	switch (r.Status) {
@@ -210,5 +189,11 @@ func setupLocalVariables() {
 func ForceConfigReload() {
 	log.Info("Client config forced reload..")
 
+	// Call setup to re-set the client
+	Setup()
+
 	// double check for a role change.. if so we need to start sending health checks!
+
+
+	// "cluster configuration has recovered."
 }

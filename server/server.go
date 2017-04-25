@@ -146,16 +146,17 @@ func monitorResponses() {
 	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
 
-		if int(elapsed)%20 == 0 {
+		if int(elapsed) > 0 && int(elapsed)%5 == 0 {
 			log.Warn("No healthchecks are being made.. Perhaps a failover is required?")
 		}
 
 		// If 30 seconds has gone by.. something is wrong.
 		if int(elapsed) >= Config.Local.FOCLimit {
 			// Try communicating with the master through other methods
-			
+
 			// Attempt ICMP Health check
 			// Attempt HTTP Health Check
+			// NOTE: use a waitgroup with go routines perhaps? this way they can be sent at the same time
 
 			// Nothing has worked.. assume the master has failed. Fail over.
 			log.Info("Attempting a failover..")
@@ -185,7 +186,7 @@ func failover() {
 		// Tell the client to reload the config
 		client.ForceConfigReload()
 
-		log.Info("Failover completed..")
+		log.Info("Completed. Local role has been re-assigned as master..")
 	}
 }
 
