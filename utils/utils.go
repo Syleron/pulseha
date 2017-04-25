@@ -6,13 +6,14 @@ import (
 	"os/exec"
 	"net"
 	"io/ioutil"
+	"time"
 )
 
 /**
  * This function is to be used to load our JSON based config and decode it as a struct!
  */
 func LoadConfig() structures.Configuration {
-	c, _ := ioutil.ReadFile("config.json")
+	c, _ := ioutil.ReadFile("./config.json")
 	configuration := structures.Configuration{}
 	json.Unmarshal([]byte(c), &configuration)
 
@@ -27,6 +28,20 @@ func LoadConfig() structures.Configuration {
 	configuration.Validate()
 
 	return configuration
+}
+
+/**
+ * This function is used to save the struct back as json in the config.json file.
+ */
+func SaveConfig(config structures.Configuration) bool {
+	// Validate before we save
+	config.Validate()
+	// Convert struct back to JSON format
+	configJSON, _ := json.MarshalIndent(config, "", "    ")
+	// Save back to file
+	_ = ioutil.WriteFile("./config.json", configJSON, 0644)
+	// Return successful
+	return true
 }
 
 /**
@@ -62,17 +77,10 @@ func ValidIPv4(ipAddress string) bool {
 }
 
 /**
- * Important function to validate an IPv6 Addr.
- *
- * @return bool
+ * Function to schedule the execution every x time as time.Duration.
  */
-func validIPv6(ipAddress string) bool {
-	testInput := net.ParseIP(ipAddress)
-
-	if testInput.To16() == nil {
-		return false
+func Scheduler(method func(), delay time.Duration) {
+	for _ = range time.Tick(delay) {
+		method()
 	}
-
-	return true
 }
-

@@ -20,7 +20,6 @@ type Configuration struct {
 
 type Cluster struct {
 	Status string `json:"status"`
-	LastResponse string `json:"last_response"`
 	Nodes Nodes `json:"nodes"`
 }
 
@@ -62,11 +61,6 @@ func (c *Configuration) Validate() {
 	// Make sure we have the "Cluster" Section
 	if c.Cluster == (Cluster{}) {
 		log.Error("Invalid Config. Missing 'cluster' section.")
-		success = false
-	}
-
-	if c.Cluster.LastResponse == "" {
-		log.Error("Invalid Config. Cluster 'last_response' is either not set or missing.")
 		success = false
 	}
 

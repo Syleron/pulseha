@@ -41,7 +41,7 @@ func Setup() {
 			log.Info("This is a configured setup..")
 			// Start the health check scheduler
 			log.Info("Starting healthcheck scheduler..")
-			scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
+			utils.Scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 		} else {
 			// Logo that we have not been configured yet.
 			log.Warn("This is an unconfigured deployment.")
@@ -71,12 +71,10 @@ func Setup() {
 }
 
 /**
- * Function to schedule the execution every x time as time.Duration.
+ * Slave function - used to monitor when the last healthcheck we received.
  */
-func scheduler(method func(), delay time.Duration) {
-	for _ = range time.Tick(delay) {
-		method()
-	}
+func monitorResponses() {
+
 }
 
 /**
@@ -158,8 +156,10 @@ func sendSetup() {
 		if (configureCluster()) {
 			// start sending healthchecks
 			log.Info("Starting healthcheck scheduler..")
-			scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
+			utils.Scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 		}
+	default:
+		log.Printf("Default Response: %s", r.Status)
 	}
 }
 
@@ -205,4 +205,10 @@ func setupLocalVariables() {
 	default:
 		panic("Unable to initiate due to invalid role set in configuration.")
 	}
+}
+
+func ForceConfigReload() {
+	log.Info("Client config forced reload..")
+
+	// double check for a role change.. if so we need to start sending health checks!
 }

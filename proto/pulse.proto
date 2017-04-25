@@ -2,14 +2,27 @@ syntax = "proto3";
 
 package requester;
 
+// Types
+message HealthCheckRequest {
+    enum ServingRequest {
+        SETUP = 0;
+        STATUS = 1;
+    }
+    ServingRequest request = 1;
+}
+
+message HealthCheckResponse {
+    enum ServingStatus {
+        UNKNOWN = 0;
+        UNCONFIGURED = 1;
+        CONFIGURED = 2;
+        FAILVER = 3;
+        HEALTHY = 4;
+    }
+    ServingStatus status = 1;
+}
+
+// Services
 service Requester {
-    rpc Process (Config) returns (Response) {}
-}
-
-message Config {
-    string name = 1;
-}
-
-message Response {
-    string message = 1;
+    rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
 }
