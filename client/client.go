@@ -2,7 +2,7 @@ package client
 
 import (
 	log "github.com/Sirupsen/logrus"
-	pb "github.com/syleron/pulse/proto"
+	hc "github.com/syleron/pulse/proto"
 	"google.golang.org/grpc"
 	"time"
 	"github.com/syleron/pulse/structures"
@@ -11,7 +11,11 @@ import (
 )
 var (
 	Config		structures.Configuration
-	Connection	pb.RequesterClient
+	Connection	hc.RequesterClient
+
+	// Local Variables
+	LocalIP		string
+	LocalPort	string
 
 	// Peer's Connection Details
 	PeerIP		string
@@ -22,8 +26,6 @@ var (
  * Setup Function used to initialise the client
  */
 func Setup() {
-	log.Info("Initialising client..")
-
 	// Set the local config value - this should probably have validation - probably a nicer way og doing this.
 	Config = utils.LoadConfig()
 	Config.Validate()
@@ -36,23 +38,36 @@ func Setup() {
 		// We are the master.
 		// Are we in a configured state?
 		if (Config.Local.Configured) {
+			log.Info("This is a configured setup..")
 			// Start the health check scheduler
+			log.Info("Starting healthcheck scheduler..")
+			scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 		} else {
+			// Logo that we have not been configured yet.
+			log.Warn("This is an unconfigured deployment.")
 
+			// Send setup request to slave
+			sendSetup()
 		}
+
+
+		// Schedule the health checks to ensure each member within the cluster still exists!
+		//scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 	} else {
 		// We are the slave.
 		// Are we in a configured state?
 		if (Config.Local.Configured) {
+			log.Info("This is a configured setup..")
 			// check to see when the last time we received a health check
 			// Do we need to failover?
 		} else {
+			// Log that that we have not been configured yet.
+			log.Warn("This is an unconfigured deployment.")
+			// Log that we are listening for a setup request
+			log.Info("Waiting for setup request from master..")
 			// We have not been configured yet. Sit and listen
 		}
 	}
-
-	// Schedule the health checks to ensure each member within the cluster still exists!
-	scheduler(roundRobinHealthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
 }
 
 /**
@@ -68,7 +83,7 @@ func scheduler(method func(), delay time.Duration) {
  * Function to handle health checks across the cluster
  * TODO: Update this function to perform a health check that is secure.
  */
-func roundRobinHealthCheck() {
+func healthCheck() {
 	var opts []grpc.DialOption
 
 	// setup TLS stuff
@@ -82,26 +97,29 @@ func roundRobinHealthCheck() {
 	}
 
 	conn, err := grpc.Dial(PeerIP+":"+PeerPort, opts...)
+
 	if err != nil {
 		log.Error("Connection Error: %v", err)
 	}
+
 	defer conn.Close()
 
-	c := pb.NewRequesterClient(conn)
+	c := hc.NewRequesterClient(conn)
 
-	name := "world"
-
-	r, err := c.Process(context.Background(), &pb.Config{Name: name})
-
-	r, err := c.Process(context.Background(), &pb.)
+	r, err := c.Check(context.Background(), &hc.HealthCheckRequest{
+		Request: hc.HealthCheckRequest_STATUS,
+	})
 
 	if err != nil {
 		log.Fatalf("could not greet: %v", err)
+	} else {
+		log.Printf("Response: %s", r.Status)
 	}
-
-	log.Printf("Response: %s", r.Message)
 }
 
+/**
+ * Function to setup cluster as a master.
+ */
 func sendSetup() {
 	var opts []grpc.DialOption
 
@@ -123,18 +141,51 @@ func sendSetup() {
 
 	defer conn.Close()
 
-	c := pb.NewRequesterClient(conn)
+	c := hc.NewRequesterClient(conn)
 
-	name := "world"
-
-	r, err := c.Process(context.Background(), &pb.Config{Name: name})
+	r, err := c.Check(context.Background(), &hc.HealthCheckRequest{
+		Request: hc.HealthCheckRequest_SETUP,
+	})
 
 	if err != nil {
 		log.Fatalf("could not greet: %v", err)
 	}
 
-	log.Printf("Response: %s", r.Message)
+	switch (r.Status) {
+	case hc.HealthCheckResponse_UNKNOWN:
+		log.Printf("Response: %s", r.Status)
+	case hc.HealthCheckResponse_CONFIGURED:
+		if (configureCluster()) {
+			// start sending healthchecks
+			log.Info("Starting healthcheck scheduler..")
+			scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
+		}
+	}
+}
 
+/**
+ * This function should only ever be called by the master to configure itself.
+ */
+func configureCluster() bool{
+	// Check to see if we can configure this node
+	// make sure we are a slave
+	if Config.Local.Role == "master" {
+		// Are we in a configured state already?
+		if Config.Local.Configured == false {
+			// Set the local value to configured
+			Config.Local.Configured = true;
+
+			// Save
+			utils.SaveConfig(Config)
+
+			log.Info("Succesfully configured master.")
+
+			return true;
+		} else {
+			return false
+		}
+	}
+	return false
 }
 
 func setupLocalVariables() {
@@ -142,9 +193,15 @@ func setupLocalVariables() {
 	case "master":
 		PeerIP = Config.Cluster.Nodes.Slave.IP
 		PeerPort = Config.Cluster.Nodes.Slave.Port
+
+		LocalIP = Config.Cluster.Nodes.Master.IP
+		LocalPort = Config.Cluster.Nodes.Master.Port
 	case "slave":
 		PeerIP = Config.Cluster.Nodes.Master.IP
 		PeerPort = Config.Cluster.Nodes.Master.Port
+
+		LocalIP = Config.Cluster.Nodes.Slave.IP
+		LocalPort = Config.Cluster.Nodes.Slave.Port
 	default:
 		panic("Unable to initiate due to invalid role set in configuration.")
 	}
