@@ -3,7 +3,6 @@
     "hc_interval": 1000,
     "foc_interval": 5000,
     "foc_limit": 30,
-    "use_add_health": true,
     "role": "master",
     "tls": false,
     "interface": "ens3",

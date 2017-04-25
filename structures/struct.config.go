@@ -10,7 +10,6 @@ type Configuration struct {
 			HCInterval 	int `json:"hc_interval"`
 			FOCInterval 	int `json:"foc_interval"`
 			FOCLimit 	int `json:"foc_limit"`
-			UseAddHealth 	bool `json:"use_add_health"`
 			Role 		string `json:"role"`
 			TLS 		bool `json:"tls"`
 			Configured 	bool `json:"configured"`
