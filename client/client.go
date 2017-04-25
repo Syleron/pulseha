@@ -41,7 +41,7 @@ func Setup() {
 			log.Info("This is a configured setup..")
 			// Start the health check scheduler
 			log.Info("Starting healthcheck scheduler..")
-			utils.Scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
+			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
 		} else {
 			// Logo that we have not been configured yet.
 			log.Warn("This is an unconfigured deployment.")
@@ -156,7 +156,7 @@ func sendSetup() {
 		if (configureCluster()) {
 			// start sending healthchecks
 			log.Info("Starting healthcheck scheduler..")
-			utils.Scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
+			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
 		}
 	default:
 		log.Printf("Default Response: %s", r.Status)

@@ -143,14 +143,23 @@ func Setup(wg *sync.WaitGroup) {
  * Slave function - used to monitor when the last health check we received.
  */
 func monitorResponses() {
-	for _ = range time.Tick(time.Duration(5000) * time.Millisecond) {
+	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
 
+		if int(elapsed)%20 == 0 {
+			log.Warn("No healthchecks are being made.. Perhaps a failover is required?")
+		}
+
 		// If 30 seconds has gone by.. something is wrong.
-		if int(elapsed) >= 30 {
+		if int(elapsed) >= Config.Local.FOCLimit {
+			// Try communicating with the master through other methods
+			
+			// Attempt ICMP Health check
+			// Attempt HTTP Health Check
+
+			// Nothing has worked.. assume the master has failed. Fail over.
 			log.Info("Attempting a failover..")
 			failover()
-
 			break
 		}
 	}
@@ -166,6 +175,9 @@ func failover() {
 
 		// Update local status
 		Status = hc.HealthCheckResponse_FAILVER
+
+		// Update network setting
+		// -- Bring up floating IP
 
 		// Save to file
 		utils.SaveConfig(Config)

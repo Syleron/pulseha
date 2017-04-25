@@ -7,14 +7,14 @@ import (
 
 type Configuration struct {
 	Local struct {
-			Interval int `json:interval"`
-			Retries int `json:"retries"`
-			UseAddHealth bool `json:"use_add_health"`
-			Role string `json:"role"`
-			TLS bool `json:"tls"`
-			Configured bool `json:"configured"`
+			HCInterval 	int `json:"hc_interval"`
+			FOCInterval 	int `json:"foc_interval"`
+			FOCLimit 	int `json:"foc_limit"`
+			UseAddHealth 	bool `json:"use_add_health"`
+			Role 		string `json:"role"`
+			TLS 		bool `json:"tls"`
+			Configured 	bool `json:"configured"`
 	       } `json:"local"`
-	//Cluster map[string]ServerID `json:"cluster"`
 	Cluster Cluster `json:"cluster"`
 }
 
