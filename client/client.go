@@ -8,10 +8,13 @@ import (
 	"github.com/syleron/pulse/structures"
 	"github.com/syleron/pulse/utils"
 	"context"
+	"google.golang.org/grpc/grpclog"
+	oglog "log"
+	"io/ioutil"
 )
 var (
 	Config		structures.Configuration
-	Connection	hc.RequesterClient
+	Connected	bool
 
 	// Local Variables
 	LocalIP		string
@@ -32,6 +35,9 @@ func Setup() {
 
 	// Set all the local variables from the config.
 	setupLocalVariables()
+
+	// Set connected value
+	Connected = false
 
 	// Check to see what role we are
 	if (Config.Local.Role == "master") {
@@ -82,9 +88,10 @@ func monitorResponses() {
  */
 func healthCheck() {
 	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
+	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
-		log.Error("Connection Error: %v", err)
+		//log.Error("Connection Error: %v", err)
 	}
 
 	defer conn.Close()
@@ -97,11 +104,14 @@ func healthCheck() {
 
 	if err != nil {
 		// Oops we couldn't connect... let's try again!
+		logConnectionStatus(false)
+		conn.Close()
 		time.Sleep(time.Second * 5)
 		healthCheck()
+	} else {
+		logConnectionStatus(true)
+		log.Printf("Response: %s", r.Status)
 	}
-
-	log.Printf("Response: %s", r.Status)
 }
 
 /**
@@ -109,6 +119,7 @@ func healthCheck() {
  */
 func sendSetup() {
 	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
+	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
 		//log.Error("Connection Error: %v", err)
@@ -124,21 +135,23 @@ func sendSetup() {
 
 	if err != nil {
 		// Oops we couldn't connect... let's try again!
+		logConnectionStatus(false)
 		time.Sleep(time.Second * 5)
 		sendSetup()
-	}
-
-	switch (r.Status) {
-	case hc.HealthCheckResponse_UNKNOWN:
-		log.Printf("Response: %s", r.Status)
-	case hc.HealthCheckResponse_CONFIGURED:
-		if (configureCluster()) {
-			// start sending healthchecks
-			log.Info("Starting healthcheck scheduler..")
-			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
+	} else {
+		logConnectionStatus(true)
+		switch (r.Status) {
+		case hc.HealthCheckResponse_UNKNOWN:
+			log.Printf("Response: %s", r.Status)
+		case hc.HealthCheckResponse_CONFIGURED:
+			if (configureCluster()) {
+				// start sending healthchecks
+				log.Info("Starting healthcheck scheduler..")
+				utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
+			}
+		default:
+			log.Printf("Default Response: %s", r.Status)
 		}
-	default:
-		log.Printf("Default Response: %s", r.Status)
 	}
 }
 
@@ -196,4 +209,17 @@ func ForceConfigReload() {
 
 
 	// "cluster configuration has recovered."
+}
+
+/**
+ * Master Function - Used to log whether we are still connected or not
+ */
+func logConnectionStatus(status bool) {
+	if Connected && !status  {
+		log.Warn("Disconnected from slave.. Attempting to reconnect!")
+		Connected = false
+	} else if !Connected && status {
+		log.Info("Connection with slave established!")
+		Connected = true
+	}
 }

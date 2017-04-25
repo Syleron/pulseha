@@ -145,8 +145,8 @@ func Setup(wg *sync.WaitGroup) {
 func monitorResponses() {
 	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
-
-		if int(elapsed) > 0 && int(elapsed)%5 == 0 {
+		
+		if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 			log.Warn("No healthchecks are being made.. Perhaps a failover is required?")
 		}
 
