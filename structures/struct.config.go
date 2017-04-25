@@ -10,11 +10,13 @@ type Configuration struct {
 			HCInterval 	int `json:"hc_interval"`
 			FOCInterval 	int `json:"foc_interval"`
 			FOCLimit 	int `json:"foc_limit"`
+			Interface 	string `json:"interface"`
 			Role 		string `json:"role"`
 			TLS 		bool `json:"tls"`
 			Configured 	bool `json:"configured"`
 	       } `json:"local"`
 	Cluster Cluster `json:"cluster"`
+	HealthChecks HealthChecks `json:"health_checks"`
 }
 
 type Cluster struct {
@@ -32,6 +34,20 @@ type ClusterDef struct {
 	Port string `json:"port"`
 }
 
+type HealthChecks struct {
+	ICMP ICMPHC `json:"icmp"`
+	HTTP HTTPHC `json:"http"`
+}
+
+type ICMPHC struct {
+	Enabled bool `json:"enabled"`
+}
+
+type HTTPHC struct {
+	Enabled bool `json:"enabled"`
+	Address string `json:"address"`
+}
+
 /**
  * Function used to validate that the values in the config
  * exist and are what we expect!
@@ -42,6 +58,26 @@ func (c *Configuration) Validate() {
 	// Make sure we have the "Local" Section
 	if c.Local == (Configuration{}.Local) {
 		log.Error("Invalid Config. Missing 'local' section.")
+		success = false
+	}
+
+	if c.Local.HCInterval == 0 {
+		log.Error("Invalid Config. Missing 'hcinterval' section.")
+		success = false
+	}
+
+	if c.Local.FOCInterval == 0{
+		log.Error("Invalid Config. Missing 'foc_interval' section.")
+		success = false
+	}
+
+	if c.Local.FOCLimit == 0{
+		log.Error("Invalid Config. Missing 'foc_limit' section.")
+		success = false
+	}
+
+	if c.Local.Interface == "" {
+		log.Error("Invalid Config. Missing 'interface' section.")
 		success = false
 	}
 

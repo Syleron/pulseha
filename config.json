@@ -20,5 +20,14 @@
         "port": "50052"
       }
     }
+  },
+  "health_checks": {
+    "icmp": {
+      "enabled": true
+    },
+    "http": {
+      "enabled": true,
+      "address": "http://www.google.com/"
+    }
   }
 }
