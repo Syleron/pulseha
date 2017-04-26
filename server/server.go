@@ -12,6 +12,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"time"
 	"github.com/syleron/pulse/client"
+	"github.com/syleron/pulse/networking"
 )
 
 var (
@@ -156,16 +157,39 @@ func monitorResponses() {
 
 		// If 30 seconds has gone by.. something is wrong.
 		if int(elapsed) >= Config.Local.FOCLimit {
+			var addHCSuccess bool = false
+
 			// Try communicating with the master through other methods
+			if Config.HealthChecks.ICMP != (structures.Configuration{}.HealthChecks.ICMP) {
+				if Config.HealthChecks.ICMP.Enabled {
+					success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
 
-			// Attempt ICMP Health check
-			// Attempt HTTP Health Check
-			// NOTE: use a waitgroup with go routines perhaps? this way they can be sent at the same time
+					if success {
+						log.Warn("ICMP health check succesful! Assuming master is still available..")
+						addHCSuccess = true
+					}
+				}
+			}
 
-			// Nothing has worked.. assume the master has failed. Fail over.
-			log.Info("Attempting a failover..")
-			failover()
-			break
+			if Config.HealthChecks.HTTP != (structures.Configuration{}.HealthChecks.HTTP) {
+				if Config.HealthChecks.HTTP.Enabled {
+					success := networking.Curl(Config.HealthChecks.HTTP.Address)
+
+					if success {
+						log.Warn("HTTP health check succesful! Assuming master is still available..")
+						addHCSuccess = true
+					}
+				}
+			}
+
+			if !addHCSuccess {
+				// Nothing has worked.. assume the master has failed. Fail over.
+				log.Info("Attempting a failover..")
+				failover()
+				break
+			} else {
+				Last_response = time.Now()
+			}
 		}
 	}
 }
@@ -182,7 +206,7 @@ func failover() {
 		Status = hc.HealthCheckResponse_FAILVER
 
 		// Update network setting
-		// -- Bring up floating IP
+		// -- Bring up floating IP (this may not actually need to be done here as I'm going to put this logic in setup)
 
 		// Save to file
 		utils.SaveConfig(Config)
