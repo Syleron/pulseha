@@ -44,7 +44,7 @@ func Setup() {
 		// We are the master.
 		// Are we in a configured state?
 		if (Config.Local.Configured) {
-			log.Info("This is a configured setup..")
+			log.Info("This is a configured cluster..")
 			// Start the health check scheduler
 			log.Info("Starting healthcheck scheduler..")
 			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
@@ -63,7 +63,7 @@ func Setup() {
 		// We are the slave.
 		// Are we in a configured state?
 		if (Config.Local.Configured) {
-			log.Info("This is a configured setup..")
+			log.Info("This is a configured cluster..")
 			// check to see when the last time we received a health check
 			// Do we need to failover?
 		} else {
@@ -74,13 +74,6 @@ func Setup() {
 			// We have not been configured yet. Sit and listen
 		}
 	}
-}
-
-/**
- * Slave function - used to monitor when the last healthcheck we received.
- */
-func monitorResponses() {
-
 }
 
 /**

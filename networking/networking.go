@@ -22,13 +22,6 @@ func SendGARP() error {
 }
 
 /**
- *
- */
-func AssignFloatingIP() {
-
-}
-
-/**
  * Checks to see what status a network interface is currently.
  * Possible responses are either up or down.
  */

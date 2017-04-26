@@ -16,7 +16,7 @@ func main() {
 		var wg sync.WaitGroup
 		wg.Add(1)
 		// Setup Server
-		go server.Setup(&wg)
+		go server.Setup()
 		// Server Client
 		go client.Setup()
 		// Wait for wait group to finish

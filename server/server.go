@@ -16,7 +16,9 @@ import (
 
 var (
 	Config	structures.Configuration
-	Role	string
+	Role string
+
+	Lis  *net.Listener
 
 	ServerIP string
 	ServerPort string
@@ -99,7 +101,7 @@ func configureCluster() bool{
 /*
  * Setup Function used to initialise the server
  */
-func Setup(wg *sync.WaitGroup) {
+func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
 	Config.Validate()
@@ -112,13 +114,15 @@ func Setup(wg *sync.WaitGroup) {
 	// Log message
 	log.Info(Role + " initialised on port " + ServerPort);
 
-	defer wg.Done()
+	//defer wg.Done()
 
 	lis, err := net.Listen("tcp", ":" + ServerPort)
 
 	if err != nil {
 		log.Error("failed to listen: %v", err)
 	}
+
+	Lis = &lis
 
 	s := grpc.NewServer()
 
@@ -136,7 +140,7 @@ func Setup(wg *sync.WaitGroup) {
 		}
 	}()
 
-	s.Serve(lis)
+	s.Serve(*Lis)
 }
 
 /**
@@ -147,7 +151,7 @@ func monitorResponses() {
 		elapsed := int64(time.Since(Last_response)) / 1e9
 		
 		if int(elapsed) > 0 && int(elapsed)%4 == 0 {
-			log.Warn("No healthchecks are being made.. Perhaps a failover is required?")
+			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
 
 		// If 30 seconds has gone by.. something is wrong.
@@ -183,10 +187,17 @@ func failover() {
 		// Save to file
 		utils.SaveConfig(Config)
 
-		// Tell the client to reload the config
-		client.ForceConfigReload()
-
 		log.Info("Completed. Local role has been re-assigned as master..")
+
+		// Close server
+		var serverListener net.Listener
+		serverListener = *Lis
+		serverListener.Close()
+
+		// Re-setup the server
+		go Setup()
+		// Tell the client to reload the config
+		go client.ForceConfigReload()
 	}
 }
 
