@@ -40,7 +40,7 @@ func Setup() {
 	Connected = false
 
 	// Check to see what role we are
-	if (Config.Local.Role == "master") {
+	if Config.Local.Role == "master" {
 		// We are the master.
 		// Are we in a configured state?
 		if (Config.Local.Configured) {
@@ -77,7 +77,7 @@ func Setup() {
 }
 
 /**
- * Function to handle health checks across the cluster
+ * Master Function to handle health checks across the cluster
  */
 func healthCheck() {
 	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
@@ -108,7 +108,7 @@ func healthCheck() {
 }
 
 /**
- * Function to setup cluster as a master.
+ * Master unction to setup cluster as a master.
  */
 func sendSetup() {
 	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
@@ -149,7 +149,9 @@ func sendSetup() {
 }
 
 /**
- * This function should only ever be called by the master to configure itself.
+ * Master This function should only ever be called by the master to configure itself.
+ * NOTE: This function could be shared between the client and server so this could
+ *       be moved to the utils package.
  */
 func configureCluster() bool{
 	// Check to see if we can configure this node
@@ -163,7 +165,7 @@ func configureCluster() bool{
 			// Save
 			utils.SaveConfig(Config)
 
-			log.Info("Succesfully configured master.")
+			log.Info("Successfully configured master.")
 
 			return true;
 		} else {
@@ -173,6 +175,9 @@ func configureCluster() bool{
 	return false
 }
 
+/**
+ * Function to setup the local variables for this client.
+ */
 func setupLocalVariables() {
 	switch Config.Local.Role {
 	case "master":
@@ -192,16 +197,14 @@ func setupLocalVariables() {
 	}
 }
 
+/**
+ * Function to completely reload the config and re-setup the client.
+ */
 func ForceConfigReload() {
 	log.Info("Client config forced reload..")
 
 	// Call setup to re-set the client
 	Setup()
-
-	// double check for a role change.. if so we need to start sending health checks!
-
-
-	// "cluster configuration has recovered."
 }
 
 /**

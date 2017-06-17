@@ -18,12 +18,9 @@ import (
 var (
 	Config	structures.Configuration
 	Role string
-
 	Lis  *net.Listener
-
 	ServerIP string
 	ServerPort string
-
 	Last_response time.Time // Last time we got a health check from the master
 	Status hc.HealthCheckResponse_ServingStatus // The status of the cluster
 )
@@ -89,7 +86,7 @@ func configureCluster() bool{
 			// Save
 			utils.SaveConfig(Config)
 
-			log.Info("Succesfully configured slave.")
+			log.Info("Successfully configured slave.")
 
 			return true;
 		} else {
@@ -135,8 +132,6 @@ func Setup() {
 	go func() {
 		if Config.Local.Role == "slave" && Config.Local.Configured {
 			Last_response = time.Now()
-
-			// TODO: this time needs to change
 			monitorResponses()
 		}
 	}()
@@ -165,7 +160,7 @@ func monitorResponses() {
 					success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
 
 					if success {
-						log.Warn("ICMP health check succesful! Assuming master is still available..")
+						log.Warn("ICMP health check successful! Assuming master is still available..")
 						addHCSuccess = true
 					}
 				}
@@ -176,7 +171,7 @@ func monitorResponses() {
 					success := networking.Curl(Config.HealthChecks.HTTP.Address)
 
 					if success {
-						log.Warn("HTTP health check succesful! Assuming master is still available..")
+						log.Warn("HTTP health check successful! Assuming master is still available..")
 						addHCSuccess = true
 					}
 				}
@@ -225,6 +220,9 @@ func failover() {
 	}
 }
 
+/**
+ * Function to setup the local variables for this client.
+ */
 func setupLocalVariables() {
 	switch Config.Local.Role {
 	case "master":

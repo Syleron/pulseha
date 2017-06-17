@@ -20,7 +20,7 @@ type Configuration struct {
 }
 
 type Cluster struct {
-	Status string `json:"status"`
+	FloatingIP string `json:"floating_ip"`
 	Nodes Nodes `json:"nodes"`
 }
 
@@ -66,12 +66,12 @@ func (c *Configuration) Validate() {
 		success = false
 	}
 
-	if c.Local.FOCInterval == 0{
+	if c.Local.FOCInterval == 0 {
 		log.Error("Invalid Config. Missing 'foc_interval' section.")
 		success = false
 	}
 
-	if c.Local.FOCLimit == 0{
+	if c.Local.FOCLimit == 0 {
 		log.Error("Invalid Config. Missing 'foc_limit' section.")
 		success = false
 	}
@@ -96,11 +96,6 @@ func (c *Configuration) Validate() {
 	// Make sure we have the "Cluster" Section
 	if c.Cluster == (Cluster{}) {
 		log.Error("Invalid Config. Missing 'cluster' section.")
-		success = false
-	}
-
-	if c.Cluster.Status == "" {
-		log.Error("Invalid Config. Cluster 'status' is either not set or missing.")
 		success = false
 	}
 

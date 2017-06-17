@@ -7,22 +7,23 @@ import (
 	"net"
 	"io/ioutil"
 	"time"
+	"os"
+	log "github.com/Sirupsen/logrus"
 )
 
 /**
  * This function is to be used to load our JSON based config and decode it as a struct!
  */
 func LoadConfig() structures.Configuration {
-	c, _ := ioutil.ReadFile("./config.json")
+	c, err := ioutil.ReadFile("./config.json")
 	configuration := structures.Configuration{}
 	json.Unmarshal([]byte(c), &configuration)
 
 	// We had an error attempting to decode the json into our struct! oops!
-	//if err != nil {
-	//	fmt.Println("error:", err)
-	//
-	//	return structures.Configuration{}
-	//}
+	if err != nil {
+		log.Error("Unable to load config.json. Does it exist?")
+		os.Exit(1)
+	}
 
 	// Validate our config to ensure that there nothing obviously wrong.
 	configuration.Validate()
@@ -39,7 +40,13 @@ func SaveConfig(config structures.Configuration) bool {
 	// Convert struct back to JSON format
 	configJSON, _ := json.MarshalIndent(config, "", "    ")
 	// Save back to file
-	_ = ioutil.WriteFile("./config.json", configJSON, 0644)
+	err := ioutil.WriteFile("./config.json", configJSON, 0644)
+
+	if err != nil {
+		log.Error("Unable to save config.json. Does it exist?")
+		os.Exit(1)
+	}
+
 	// Return successful
 	return true
 }
