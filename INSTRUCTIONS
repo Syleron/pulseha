@@ -1,0 +1,76 @@
+A basic guide to building and running Pulse.
+-----------------------------
+
+-Please refer to the following page on how to setup the a Go project:
+
+https://golang.org/doc/code.html
+
+- To build the program you must first grab the project dependencies. In order to do this, please navigate to the project
+directory via terminal/console and enter the following command:
+
+go get -d
+
+- To build the pulse, please use the following command:
+
+go build
+
+-----------------------------
+-----------------------------
+
+Required host software to be installed
+Supported Host Operating System: CentOS
+-----------------------------
+- arping
+- curl
+- net-tools
+- arp-scan
+
+
+JSON Configuration Reference
+-----------------------------
+
+- Local
+•	hc_interval – This integer value defines the interval in milliseconds which health checks are made from the master to the slave node.
+•	foc_interval – This integer value defines the interval in milliseconds which the slave checks when the last health check request was made from the master node.
+•	foc_limit – This integer value defines the amount of time before a failover is attempted in seconds.
+•	role – The role string variable defines the current role of the node within the cluster (master/slave).
+•	interface – The local network interface that the floating IP will be assigned to. Defined as a string.
+•	configured – This boolean variable defines whether or not the the cluster has been configured.
+
+- Cluster
+•	floating_ip – This string value defines the floating Internet Protocol (IP) address that will be assigned to the master node at any point in time.
+•	nodes – Stores the nodes that the cluster communication manager is responsible for ensuring high availability. As previously mentioned, this cluster communication manager will only have two nodes.
+••	Master Node & Slave Node – These node sections contain the following configurable options:
+•••	ip – Internet Protocol version 4 (IPv4) address assigned to the node.
+•••	port – The port that this cluster communication manager server will utilize in order to receive health checks.
+
+Start daemon as Master (Un-configured)
+-----------------------
+** Cluster section completed based on your network configuration (IP, Port, Failover IP, etc.).
+
+• configured = false
+• role = master
+
+Start daemon as Slave (Un-configured)
+-----------------------
+** Cluster section completed based on your network configuration (IP, Port, Failover IP, etc.).
+
+• configured = false
+• role = slave
+
+Perform a cluster setup
+-----------------------
+** Cluster section completed based on your network configuration (IP, Port, Failover IP, etc.).
+
+Have both un-configured master and slave daemons running and they will automatically setup themselves. If by chance they do not, please make
+sure the two can communicate over the port set in the configuration file via TCP.
+
+Reintroduce Slave
+-----------------------
+** Cluster section completed based on your network configuration (IP, Port, Failover IP, etc.).
+
+After a failover has been completed, high availability will not be maintained until a new slave is reintroduced back into the cluster.
+To perform this process, please start the slave with the following configuration:
+
+• configured = true
+• role = slave

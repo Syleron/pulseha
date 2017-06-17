@@ -76,6 +76,11 @@ func (c *Configuration) Validate() {
 		success = false
 	}
 
+	if c.Local.HCInterval > (c.Local.FOCLimit * 1000) {
+		log.Error("Invalid Config. HCinterval cannot exceed the FOCLimit.")
+		success = false
+	}
+
 	if c.Local.Interface == "" {
 		log.Error("Invalid Config. Missing 'interface' section.")
 		success = false

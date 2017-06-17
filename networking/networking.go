@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strings"
 	"bytes"
+	"os"
 )
 
 // Required System Calls to correctly Function
@@ -18,9 +19,32 @@ import (
  * Send Gratuitous ARP to automagically tell the router who has the new floating IP
  * NOTE: This function assumes the OS is LINUX and has "arping" installed.
  */
-func SendGARP() error {
+func SendGARP(iface, ip string) bool {
+	if !_ifaceExist(iface) {
+		log.Warn("Network interface does not exist!");
+		os.Exit(1)
+	}
 
-	return nil
+	args := []string{
+		"-U",
+		"-c",
+		"4",
+		"-I",
+		iface,
+		ip,
+	}
+
+	output, err := utils.Execute("arping", args)
+
+	if err != nil {
+		return false
+	}
+
+	if output == "" {
+		return true
+	} else {
+		return false
+	}
 }
 
 /**
@@ -29,7 +53,7 @@ func SendGARP() error {
  */
 func _netInterfaceStatus(iface string) bool{
 	args := []string{
-		"/sys/class/net/"+iface+"operstate",
+		"/sys/class/net/"+iface+"/operstate",
 	}
 
 	output, err := utils.Execute("cat", args)
@@ -65,51 +89,57 @@ func _ifaceExist(iface string) bool {
 /**
  * This function is to bring up a network interface
  */
-func BringIPup(iface string) bool{
+func BringIPup(iface, ip string) bool{
 	if !_ifaceExist(iface) {
-		// TODO: Error log
-		return false
+		log.Warn("Network interface does not exist!");
+		os.Exit(1)
 	}
 
 	args := []string{
-		iface,
+		iface+":0",
+		ip,
+		"up",
 	}
 
-	output, err := utils.Execute("ifup", args)
+	output, err := utils.Execute("ifconfig", args)
 
 	if err != nil {
-		//return err.Error();
 		return false
 	}
 
-	log.Debug(output)
-
-	return true
+	if output == "" {
+		return true
+	} else {
+		return false
+	}
 }
 
 /**
  * This function is to bring down a network interface
  */
-func BringIPdown(iface string) bool{
+func BringIPdown(iface, ip string) bool{
 	if !_ifaceExist(iface) {
-		// TODO: Error log
+		log.Warn("Network interfaces does not exist!");
 		return false
 	}
 
 	args := []string{
-		iface,
+		iface+":0",
+		ip,
+		"down",
 	}
 
-	output, err := utils.Execute("ifdown", args)
+	output, err := utils.Execute("ifconfig", args)
 
 	if err != nil {
-		//return err.Error();
 		return false
 	}
 
-	log.Debug(output)
-
-	return true
+	if output == "" {
+		return true
+	} else {
+		return false
+	}
 }
 
 
@@ -132,7 +162,7 @@ func Curl(httpRequestURL string) bool{
 	output, err := utils.Execute("curl", args)
 
 	if err != nil {
-		log.Error("Curl request failed.")
+		log.Error("Http Curl request failed.")
 		return false
 	}
 

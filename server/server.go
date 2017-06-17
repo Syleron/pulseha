@@ -13,6 +13,9 @@ import (
 	"time"
 	"github.com/syleron/pulse/client"
 	"github.com/syleron/pulse/networking"
+	"google.golang.org/grpc/grpclog"
+	"io/ioutil"
+	oglog "log"
 )
 
 var (
@@ -115,6 +118,7 @@ func Setup() {
 	//defer wg.Done()
 
 	lis, err := net.Listen("tcp", ":" + ServerPort)
+	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
 		log.Error("failed to listen: %v", err)
@@ -200,8 +204,12 @@ func failover() {
 		// Update local status
 		Status = hc.HealthCheckResponse_FAILVER
 
-		// Update network setting
-		// -- Bring up floating IP (this may not actually need to be done here as I'm going to put this logic in setup)
+		// Update master and slave configuration
+		Config.Cluster.Nodes.Slave.IP = Config.Cluster.Nodes.Master.IP
+		Config.Cluster.Nodes.Slave.Port = Config.Cluster.Nodes.Master.Port
+
+		Config.Cluster.Nodes.Master.IP = ServerIP
+		Config.Cluster.Nodes.Master.Port = ServerPort
 
 		// Save to file
 		utils.SaveConfig(Config)
@@ -212,6 +220,8 @@ func failover() {
 		var serverListener net.Listener
 		serverListener = *Lis
 		serverListener.Close()
+
+		time.Sleep(1000)
 
 		// Re-setup the server
 		go Setup()
@@ -226,7 +236,7 @@ func failover() {
 func setupLocalVariables() {
 	switch Config.Local.Role {
 	case "master":
-		ServerIP= Config.Cluster.Nodes.Master.IP
+		ServerIP = Config.Cluster.Nodes.Master.IP
 		ServerPort = Config.Cluster.Nodes.Master.Port
 		Role = "master"
 	case "slave":

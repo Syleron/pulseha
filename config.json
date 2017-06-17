@@ -1,33 +1,33 @@
 {
-  "local": {
-    "hc_interval": 1000,
-    "foc_interval": 5000,
-    "foc_limit": 30,
-    "role": "master",
-    "tls": false,
-    "interface": "ens3",
-    "configured": false
-  },
-  "cluster": {
-    "floating_ip": "192.168.1.10",
-    "nodes": {
-      "master": {
-        "ip": "127.0.0.1",
-        "port": "50051"
-      },
-      "slave": {
-        "ip": "127.0.0.1",
-        "port": "50052"
-      }
-    }
-  },
-  "health_checks": {
-    "icmp": {
-      "enabled": true
+    "local": {
+        "hc_interval": 1000,
+        "foc_interval": 5000,
+        "foc_limit": 30,
+        "interface": "en1",
+        "role": "master",
+        "tls": false,
+        "configured": true
     },
-    "http": {
-      "enabled": true,
-      "address": "http://www.google.com/"
+    "cluster": {
+        "floating_ip": "192.168.1.10",
+        "nodes": {
+            "master": {
+                "ip": "127.0.0.1",
+                "port": "50051"
+            },
+            "slave": {
+                "ip": "127.0.0.1",
+                "port": "50052"
+            }
+        }
+    },
+    "health_checks": {
+        "icmp": {
+            "enabled": true
+        },
+        "http": {
+            "enabled": true,
+            "address": "http://www.google.com/"
+        }
     }
-  }
 }

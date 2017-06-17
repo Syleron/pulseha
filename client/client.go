@@ -11,6 +11,7 @@ import (
 	"google.golang.org/grpc/grpclog"
 	oglog "log"
 	"io/ioutil"
+	"github.com/syleron/pulse/networking"
 )
 var (
 	Config		structures.Configuration
@@ -38,6 +39,9 @@ func Setup() {
 
 	// Set connected value
 	Connected = false
+
+	// Setup local networking
+	_configureLocalNetwork()
 
 	// Check to see what role we are
 	if Config.Local.Role == "master" {
@@ -73,6 +77,21 @@ func Setup() {
 			log.Info("Waiting for setup request from master..")
 			// We have not been configured yet. Sit and listen
 		}
+	}
+}
+
+/**
+ * Handle floating ip up/down based on master or slave.
+ */
+func _configureLocalNetwork() {
+	if (Config.Local.Role == "master") {
+		// Attempt to bring floating IP up
+		networking.BringIPup(Config.Local.Interface, Config.Cluster.FloatingIP)
+		// Send grat arp
+		networking.SendGARP(Config.Local.Interface, Config.Cluster.FloatingIP)
+	} else {
+		// Attempt to bring floating IP down
+		networking.BringIPdown(Config.Local.Interface, Config.Cluster.FloatingIP)
 	}
 }
 
