@@ -1,7 +1,12 @@
-[![Build Status](https://travis-ci.org/Syleron/Pulse.svg?branch=master)](https://travis-ci.org/Syleron/Pulse)
-[![GoDoc](https://godoc.org/github.com/Syleron/Pulse?status.svg)](https://godoc.org/github.com/Syleron/Pulse)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-## Pulse
+<p align="center">
+<img src="pulse-logo.png" width="250">
+<br><br>
+<a href="https://travis-ci.org/Syleron/Pulse"><img src="https://travis-ci.org/Syleron/Pulse.svg?branch=master"><a/>
+<a href="https://godoc.org/github.com/Syleron/Pulse"><img src="https://godoc.org/github.com/Syleron/Pulse?status.svg"><a/>
+<a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg"><a/>
+</p>
+  
+## About
 HA Cluster Daemon
 
 ## License
