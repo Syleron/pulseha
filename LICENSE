@@ -630,7 +630,7 @@ state the exclusion of warranty; and each file should have at least
 the "copyright" line and a pointer to where the full notice is found.
 
     Pulse - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak
+    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published
