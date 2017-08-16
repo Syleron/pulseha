@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package requester;
+
+// Types
+message HealthCheckRequest {
+    enum ServingRequest {
+        SETUP = 0;
+        STATUS = 1;
+    }
+    ServingRequest request = 1;
+}
+
+message HealthCheckResponse {
+    enum ServingStatus {
+        UNKNOWN = 0;
+        UNCONFIGURED = 1;
+        CONFIGURED = 2;
+        FAILVER = 3;
+        HEALTHY = 4;
+    }
+    ServingStatus status = 1;
+}
+
+// Services
+service Requester {
+    rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
+}
