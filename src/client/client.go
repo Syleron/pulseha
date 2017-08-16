@@ -2,10 +2,10 @@ package client
 
 import (
 	log "github.com/Sirupsen/logrus"
-	hc "github.com/syleron/Pulse/src/proto"
-	"github.com/syleron/Pulse/src/structures"
-	"github.com/syleron/Pulse/src/utils"
-	"github.com/syleron/Pulse/src/networking"
+	hc "github.com/Syleron/Pulse/src/proto"
+	"github.com/Syleron/Pulse/src/structures"
+	"github.com/Syleron/Pulse/src/utils"
+	"github.com/Syleron/Pulse/src/networking"
 	"google.golang.org/grpc"
 	"time"
 	"context"

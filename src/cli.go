@@ -3,7 +3,7 @@ package src
 import (
 	"gopkg.in/urfave/cli.v1"
 	"os"
-	"github.com/syleron/Pulse/src/utils"
+	"github.com/Syleron/Pulse/src/utils"
 	"fmt"
 )
 

@@ -1,8 +1,8 @@
 package src
 
 import (
-	"github.com/syleron/Pulse/src/client"
-	"github.com/syleron/Pulse/src/server"
+	"github.com/Syleron/Pulse/src/client"
+	"github.com/Syleron/Pulse/src/server"
 	"sync"
 	"os"
 )
