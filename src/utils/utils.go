@@ -1,7 +1,7 @@
 package utils
 
 import (
-	"github.com/syleron/pulse/structures"
+	"github.com/syleron/Pulse/src/structures"
 	"encoding/json"
 	"os/exec"
 	"net"

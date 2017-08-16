@@ -2,17 +2,18 @@ package client
 
 import (
 	log "github.com/Sirupsen/logrus"
-	hc "github.com/syleron/pulse/proto"
+	hc "github.com/syleron/Pulse/src/proto"
+	"github.com/syleron/Pulse/src/structures"
+	"github.com/syleron/Pulse/src/utils"
+	"github.com/syleron/Pulse/src/networking"
 	"google.golang.org/grpc"
 	"time"
-	"github.com/syleron/pulse/structures"
-	"github.com/syleron/pulse/utils"
 	"context"
 	"google.golang.org/grpc/grpclog"
 	oglog "log"
 	"io/ioutil"
-	"github.com/syleron/pulse/networking"
 )
+
 var (
 	Config		structures.Configuration
 	Connected	bool

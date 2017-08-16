@@ -2,7 +2,7 @@ package networking
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"github.com/syleron/pulse/utils"
+	"github.com/syleron/Pulse/src/utils"
 	"net"
 	"os/exec"
 	"strings"
