@@ -25,16 +25,7 @@ func SendGARP(iface, ip string) bool {
 		os.Exit(1)
 	}
 
-	args := []string{
-		"-U",
-		"-c",
-		"4",
-		"-I",
-		iface,
-		ip,
-	}
-
-	output, err := utils.Execute("arping", args)
+	output, err := utils.Execute("arping", "-U", "-c", "4", "-I", iface, ip)
 
 	if err != nil {
 		return false
@@ -52,11 +43,7 @@ func SendGARP(iface, ip string) bool {
  * Possible responses are either up or down.
  */
 func _netInterfaceStatus(iface string) bool{
-	args := []string{
-		"/sys/class/net/"+iface+"/operstate",
-	}
-
-	output, err := utils.Execute("cat", args)
+	output, err := utils.Execute("cat", "/sys/class/net/"+iface+"/operstate")
 
 	if err != nil {
 		//return err.Error();
@@ -94,14 +81,8 @@ func BringIPup(iface, ip string) bool{
 		log.Warn("Network interface does not exist!");
 		os.Exit(1)
 	}
-
-	args := []string{
-		iface+":0",
-		ip,
-		"up",
-	}
-
-	output, err := utils.Execute("ifconfig", args)
+	
+	output, err := utils.Execute("ifconfig", iface+":0", ip,"up")
 
 	if err != nil {
 		return false
@@ -123,13 +104,7 @@ func BringIPdown(iface, ip string) bool{
 		return false
 	}
 
-	args := []string{
-		iface+":0",
-		ip,
-		"down",
-	}
-
-	output, err := utils.Execute("ifconfig", args)
+	output, err := utils.Execute("ifconfig", iface+":0", ip, "down")
 
 	if err != nil {
 		return false
@@ -149,17 +124,7 @@ func BringIPdown(iface, ip string) bool{
  * This only returns a boolean based off the http status code received by the request.
  */
 func Curl(httpRequestURL string) bool{
-	// Create list of commands to execute
-	args := []string{
-		"-s",
-		"-o",
-		"/dev/null",
-		"-w",
-		"\"%{http_code}\"",
-		httpRequestURL,
-	}
-
-	output, err := utils.Execute("curl", args)
+	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
 
 	if err != nil {
 		log.Error("Http Curl request failed.")
@@ -206,13 +171,7 @@ func ICMPIPv4(Ipv4Addr string) bool {
  * Function to perform an arp scan on the network. This will allow us to see which IP's are available.
  */
 func arpScan(addrWSubnet string) string{
-	// Create list of commands to execute
-	args := []string{
-		"arp-scan",
-		addrWSubnet,
-	}
-
-	output, err := utils.Execute("arp-scan", args)
+	output, err := utils.Execute("arp-scan", "arp-scan", addrWSubnet)
 
 	if err != nil {
 		return err.Error();

@@ -3,10 +3,10 @@
         "hc_interval": 1000,
         "foc_interval": 5000,
         "foc_limit": 30,
-        "interface": "en1",
+        "interface": "ens3",
         "role": "master",
-        "tls": false,
-        "configured": true
+        "tls": true,
+        "configured": false
     },
     "cluster": {
         "floating_ip": "192.168.1.10",
