@@ -137,7 +137,7 @@ func Setup() {
 		}
 		
 		// Specify GRPC credentials
-	    creds, err := credentials.NewServerTLSFromFile("./certs/server.cer", "./certs/server.key")
+	    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
 	    
 	    if err != nil {
 	    	log.Fatal("Could not load TLS keys: ", err)
