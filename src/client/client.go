@@ -52,19 +52,15 @@ func Setup() {
 	var err error
 	
 	// Setup GRPC client
-	if Config.Local.TLS {
-		// Create the client TLS credentials
-	    creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
-	    if err != nil {
-	    	log.Fatal("Could not load TLS cert: ", err)
-	    	os.Exit(1)
-	    }
-    
-		// Create a connection with the TLS credentials
-		Conn, err = grpc.Dial(PeerIP+":"+PeerPort, grpc.WithTransportCredentials(creds))
-	} else {
-		Conn, err = grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
-	}	
+	// Create the client TLS credentials
+    creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+    if err != nil {
+    	log.Fatal("Could not load TLS cert: ", err)
+    	os.Exit(1)
+    }
+
+	// Create a connection with the TLS credentials
+	Conn, err = grpc.Dial(PeerIP+":"+PeerPort, grpc.WithTransportCredentials(creds))
 		
 	if err != nil {
 	    log.Warning("GRPC Connection Error ", err)

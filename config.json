@@ -5,7 +5,6 @@
         "foc_limit": 30,
         "interface": "ens3",
         "role": "master",
-        "tls": true,
         "configured": false
     },
     "cluster": {
@@ -13,11 +12,11 @@
         "nodes": {
             "master": {
                 "ip": "127.0.0.1",
-                "port": "50051"
+                "port": "8443"
             },
             "slave": {
                 "ip": "127.0.0.1",
-                "port": "50052"
+                "port": "8443"
             }
         }
     },

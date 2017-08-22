@@ -18,7 +18,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	"io/ioutil"
 	"os"
-	"strconv"
 	oglog "log"
 )
 
@@ -127,31 +126,26 @@ func Setup() {
 	
 	var s *grpc.Server
 
-	// Check to see if we have TLS enabled.
-	if Config.Local.TLS {
-		// Create folder and keys if we have to
-		// Note: This should probably check if the key files exist as well.
-		if utils.CreateFolder("./certs") {
-			log.Warn("Missing TLS keys.")
-			security.Generate()
-		}
-		
-		// Specify GRPC credentials
-	    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
-	    
-	    if err != nil {
-	    	log.Fatal("Could not load TLS keys: ", err)
-	    	os.Exit(1)
-	    }
-	    
-	    // Start GRPC server
-		s = grpc.NewServer(grpc.Creds(creds))
-	} else {
-		s = grpc.NewServer()
+	// Create folder and keys if we have to
+	// Note: This should probably check if the key files exist as well.
+	if utils.CreateFolder("./certs") {
+		log.Warn("Missing TLS keys.")
+		security.Generate()
 	}
 	
+	// Specify GRPC credentials
+    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+    
+    if err != nil {
+    	log.Fatal("Could not load TLS keys: ", err)
+    	os.Exit(1)
+    }
+    
+    // Start GRPC server
+	s = grpc.NewServer(grpc.Creds(creds))
+	
 	// Log message
-	log.Info(Role + " initialised on port " + ServerPort + " TLS: " + strconv.FormatBool(Config.Local.TLS));
+	log.Info(Role + " initialised on port " + ServerPort);
 
 	hc.RegisterRequesterServer(s, &server{})
 
