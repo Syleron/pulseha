@@ -10,8 +10,10 @@ import (
 	"time"
 	"context"
 	"google.golang.org/grpc/grpclog"
+	"google.golang.org/grpc/credentials"
 	oglog "log"
 	"io/ioutil"
+	"os"
 )
 
 var (
@@ -25,6 +27,9 @@ var (
 	// Peer's Connection Details
 	PeerIP		string
 	PeerPort	string
+	
+	Conn		*grpc.ClientConn
+	Client		hc.RequesterClient
 )
 
 /*
@@ -43,6 +48,32 @@ func Setup() {
 
 	// Setup local networking
 	_configureLocalNetwork()
+
+	var err error
+	
+	// Setup GRPC client
+	// Create the client TLS credentials
+    creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+    if err != nil {
+    	log.Fatal("Could not load TLS cert: ", err)
+    	os.Exit(1)
+    }
+
+	// Create a connection with the TLS credentials
+	Conn, err = grpc.Dial(PeerIP+":"+PeerPort, grpc.WithTransportCredentials(creds))
+		
+	if err != nil {
+	    log.Warning("GRPC Connection Error ", err)
+	}
+	
+	// Set the default logger for grpc
+	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
+	
+	// Defer closing the client connection.
+	defer Conn.Close()
+
+	Client = hc.NewRequesterClient(Conn)
+
 
 	// Check to see what role we are
 	if Config.Local.Role == "master" {
@@ -100,25 +131,14 @@ func _configureLocalNetwork() {
  * Master Function to handle health checks across the cluster
  */
 func healthCheck() {
-	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
-	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
-
-	if err != nil {
-		//log.Error("Connection Error: %v", err)
-	}
-
-	defer conn.Close()
-
-	c := hc.NewRequesterClient(conn)
-
-	r, err := c.Check(context.Background(), &hc.HealthCheckRequest{
+	r, err := Client.Check(context.Background(), &hc.HealthCheckRequest{
 		Request: hc.HealthCheckRequest_STATUS,
 	})
 
 	if err != nil {
 		// Oops we couldn't connect... let's try again!
 		logConnectionStatus(false)
-		conn.Close()
+		Conn.Close()
 		time.Sleep(time.Second * 5)
 		healthCheck()
 	} else {
@@ -131,18 +151,7 @@ func healthCheck() {
  * Master unction to setup cluster as a master.
  */
 func sendSetup() {
-	conn, err := grpc.Dial(PeerIP+":"+PeerPort, grpc.WithInsecure())
-	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
-
-	if err != nil {
-		//log.Error("Connection Error: %v", err)
-	}
-
-	defer conn.Close()
-
-	c := hc.NewRequesterClient(conn)
-
-	r, err := c.Check(context.Background(), &hc.HealthCheckRequest{
+	r, err := Client.Check(context.Background(), &hc.HealthCheckRequest{
 		Request: hc.HealthCheckRequest_SETUP,
 	})
 

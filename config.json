@@ -3,21 +3,20 @@
         "hc_interval": 1000,
         "foc_interval": 5000,
         "foc_limit": 30,
-        "interface": "en1",
+        "interface": "ens3",
         "role": "master",
-        "tls": false,
-        "configured": true
+        "configured": false
     },
     "cluster": {
         "floating_ip": "192.168.1.10",
         "nodes": {
             "master": {
                 "ip": "127.0.0.1",
-                "port": "50051"
+                "port": "8443"
             },
             "slave": {
                 "ip": "127.0.0.1",
-                "port": "50052"
+                "port": "8443"
             }
         }
     },

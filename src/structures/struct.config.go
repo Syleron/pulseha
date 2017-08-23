@@ -12,7 +12,6 @@ type Configuration struct {
 			FOCLimit 	int `json:"foc_limit"`
 			Interface 	string `json:"interface"`
 			Role 		string `json:"role"`
-			TLS 		bool `json:"tls"`
 			Configured 	bool `json:"configured"`
 	       } `json:"local"`
 	Cluster Cluster `json:"cluster"`

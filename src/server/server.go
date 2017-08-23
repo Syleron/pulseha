@@ -8,13 +8,16 @@ import (
 	"github.com/Syleron/Pulse/src/utils"
 	"github.com/Syleron/Pulse/src/client"
 	"github.com/Syleron/Pulse/src/networking"
+	"github.com/Syleron/Pulse/src/security"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"sync"
 	"google.golang.org/grpc/codes"
 	"time"
 	"google.golang.org/grpc/grpclog"
+	"google.golang.org/grpc/credentials"
 	"io/ioutil"
+	"os"
 	oglog "log"
 )
 
@@ -111,12 +114,7 @@ func Setup() {
 
 	// Setup local variables
 	setupLocalVariables()
-
-	// Log message
-	log.Info(Role + " initialised on port " + ServerPort);
-
-	//defer wg.Done()
-
+	
 	lis, err := net.Listen("tcp", ":" + ServerPort)
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
@@ -125,8 +123,29 @@ func Setup() {
 	}
 
 	Lis = &lis
+	
+	var s *grpc.Server
 
-	s := grpc.NewServer()
+	// Create folder and keys if we have to
+	// Note: This should probably check if the key files exist as well.
+	if utils.CreateFolder("./certs") {
+		log.Warn("Missing TLS keys.")
+		security.Generate()
+	}
+	
+	// Specify GRPC credentials
+    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+    
+    if err != nil {
+    	log.Fatal("Could not load TLS keys: ", err)
+    	os.Exit(1)
+    }
+    
+    // Start GRPC server
+	s = grpc.NewServer(grpc.Creds(creds))
+	
+	// Log message
+	log.Info(Role + " initialised on port " + ServerPort);
 
 	hc.RegisterRequesterServer(s, &server{})
 
