@@ -7,7 +7,7 @@ import (
 	"github.com/Syleron/Pulse/src/structures"
 	"github.com/Syleron/Pulse/src/utils"
 	"github.com/Syleron/Pulse/src/client"
-	"github.com/Syleron/Pulse/src/networking"
+	"github.com/Syleron/Pulse/src/plugins"
 	"github.com/Syleron/Pulse/src/security"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	Config	structures.Configuration
+	Config structures.Configuration
 	Role string
 	Lis  *net.Listener
 	ServerIP string
@@ -31,8 +31,8 @@ var (
 	Status hc.HealthCheckResponse_ServingStatus // The status of the cluster
 )
 
-type server struct{
-	mu sync.Mutex
+type server struct {
+	mu     sync.Mutex
 	status hc.HealthCheckResponse_ServingStatus
 }
 
@@ -80,7 +80,7 @@ func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.Heal
 /**
  * Function is used to configure a clustered pair
  */
-func configureCluster() bool{
+func configureCluster() bool {
 	// Check to see if we can configure this node
 	// make sure we are a slave
 	if Config.Local.Role == "slave" {
@@ -108,21 +108,27 @@ func configureCluster() bool{
 func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
-	
-	// Are we master or slave?
+
+	// Load plugins
+	_, err := plugins.LoadPlugins()
+
+	if err != nil {
+		log.Errorf("Failed to load plugins: %v", err)
+		os.Exit(1)
+	}
 
 	// Setup local variables
 	setupLocalVariables()
-	
+
 	lis, err := net.Listen("tcp", ":" + ServerPort)
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
-		log.Error("failed to listen: %v", err)
+		log.Errorf("failed to listen: %v", err)
 	}
 
 	Lis = &lis
-	
+
 	var s *grpc.Server
 
 	// Create folder and keys if we have to
@@ -131,27 +137,18 @@ func Setup() {
 		log.Warn("Missing TLS keys.")
 		security.Generate()
 	}
-	
+
 	// Specify GRPC credentials
-    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
-    
-    if err != nil {
-    	log.Fatal("Could not load TLS keys: ", err)
-    	os.Exit(1)
-    }
-    
-    // Start GRPC server
-	s = grpc.NewServer(grpc.Creds(creds))
-		log.Info("testing?")
-	
-	// Load plugins
-	plugins, err := plugins.LoadPlugins()
-	
+	creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+
 	if err != nil {
-		log.Error("Failed to load plugins: " + err)
+		log.Fatal("Could not load TLS keys: ", err)
 		os.Exit(1)
 	}
-	
+
+	// Start GRPC server
+	s = grpc.NewServer(grpc.Creds(creds))
+
 	// Log message
 	log.Info(Role + " initialised on port " + ServerPort);
 
@@ -176,8 +173,8 @@ func Setup() {
 func monitorResponses() {
 	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
-		
-		if int(elapsed) > 0 && int(elapsed)%4 == 0 {
+
+		if int(elapsed) > 0 && int(elapsed) % 4 == 0 {
 			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
 
@@ -188,23 +185,23 @@ func monitorResponses() {
 			// Try communicating with the master through other methods
 			if Config.HealthChecks.ICMP != (structures.Configuration{}.HealthChecks.ICMP) {
 				if Config.HealthChecks.ICMP.Enabled {
-					success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
-
-					if success {
-						log.Warn("ICMP health check successful! Assuming master is still available..")
-						addHCSuccess = true
-					}
+					//success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
+					//
+					//if success {
+					//	log.Warn("ICMP health check successful! Assuming master is still available..")
+					//	addHCSuccess = true
+					//}
 				}
 			}
 
 			if Config.HealthChecks.HTTP != (structures.Configuration{}.HealthChecks.HTTP) {
 				if Config.HealthChecks.HTTP.Enabled {
-					success := networking.Curl(Config.HealthChecks.HTTP.Address)
-
-					if success {
-						log.Warn("HTTP health check successful! Assuming master is still available..")
-						addHCSuccess = true
-					}
+					//success := networking.Curl(Config.HealthChecks.HTTP.Address)
+					//
+					//if success {
+					//	log.Warn("HTTP health check successful! Assuming master is still available..")
+					//	addHCSuccess = true
+					//}
 				}
 			}
 

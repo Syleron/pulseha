@@ -1,9 +1,11 @@
 package plugins
 
 import (
-    log "github.com/Sirupsen/logrus"
-    "github.com/Syleron/Pulse/src/utils"
-    "plugin"
+	log "github.com/Sirupsen/logrus"
+	"path"
+	"path/filepath"
+	"plugin"
+	"github.com/Syleron/Pulse/src/utils"
 )
 
 type Plugin interface {
@@ -16,9 +18,43 @@ type pluginType interface {
 }
 
 func LoadPlugins() ([]pluginType, error) {
-    var plugins []pluginType
-    
-    log.Info("[Plugins] Loading..")
-    
-	return plugins, nil
+	var modules []pluginType
+
+	utils.CreateFolder("./plugins")
+
+	evtGlob := path.Join("./plugins", "/*.so")
+	evt, err := filepath.Glob(evtGlob)
+
+	if err != nil {
+		return modules, err
+	}
+
+	var plugins []*plugin.Plugin
+	for _, pFile := range evt {
+		if plug, err := plugin.Open(pFile); err == nil {
+			plugins = append(plugins, plug)
+		}
+	}
+
+	for _, p := range plugins {
+		symEvt, err := p.Lookup("EventType")
+
+		if err != nil {
+			log.Errorf("Event Type has no eventType symbol: %v", err)
+			continue
+		}
+
+		e, ok := symEvt.(pluginType)
+
+		if !ok {
+			log.Errorf("Event Type is not an Event interface type")
+			continue
+		}
+
+		modules = append(modules, e)
+	}
+
+	log.Infof("%v plugins loaded", len(modules))
+
+	return modules, nil
 }

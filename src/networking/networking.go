@@ -4,9 +4,6 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/Pulse/src/utils"
 	"net"
-	"os/exec"
-	"strings"
-	"bytes"
 	"os"
 )
 
