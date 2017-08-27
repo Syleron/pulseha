@@ -8,17 +8,17 @@ import (
 	"github.com/Syleron/Pulse/src/utils"
 )
 
-type Module interface {
+type Plugin interface {
 	PluginName() string
 }
 
-type moduleType interface {
+type pluginType interface {
 	Name() string
-	Decode([]byte) (Module, error)
+	Decode([]byte) (Plugin, error)
 }
 
-func LoadModules() ([]moduleType, error) {
-	var modules []moduleType
+func LoadPlugins() ([]pluginType, error) {
+	var modules []pluginType
 
 	utils.CreateFolder("./modules")
 
@@ -44,7 +44,7 @@ func LoadModules() ([]moduleType, error) {
 			continue
 		}
 
-		e, ok := symEvt.(moduleType)
+		e, ok := symEvt.(pluginType)
 
 		if !ok {
 			log.Errorf("Event Type is not an Event interface type")
@@ -54,7 +54,7 @@ func LoadModules() ([]moduleType, error) {
 		modules = append(modules, e)
 	}
 
-	log.Infof("%v modules loaded", len(modules))
+	log.Infof("%v plugins loaded", len(modules))
 
 	return modules, nil
 }
