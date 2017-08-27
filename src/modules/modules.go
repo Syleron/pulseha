@@ -20,9 +20,9 @@ type pluginType interface {
 func LoadPlugins() ([]pluginType, error) {
 	var modules []pluginType
 
-	utils.CreateFolder("./plugins")
+	utils.CreateFolder("./modules")
 
-	evtGlob := path.Join("./plugins", "/*.so")
+	evtGlob := path.Join("./modules", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {
@@ -54,7 +54,7 @@ func LoadPlugins() ([]pluginType, error) {
 		modules = append(modules, e)
 	}
 
-	log.Infof("%v plugins loaded", len(modules))
+	log.Infof("%v modules loaded", len(modules))
 
 	return modules, nil
 }

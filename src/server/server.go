@@ -7,7 +7,7 @@ import (
 	"github.com/Syleron/Pulse/src/structures"
 	"github.com/Syleron/Pulse/src/utils"
 	"github.com/Syleron/Pulse/src/client"
-	"github.com/Syleron/Pulse/src/plugins"
+	"github.com/Syleron/Pulse/src/modules"
 	"github.com/Syleron/Pulse/src/security"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -109,11 +109,11 @@ func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
 
-	// Load plugins
-	_, err := plugins.LoadPlugins()
+	// Load modules
+	_, err := modules.LoadModules()
 
 	if err != nil {
-		log.Errorf("Failed to load plugins: %v", err)
+		log.Errorf("Failed to load modules: %v", err)
 		os.Exit(1)
 	}
 
