@@ -11,6 +11,22 @@ import (
 	log "github.com/Sirupsen/logrus"
 )
 
+func loadFile() []byte {
+	c, err := ioutil.ReadFile("./config.json")
+
+	// We had an error attempting to decode the json into our struct! oops!
+	if err != nil {
+		log.Error("Unable to load config.json. Does it exist?")
+		os.Exit(1)
+	}
+	
+	return []byte(c)
+}
+
+func saveFile() {
+	
+}
+
 /**
  * This function is to be used to load our JSON based config and decode it as a struct!
  */

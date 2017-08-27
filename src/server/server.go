@@ -108,8 +108,7 @@ func configureCluster() bool{
 func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
-	Config.Validate()
-
+	
 	// Are we master or slave?
 
 	// Setup local variables
@@ -143,6 +142,15 @@ func Setup() {
     
     // Start GRPC server
 	s = grpc.NewServer(grpc.Creds(creds))
+		log.Info("testing?")
+	
+	// Load plugins
+	plugins, err := plugins.LoadPlugins()
+	
+	if err != nil {
+		log.Error("Failed to load plugins: " + err)
+		os.Exit(1)
+	}
 	
 	// Log message
 	log.Info(Role + " initialised on port " + ServerPort);
