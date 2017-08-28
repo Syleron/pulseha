@@ -2,33 +2,33 @@ package server
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"net"
-	hc "github.com/Syleron/Pulse/src/proto"
-	"github.com/Syleron/Pulse/src/structures"
-	"github.com/Syleron/Pulse/src/utils"
 	"github.com/Syleron/Pulse/src/client"
 	"github.com/Syleron/Pulse/src/plugins"
+	hc "github.com/Syleron/Pulse/src/proto"
 	"github.com/Syleron/Pulse/src/security"
+	"github.com/Syleron/Pulse/src/structures"
+	"github.com/Syleron/Pulse/src/utils"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	"sync"
 	"google.golang.org/grpc/codes"
-	"time"
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/grpclog"
 	"io/ioutil"
-	"os"
 	oglog "log"
+	"net"
+	"os"
+	"sync"
+	"time"
 )
 
 var (
-	Config structures.Configuration
-	Role string
-	Lis  *net.Listener
-	ServerIP string
-	ServerPort string
-	Last_response time.Time // Last time we got a health check from the master
-	Status hc.HealthCheckResponse_ServingStatus // The status of the cluster
+	Config        structures.Configuration
+	Role          string
+	Lis           *net.Listener
+	ServerIP      string
+	ServerPort    string
+	Last_response time.Time                            // Last time we got a health check from the master
+	Status        hc.HealthCheckResponse_ServingStatus // The status of the cluster
 )
 
 type server struct {
@@ -40,11 +40,11 @@ func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.Heal
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	switch(in.Request) {
+	switch in.Request {
 	case hc.HealthCheckRequest_SETUP:
 		log.Info("Recieved setup request from master..")
 
-		if (configureCluster()) {
+		if configureCluster() {
 			// Reset the last_response time
 			Last_response = time.Now()
 			// Successfully configured the cluster... now to monitor for health checks
@@ -87,14 +87,14 @@ func configureCluster() bool {
 		// Are we in a configured state already?
 		if Config.Local.Configured == false {
 			// Set the local value to configured
-			Config.Local.Configured = true;
+			Config.Local.Configured = true
 
 			// Save
 			utils.SaveConfig(Config)
 
 			log.Info("Successfully configured slave.")
 
-			return true;
+			return true
 		} else {
 			return false
 		}
@@ -109,18 +109,18 @@ func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
 
-	// Load modules
-	_, err := modules.LoadPlugins()
+	// Load plugins
+	_, err := plugins.Load()
 
 	if err != nil {
-		log.Errorf("Failed to load modules: %v", err)
+		log.Errorf("Failed to load plugins: %v", err)
 		os.Exit(1)
 	}
 
 	// Setup local variables
 	setupLocalVariables()
 
-	lis, err := net.Listen("tcp", ":" + ServerPort)
+	lis, err := net.Listen("tcp", ":"+ServerPort)
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
@@ -150,7 +150,7 @@ func Setup() {
 	s = grpc.NewServer(grpc.Creds(creds))
 
 	// Log message
-	log.Info(Role + " initialised on port " + ServerPort);
+	log.Info(Role + " initialised on port " + ServerPort)
 
 	hc.RegisterRequesterServer(s, &server{})
 
@@ -174,7 +174,7 @@ func monitorResponses() {
 	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
 
-		if int(elapsed) > 0 && int(elapsed) % 4 == 0 {
+		if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
 
@@ -221,7 +221,7 @@ func monitorResponses() {
  * Slave Function - Used when the master is no longer around.
  */
 func failover() {
-	if (Config.Local.Role == "slave") {
+	if Config.Local.Role == "slave" {
 		// update local role
 		Config.Local.Role = "master"
 
@@ -272,7 +272,7 @@ func setupLocalVariables() {
 	}
 
 	// Local configuration status
-	if (Config.Local.Configured) {
+	if Config.Local.Configured {
 		Status = hc.HealthCheckResponse_CONFIGURED
 	} else {
 		Status = hc.HealthCheckResponse_UNCONFIGURED

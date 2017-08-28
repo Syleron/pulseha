@@ -1,16 +1,19 @@
-package modules
+package plugins
 
 import (
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/Pulse/src/structures"
+	"github.com/Syleron/Pulse/src/utils"
 	"path"
 	"path/filepath"
 	"plugin"
-	"github.com/Syleron/Pulse/src/utils"
-	"github.com/Syleron/Pulse/src/structures"
 	"strconv"
 )
 
-func LoadPlugins() ([]structures.PluginHC, error) {
+/**
+ *
+ **/
+func Load() ([]structures.PluginHC, error) {
 	var modules []structures.PluginHC
 
 	utils.CreateFolder("./plugins")
@@ -23,7 +26,7 @@ func LoadPlugins() ([]structures.PluginHC, error) {
 	}
 
 	var plugins []*plugin.Plugin
-	
+
 	for _, pFile := range evt {
 		if plug, err := plugin.Open(pFile); err == nil {
 			plugins = append(plugins, plug)
@@ -37,9 +40,9 @@ func LoadPlugins() ([]structures.PluginHC, error) {
 			log.Errorf("Plugin has no pluginType symbol: %v", err)
 			continue
 		}
-		
+
 		e, ok := symEvt.(structures.PluginHC)
-		
+
 		if !ok {
 			log.Error("Plugin is not of an PluginHC interface type")
 			continue
@@ -50,11 +53,11 @@ func LoadPlugins() ([]structures.PluginHC, error) {
 
 	if len(modules) > 0 {
 		var pluginNames string = ""
-		
+
 		for _, plgn := range modules {
-		    pluginNames += plgn.Name() + "(v" + strconv.FormatFloat(plgn.Version(), 'f', -1, 32) + ") "
+			pluginNames += plgn.Name() + "(v" + strconv.FormatFloat(plgn.Version(), 'f', -1, 32) + ") "
 		}
-		
+
 		log.Infof("Plugins loaded (%v): %v", len(modules), pluginNames)
 	}
 
