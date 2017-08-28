@@ -3,7 +3,7 @@
         "hc_interval": 1000,
         "foc_interval": 5000,
         "foc_limit": 30,
-        "interface": "en0",
+        "interface": "ens3",
         "role": "master",
         "configured": false
     },

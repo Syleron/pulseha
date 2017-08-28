@@ -6,23 +6,16 @@ import (
 	"path/filepath"
 	"plugin"
 	"github.com/Syleron/Pulse/src/utils"
+	"github.com/Syleron/Pulse/src/structures"
+	"strconv"
 )
 
-type Plugin interface {
-	PluginName() string
-}
+func LoadPlugins() ([]structures.PluginHC, error) {
+	var modules []structures.PluginHC
 
-type pluginType interface {
-	Name() string
-	Decode([]byte) (Plugin, error)
-}
+	utils.CreateFolder("./plugins")
 
-func LoadPlugins() ([]pluginType, error) {
-	var modules []pluginType
-
-	utils.CreateFolder("./modules")
-
-	evtGlob := path.Join("./modules", "/*.so")
+	evtGlob := path.Join("./plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {
@@ -30,6 +23,7 @@ func LoadPlugins() ([]pluginType, error) {
 	}
 
 	var plugins []*plugin.Plugin
+	
 	for _, pFile := range evt {
 		if plug, err := plugin.Open(pFile); err == nil {
 			plugins = append(plugins, plug)
@@ -37,24 +31,32 @@ func LoadPlugins() ([]pluginType, error) {
 	}
 
 	for _, p := range plugins {
-		symEvt, err := p.Lookup("EventType")
+		symEvt, err := p.Lookup("PluginHC")
 
 		if err != nil {
-			log.Errorf("Event Type has no eventType symbol: %v", err)
+			log.Errorf("Plugin has no pluginType symbol: %v", err)
 			continue
 		}
-
-		e, ok := symEvt.(pluginType)
-
+		
+		e, ok := symEvt.(structures.PluginHC)
+		
 		if !ok {
-			log.Errorf("Event Type is not an Event interface type")
+			log.Error("Plugin is not of an PluginHC interface type")
 			continue
 		}
 
 		modules = append(modules, e)
 	}
 
-	log.Infof("%v plugins loaded", len(modules))
+	if len(modules) > 0 {
+		var pluginNames string = ""
+		
+		for _, plgn := range modules {
+		    pluginNames += plgn.Name() + "(v" + strconv.FormatFloat(plgn.Version(), 'f', -1, 32) + ") "
+		}
+		
+		log.Infof("Plugins loaded (%v): %v", len(modules), pluginNames)
+	}
 
 	return modules, nil
 }
