@@ -25,6 +25,7 @@ var (
 	Config	structures.Configuration
 	Role string
 	Lis  *net.Listener
+	Sgrpc *grpc.Server
 	ServerIP string
 	ServerPort string
 	Last_response time.Time // Last time we got a health check from the master
@@ -42,7 +43,7 @@ func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.Heal
 
 	switch(in.Request) {
 	case hc.HealthCheckRequest_SETUP:
-		log.Info("Recieved setup request from master..")
+		log.Info("Received setup request from master..")
 
 		if (configureCluster()) {
 			// Reset the last_response time
@@ -124,8 +125,6 @@ func Setup() {
 
 	Lis = &lis
 	
-	var s *grpc.Server
-
 	// Create folder and keys if we have to
 	// Note: This should probably check if the key files exist as well.
 	if utils.CreateFolder("./certs") {
@@ -142,12 +141,12 @@ func Setup() {
     }
     
     // Start GRPC server
-	s = grpc.NewServer(grpc.Creds(creds))
+	Sgrpc = grpc.NewServer(grpc.Creds(creds))
 	
 	// Log message
 	log.Info(Role + " initialised on port " + ServerPort);
 
-	hc.RegisterRequesterServer(s, &server{})
+	hc.RegisterRequesterServer(Sgrpc, &server{})
 
 	// If we are a slave.. we need to set the starting time
 	// and fail-over checker
@@ -159,7 +158,7 @@ func Setup() {
 		}
 	}()
 
-	s.Serve(*Lis)
+	Sgrpc.Serve(*Lis)
 }
 
 /**
@@ -236,11 +235,11 @@ func failover() {
 		log.Info("Completed. Local role has been re-assigned as master..")
 
 		// Close server
-		var serverListener net.Listener
-		serverListener = *Lis
-		serverListener.Close()
+		serverListener := *Lis
+		grpcServer := *Sgrpc
 
-		time.Sleep(1000)
+		grpcServer.Stop()
+		serverListener.Close()
 
 		// Re-setup the server
 		go Setup()
