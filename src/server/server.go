@@ -33,13 +33,13 @@ var (
 )
 
 type server struct {
-	mu     sync.Mutex
+	sync.Mutex
 	status hc.HealthCheckResponse_ServingStatus
 }
 
 func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.HealthCheckResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Lock()
+	defer s.Unlock()
 
 	switch in.Request {
 	case hc.HealthCheckRequest_SETUP:
