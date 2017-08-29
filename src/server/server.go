@@ -23,6 +23,7 @@ import (
 
 var (
 	Config        structures.Configuration
+	Plugins		  []structures.PluginHC
 	Role          string
 	Lis           *net.Listener
 	ServerIP      string
@@ -110,7 +111,8 @@ func Setup() {
 	Config = utils.LoadConfig()
 
 	// Load plugins
-	_, err := plugins.Load()
+	var err error
+	Plugins, err = plugins.Load()
 
 	if err != nil {
 		log.Errorf("Failed to load plugins: %v", err)
@@ -178,31 +180,18 @@ func monitorResponses() {
 			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
 
-		// If 30 seconds has gone by.. something is wrong.
+		// If x seconds has gone by.. something is wrong.
 		if int(elapsed) >= Config.Local.FOCLimit {
 			var addHCSuccess bool = false
-
-			// Try communicating with the master through other methods
-			if Config.HealthChecks.ICMP != (structures.Configuration{}.HealthChecks.ICMP) {
-				if Config.HealthChecks.ICMP.Enabled {
-					//success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
-					//
-					//if success {
-					//	log.Warn("ICMP health check successful! Assuming master is still available..")
-					//	addHCSuccess = true
-					//}
-				}
-			}
-
-			if Config.HealthChecks.HTTP != (structures.Configuration{}.HealthChecks.HTTP) {
-				if Config.HealthChecks.HTTP.Enabled {
-					//success := networking.Curl(Config.HealthChecks.HTTP.Address)
-					//
-					//if success {
-					//	log.Warn("HTTP health check successful! Assuming master is still available..")
-					//	addHCSuccess = true
-					//}
-				}
+			
+			for _, plugin := range Plugins {
+			    success, enabled := plugin.Send()
+			    
+			    if enabled && success {
+					log.Warn(plugin.Name() + " health check successful! Assuming master is still available..")
+			    	addHCSuccess = true
+			    	break
+			    }
 			}
 
 			if !addHCSuccess {

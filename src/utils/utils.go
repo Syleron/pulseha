@@ -12,25 +12,18 @@ import (
 )
 
 /**
- *
+ * Load a specific file and return byte code
  **/
-func loadFile() []byte {
-	c, err := ioutil.ReadFile("./config.json")
+func LoadFile(file string) []byte {
+	c, err := ioutil.ReadFile(file)
 
 	// We had an error attempting to decode the json into our struct! oops!
 	if err != nil {
-		log.Error("Unable to load config.json. Does it exist?")
+		log.Error("Unable to load file. Does it exist?")
 		os.Exit(1)
 	}
 
 	return []byte(c)
-}
-
-/**
- *
- **/
-func saveFile() {
-
 }
 
 /**
