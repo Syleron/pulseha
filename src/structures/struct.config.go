@@ -7,25 +7,25 @@ import (
 
 type Configuration struct {
 	Local struct {
-			HCInterval 	int `json:"hc_interval"`
-			FOCInterval 	int `json:"foc_interval"`
-			FOCLimit 	int `json:"foc_limit"`
-			Interface 	string `json:"interface"`
-			Role 		string `json:"role"`
-			Configured 	bool `json:"configured"`
-	       } `json:"local"`
-	Cluster Cluster `json:"cluster"`
+		HCInterval  int `json:"hc_interval"`
+		FOCInterval int `json:"foc_interval"`
+		FOCLimit    int `json:"foc_limit"`
+		Interface   string `json:"interface"`
+		Role        string `json:"role"`
+		Configured  bool `json:"configured"`
+	} `json:"local"`
+	Cluster      Cluster `json:"cluster"`
 	HealthChecks HealthChecks `json:"health_checks"`
 }
 
 type Cluster struct {
 	FloatingIP string `json:"floating_ip"`
-	Nodes Nodes `json:"nodes"`
+	Nodes      Nodes `json:"nodes"`
 }
 
 type Nodes struct {
 	Master ClusterDef `json:"master"`
-	Slave ClusterDef `json:"slave"`
+	Slave  ClusterDef `json:"slave"`
 }
 
 type ClusterDef struct {

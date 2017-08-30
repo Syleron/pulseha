@@ -17,19 +17,19 @@ import (
 )
 
 var (
-	Config		structures.Configuration
-	Connected	bool
+	Config    structures.Configuration
+	Connected bool
 
 	// Local Variables
-	LocalIP		string
-	LocalPort	string
+	LocalIP   string
+	LocalPort string
 
 	// Peer's Connection Details
-	PeerIP		string
-	PeerPort	string
-	
-	Conn		*grpc.ClientConn
-	Client		hc.RequesterClient
+	PeerIP   string
+	PeerPort string
+
+	Conn   *grpc.ClientConn
+	Client hc.RequesterClient
 )
 
 /*
@@ -50,30 +50,29 @@ func Setup() {
 	_configureLocalNetwork()
 
 	var err error
-	
+
 	// Setup GRPC client
 	// Create the client TLS credentials
-    creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
-    if err != nil {
-    	log.Fatal("Could not load TLS cert: ", err)
-    	os.Exit(1)
-    }
+	creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+	if err != nil {
+		log.Fatal("Could not load TLS cert: ", err)
+		os.Exit(1)
+	}
 
 	// Create a connection with the TLS credentials
 	Conn, err = grpc.Dial(PeerIP+":"+PeerPort, grpc.WithTransportCredentials(creds))
-		
+
 	if err != nil {
-	    log.Warning("GRPC Connection Error ", err)
+		log.Warning("GRPC Connection Error ", err)
 	}
-	
+
 	// Set the default logger for grpc
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
-	
+
 	// Defer closing the client connection.
 	defer Conn.Close()
 
 	Client = hc.NewRequesterClient(Conn)
-
 
 	// Check to see what role we are
 	if Config.Local.Role == "master" {
@@ -83,7 +82,7 @@ func Setup() {
 			log.Info("This is a configured cluster..")
 			// Start the health check scheduler
 			log.Info("Starting healthcheck scheduler..")
-			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
+			utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval)*time.Millisecond)
 		} else {
 			// Logo that we have not been configured yet.
 			log.Warn("This is an unconfigured deployment.")
@@ -91,7 +90,6 @@ func Setup() {
 			// Send setup request to slave
 			sendSetup()
 		}
-
 
 		// Schedule the health checks to ensure each member within the cluster still exists!
 		//scheduler(healthCheck, time.Duration(Config.Local.Interval) * time.Millisecond)
@@ -169,7 +167,7 @@ func sendSetup() {
 			if (configureCluster()) {
 				// start sending healthchecks
 				log.Info("Starting healthcheck scheduler..")
-				utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval) * time.Millisecond)
+				utils.Scheduler(healthCheck, time.Duration(Config.Local.HCInterval)*time.Millisecond)
 			}
 		default:
 			log.Printf("Default Response: %s", r.Status)
@@ -182,7 +180,7 @@ func sendSetup() {
  * NOTE: This function could be shared between the client and server so this could
  *       be moved to the utils package.
  */
-func configureCluster() bool{
+func configureCluster() bool {
 	// Check to see if we can configure this node
 	// make sure we are a slave
 	if Config.Local.Role == "master" {
@@ -240,7 +238,7 @@ func ForceConfigReload() {
  * Master Function - Used to log whether we are still connected or not
  */
 func logConnectionStatus(status bool) {
-	if Connected && !status  {
+	if Connected && !status {
 		log.Warn("Disconnected from slave.. Attempting to reconnect!")
 		Connected = false
 	} else if !Connected && status {

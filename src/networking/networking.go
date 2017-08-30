@@ -42,7 +42,7 @@ func SendGARP(iface, ip string) bool {
  * Checks to see what status a network interface is currently.
  * Possible responses are either up or down.
  */
-func _netInterfaceStatus(iface string) bool{
+func _netInterfaceStatus(iface string) bool {
 	output, err := utils.Execute("cat", "/sys/class/net/"+iface+"/operstate")
 
 	if err != nil {
@@ -76,13 +76,13 @@ func _ifaceExist(iface string) bool {
 /**
  * This function is to bring up a network interface
  */
-func BringIPup(iface, ip string) bool{
+func BringIPup(iface, ip string) bool {
 	if !_ifaceExist(iface) {
 		log.Warn("Network interface does not exist!");
 		os.Exit(1)
 	}
-	
-	output, err := utils.Execute("ifconfig", iface+":0", ip,"up")
+
+	output, err := utils.Execute("ifconfig", iface+":0", ip, "up")
 
 	if err != nil {
 		return false
@@ -98,7 +98,7 @@ func BringIPup(iface, ip string) bool{
 /**
  * This function is to bring down a network interface
  */
-func BringIPdown(iface, ip string) bool{
+func BringIPdown(iface, ip string) bool {
 	if !_ifaceExist(iface) {
 		log.Warn("Network interfaces does not exist!");
 		return false
@@ -117,13 +117,11 @@ func BringIPdown(iface, ip string) bool{
 	}
 }
 
-
-
 /**
  * Perform a curl request to a web host.
  * This only returns a boolean based off the http status code received by the request.
  */
-func Curl(httpRequestURL string) bool{
+func Curl(httpRequestURL string) bool {
 	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
 
 	if err != nil {
@@ -145,7 +143,7 @@ func ICMPIPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
 	if !utils.ValidIPv4(Ipv4Addr) {
 		log.Error("Invalid IPv4 address for ICMP check..")
-		return	false
+		return false
 	}
 
 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
@@ -170,7 +168,7 @@ func ICMPIPv4(Ipv4Addr string) bool {
 /**
  * Function to perform an arp scan on the network. This will allow us to see which IP's are available.
  */
-func arpScan(addrWSubnet string) string{
+func arpScan(addrWSubnet string) string {
 	output, err := utils.Execute("arp-scan", "arp-scan", addrWSubnet)
 
 	if err != nil {

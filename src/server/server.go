@@ -22,18 +22,18 @@ import (
 )
 
 var (
-	Config	structures.Configuration
-	Role string
-	Lis  *net.Listener
-	Sgrpc *grpc.Server
-	ServerIP string
-	ServerPort string
-	Last_response time.Time // Last time we got a health check from the master
-	Status hc.HealthCheckResponse_ServingStatus // The status of the cluster
+	Config        structures.Configuration
+	Role          string
+	Lis           *net.Listener
+	Sgrpc         *grpc.Server
+	ServerIP      string
+	ServerPort    string
+	Last_response time.Time                            // Last time we got a health check from the master
+	Status        hc.HealthCheckResponse_ServingStatus // The status of the cluster
 )
 
-type server struct{
-	mu sync.Mutex
+type server struct {
+	mu     sync.Mutex
 	status hc.HealthCheckResponse_ServingStatus
 }
 
@@ -81,7 +81,7 @@ func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.Heal
 /**
  * Function is used to configure a clustered pair
  */
-func configureCluster() bool{
+func configureCluster() bool {
 	// Check to see if we can configure this node
 	// make sure we are a slave
 	if Config.Local.Role == "slave" {
@@ -115,8 +115,8 @@ func Setup() {
 
 	// Setup local variables
 	setupLocalVariables()
-	
-	lis, err := net.Listen("tcp", ":" + ServerPort)
+
+	lis, err := net.Listen("tcp", ":"+ServerPort)
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
@@ -124,28 +124,27 @@ func Setup() {
 	}
 
 	Lis = &lis
-	
+
 	// Create folder and keys if we have to
 	// Note: This should probably check if the key files exist as well.
 	if utils.CreateFolder("./certs") {
 		log.Warn("Missing TLS keys.")
 		security.Generate()
 	}
-	
+
 	// Specify GRPC credentials
-    creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
-    
-    if err != nil {
-    	log.Fatal("Could not load TLS keys: ", err)
-    	os.Exit(1)
-    }
-    
-    // Start GRPC server
+	creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+
+	if err != nil {
+		log.Fatal("Could not load TLS keys: ", err)
+		os.Exit(1)
+	}
+
+	// Start GRPC server
 	Sgrpc = grpc.NewServer(grpc.Creds(creds))
-	
+
 	// Log message
 	log.Info(Role + " initialised on port " + ServerPort);
-
 	hc.RegisterRequesterServer(Sgrpc, &server{})
 
 	// If we are a slave.. we need to set the starting time
@@ -165,9 +164,9 @@ func Setup() {
  * Slave function - used to monitor when the last health check we received.
  */
 func monitorResponses() {
-	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval) * time.Millisecond) {
+	for _ = range time.Tick(time.Duration(Config.Local.FOCInterval)*time.Millisecond) {
 		elapsed := int64(time.Since(Last_response)) / 1e9
-		
+
 		if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
