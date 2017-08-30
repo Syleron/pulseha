@@ -12,7 +12,7 @@ It has these top-level messages:
 	HealthCheckRequest
 	HealthCheckResponse
 */
-package requester
+package main
 
 import proto "github.com/golang/protobuf/proto"
 import fmt "fmt"

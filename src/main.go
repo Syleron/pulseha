@@ -1,25 +1,69 @@
 package main
 
 import (
-	"github.com/Syleron/Pulse/src/client"
-	"github.com/Syleron/Pulse/src/server"
-	"sync"
+	"net"
+	"log"
 	"os"
+	"sync"
 )
 
-func main() {
-	// Setup CLI
-	if len(os.Args) > 1 {
-		setupCLI()
-	} else {
-		// Setup wait group
-		var wg sync.WaitGroup
-		wg.Add(1)
-		// Setup Server
-		go server.Setup()
-		// Server Client
-		go client.Setup()
-		// Wait for wait group to finish
-		wg.Wait()
+/**
+ * Main Pulse struct type
+ */
+type Pulse struct {
+	Client *Client
+	Server *Server
+	Config *Config
+	Logger *log.Logger
+}
+
+/**
+ * Member node struct type
+ */
+type Member struct {
+	Name   string
+	Addr   net.IP
+	Port uint16
+}
+
+/**
+ * Create a new instance of PulseHA
+ */
+func Create(conf *Config) (*Pulse, error) {
+	logger := conf.Logger
+
+	if logger == nil {
+		logOutput := conf.LogOutput
+
+		if logOutput == nil {
+			logOutput = os.Stderr
+		}
+
+		logger = log.New(logOutput, "", log.LstdFlags)
 	}
+
+	logger.Print("[INFO] Pulse: Initializing...")
+
+	pulse := &Pulse{
+		Server: &Server{
+			Logger: logger,
+		},
+		Config: conf,
+		Logger: logger,
+	}
+
+	// Setup background stuffs
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go pulse.Server.Setup("0.0.0.0","8443")
+	wg.Wait()
+
+	return pulse, nil
+}
+
+/**
+ * Essential Construct
+ */
+func main() {
+	Create(DefaultLocalConfig())
 }
