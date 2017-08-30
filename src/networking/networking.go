@@ -4,9 +4,6 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/Pulse/src/utils"
 	"net"
-	"os/exec"
-	"strings"
-	"bytes"
 	"os"
 )
 
@@ -119,53 +116,53 @@ func BringIPdown(iface, ip string) bool{
 
 
 
-/**
- * Perform a curl request to a web host.
- * This only returns a boolean based off the http status code received by the request.
- */
-func Curl(httpRequestURL string) bool{
-	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
+// /**
+//  * Perform a curl request to a web host.
+//  * This only returns a boolean based off the http status code received by the request.
+//  */
+// func Curl(httpRequestURL string) bool{
+// 	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
 
-	if err != nil {
-		log.Error("Http Curl request failed.")
-		return false
-	}
+// 	if err != nil {
+// 		log.Error("Http Curl request failed.")
+// 		return false
+// 	}
 
-	if output == "\"200\"" {
-		return true
-	} else {
-		return false
-	}
-}
+// 	if output == "\"200\"" {
+// 		return true
+// 	} else {
+// 		return false
+// 	}
+// }
 
-/**
- *
- */
-func ICMPIPv4(Ipv4Addr string) bool {
-	// Validate the IP address to ensure it's an IPv4 addr.
-	if !utils.ValidIPv4(Ipv4Addr) {
-		log.Error("Invalid IPv4 address for ICMP check..")
-		return	false
-	}
+// /**
+//  *
+//  */
+// func ICMPIPv4(Ipv4Addr string) bool {
+// 	// Validate the IP address to ensure it's an IPv4 addr.
+// 	if !utils.ValidIPv4(Ipv4Addr) {
+// 		log.Error("Invalid IPv4 address for ICMP check..")
+// 		return	false
+// 	}
 
-	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
-	cmd := exec.Command("bash", "-c", cmds)
-	cmd.Stdin = strings.NewReader("some input")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
+// 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
+// 	cmd := exec.Command("bash", "-c", cmds)
+// 	cmd.Stdin = strings.NewReader("some input")
+// 	var out bytes.Buffer
+// 	cmd.Stdout = &out
+// 	err := cmd.Run()
 
-	if err != nil {
-		log.Error("ICMP request failed.")
-		return false
-	}
+// 	if err != nil {
+// 		log.Error("ICMP request failed.")
+// 		return false
+// 	}
 
-	if strings.Contains(out.String(), "0") {
-		return true
-	} else {
-		return false
-	}
-}
+// 	if strings.Contains(out.String(), "0") {
+// 		return true
+// 	} else {
+// 		return false
+// 	}
+// }
 
 /**
  * Function to perform an arp scan on the network. This will allow us to see which IP's are available.

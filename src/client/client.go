@@ -38,7 +38,6 @@ var (
 func Setup() {
 	// Set the local config value - this should probably have validation - probably a nicer way og doing this.
 	Config = utils.LoadConfig()
-	Config.Validate()
 
 	// Set all the local variables from the config.
 	setupLocalVariables()
