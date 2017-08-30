@@ -21,6 +21,9 @@ const (
 	PulseDisconnected
 )
 
+/**
+ *
+ */
 func (p PulseState) String() string {
 	switch p {
 	case PulseConnected:
@@ -32,11 +35,17 @@ func (p PulseState) String() string {
 	}
 }
 
+/**
+ *
+ */
 func (c *Client) Setup() {
 	// Set initial state
-	c.State = PulseDisconnected
+	//c.State = PulseDisconnected
 }
 
+/**
+ *
+ */
 func (c *Client) Connect(ip, port string) {
 	creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
 
@@ -54,6 +63,19 @@ func (c *Client) Connect(ip, port string) {
 	c.Requester = NewRequesterClient(c.Connection)
 }
 
+/**
+ *
+ */
 func (c *Client) Close() {
 	c.Connection.Close()
 }
+
+/**
+ *
+ */
+func (c *Client) sendSetup() {}
+
+/**
+ *
+ */
+func (c *Client) configureCluster() {}

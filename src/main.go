@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net"
 	"log"
 	"os"
 	"sync"
@@ -15,15 +14,6 @@ type Pulse struct {
 	Server *Server
 	Config *Config
 	Logger *log.Logger
-}
-
-/**
- * Member node struct type
- */
-type Member struct {
-	Name   string
-	Addr   net.IP
-	Port uint16
 }
 
 /**
@@ -42,8 +32,6 @@ func Create(conf *Config) (*Pulse, error) {
 		logger = log.New(logOutput, "", log.LstdFlags)
 	}
 
-	logger.Print("[INFO] Pulse: Initializing...")
-
 	pulse := &Pulse{
 		Server: &Server{
 			Logger: logger,
@@ -52,9 +40,19 @@ func Create(conf *Config) (*Pulse, error) {
 		Logger: logger,
 	}
 
+	// Load plugins
+	_, err := LoadPlugins()
+
+	if err != nil {
+		logger.Printf("[ERR] Pulse: Failed to load plugins: %s", err)
+		os.Exit(1)
+	}
+
 	// Setup background stuffs
+	// Note: Perhaps look into not using a wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
+	go pulse.Client.Setup()
 	go pulse.Server.Setup("0.0.0.0","8443")
 	wg.Wait()
 
