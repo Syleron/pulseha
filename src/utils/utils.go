@@ -1,15 +1,30 @@
 package utils
 
 import (
-	"github.com/Syleron/Pulse/src/structures"
 	"encoding/json"
-	"os/exec"
-	"net"
-	"io/ioutil"
-	"time"
-	"os"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/Pulse/src/structures"
+	"io/ioutil"
+	"net"
+	"os"
+	"os/exec"
+	"time"
 )
+
+/**
+ * Load a specific file and return byte code
+ **/
+func LoadFile(file string) []byte {
+	c, err := ioutil.ReadFile(file)
+
+	// We had an error attempting to decode the json into our struct! oops!
+	if err != nil {
+		log.Error("Unable to load file. Does it exist?")
+		os.Exit(1)
+	}
+
+	return []byte(c)
+}
 
 /**
  * This function is to be used to load our JSON based config and decode it as a struct!
@@ -107,7 +122,7 @@ func CreateFolder(path string) (bool) {
 /**
  * Check if a folder exists.
  */
-func CheckFolderExist(path string) (bool) {
+func CheckFolderExist(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		return false
 	}
@@ -115,7 +130,7 @@ func CheckFolderExist(path string) (bool) {
 }
 
 /**
- * Get local hostname 
+ * Get local hostname
  */
 func GetHostname() (string) {
 	output, err := Execute("hostname", "-f")

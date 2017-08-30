@@ -2,23 +2,23 @@ package server
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"net"
+	"github.com/Syleron/Pulse/src/client"
+	"github.com/Syleron/Pulse/src/plugins"
 	hc "github.com/Syleron/Pulse/src/proto"
+	"github.com/Syleron/Pulse/src/security"
 	"github.com/Syleron/Pulse/src/structures"
 	"github.com/Syleron/Pulse/src/utils"
-	"github.com/Syleron/Pulse/src/client"
-	"github.com/Syleron/Pulse/src/networking"
-	"github.com/Syleron/Pulse/src/security"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
-	"sync"
 	"google.golang.org/grpc/codes"
-	"time"
-	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/grpclog"
 	"io/ioutil"
-	"os"
 	oglog "log"
+	"net"
+	"os"
+	"sync"
+	"time"
 )
 
 var (
@@ -26,6 +26,7 @@ var (
 	Role          string
 	Lis           *net.Listener
 	Sgrpc         *grpc.Server
+	Plugins		  []structures.PluginHC
 	ServerIP      string
 	ServerPort    string
 	Last_response time.Time                            // Last time we got a health check from the master
@@ -33,19 +34,19 @@ var (
 )
 
 type server struct {
-	mu     sync.Mutex
+	sync.Mutex
 	status hc.HealthCheckResponse_ServingStatus
 }
 
 func (s *server) Check(ctx context.Context, in *hc.HealthCheckRequest) (*hc.HealthCheckResponse, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.Lock()
+	defer s.Unlock()
 
-	switch(in.Request) {
+	switch in.Request {
 	case hc.HealthCheckRequest_SETUP:
 		log.Info("Received setup request from master..")
 
-		if (configureCluster()) {
+		if configureCluster() {
 			// Reset the last_response time
 			Last_response = time.Now()
 			// Successfully configured the cluster... now to monitor for health checks
@@ -88,14 +89,14 @@ func configureCluster() bool {
 		// Are we in a configured state already?
 		if Config.Local.Configured == false {
 			// Set the local value to configured
-			Config.Local.Configured = true;
+			Config.Local.Configured = true
 
 			// Save
 			utils.SaveConfig(Config)
 
 			log.Info("Successfully configured slave.")
 
-			return true;
+			return true
 		} else {
 			return false
 		}
@@ -109,9 +110,15 @@ func configureCluster() bool {
 func Setup() {
 	// Load the config and validate
 	Config = utils.LoadConfig()
-	Config.Validate()
 
-	// Are we master or slave?
+	// Load plugins
+	var err error
+	Plugins, err = plugins.Load()
+
+	if err != nil {
+		log.Errorf("Failed to load plugins: %v", err)
+		os.Exit(1)
+	}
 
 	// Setup local variables
 	setupLocalVariables()
@@ -120,7 +127,7 @@ func Setup() {
 	grpclog.SetLogger(oglog.New(ioutil.Discard, "", 0))
 
 	if err != nil {
-		log.Error("failed to listen: %v", err)
+		log.Errorf("failed to listen: %v", err)
 	}
 
 	Lis = &lis
@@ -171,31 +178,18 @@ func monitorResponses() {
 			log.Warn("No health checks are being made.. Perhaps a failover is required?")
 		}
 
-		// If 30 seconds has gone by.. something is wrong.
+		// If x seconds has gone by.. something is wrong.
 		if int(elapsed) >= Config.Local.FOCLimit {
 			var addHCSuccess bool = false
-
-			// Try communicating with the master through other methods
-			if Config.HealthChecks.ICMP != (structures.Configuration{}.HealthChecks.ICMP) {
-				if Config.HealthChecks.ICMP.Enabled {
-					success := networking.ICMPIPv4(Config.Cluster.Nodes.Master.IP)
-
-					if success {
-						log.Warn("ICMP health check successful! Assuming master is still available..")
-						addHCSuccess = true
-					}
-				}
-			}
-
-			if Config.HealthChecks.HTTP != (structures.Configuration{}.HealthChecks.HTTP) {
-				if Config.HealthChecks.HTTP.Enabled {
-					success := networking.Curl(Config.HealthChecks.HTTP.Address)
-
-					if success {
-						log.Warn("HTTP health check successful! Assuming master is still available..")
-						addHCSuccess = true
-					}
-				}
+			
+			for _, plugin := range Plugins {
+			    success, enabled := plugin.Send()
+			    
+			    if enabled && success {
+					log.Warn(plugin.Name() + " health check successful! Assuming master is still available..")
+			    	addHCSuccess = true
+			    	break
+			    }
 			}
 
 			if !addHCSuccess {
@@ -214,7 +208,7 @@ func monitorResponses() {
  * Slave Function - Used when the master is no longer around.
  */
 func failover() {
-	if (Config.Local.Role == "slave") {
+	if Config.Local.Role == "slave" {
 		// update local role
 		Config.Local.Role = "master"
 
@@ -265,7 +259,7 @@ func setupLocalVariables() {
 	}
 
 	// Local configuration status
-	if (Config.Local.Configured) {
+	if Config.Local.Configured {
 		Status = hc.HealthCheckResponse_CONFIGURED
 	} else {
 		Status = hc.HealthCheckResponse_UNCONFIGURED
