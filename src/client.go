@@ -2,16 +2,16 @@ package main
 
 import (
 	"google.golang.org/grpc/credentials"
-	"log"
 	"os"
 	"google.golang.org/grpc"
+	"github.com/coreos/go-log/log"
 )
 
 type Client struct {
-	Logger *log.Logger
 	State      PulseState
 	Connection *grpc.ClientConn
 	Requester  RequesterClient
+	Config *Config
 }
 
 type PulseState int
@@ -39,8 +39,13 @@ func (p PulseState) String() string {
  *
  */
 func (c *Client) Setup() {
-	// Set initial state
-	//c.State = PulseDisconnected
+	// Are we in a cluster?
+
+	// Are there any other members in the cluster online?
+
+	// Are they the active appliance? (They should be)
+
+	// If not.. who is the active appliance? (because there should be one)
 }
 
 /**
@@ -50,14 +55,14 @@ func (c *Client) Connect(ip, port string) {
 	creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
 
 	if err != nil {
-		log.Fatal("Could not load TLS cert: ", err)
+		log.Errorf("Could not load TLS cert: ", err)
 		os.Exit(1)
 	}
 
 	c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 
 	if err != nil {
-		c.Logger.Printf("[ERR] Pulse: GRPC client connection error", err)
+		log.Errorf("GRPC client connection error: ", err)
 	}
 
 	c.Requester = NewRequesterClient(c.Connection)
@@ -79,3 +84,7 @@ func (c *Client) sendSetup() {}
  *
  */
 func (c *Client) configureCluster() {}
+
+func (c *Client) Join() {}
+func (c *Client) Leave() {}
+func (c *Client) Broadcast() {}

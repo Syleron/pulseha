@@ -16,6 +16,7 @@ type Server struct {
 	Status HealthCheckResponse_ServingStatus
 	Last_response time.Time
 	Members []Member
+	Config *Config
 }
 
 /**
@@ -52,12 +53,16 @@ func (s *Server) Failover() {}
 /**
  *
  */
-func (s *Server) ConfigureCluster() {}
+func (s *Server) ConfigureCluster() {
+	// Configure the cluster
+}
 
 /**
  *
  */
-func (s *Server) MonitorResponses() {}
+func (s *Server) MonitorResponses() {
+	// handle the responses and act upon them
+}
 
 /**
  *

@@ -12,7 +12,6 @@ type Pulse struct {
 	Client *Client
 	Server *Server
 	Config *Config
-	Logger *log.Logger
 }
 
 /**
@@ -26,6 +25,10 @@ func Create() (*Pulse, error) {
 
 	// Load the config
 	pulse.Config.Load()
+
+	// Set the configs for client/server
+	pulse.Server.Config = pulse.Config
+	pulse.Client.Config = pulse.Config
 
 	// Load plugins
 	_, err := LoadPlugins()
