@@ -1,8 +1,8 @@
 {
-    "pulseha": {
-        "cluster_name": "",
-        "bind_address": "",
-        "bind_port": ""
+    "cluster": {
+        "cluster_name": "TestCluster",
+        "bind_address": "0.0.0.0",
+        "bind_port": "8443"
     },
     "pools": {
         "pool_1": {
@@ -17,13 +17,11 @@
     "nodes": {
         "node_1": {
             "address": "192.168.63.229",
-            "port": "",
-            "state": "up"
+            "port": ""
         },
         "node_2": {
             "address": "192.168.63.230",
-            "port": "",
-            "state": "up"
+            "port": ""
         }
     },
     "logging": {

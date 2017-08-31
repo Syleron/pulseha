@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/Syleron/Pulse/src/utils"
 	"path"
 	"path/filepath"
 	"plugin"
 	"strconv"
+	"github.com/coreos/go-log/log"
 )
 
 /**
@@ -20,7 +20,7 @@ type PluginHC interface {
 func LoadPlugins() ([]PluginHC, error) {
 	var modules []PluginHC
 
-	utils.CreateFolder("./plugins")
+	CreateFolder("./plugins")
 
 	evtGlob := path.Join("./plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
@@ -41,14 +41,14 @@ func LoadPlugins() ([]PluginHC, error) {
 		symEvt, err := p.Lookup("PluginHC")
 
 		if err != nil {
-			//log.Errorf("Plugin has no pluginType symbol: %v", err)
+			log.Errorf("Plugin has no pluginType symbol: %v", err)
 			continue
 		}
 
 		e, ok := symEvt.(PluginHC)
 
 		if !ok {
-			//log.Error("Plugin is not of an PluginHC interface type")
+			log.Error("Plugin is not of an PluginHC interface type")
 			continue
 		}
 
@@ -62,7 +62,7 @@ func LoadPlugins() ([]PluginHC, error) {
 			pluginNames += plgn.Name() + "(v" + strconv.FormatFloat(plgn.Version(), 'f', -1, 32) + ") "
 		}
 
-		//log.Infof("Plugins loaded (%v): %v", len(modules), pluginNames)
+		log.Infof("Plugins loaded (%v): %v", len(modules), pluginNames)
 	}
 
 	return modules, nil

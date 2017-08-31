@@ -1,12 +1,13 @@
-package utils
+package main
 
 import (
 	"io/ioutil"
-	"log"
 	"os"
 	"os/exec"
 	"net"
 	"time"
+	"encoding/json"
+	"github.com/coreos/go-log/log"
 )
 
 /**
@@ -22,6 +23,23 @@ func LoadFile(file string) []byte {
 	}
 
 	return []byte(c)
+}
+
+/**
+ *
+ */
+func LoadConfig() Config {
+	c, err := ioutil.ReadFile("./config.json")
+	config := Config{}
+	json.Unmarshal([]byte(c), &config)
+
+	// We had an error attempting to decode the json into our struct! oops!
+	if err != nil {
+		log.Error("Unable to load config.json. Does it exist?")
+		os.Exit(1)
+	}
+
+	return config
 }
 
 /**
@@ -94,7 +112,7 @@ func GetHostname() string {
 	output, err := Execute("hostname", "-f")
 
 	if err != nil {
-		log.Fatal("Failed to obtain hostname.")
+		log.Error("Failed to obtain hostname.")
 		os.Exit(1)
 	}
 

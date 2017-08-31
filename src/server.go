@@ -6,14 +6,12 @@ import (
 	"google.golang.org/grpc"
 	"net"
 	"google.golang.org/grpc/credentials"
-	"log"
 	"os"
 	"time"
-	"github.com/Syleron/Pulse/src/utils"
+	"github.com/coreos/go-log/log"
 )
 
 type Server struct {
-	Logger *log.Logger
 	sync.Mutex
 	Status HealthCheckResponse_ServingStatus
 	Last_response time.Time
@@ -68,18 +66,18 @@ func (s *Server) Setup(ip, port string) {
 	lis, err := net.Listen("tcp", ip+":"+port)
 
 	if err != nil {
-		s.Logger.Printf("[ERR] Pulse: Failed to listen: %s", err)
+		log.Errorf("Failed to listen: %s", err)
 	}
 
-	if utils.CreateFolder("./certs") {
-		s.Logger.Print("[WARN] Pulse: TLS keys are missing! Generating..")
+	if CreateFolder("./certs") {
+		log.Warning("TLS keys are missing! Generating..")
 		GenOpenSSL()
 	}
 
 	creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
 
 	if err != nil {
-		s.Logger.Print("[ERR] Pulse: Could not load TLS keys.")
+		log.Error("Could not load TLS keys.")
 		os.Exit(1)
 	}
 
@@ -87,9 +85,10 @@ func (s *Server) Setup(ip, port string) {
 
 	RegisterRequesterServer(grpcServer, s)
 
-	s.Logger.Printf("[INFO] Pulse: Initialised on "+ip+":"+port)
+	log.Info("Initialised on "+ip+":"+port)
 
 	if err := grpcServer.Serve(lis); err != nil {
-		s.Logger.Printf("[ERR] Pulse: GRPC unable to serve: %s", err)
+		log.Errorf("GRPC unable to serve: %s", err)
 	}
 }
+

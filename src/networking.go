@@ -1,8 +1,7 @@
-package networking
+package main
 
 import (
 	"os"
-	"github.com/Syleron/Pulse/src/utils"
 	"net"
 	"os/exec"
 	"strings"
@@ -19,7 +18,7 @@ func SendGARP(iface, ip string) bool {
 		os.Exit(1)
 	}
 
-	output, err := utils.Execute("arping", "-U", "-c", "5", "-I", iface, ip)
+	output, err := Execute("arping", "-U", "-c", "5", "-I", iface, ip)
 
 	if err != nil {
 		return false
@@ -36,8 +35,8 @@ func SendGARP(iface, ip string) bool {
  * Checks to see what status a network interface is currently.
  * Possible responses are either up or down.
  */
-func _netInterfaceStatus(iface string) bool{
-	_, err := utils.Execute("cat", "/sys/class/net/"+iface+"/operstate")
+func _netInterfaceStatus(iface string) bool {
+	_, err := Execute("cat", "/sys/class/net/"+iface+"/operstate")
 
 	if err != nil {
 		//return err.Error();
@@ -68,13 +67,13 @@ func _ifaceExist(iface string) bool {
 /**
  * This function is to bring up a network interface
  */
-func BringIPup(iface, ip string) bool{
+func BringIPup(iface, ip string) bool {
 	if !_ifaceExist(iface) {
 		//log.Warn("Network interface does not exist!");
 		os.Exit(1)
 	}
 
-	output, err := utils.Execute("ifconfig", iface+":0", ip,"up")
+	output, err := Execute("ifconfig", iface+":0", ip, "up")
 
 	if err != nil {
 		return false
@@ -90,13 +89,13 @@ func BringIPup(iface, ip string) bool{
 /**
  * This function is to bring down a network interface
  */
-func BringIPdown(iface, ip string) bool{
+func BringIPdown(iface, ip string) bool {
 	if !_ifaceExist(iface) {
 		//log.Warn("Network interfaces does not exist!");
 		return false
 	}
 
-	output, err := utils.Execute("ifconfig", iface+":0", ip, "down")
+	output, err := Execute("ifconfig", iface+":0", ip, "down")
 
 	if err != nil {
 		return false
@@ -109,13 +108,12 @@ func BringIPdown(iface, ip string) bool{
 	}
 }
 
-
 /**
  * Perform a curl request to a web host.
  * This only returns a boolean based off the http status code received by the request.
  */
-func Curl(httpRequestURL string) bool{
-	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
+func Curl(httpRequestURL string) bool {
+	output, err := Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
 
 	if err != nil {
 		//log.Error("Http Curl request failed.")
@@ -134,9 +132,9 @@ func Curl(httpRequestURL string) bool{
  */
 func ICMPIPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if !utils.ValidIPv4(Ipv4Addr) {
+	if !ValidIPv4(Ipv4Addr) {
 		//log.Error("Invalid IPv4 address for ICMP check..")
-		return	false
+		return false
 	}
 
 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
@@ -161,11 +159,11 @@ func ICMPIPv4(Ipv4Addr string) bool {
 /**
  * Function to perform an arp scan on the network. This will allow us to see which IP's are available.
  */
-func ArpScan(addrWSubnet string) string{
-	output, err := utils.Execute("arp-scan", "arp-scan", addrWSubnet)
+func ArpScan(addrWSubnet string) string {
+	output, err := Execute("arp-scan", "arp-scan", addrWSubnet)
 
 	if err != nil {
-		return err.Error();
+		return err.Error()
 	}
 
 	return output
