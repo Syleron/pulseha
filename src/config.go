@@ -37,6 +37,9 @@ type Node struct {
 	Port string `json:"port"`
 }
 
+/**
+ *
+ */
 func (c *Config) Load() {
 	log.Debug("Loading configuration file")
 	b, err := ioutil.ReadFile("./config.json")
@@ -54,18 +57,40 @@ func (c *Config) Load() {
 	}
 }
 
+/**
+ *
+ */
 func (c *Config) Save() {
+	// Validate before we save
+	c.Validate()
+	// Convert struct back to JSON format
+	configJSON, _ := json.MarshalIndent(c, "", "    ")
+	// Save back to file
+	err := ioutil.WriteFile("./config.json", configJSON, 0644)
 
+	if err != nil {
+		log.Error("Unable to save config.json. Does it exist?")
+		os.Exit(1)
+	}
 }
 
+/**
+ *
+ */
 func (c *Config) Reload() {
 
 }
 
+/**
+ *
+ */
 func (c *Config) Validate() {
 
 }
 
+/**
+ *
+ */
 func DefaultLocalConfig() (*Config) {
 	return &Config{
 		//Cluster: {
