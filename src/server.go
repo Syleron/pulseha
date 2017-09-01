@@ -74,19 +74,24 @@ func (s *Server) Setup(ip, port string) {
 		log.Errorf("Failed to listen: %s", err)
 	}
 
-	if CreateFolder("./certs") {
-		log.Warning("TLS keys are missing! Generating..")
-		GenOpenSSL()
+	var grpcServer *grpc.Server
+	if s.Config.Cluster.TLS {
+		if CreateFolder("./certs") {
+			log.Warning("TLS keys are missing! Generating..")
+			GenOpenSSL()
+		}
+
+		creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+
+		if err != nil {
+			log.Error("Could not load TLS keys.")
+			os.Exit(1)
+		}
+
+		grpcServer = grpc.NewServer(grpc.Creds(creds))
+	} else {
+		grpcServer = grpc.NewServer()
 	}
-
-	creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
-
-	if err != nil {
-		log.Error("Could not load TLS keys.")
-		os.Exit(1)
-	}
-
-	grpcServer := grpc.NewServer(grpc.Creds(creds))
 
 	RegisterRequesterServer(grpcServer, s)
 

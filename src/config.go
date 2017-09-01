@@ -17,10 +17,11 @@ type Cluster struct {
 	ClusterName string `json:"cluster_name"`
 	BindIP   string `json:"bind_address"`
 	BindPort string `json:"bind_port"`
+	TLS bool `json:"tls"`
 }
 
 type Pools struct {
-	Pool map[string]Pool
+	Pools map[string]Pool
 }
 
 type Pool struct {

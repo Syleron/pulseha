@@ -2,27 +2,12 @@
     "cluster": {
         "cluster_name": "TestCluster",
         "bind_address": "0.0.0.0",
-        "bind_port": "8443"
+        "bind_port": "8443",
+        "tls": false
     },
     "pools": {
-        "pool_1": {
-            "nodes": ["node_1", "node_2"],
-            "floating_ips": []
-        },
-        "pool_2": {
-            "nodes": ["node_1"],
-            "floating_ips": []
-        }
     },
     "nodes": {
-        "node_1": {
-            "address": "192.168.63.229",
-            "port": ""
-        },
-        "node_2": {
-            "address": "192.168.63.230",
-            "port": ""
-        }
     },
     "logging": {
         "to_logfile": false,

@@ -40,7 +40,19 @@ func (p PulseState) String() string {
  */
 func (c *Client) Setup() {
 	// Are we in a cluster?
+	if c.ClusterCheck() {
+		// We are in a cluster
+		// Find the active node
+		_, err := c.FindActiveNode()
 
+		if err != nil {
+			// No one is available.. assume we must take responsibility.
+			log.Info("No members available.")
+		}
+
+	} else {
+		// we are not in a cluster
+	}
 	// Are there any other members in the cluster online?
 
 	// Are they the active appliance? (They should be)
@@ -52,14 +64,20 @@ func (c *Client) Setup() {
  *
  */
 func (c *Client) Connect(ip, port string) {
-	creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+	var err error
 
-	if err != nil {
-		log.Errorf("Could not load TLS cert: ", err)
-		os.Exit(1)
+	if c.Config.Cluster.TLS {
+		creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+
+		if err != nil {
+			log.Errorf("Could not load TLS cert: ", err)
+			os.Exit(1)
+		}
+
+		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
+	} else {
+		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
 	}
-
-	c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 
 	if err != nil {
 		log.Errorf("GRPC client connection error: ", err)
@@ -88,3 +106,17 @@ func (c *Client) configureCluster() {}
 func (c *Client) Join() {}
 func (c *Client) Leave() {}
 func (c *Client) Broadcast() {}
+
+func (c *Client) ClusterCheck() bool {
+	//if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
+	//	return true
+	//}
+	//
+	return false
+}
+
+func (c *Client) FindActiveNode() (*Member, error) {
+	return &Member{}, nil
+}
+
+
