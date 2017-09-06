@@ -103,15 +103,27 @@ func (c *Client) sendSetup() {}
  */
 func (c *Client) configureCluster() {}
 
-func (c *Client) Join() {}
+func (c *Client) Join(ip, port string) {
+	// Are we already in a cluster?
+	if !c.ClusterCheck() {
+		// Was an ip port provided? if not, create a new cluster
+		if ip == "" || port == "" {
+
+		} else {
+			// Attempt to connect to node to join the cluster
+		}
+	} else {
+		log.Error("Unable to join cluster. Already configured in a cluster.")
+	}
+}
 func (c *Client) Leave() {}
 func (c *Client) Broadcast() {}
 
 func (c *Client) ClusterCheck() bool {
-	//if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
-	//	return true
-	//}
-	//
+	if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
+		return true
+	}
+
 	return false
 }
 

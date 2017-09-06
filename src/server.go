@@ -48,25 +48,6 @@ func (s *Server) Check(ctx context.Context, in *HealthCheckRequest) (*HealthChec
 /**
  *
  */
-func (s *Server) Failover() {}
-
-/**
- *
- */
-func (s *Server) ConfigureCluster() {
-	// Configure the cluster
-}
-
-/**
- *
- */
-func (s *Server) MonitorResponses() {
-	// handle the responses and act upon them
-}
-
-/**
- *
- */
 func (s *Server) Setup(ip, port string) {
 	lis, err := net.Listen("tcp", ip+":"+port)
 
@@ -102,3 +83,14 @@ func (s *Server) Setup(ip, port string) {
 	}
 }
 
+func (s * Server) Join(ip, port string) {
+
+}
+
+func (c *Client) ClusterCheck() bool {
+	if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
+		return true
+	}
+
+	return false
+}

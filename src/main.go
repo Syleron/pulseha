@@ -17,18 +17,31 @@ type Pulse struct {
 /**
  * Create a new instance of PulseHA
  */
-func Create() (*Pulse, error) {
-	pulse := &Pulse{
-		Server: &Server{},
-		Config: &Config{},
-	}
+func createPulse() (*Pulse) {
+	config := &Config{}
 
 	// Load the config
-	pulse.Config.Load()
+	config.Load()
 
-	// Set the configs for client/server
-	pulse.Server.Config = pulse.Config
-	pulse.Client.Config = pulse.Config
+	// Create the Pulse object
+	pulse := &Pulse{
+		Server: &Server{
+			Config: config,
+		},
+		Client: &Client{
+			Config: config,
+		},
+		Config: config,
+	}
+
+	return pulse
+}
+
+/**
+ * Essential Construct
+ */
+func main() {
+	pulse := createPulse()
 
 	// Load plugins
 	_, err := LoadPlugins()
@@ -38,16 +51,9 @@ func Create() (*Pulse, error) {
 		os.Exit(1)
 	}
 
-	// Setup background stuffs
+	// Setup go routine for client
 	go pulse.Client.Setup()
+
+	// Setup server
 	pulse.Server.Setup(pulse.Config.Cluster.BindIP,pulse.Config.Cluster.BindPort)
-
-	return pulse, nil
-}
-
-/**
- * Essential Construct
- */
-func main() {
-	Create()
 }
