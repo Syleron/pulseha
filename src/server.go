@@ -87,10 +87,10 @@ func (s * Server) Join(ip, port string) {
 
 }
 
-func (c *Client) ClusterCheck() bool {
-	if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
-		return true
-	}
-
-	return false
-}
+//func (c *Client) ClusterCheck() bool {
+//	if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
+//		return true
+//	}
+//
+//	return false
+//}

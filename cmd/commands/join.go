@@ -28,5 +28,5 @@ func (c *JoinCommand) Run(args []string) int {
 }
 
 func (c *JoinCommand) Synopsis() string {
-	return "Tell Pulse to join a custer"
+	return "Tell Pulse to join a cluster"
 }

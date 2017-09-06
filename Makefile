@@ -6,5 +6,8 @@ build: get
 	 env GOOS=linux GOARCH=amd64 go build -v -o ./bin/pulse ./src/
 get:
 	 go get -d ./src/
+cli:
+	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
+	 env GOOS=linux GOARCH=amd64 go build -v -o ./bin/pulseha ./cmd/
 clean:
 	go clean

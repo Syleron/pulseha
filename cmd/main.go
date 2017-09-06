@@ -11,7 +11,7 @@ import (
 type Release int
 
 const Version = "0.0.1"
-const VersionRelease = Release.String()
+const VersionRelease = "Development"
 
 
 const (

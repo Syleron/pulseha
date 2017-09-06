@@ -1,9 +1,9 @@
 package main
 
 import (
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"os"
-	"google.golang.org/grpc"
 	"github.com/coreos/go-log/log"
 )
 
@@ -90,7 +90,7 @@ func (c *Client) Connect(ip, port string) {
  *
  */
 func (c *Client) Close() {
-	c.Connection.Close()
+	//c.Connection.Close()
 }
 
 /**
