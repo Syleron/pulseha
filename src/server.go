@@ -9,11 +9,12 @@ import (
 	"os"
 	"time"
 	"github.com/coreos/go-log/log"
+	"github.com/Syleron/Pulse/proto"
 )
 
 type Server struct {
 	sync.Mutex
-	Status HealthCheckResponse_ServingStatus
+	Status proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
 	Members []Member
 	Config *Config
@@ -26,19 +27,22 @@ type Member struct {
 	Name   string
 	Addr   net.IP
 	Port uint16
-	State HealthCheckResponse_ServingStatus
+	State proto.HealthCheckResponse_ServingStatus
 }
 
 /**
  *
  */
-func (s *Server) Check(ctx context.Context, in *HealthCheckRequest) (*HealthCheckResponse, error) {
+func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*proto.HealthCheckResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 
 	switch in.Request {
-	case HealthCheckRequest_SETUP:
-	case HealthCheckRequest_STATUS:
+	case proto.HealthCheckRequest_SETUP:
+	case proto.HealthCheckRequest_STATUS:
+		return &proto.HealthCheckResponse{
+			Status: proto.HealthCheckResponse_CONFIGURED,
+		}, nil
 	default:
 	}
 
@@ -56,7 +60,7 @@ func (s *Server) Setup(ip, port string) {
 	}
 
 	var grpcServer *grpc.Server
-	if s.Config.Cluster.TLS {
+	if s.Config.Pulse.TLS {
 		if CreateFolder("./certs") {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
@@ -74,13 +78,29 @@ func (s *Server) Setup(ip, port string) {
 		grpcServer = grpc.NewServer()
 	}
 
-	RegisterRequesterServer(grpcServer, s)
+	proto.RegisterRequesterServer(grpcServer, s)
 
-	log.Info("Initialised on "+ip+":"+port)
+	log.Info("Pulse initialised on "+ip+":"+port)
 
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Errorf("GRPC unable to serve: %s", err)
+	s.SetupCLI()
+
+	grpcServer.Serve(lis)
+}
+
+func (s *Server) SetupCLI() {
+	lis, err := net.Listen("tcp", "127.0.0.1:9443")
+
+	if err != nil {
+		log.Errorf("Failed to listen: %s", err)
 	}
+
+	grpcServer := grpc.NewServer()
+
+	proto.RegisterRequesterServer(grpcServer, s)
+
+	log.Info("CLI initialised on 127.0.0.1:9443")
+
+	grpcServer.Serve(lis)
 }
 
 func (s * Server) Join(ip, port string) {

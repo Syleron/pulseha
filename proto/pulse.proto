@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package requester;
+package proto;
 
 // Types
 message HealthCheckRequest {

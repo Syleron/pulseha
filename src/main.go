@@ -55,5 +55,5 @@ func main() {
 	go pulse.Client.Setup()
 
 	// Setup server
-	pulse.Server.Setup(pulse.Config.Cluster.BindIP,pulse.Config.Cluster.BindPort)
+	pulse.Server.Setup(pulse.Config.Pulse.BindIP,pulse.Config.Pulse.BindPort)
 }

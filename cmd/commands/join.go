@@ -4,6 +4,10 @@ import (
 	"github.com/mitchellh/cli"
 	"strings"
 	"flag"
+	"google.golang.org/grpc"
+	"github.com/Syleron/Pulse/proto"
+	"context"
+	"fmt"
 )
 
 type JoinCommand struct {
@@ -23,14 +27,38 @@ func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
+	if err := cmdFlags.Parse(args); err != nil {
+		return 1
+	}
+
 	addr := cmdFlags.Args()
 
 	if len(addr) == 0 {
-		// No address was specified... error out
 		c.Ui.Error("Please specify an address to join.")
 		c.Ui.Error("")
 		c.Ui.Error(c.Help())
 		return 1
+	}
+
+	connection, err := grpc.Dial(addr[0], grpc.WithInsecure())
+
+	if err != nil {
+		c.Ui.Error("GRPC client connection error")
+		c.Ui.Error(err.Error())
+	}
+
+	defer connection.Close()
+
+	client := proto.NewRequesterClient(connection)
+
+	r, err := client.Check(context.Background(), &proto.HealthCheckRequest{
+		Request: proto.HealthCheckRequest_STATUS,
+	})
+
+	if err != nil {
+		c.Ui.Output("PulseHA CLI connection error")
+	} else {
+		fmt.Printf("response: %s", r.Status)
 	}
 
 	return 0

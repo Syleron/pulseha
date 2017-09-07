@@ -8,13 +8,12 @@ import (
 )
 
 type Config struct {
-	Cluster Cluster `json:"cluster"`
+	Pulse Cluster `json:"pulse"`
 	Pools Pools `json:"pools"`
 	Nodes Nodes `json:"nodes"`
 }
 
 type Cluster struct {
-	ClusterName string `json:"cluster_name"`
 	BindIP   string `json:"bind_address"`
 	BindPort string `json:"bind_port"`
 	TLS bool `json:"tls"`

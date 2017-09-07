@@ -5,12 +5,13 @@ import (
 	"google.golang.org/grpc/credentials"
 	"os"
 	"github.com/coreos/go-log/log"
+	"github.com/Syleron/Pulse/proto"
 )
 
 type Client struct {
 	State      PulseState
 	Connection *grpc.ClientConn
-	Requester  RequesterClient
+	Requester  proto.RequesterClient
 	Config *Config
 }
 
@@ -66,7 +67,7 @@ func (c *Client) Setup() {
 func (c *Client) Connect(ip, port string) {
 	var err error
 
-	if c.Config.Cluster.TLS {
+	if c.Config.Pulse.TLS {
 		creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
 
 		if err != nil {
@@ -83,7 +84,7 @@ func (c *Client) Connect(ip, port string) {
 		log.Errorf("GRPC client connection error: ", err)
 	}
 
-	c.Requester = NewRequesterClient(c.Connection)
+	c.Requester = proto.NewRequesterClient(c.Connection)
 }
 
 /**
