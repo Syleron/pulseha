@@ -9,5 +9,7 @@ get:
 cli:
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=linux GOARCH=amd64 go build -v -o ./bin/pulseha ./cmd/
+protos:
+	 protoc ./proto/pulse.proto --go_out=plugins=grpc:.
 clean:
 	go clean

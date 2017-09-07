@@ -10,7 +10,6 @@ message HealthCheckRequest {
     }
     ServingRequest request = 1;
 }
-
 message HealthCheckResponse {
     enum ServingStatus {
         UNKNOWN = 0;
@@ -21,8 +20,27 @@ message HealthCheckResponse {
     }
     ServingStatus status = 1;
 }
+message PulseJoin {
+    bool success = 1;
+    string address = 2;
+}
+message PulseLeave {
+    bool success = 1;
+    string message = 2;
+}
+message PulseCreate {
+    bool success = 1;
+    string message = 2;
+}
 
 // Services
 service Requester {
+    // Perform GRPC Health Check
     rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
+    // Join Cluster
+    rpc Join (PulseJoin) returns (PulseJoin);
+    // Leave Cluster
+    rpc Leave (PulseLeave) returns (PulseLeave);
+    // Create Cluster
+    rpc Create (PulseCreate) returns (PulseCreate);
 }

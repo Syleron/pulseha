@@ -51,14 +51,14 @@ func (c *JoinCommand) Run(args []string) int {
 
 	client := proto.NewRequesterClient(connection)
 
-	r, err := client.Check(context.Background(), &proto.HealthCheckRequest{
-		Request: proto.HealthCheckRequest_STATUS,
+	r, err := client.Join(context.Background(), &proto.PulseJoin{
+		Address: addr[0],
 	})
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 	} else {
-		fmt.Printf("response: %s", r.Status)
+		fmt.Printf("response: %s", r.Success)
 	}
 
 	return 0

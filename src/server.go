@@ -36,17 +36,40 @@ type Member struct {
 func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*proto.HealthCheckResponse, error) {
 	s.Lock()
 	defer s.Unlock()
-
 	switch in.Request {
 	case proto.HealthCheckRequest_SETUP:
+		log.Debug("Server:Check() - HealthCheckRequest Setup")
 	case proto.HealthCheckRequest_STATUS:
+		log.Debug("Server:Check() - HealthCheckRequest Status")
 		return &proto.HealthCheckResponse{
 			Status: proto.HealthCheckResponse_CONFIGURED,
 		}, nil
 	default:
 	}
-
 	return nil, nil
+}
+
+func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:Join() - Join Pulse cluster")
+	return &proto.PulseJoin{
+		Success: true,
+	}, nil
+}
+
+func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:Join() - Join Pulse cluster")
+	return &proto.PulseLeave{}, nil
+}
+
+func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:Join() - Join Pulse cluster")
+	return &proto.PulseCreate{}, nil
 }
 
 /**
@@ -103,14 +126,3 @@ func (s *Server) SetupCLI() {
 	grpcServer.Serve(lis)
 }
 
-func (s * Server) Join(ip, port string) {
-
-}
-
-//func (c *Client) ClusterCheck() bool {
-//	if len(c.Config.Nodes.Nodes) > 0 && len(c.Config.Pools.Pools) > 0 {
-//		return true
-//	}
-//
-//	return false
-//}
