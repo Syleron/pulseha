@@ -67,7 +67,7 @@ func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJo
 func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:Join() - Join Pulse cluster")
+	log.Debug("Server:Leave() - Leave Pulse cluster")
 	return &proto.PulseLeave{}, nil
 }
 
@@ -77,7 +77,7 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:Join() - Join Pulse cluster")
+	log.Debug("Server:Create() - Create Pulse cluster")
 	return &proto.PulseCreate{}, nil
 }
 
@@ -133,7 +133,7 @@ func (s *Server) SetupCLI() {
 
 	proto.RegisterRequesterServer(grpcServer, s)
 
-	log.Info("CLI initialised on 127.0.0.1:9443")
+	log.Debug("CLI initialised on 127.0.0.1:9443")
 
 	grpcServer.Serve(lis)
 }

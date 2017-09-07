@@ -63,6 +63,7 @@ func (c *JoinCommand) Run(args []string) int {
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
+		c.Ui.Output(err.Error())
 	} else {
 		fmt.Printf("response: %s", r.Success)
 	}

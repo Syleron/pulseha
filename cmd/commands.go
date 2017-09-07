@@ -21,6 +21,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"create": func() (cli.Command, error) {
+			return &commands.CreateCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,
