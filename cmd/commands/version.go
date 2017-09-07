@@ -21,7 +21,7 @@ func (c *VersionCommand) Run(_ []string) int {
 
 	fmt.Fprintf(&versionString, "PulseHA v%s", c.Version)
 
-	c.Ui.Output(versionString.String())
+	c.Ui.Output(versionString.String() + " Copyright (C) 2017 Andrew Zak <andrew@pulseha.com>")
 
 	return 0
 }

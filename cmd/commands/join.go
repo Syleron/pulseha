@@ -13,9 +13,8 @@ type JoinCommand struct {
 func (c *JoinCommand) Help() string {
 	helpText := `
 Usage: PulseHA join [options] address ...
-  Tells a running PulseHA agent (with "pulseha agent") to join the cluster
+  Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
-Options:
 `
 	return strings.TrimSpace(helpText)
 }
@@ -23,6 +22,16 @@ Options:
 func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
+
+	addr := cmdFlags.Args()
+
+	if len(addr) == 0 {
+		// No address was specified... error out
+		c.Ui.Error("Please specify an address to join.")
+		c.Ui.Error("")
+		c.Ui.Error(c.Help())
+		return 1
+	}
 
 	return 0
 }
