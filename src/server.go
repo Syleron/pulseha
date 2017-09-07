@@ -49,6 +49,9 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 	return nil, nil
 }
 
+/**
+ *
+ */
 func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -58,6 +61,9 @@ func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJo
 	}, nil
 }
 
+/**
+ *
+ */
 func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -65,6 +71,9 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 	return &proto.PulseLeave{}, nil
 }
 
+/**
+ *
+ */
 func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -110,6 +119,9 @@ func (s *Server) Setup(ip, port string) {
 	grpcServer.Serve(lis)
 }
 
+/**
+ *
+ */
 func (s *Server) SetupCLI() {
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 

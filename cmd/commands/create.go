@@ -10,6 +10,9 @@ type CreateCommand struct {
 	Ui cli.Ui
 }
 
+/**
+ *
+ */
 func (c *CreateCommand) Help() string {
 	helpText := `
 Usage: PulseHA create [options] address ...
@@ -20,6 +23,9 @@ Options:
 	return strings.TrimSpace(helpText)
 }
 
+/**
+ *
+ */
 func (c *CreateCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
@@ -27,6 +33,9 @@ func (c *CreateCommand) Run(args []string) int {
 	return 0
 }
 
+/**
+ *
+ */
 func (c *CreateCommand) Synopsis() string {
 	return "Tell Pulse to create new HA cluster"
 }

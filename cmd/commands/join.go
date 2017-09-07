@@ -14,6 +14,9 @@ type JoinCommand struct {
 	Ui cli.Ui
 }
 
+/**
+ *
+ */
 func (c *JoinCommand) Help() string {
 	helpText := `
 Usage: PulseHA join [options] address ...
@@ -23,6 +26,9 @@ Usage: PulseHA join [options] address ...
 	return strings.TrimSpace(helpText)
 }
 
+/**
+ *
+ */
 func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
@@ -64,6 +70,9 @@ func (c *JoinCommand) Run(args []string) int {
 	return 0
 }
 
+/**
+ *
+ */
 func (c *JoinCommand) Synopsis() string {
 	return "Tell Pulse to join a cluster"
 }

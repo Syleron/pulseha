@@ -10,6 +10,9 @@ type LeaveCommand struct {
 	Ui cli.Ui
 }
 
+/**
+ *
+ */
 func (c *LeaveCommand) Help() string {
 	helpText := `
 Usage: PulseHA leave [options] ...
@@ -20,6 +23,9 @@ Options:
 	return strings.TrimSpace(helpText)
 }
 
+/**
+ *
+ */
 func (c *LeaveCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("leave", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
@@ -27,6 +33,9 @@ func (c *LeaveCommand) Run(args []string) int {
 	return 0
 }
 
+/**
+ *
+ */
 func (c *LeaveCommand) Synopsis() string {
 	return "Tell Pulse to create new HA cluster"
 }

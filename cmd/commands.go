@@ -9,6 +9,9 @@ import (
 
 var Commands map[string]cli.CommandFactory
 
+/**
+ *
+ */
 func init() {
 	ui := &cli.BasicUi{Writer: os.Stdout}
 
@@ -28,6 +31,9 @@ func init() {
 	}
 }
 
+/**
+ *
+ */
 func makeShutdownCh() <-chan struct{} {
 	resultCh := make(chan struct{})
 

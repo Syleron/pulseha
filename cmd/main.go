@@ -8,35 +8,19 @@ import (
 	"os"
 )
 
-type Release int
-
 const Version = "0.0.1"
 const VersionRelease = "Development"
 
-
-const (
-	DEVELOPMENT    = iota
-	PRODUCTION
-	BETA
-)
-
-func (r Release) String() string {
-	switch r {
-	case DEVELOPMENT:
-		return "dev"
-	case PRODUCTION:
-		return "prod"
-	case BETA:
-		return "beta"
-	default:
-		return "??"
-	}
-}
-
+/**
+ *
+ */
 func main() {
 	os.Exit(realMain())
 }
 
+/**
+ *
+ */
 func realMain() int {
 	log.SetOutput(ioutil.Discard)
 

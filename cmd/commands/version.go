@@ -12,10 +12,16 @@ type VersionCommand struct {
 	Ui             cli.Ui
 }
 
+/**
+ *
+ */
 func (c *VersionCommand) Help() string {
 	return ""
 }
 
+/**
+ *
+ */
 func (c *VersionCommand) Run(_ []string) int {
 	var versionString bytes.Buffer
 
@@ -26,6 +32,9 @@ func (c *VersionCommand) Run(_ []string) int {
 	return 0
 }
 
+/**
+ *
+ */
 func (c *VersionCommand) Synopsis() string {
 	return "Prints the PulseHA version"
 }
