@@ -1,14 +1,6 @@
 package commands
 
 import (
-	"strings"
-	"flag"
-	"github.com/mitchellh/cli"
-)
-
-package commands
-
-import (
 "github.com/mitchellh/cli"
 "strings"
 "flag"
@@ -29,7 +21,7 @@ Options:
 }
 
 func (c *LeaveCommand) Run(args []string) int {
-	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
+	cmdFlags := flag.NewFlagSet("leave", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
 	return 0
