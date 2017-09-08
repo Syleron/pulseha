@@ -82,6 +82,8 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 	log.Debug("Server:Create() - Create Pulse cluster")
 	// Method of first checking to see if we are in a cluster.
 	if !_clusterCheck(s.Config) {
+		// create a group
+		s.Config.Groups["group_1"] = []string{}
 		// we are not in an active cluster
 		newNode := Node{
 			IP: in.BindIp,
