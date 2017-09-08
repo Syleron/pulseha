@@ -15,7 +15,7 @@ type LeaveCommand struct {
  */
 func (c *LeaveCommand) Help() string {
 	helpText := `
-Usage: PulseHA leave [options] ...
+Usage: pulseha leave [options] ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:

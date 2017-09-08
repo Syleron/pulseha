@@ -18,7 +18,7 @@ type CreateCommand struct {
  */
 func (c *CreateCommand) Help() string {
 	helpText := `
-Usage: PulseHA create [options] address ...
+Usage: pulseha create [options] address ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
