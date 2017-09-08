@@ -31,6 +31,8 @@ message PulseLeave {
 message PulseCreate {
     bool success = 1;
     string message = 2;
+    string bind_ip = 3;
+    string bind_port = 4;
 }
 
 // Services

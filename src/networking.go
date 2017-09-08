@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"bytes"
+	"github.com/coreos/go-log/log"
 )
 
 /**
@@ -167,4 +168,19 @@ func ArpScan(addrWSubnet string) string {
 	}
 
 	return output
+}
+
+/**
+ * Return network interface names
+ */
+func _getInterfaceNames() ([]string) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Errorf("Error retrieving network interfaces: ", err)
+	}
+	var interfaceNames []string
+	for _, iface := range ifaces {
+		interfaceNames = append(interfaceNames, iface.Name)
+	}
+	return interfaceNames
 }

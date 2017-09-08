@@ -1,27 +1,9 @@
 {
     "pulse": {
-        "bind_address": "0.0.0.0",
-        "bind_port": "8443",
         "tls": true
     },
-    "floating_ip_groups": {
-        "group1": ["192,168,63,225", "192.168.63.226"],
-        "group2": ["192.168.63.227"]
-    },
-    "nodes": {
-        "node_1": {
-            "bind_Address": "192.168.63.229",
-            "bind_port": "8443",
-            "ip_assignment_groups": {
-                "eth1": [
-                    "group1"
-                ],
-                "eth2": [
-                    "group2"
-                ]
-            }
-        }
-    },
+    "floating_ip_groups": {},
+    "nodes": {},
     "logging": {
         "to_logfile": false,
         "logfile": "/var/log/pulseha.log"

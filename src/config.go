@@ -8,24 +8,14 @@ import (
 )
 
 type Config struct {
-	Pulse Cluster `json:"pulse"`
-	Pools Pools `json:"pools"`
-	Nodes Nodes `json:"nodes"`
+	Pulse Local `json:"pulse"`
+	Groups map[string][]string `json:"floating_ip_groups"`
+	Nodes map[string]Node `json:"nodes"`
+	Logging Logging `json:"logging"`
 }
 
-type Cluster struct {
-	BindIP   string `json:"bind_address"`
-	BindPort string `json:"bind_port"`
+type Local struct {
 	TLS bool `json:"tls"`
-}
-
-type Pools struct {
-	Pools map[string]Pool
-}
-
-type Pool struct {
-	Nodes []string `json:"nodes"`
-	FloatingIPs []string `json:"floating_ips"`
 }
 
 type Nodes struct {
@@ -33,20 +23,26 @@ type Nodes struct {
 }
 
 type Node struct {
-	IP   string `json:"ip"`
-	Port string `json:"port"`
+	IP   string `json:"bind_address"`
+	Port string `json:"bind_port"`
+	IPGroups map[string][]string  `json:"group_assignments"`
+}
+
+type Logging struct {
+	ToLogFile bool `json:"to_logfile"`
+	LogFile string `json:"logfile"`
 }
 
 /**
- *
+ * Function used to load the config
  */
 func (c *Config) Load() {
-	log.Debug("Loading configuration file")
+	log.Info("Loading configuration file")
 	b, err := ioutil.ReadFile("./config.json")
 	err = json.Unmarshal([]byte(b), c)
 
 	if err != nil {
-		log.Errorf("Unable to umarshal config: %s", err)
+		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
 	}
 
@@ -58,7 +54,7 @@ func (c *Config) Load() {
 }
 
 /**
- *
+ * Function used to save the config
  */
 func (c *Config) Save() {
 	// Validate before we save
@@ -67,7 +63,7 @@ func (c *Config) Save() {
 	configJSON, _ := json.MarshalIndent(c, "", "    ")
 	// Save back to file
 	err := ioutil.WriteFile("./config.json", configJSON, 0644)
-
+	// Check for errors
 	if err != nil {
 		log.Error("Unable to save config.json. Does it exist?")
 		os.Exit(1)
@@ -75,17 +71,22 @@ func (c *Config) Save() {
 }
 
 /**
- *
+ * Reload the config file into memory.
+ * Note: Need to clear memory value before calling Load()
  */
 func (c *Config) Reload() {
-
+	// Reload the config file
+	c.Load()
 }
 
 /**
  *
  */
 func (c *Config) Validate() {
+}
 
+func (c *Config) LocalNode() (Node) {
+	return c.Nodes[GetHostname()]
 }
 
 /**

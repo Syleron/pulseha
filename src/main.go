@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/coreos/go-log/log"
 	"os"
+	"sync"
 )
 
 /**
@@ -22,6 +23,8 @@ func createPulse() (*Pulse) {
 
 	// Load the config
 	config.Load()
+	// Validate the config
+	config.Validate()
 
 	// Create the Pulse object
 	pulse := &Pulse{
@@ -51,9 +54,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	var wg sync.WaitGroup
+	wg.Add(1)
+	// Setup cli
+	go pulse.Server.SetupCLI()
 	// Setup go routine for client
 	go pulse.Client.Setup()
-
 	// Setup server
-	pulse.Server.Setup(pulse.Config.Pulse.BindIP,pulse.Config.Pulse.BindPort)
+	go pulse.Server.Setup()
+	wg.Wait()
 }

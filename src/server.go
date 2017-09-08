@@ -18,6 +18,7 @@ type Server struct {
 	Last_response time.Time
 	Members []Member
 	Config *Config
+	Log log.Logger
 }
 
 /**
@@ -56,6 +57,7 @@ func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJo
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Join() - Join Pulse cluster")
+
 	return &proto.PulseJoin{
 		Success: true,
 	}, nil
@@ -78,17 +80,53 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Create() - Create Pulse cluster")
-	return &proto.PulseCreate{}, nil
+	// Method of first checking to see if we are in a cluster.
+	if !_clusterCheck(s.Config) {
+		// we are not in an active cluster
+		newNode := Node{
+			IP: in.BindIp,
+			Port: in.BindPort,
+			IPGroups: make(map[string][]string, 0),
+		}
+		// Assign interface names to node
+		for _, name := range _getInterfaceNames() {
+			if name != "lo" {
+				newNode.IPGroups[name] = make([]string, 0)
+			}
+		}
+		// Add the node to the nodes config
+		s.Config.Nodes[GetHostname()] = newNode
+		// Save the config
+		s.Config.Save()
+		// Setup the listener
+		go s.Setup()
+		// return if we were successful or not
+		return &proto.PulseCreate{
+			Success: true,
+			Message: "Pulse cluster successfully created!",
+		}, nil
+	} else {
+		return &proto.PulseCreate{
+			Success: false,
+			Message: "Pulse daemon is already in a configured cluster",
+		}, nil
+	}
 }
 
 /**
  *
  */
-func (s *Server) Setup(ip, port string) {
-	lis, err := net.Listen("tcp", ip+":"+port)
+func (s *Server) Setup() {
+	// Only continue if we are in a configured cluster
+	if !_clusterCheck(s.Config) {
+		return
+	}
+
+	lis, err := net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
 
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
+		os.Exit(1)
 	}
 
 	var grpcServer *grpc.Server
@@ -112,9 +150,7 @@ func (s *Server) Setup(ip, port string) {
 
 	proto.RegisterRequesterServer(grpcServer, s)
 
-	log.Info("Pulse initialised on "+ip+":"+port)
-
-	s.SetupCLI()
+	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
 
 	grpcServer.Serve(lis)
 }
@@ -133,7 +169,7 @@ func (s *Server) SetupCLI() {
 
 	proto.RegisterRequesterServer(grpcServer, s)
 
-	log.Debug("CLI initialised on 127.0.0.1:9443")
+	log.Info("CLI initialised on 127.0.0.1:9443")
 
 	grpcServer.Serve(lis)
 }

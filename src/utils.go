@@ -118,3 +118,13 @@ func GetHostname() string {
 
 	return output
 }
+
+/**
+ * Private - Check to see if we are in a configured cluster or not.
+ */
+func _clusterCheck(c *Config) (bool) {
+	if len(c.Nodes) > 0 {
+		return true
+	}
+	return false
+}
