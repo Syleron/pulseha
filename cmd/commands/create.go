@@ -18,9 +18,8 @@ type CreateCommand struct {
  */
 func (c *CreateCommand) Help() string {
 	helpText := `
-Usage: pulseha create [options] address ...
-  Tells a running PulseHA agent to join the cluster
-  by specifying at least one existing member.
+Usage: pulseha create [options] ...
+  Tells the PulseHA daemon to configure a new cluster.
 Options:
   -bind-addr Pulse daemon bind address and port
 `
@@ -44,7 +43,8 @@ func (c *CreateCommand) Run(args []string) int {
 
 	// If we have the default.. which we don't want.. error out.
 	if *bindAddr == "127.0.0.1" {
-		c.Ui.Error("Please specify a bind address. Type 'pulseha create help' for more details")
+		c.Ui.Error("Please specify a bind address.\n")
+		c.Ui.Output(c.Help())
 		return 1
 	}
 

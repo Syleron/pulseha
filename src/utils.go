@@ -8,6 +8,7 @@ import (
 	"time"
 	"encoding/json"
 	"github.com/coreos/go-log/log"
+	"strings"
 )
 
 /**
@@ -116,7 +117,8 @@ func GetHostname() string {
 		os.Exit(1)
 	}
 
-	return output
+	// Remove new line characters
+	return strings.TrimSuffix(output, "\n")
 }
 
 /**
