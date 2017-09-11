@@ -20,6 +20,8 @@ message HealthCheckResponse {
     }
     ServingStatus status = 1;
 }
+
+// Pulse Cluster Messages
 message PulseJoin {
     bool success = 1;
     string address = 2;
@@ -34,7 +36,26 @@ message PulseCreate {
     string bind_ip = 3;
     string bind_port = 4;
 }
-
+// Pulse Group Messages
+message PulseGroupNew {
+    bool success = 1;
+    string message = 2;
+}
+message PulseGroupDelete {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+}
+message PulseGroupAdd {
+    bool success = 1;
+    string message = 2;
+    repeated string ips = 3;
+}
+message PulseGroupRemove {
+    bool success = 1;
+    string message = 2;
+    repeated string ips = 3;
+}
 // Services
 service Requester {
     // Perform GRPC Health Check
@@ -45,4 +66,8 @@ service Requester {
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Create Cluster
     rpc Create (PulseCreate) returns (PulseCreate);
+    // Create floating ip group
+    rpc NewGroup (PulseGroupNew) returns (PulseGroupNew);
+    // Delete floating ip group
+    rpc DeleteGroup (PulseGroupDelete) returns (PulseGroupDelete);
 }

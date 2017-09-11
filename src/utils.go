@@ -130,3 +130,10 @@ func _clusterCheck(c *Config) (bool) {
 	}
 	return false
 }
+
+/**
+ *
+ */
+func _genGroupName(c *Config) {
+
+}

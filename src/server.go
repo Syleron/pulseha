@@ -160,6 +160,47 @@ func (s *Server) Setup() {
 /**
  *
  */
+func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:NewGroup() - Create floating IP group")
+
+	// Check to make sure we are in a cluster
+	if _clusterCheck(s.Config) {
+		// Generate a new name.
+		// Check to see if the group name has already been used!
+		// Define the new group within our config
+		s.Config.Groups["group_2"] = []string{}
+		// Save to the config
+		s.Config.Save()
+		// Note: Do we need to reload?
+		return &proto.PulseGroupNew{
+			Success: true,
+			Message: "Group successfully added.",
+		}, nil
+	} else {
+		return &proto.PulseGroupNew{
+			Success: false,
+			Message: "Groups can only be created in a configured cluster.",
+		}, nil
+	}
+}
+
+/**
+ *
+ */
+func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*proto.PulseGroupDelete, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:DeleteGroup() - Delete floating IP group")
+	return &proto.PulseGroupDelete{
+		Success: false,
+	}, nil
+}
+
+/**
+ *
+ */
 func (s *Server) SetupCLI() {
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 
@@ -175,4 +216,3 @@ func (s *Server) SetupCLI() {
 
 	grpcServer.Serve(lis)
 }
-

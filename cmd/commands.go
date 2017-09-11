@@ -26,6 +26,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"group": func() (cli.Command, error) {
+			return &commands.GroupCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,
