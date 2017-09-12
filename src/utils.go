@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"net"
 	"time"
-	"encoding/json"
 	"github.com/coreos/go-log/log"
 	"strings"
 	"strconv"
@@ -25,23 +24,6 @@ func LoadFile(file string) []byte {
 	}
 
 	return []byte(c)
-}
-
-/**
- *
- */
-func LoadConfig() Config {
-	c, err := ioutil.ReadFile("./config.json")
-	config := Config{}
-	json.Unmarshal([]byte(c), &config)
-
-	// We had an error attempting to decode the json into our struct! oops!
-	if err != nil {
-		log.Error("Unable to load config.json. Does it exist?")
-		os.Exit(1)
-	}
-
-	return config
 }
 
 /**
@@ -68,11 +50,9 @@ func Execute(cmd string, args ...string) (string, error) {
  */
 func ValidIPv4(ipAddress string) bool {
 	testInput := net.ParseIP(ipAddress)
-
 	if testInput.To4() == nil {
 		return false
 	}
-
 	return true
 }
 
@@ -112,12 +92,10 @@ func CheckFolderExist(path string) bool {
  */
 func GetHostname() string {
 	output, err := Execute("hostname", "-f")
-
 	if err != nil {
 		log.Error("Failed to obtain hostname.")
 		os.Exit(1)
 	}
-
 	// Remove new line characters
 	return strings.TrimSuffix(output, "\n")
 }
@@ -149,6 +127,18 @@ func _genGroupName(c *Config) (string) {
 func _groupExist(name string, c *Config) (bool) {
 	if _, ok := c.Groups[name]; ok {
 		return true
+	}
+	return false
+}
+
+/**
+ *
+ */
+func _groupIpExist(name string, ip string, c *Config) (bool) {
+	for _, cip := range c.Groups[name] {
+		if ip == cip {
+			return true
+		}
 	}
 	return false
 }

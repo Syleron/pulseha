@@ -7,7 +7,6 @@ import (
 	"google.golang.org/grpc"
 	"github.com/Syleron/Pulse/proto"
 	"context"
-	"github.com/coreos/go-log/log"
 )
 
 type GroupsCommand struct {
@@ -23,7 +22,8 @@ Usage: pulseha group [options] (new/delete/add/remove/assign/unassign) ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
-  - name - Name of a group
+  - name - Name of a group.
+  - ips - Selected floating IPs separated by a comma.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -36,6 +36,7 @@ func (c *GroupsCommand) Run(args []string) int {
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
 	groupName := cmdFlags.String("name", "", "Floating IP group name")
+	fIPs := cmdFlags.String("ips", "", "Floating IPs")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -74,7 +75,7 @@ func (c *GroupsCommand) Run(args []string) int {
 	case "delete":
 		// Make sure we have a group name
 		if *groupName == "" {
-			c.Ui.Error("Please specify a group name to delete")
+			c.Ui.Error("Please specify a group name")
 			c.Ui.Error("")
 			c.Ui.Error(c.Help())
 			return 1
@@ -89,6 +90,29 @@ func (c *GroupsCommand) Run(args []string) int {
 			c.Ui.Output(r.Message)
 		}
 	case "add":
+		if *groupName == "" {
+			c.Ui.Error("Please specify a group name")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *fIPs == "" {
+			c.Ui.Error("Please specify at least one IP address")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		IPslice := strings.Split(*fIPs, ",")
+		r, err := client.GroupIPAdd(context.Background(), &proto.PulseGroupAdd{
+			Name: *groupName,
+			Ips: IPslice,
+		})
+		if err != nil {
+			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output(err.Error())
+		} else {
+			c.Ui.Output(r.Message)
+		}
 		//r, err = client.NewGroup(context.Background(), &proto.PulseGroupAdd{
 		//})
 	case "remove":

@@ -212,18 +212,66 @@ func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*
 /**
  *
  */
+func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:GroupIPAdd() - Add IP addresses to group " + in.Name)
+
+	// Make sure that the group exists
+	if !_groupExist(in.Name, s.Config) {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: "IP group does not exist!",
+		}, nil
+	}
+
+	for _, ip := range in.Ips {
+		if ValidIPv4(ip) {
+			// Do we have at least one?
+			if len(s.Config.Groups[in.Name]) > 0 {
+				// Make sure we don't have any duplicates
+				if !_groupIpExist(in.Name, ip, s.Config) {
+					s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
+				} else {
+					log.Warning(ip + " already exists in group " + in.Name + ".. skipping.")
+				}
+			} else {
+				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
+			}
+		} else {
+			log.Warning(ip + " is not a valid IPv4 address")
+		}
+	}
+
+	s.Config.Save()
+	// Note: May need to reload the config
+
+	return &proto.PulseGroupAdd{
+		Success: true,
+		Message: "IP addresses successfully added to group " + in.Name,
+	}, nil
+}
+
+/**
+ *
+ */
+func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:GroupIPRemove() - Removing IPs from group " + in.Name)
+	return &proto.PulseGroupRemove{}, nil
+}
+
+/**
+ *
+ */
 func (s *Server) SetupCLI() {
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
-
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 	}
-
 	grpcServer := grpc.NewServer()
-
 	proto.RegisterRequesterServer(grpcServer, s)
-
 	log.Info("CLI initialised on 127.0.0.1:9443")
-
 	grpcServer.Serve(lis)
 }

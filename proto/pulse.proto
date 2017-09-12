@@ -49,12 +49,14 @@ message PulseGroupDelete {
 message PulseGroupAdd {
     bool success = 1;
     string message = 2;
-    repeated string ips = 3;
+    string name = 3;
+    repeated string ips = 4;
 }
 message PulseGroupRemove {
     bool success = 1;
     string message = 2;
-    repeated string ips = 3;
+    string name = 3;
+    repeated string ips = 4;
 }
 // Services
 service Requester {
@@ -70,4 +72,8 @@ service Requester {
     rpc NewGroup (PulseGroupNew) returns (PulseGroupNew);
     // Delete floating ip group
     rpc DeleteGroup (PulseGroupDelete) returns (PulseGroupDelete);
+    // Add floating IP
+    rpc GroupIPAdd (PulseGroupAdd) returns (PulseGroupAdd);
+    // Remove floating IP
+    rpc GroupIPRemove (PulseGroupRemove) returns (PulseGroupRemove);
 }
