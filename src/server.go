@@ -74,7 +74,7 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 }
 
 /**
- *
+ * Note: This will probably need to be replicated..
  */
 func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	s.Lock()
@@ -82,8 +82,6 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 	log.Debug("Server:Create() - Create Pulse cluster")
 	// Method of first checking to see if we are in a cluster.
 	if !_clusterCheck(s.Config) {
-		// create a group
-		s.Config.Groups["group1"] = []string{}
 		// we are not in an active cluster
 		newNode := Node{
 			IP: in.BindIp,
@@ -93,7 +91,11 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 		// Assign interface names to node
 		for _, name := range _getInterfaceNames() {
 			if name != "lo" {
+				// Add the interface to the node
 				newNode.IPGroups[name] = make([]string, 0)
+				// Create a group for the interface
+				s.Config.Groups[_genGroupName(s.Config)] = []string{}
+				// assign the group to the interface
 			}
 		}
 		// Add the node to the nodes config
@@ -117,6 +119,7 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 
 /**
  *
+ * Note: This will probably need to be replicated..
  */
 func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
 	s.Lock()
@@ -169,6 +172,7 @@ func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*
 
 /**
  *
+ * Note: This will probably need to be replicated..
  */
 func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
 	s.Lock()
@@ -210,6 +214,7 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 
 /**
  *
+ * Note: This will probably need to be replicated..
  */
 func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
 	s.Lock()
@@ -245,17 +250,75 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 
 /**
  *
+ * Note: This will probably need to be replicated..
  */
 func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:GroupAssign() - Assigning group x to interface x")
+	// Make sure that the group exists
+	if !_groupExist(in.Group, s.Config) {
+		return &proto.PulseGroupAssign{
+			Success: false,
+			Message: "IP group does not exist!",
+		}, nil
+	}
+	// Make sure the interface exists
+	if !_interfaceExist(in.Interface) {
+		return &proto.PulseGroupAssign{
+			Success: false,
+			Message: "Interface does not exist!",
+		}, nil
+	}
+	// Assign group to the interface
+	//s.Config.Nodes[in.Interface].IPGroups = append(s.Config.Nodes[in.Interface].IPGroups, in.Group)
+	//s.Config.Nodes[hostname].IPGroups[interface] = append(s.Config.Nodes[hostname].IPGroups[interface], ip)
+
+	//// find group and add ips
+	//for _, ip := range in.Ips {
+	//	if ValidIPAddress(ip) {
+	//		// Do we have at least one?
+	//		if len(s.Config.Groups[in.Name]) > 0 {
+	//			// Make sure we don't have any duplicates
+	//			if exists, _ := _groupIPExist(in.Name, ip, s.Config); !exists {
+	//				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
+	//			} else {
+	//				log.Warning(ip + " already exists in group " + in.Name + ".. skipping.")
+	//			}
+	//		} else {
+	//			s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
+	//		}
+	//	} else {
+	//		log.Warning(ip + " is not a valid IP address")
+	//	}
+	//}
+	// save to config
+	s.Config.Save()
+	// Note: May need to reload the config
 	return &proto.PulseGroupAssign{}, nil
 }
 
 /**
  *
+ * Note: This will probably need to be replicated..
  */
 func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:GroupUnassign() - Unassigning group x from interface x")
 	return &proto.PulseGroupUnassign{}, nil
 }
+
+/**
+ *
+ */
+func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*proto.PulseGroupList, error) {
+	s.Lock()
+	defer s.Unlock()
+	log.Debug("Server:GroupList() - Getting groups and their IPs")
+	return &proto.PulseGroupList{}, nil
+}
+
 /**
  *
  */

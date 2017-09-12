@@ -61,8 +61,9 @@ message PulseGroupRemove {
 message PulseGroupAssign {
     bool success = 1;
     string message = 2;
-    string name = 3;
-
+    string group = 3;
+    string interface = 4;
+    string node = 5;
 }
 message PulseGroupUnassign {
     bool success = 1;
@@ -97,4 +98,6 @@ service Requester {
     rpc GroupAssign (PulseGroupAssign) returns (PulseGroupAssign);
     // Unassign a group
     rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
+    // Get group list
+    rpc GroupList (PulseGroupList) returns (PulseGroupList);
 }
