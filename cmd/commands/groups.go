@@ -113,11 +113,30 @@ func (c *GroupsCommand) Run(args []string) int {
 		} else {
 			c.Ui.Output(r.Message)
 		}
-		//r, err = client.NewGroup(context.Background(), &proto.PulseGroupAdd{
-		//})
 	case "remove":
-		//r, err = client.NewGroup(context.Background(), &proto.PulseGroupRemove{
-		//})
+		if *groupName == "" {
+			c.Ui.Error("Please specify a group name")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *fIPs == "" {
+			c.Ui.Error("Please specify at least one IP address")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		IPslice := strings.Split(*fIPs, ",")
+		r, err := client.GroupIPRemove(context.Background(), &proto.PulseGroupRemove{
+			Name: *groupName,
+			Ips: IPslice,
+		})
+		if err != nil {
+			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output(err.Error())
+		} else {
+			c.Ui.Output(r.Message)
+		}
 	default:
 		c.Ui.Error("Unknown action provided.")
 		c.Ui.Error("")

@@ -133,7 +133,7 @@ func Curl(httpRequestURL string) bool {
  */
 func ICMPIPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if !ValidIPv4(Ipv4Addr) {
+	if !ValidIPAddress(Ipv4Addr) {
 		//log.Error("Invalid IPv4 address for ICMP check..")
 		return false
 	}
@@ -183,4 +183,20 @@ func _getInterfaceNames() ([]string) {
 		interfaceNames = append(interfaceNames, iface.Name)
 	}
 	return interfaceNames
+}
+
+/**
+ * Check if an interface exists on the local node
+ */
+func _interfaceExist(name string) (bool) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		log.Errorf("Error retrieving network interfaces: ", err)
+	}
+	for _, iface := range ifaces {
+		if iface.Name == name {
+			return true
+		}
+	}
+	return false
 }

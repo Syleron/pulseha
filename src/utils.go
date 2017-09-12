@@ -44,11 +44,11 @@ func Execute(cmd string, args ...string) (string, error) {
 }
 
 /**
- * Important function to validate an IPv4 Addr.
+ * Function that validates an IPv4 and IPv6 address.
  *
  * @return bool
  */
-func ValidIPv4(ipAddress string) bool {
+func ValidIPAddress(ipAddress string) (bool) {
 	testInput := net.ParseIP(ipAddress)
 	if testInput.To4() == nil {
 		return false
@@ -134,11 +134,11 @@ func _groupExist(name string, c *Config) (bool) {
 /**
  *
  */
-func _groupIpExist(name string, ip string, c *Config) (bool) {
-	for _, cip := range c.Groups[name] {
+func _groupIPExist(name string, ip string, c *Config) (bool, int) {
+	for index, cip := range c.Groups[name] {
 		if ip == cip {
-			return true
+			return true, index
 		}
 	}
-	return false
+	return false, -1
 }

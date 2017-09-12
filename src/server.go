@@ -118,48 +118,6 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 /**
  *
  */
-func (s *Server) Setup() {
-	// Only continue if we are in a configured cluster
-	if !_clusterCheck(s.Config) {
-		return
-	}
-
-	lis, err := net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
-
-	if err != nil {
-		log.Errorf("Failed to listen: %s", err)
-		os.Exit(1)
-	}
-
-	var grpcServer *grpc.Server
-	if s.Config.Pulse.TLS {
-		if CreateFolder("./certs") {
-			log.Warning("TLS keys are missing! Generating..")
-			GenOpenSSL()
-		}
-
-		creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
-
-		if err != nil {
-			log.Error("Could not load TLS keys.")
-			os.Exit(1)
-		}
-
-		grpcServer = grpc.NewServer(grpc.Creds(creds))
-	} else {
-		grpcServer = grpc.NewServer()
-	}
-
-	proto.RegisterRequesterServer(grpcServer, s)
-
-	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
-
-	grpcServer.Serve(lis)
-}
-
-/**
- *
- */
 func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
 	s.Lock()
 	defer s.Unlock()
@@ -216,7 +174,6 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupIPAdd() - Add IP addresses to group " + in.Name)
-
 	// Make sure that the group exists
 	if !_groupExist(in.Name, s.Config) {
 		return &proto.PulseGroupAdd{
@@ -224,13 +181,13 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 			Message: "IP group does not exist!",
 		}, nil
 	}
-
+	// find group and add ips
 	for _, ip := range in.Ips {
-		if ValidIPv4(ip) {
+		if ValidIPAddress(ip) {
 			// Do we have at least one?
 			if len(s.Config.Groups[in.Name]) > 0 {
 				// Make sure we don't have any duplicates
-				if !_groupIpExist(in.Name, ip, s.Config) {
+				if exists, _ := _groupIPExist(in.Name, ip, s.Config); !exists {
 					s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
 				} else {
 					log.Warning(ip + " already exists in group " + in.Name + ".. skipping.")
@@ -239,13 +196,12 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
 			}
 		} else {
-			log.Warning(ip + " is not a valid IPv4 address")
+			log.Warning(ip + " is not a valid IP address")
 		}
 	}
-
+	// save to config
 	s.Config.Save()
 	// Note: May need to reload the config
-
 	return &proto.PulseGroupAdd{
 		Success: true,
 		Message: "IP addresses successfully added to group " + in.Name,
@@ -259,9 +215,47 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupIPRemove() - Removing IPs from group " + in.Name)
-	return &proto.PulseGroupRemove{}, nil
+	// Make sure that the group exists
+	if !_groupExist(in.Name, s.Config) {
+		return &proto.PulseGroupRemove{
+			Success: false,
+			Message: "IP group does not exist!",
+		}, nil
+	}
+	// Find ips and remove them
+	for _, ip := range in.Ips {
+		// Do we have at least one?
+		if len(s.Config.Groups[in.Name]) > 0 {
+			// Make sure we don't have any duplicates
+			if exists, i := _groupIPExist(in.Name, ip, s.Config); exists {
+				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name][:i], s.Config.Groups[in.Name][i+1:]...)
+			} else {
+				log.Warning(ip + " does not exist in group " + in.Name + ".. skipping.")
+			}
+		}
+	}
+	// Save the config
+	s.Config.Save()
+	// Note: May need to reload the config
+	return &proto.PulseGroupRemove{
+		Success: true,
+		Message: "IP addresses successfully removed from group " + in.Name,
+	}, nil
 }
 
+/**
+ *
+ */
+func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
+	return &proto.PulseGroupAssign{}, nil
+}
+
+/**
+ *
+ */
+func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
+	return &proto.PulseGroupUnassign{}, nil
+}
 /**
  *
  */
@@ -273,5 +267,47 @@ func (s *Server) SetupCLI() {
 	grpcServer := grpc.NewServer()
 	proto.RegisterRequesterServer(grpcServer, s)
 	log.Info("CLI initialised on 127.0.0.1:9443")
+	grpcServer.Serve(lis)
+}
+
+/**
+ *
+ */
+func (s *Server) Setup() {
+	// Only continue if we are in a configured cluster
+	if !_clusterCheck(s.Config) {
+		return
+	}
+
+	lis, err := net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
+
+	if err != nil {
+		log.Errorf("Failed to listen: %s", err)
+		os.Exit(1)
+	}
+
+	var grpcServer *grpc.Server
+	if s.Config.Pulse.TLS {
+		if CreateFolder("./certs") {
+			log.Warning("TLS keys are missing! Generating..")
+			GenOpenSSL()
+		}
+
+		creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+
+		if err != nil {
+			log.Error("Could not load TLS keys.")
+			os.Exit(1)
+		}
+
+		grpcServer = grpc.NewServer(grpc.Creds(creds))
+	} else {
+		grpcServer = grpc.NewServer()
+	}
+
+	proto.RegisterRequesterServer(grpcServer, s)
+
+	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
+
 	grpcServer.Serve(lis)
 }

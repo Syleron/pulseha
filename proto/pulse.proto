@@ -58,6 +58,23 @@ message PulseGroupRemove {
     string name = 3;
     repeated string ips = 4;
 }
+message PulseGroupAssign {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+
+}
+message PulseGroupUnassign {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+
+}
+message PulseGroupList {
+    bool success = 1;
+    string message = 2;
+};
+
 // Services
 service Requester {
     // Perform GRPC Health Check
@@ -76,4 +93,8 @@ service Requester {
     rpc GroupIPAdd (PulseGroupAdd) returns (PulseGroupAdd);
     // Remove floating IP
     rpc GroupIPRemove (PulseGroupRemove) returns (PulseGroupRemove);
+    // Assign a group
+    rpc GroupAssign (PulseGroupAssign) returns (PulseGroupAssign);
+    // Unassign a group
+    rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
 }
