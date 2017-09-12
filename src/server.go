@@ -83,7 +83,7 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 	// Method of first checking to see if we are in a cluster.
 	if !_clusterCheck(s.Config) {
 		// create a group
-		s.Config.Groups["group_1"] = []string{}
+		s.Config.Groups["group1"] = []string{}
 		// we are not in an active cluster
 		newNode := Node{
 			IP: in.BindIp,
@@ -170,7 +170,7 @@ func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.
 		// Generate a new name.
 		// Check to see if the group name has already been used!
 		// Define the new group within our config
-		s.Config.Groups["group_2"] = []string{}
+		s.Config.Groups[_genGroupName(s.Config)] = []string{}
 		// Save to the config
 		s.Config.Save()
 		// Note: Do we need to reload?
@@ -193,9 +193,20 @@ func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:DeleteGroup() - Delete floating IP group")
-	return &proto.PulseGroupDelete{
-		Success: false,
-	}, nil
+	if _groupExist(in.Name, s.Config) {
+		delete(s.Config.Groups, in.Name)
+		s.Config.Save()
+		// Note: May need to reload!
+		return &proto.PulseGroupDelete{
+			Success: true,
+			Message: "Group " + in.Name + " successfully deleted.",
+		}, nil
+	} else {
+		return &proto.PulseGroupDelete{
+			Success: false,
+			Message: "Unable to delete group that doesn't exist!",
+		}, nil
+	}
 }
 
 /**

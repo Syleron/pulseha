@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"github.com/coreos/go-log/log"
 	"strings"
+	"strconv"
 )
 
 /**
@@ -134,6 +135,20 @@ func _clusterCheck(c *Config) (bool) {
 /**
  *
  */
-func _genGroupName(c *Config) {
+func _genGroupName(c *Config) (string) {
+	totalGroups := len(c.Groups)
+	for i := 1; i <= totalGroups; i++ {
+		newName := "group" + strconv.Itoa(i)
+		if _, ok := c.Groups[newName]; !ok {
+			return newName
+		}
+	}
+	return "group" + strconv.Itoa(totalGroups + 1)
+}
 
+func _groupExist(name string, c *Config) (bool) {
+	if _, ok := c.Groups[name]; ok {
+		return true
+	}
+	return false
 }

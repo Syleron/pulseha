@@ -26,8 +26,8 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
-		"group": func() (cli.Command, error) {
-			return &commands.GroupCommand{
+		"groups": func() (cli.Command, error) {
+			return &commands.GroupsCommand{
 				Ui: ui,
 			}, nil
 		},

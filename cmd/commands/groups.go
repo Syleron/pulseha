@@ -7,26 +7,23 @@ import (
 	"google.golang.org/grpc"
 	"github.com/Syleron/Pulse/proto"
 	"context"
+	"github.com/coreos/go-log/log"
 )
 
-type GroupCommand struct {
+type GroupsCommand struct {
 	Ui cli.Ui
 }
 
 /**
  *
  */
-func (c *GroupCommand) Help() string {
+func (c *GroupsCommand) Help() string {
 	helpText := `
-Usage: pulseha group [options] ...
+Usage: pulseha group [options] (new/delete/add/remove/assign/unassign) ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
-  - list - Lists available groups
-  - New - Create new floating IP group
-  - Delete - Delete floating IP group
-  - Add - Add one or more floating IPs
-  - Remove - Remove one or more floating IPs
+  - name - Name of a group
 `
 	return strings.TrimSpace(helpText)
 }
@@ -34,9 +31,11 @@ Options:
 /**
  *
  */
-func (c *GroupCommand) Run(args []string) int {
+func (c *GroupsCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("group", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
+
+	groupName := cmdFlags.String("name", "", "Floating IP group name")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -63,9 +62,6 @@ func (c *GroupCommand) Run(args []string) int {
 	client := proto.NewRequesterClient(connection)
 
 	switch cmds[0] {
-	case "list":
-		//r, err = client.NewGroup(context.Background(), &proto.Pulse{
-		//})
 	case "new":
 		r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{})
 
@@ -76,8 +72,16 @@ func (c *GroupCommand) Run(args []string) int {
 			c.Ui.Output(r.Message)
 		}
 	case "delete":
-		r, err := client.DeleteGroup(context.Background(), &proto.PulseGroupDelete{})
-
+		// Make sure we have a group name
+		if *groupName == "" {
+			c.Ui.Error("Please specify a group name to delete")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		r, err := client.DeleteGroup(context.Background(), &proto.PulseGroupDelete{
+			Name: *groupName,
+		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
@@ -103,6 +107,6 @@ func (c *GroupCommand) Run(args []string) int {
 /**
  *
  */
-func (c *GroupCommand) Synopsis() string {
+func (c *GroupsCommand) Synopsis() string {
 	return "Manage floating IP groups"
 }

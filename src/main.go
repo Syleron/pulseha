@@ -20,12 +20,10 @@ type Pulse struct {
  */
 func createPulse() (*Pulse) {
 	config := &Config{}
-
 	// Load the config
 	config.Load()
 	// Validate the config
 	config.Validate()
-
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &Server{
@@ -36,7 +34,6 @@ func createPulse() (*Pulse) {
 		},
 		Config: config,
 	}
-
 	return pulse
 }
 
