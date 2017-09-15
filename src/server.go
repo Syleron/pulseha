@@ -88,18 +88,21 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 			Port: in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
-		// Assign interface names to node
-		for _, name := range _getInterfaceNames() {
-			if name != "lo" {
-				// Add the interface to the node
-				newNode.IPGroups[name] = make([]string, 0)
-				// Create a group for the interface
-				s.Config.Groups[_genGroupName(s.Config)] = []string{}
-				// assign the group to the interface
-			}
-		}
 		// Add the node to the nodes config
 		s.Config.Nodes[GetHostname()] = newNode
+		// Assign interface names to node
+		for _, ifaceName := range _getInterfaceNames() {
+			if ifaceName != "lo" {
+				// Add the interface to the node
+				newNode.IPGroups[ifaceName] = make([]string, 0)
+				// Create a new group name
+				groupName := _genGroupName(s.Config)
+				// Create a group for the interface
+				s.Config.Groups[groupName] = []string{}
+				// assign the group to the interface
+				_assignGroupToNode(GetHostname(), ifaceName, groupName, s.Config)
+			}
+		}
 		// Save the config
 		s.Config.Save()
 		// Setup the listener
@@ -255,7 +258,7 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:GroupAssign() - Assigning group x to interface x")
+	log.Debug("Server:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
 	// Make sure that the group exists
 	if !_groupExist(in.Group, s.Config) {
 		return &proto.PulseGroupAssign{
@@ -271,31 +274,14 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 		}, nil
 	}
 	// Assign group to the interface
-	//s.Config.Nodes[in.Interface].IPGroups = append(s.Config.Nodes[in.Interface].IPGroups, in.Group)
-	//s.Config.Nodes[hostname].IPGroups[interface] = append(s.Config.Nodes[hostname].IPGroups[interface], ip)
-
-	//// find group and add ips
-	//for _, ip := range in.Ips {
-	//	if ValidIPAddress(ip) {
-	//		// Do we have at least one?
-	//		if len(s.Config.Groups[in.Name]) > 0 {
-	//			// Make sure we don't have any duplicates
-	//			if exists, _ := _groupIPExist(in.Name, ip, s.Config); !exists {
-	//				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
-	//			} else {
-	//				log.Warning(ip + " already exists in group " + in.Name + ".. skipping.")
-	//			}
-	//		} else {
-	//			s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
-	//		}
-	//	} else {
-	//		log.Warning(ip + " is not a valid IP address")
-	//	}
-	//}
+	_assignGroupToNode(in.Node, in.Interface, in.Group, s.Config)
 	// save to config
 	s.Config.Save()
 	// Note: May need to reload the config
-	return &proto.PulseGroupAssign{}, nil
+	return &proto.PulseGroupAssign{
+		Success: true,
+		Message: "Group " + in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
+	}, nil
 }
 
 /**
@@ -305,8 +291,30 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:GroupUnassign() - Unassigning group x from interface x")
-	return &proto.PulseGroupUnassign{}, nil
+	log.Debug("Server:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
+	// Make sure that the group exists
+	if !_groupExist(in.Group, s.Config) {
+		return &proto.PulseGroupUnassign{
+			Success: false,
+			Message: "IP group does not exist!",
+		}, nil
+	}
+	// Make sure the interface exists
+	if !_interfaceExist(in.Interface) {
+		return &proto.PulseGroupUnassign{
+			Success: false,
+			Message: "Interface does not exist!",
+		}, nil
+	}
+	// Assign group to the interface
+	_unassignGroupFromNode(in.Node, in.Interface, in.Group, s.Config)
+	// save to config
+	s.Config.Save()
+	// Note: May need to reload the config
+	return &proto.PulseGroupUnassign{
+		Success: true,
+		Message: "Group " + in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
+	}, nil
 }
 
 /**
@@ -373,4 +381,24 @@ func (s *Server) Setup() {
 	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
 
 	grpcServer.Serve(lis)
+}
+
+/**
+ * Assigns a group to an interface.
+ * Note: This function does not save to config file.
+ */
+func _assignGroupToNode(node, iface, group string, config *Config) {
+	if exists, _ := _nodeInterfaceGroupExists(node, iface, group, config); !exists {
+		config.Nodes[node].IPGroups[iface] = append(config.Nodes[node].IPGroups[iface], group)
+	} else {
+		log.Warning(group + " already exists in node " + node + ".. skipping.")
+	}
+}
+
+func _unassignGroupFromNode(node, iface, group string, config *Config) {
+	if exists, i := _nodeInterfaceGroupExists(node, iface, group, config); exists {
+		config.Nodes[node].IPGroups[iface] = append(config.Nodes[node].IPGroups[iface][:i], config.Nodes[node].IPGroups[iface][i+1:]...)
+	} else {
+		log.Warning(group + " does not exist in node " + node + ".. skipping.")
+	}
 }

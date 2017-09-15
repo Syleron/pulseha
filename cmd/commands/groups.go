@@ -24,6 +24,8 @@ Usage: pulseha group [options] (new/delete/add/remove/assign/unassign) ...
 Options:
   - name - Name of a group.
   - ips - Selected floating IPs separated by a comma.
+  - node - Node hostname.
+  - iface - Node network interface.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -37,6 +39,8 @@ func (c *GroupsCommand) Run(args []string) int {
 
 	groupName := cmdFlags.String("name", "", "Floating IP group name")
 	fIPs := cmdFlags.String("ips", "", "Floating IPs")
+	nodeHostname := cmdFlags.String("node", "", "Node hostname")
+	nodeIface := cmdFlags.String("iface", "", "Node network interface")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -130,6 +134,66 @@ func (c *GroupsCommand) Run(args []string) int {
 		r, err := client.GroupIPRemove(context.Background(), &proto.PulseGroupRemove{
 			Name: *groupName,
 			Ips: IPslice,
+		})
+		if err != nil {
+			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output(err.Error())
+		} else {
+			c.Ui.Output(r.Message)
+		}
+	case "assign":
+		if *groupName == "" {
+			c.Ui.Error("Please specify a group name")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *nodeHostname == "" {
+			c.Ui.Error("Please specify the node hostname")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *nodeIface == "" {
+			c.Ui.Error("Please specify ame network interface")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		r, err := client.GroupAssign(context.Background(), &proto.PulseGroupAssign{
+			Group: *groupName,
+			Interface: *nodeIface,
+			Node: *nodeHostname,
+		})
+		if err != nil {
+			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output(err.Error())
+		} else {
+			c.Ui.Output(r.Message)
+		}
+	case "unassign":
+		if *groupName == "" {
+			c.Ui.Error("Please specify a group name")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *nodeHostname == "" {
+			c.Ui.Error("Please specify the node hostname")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		if *nodeIface == "" {
+			c.Ui.Error("Please specify ame network interface")
+			c.Ui.Error("")
+			c.Ui.Error(c.Help())
+			return 1
+		}
+		r, err := client.GroupUnassign(context.Background(), &proto.PulseGroupUnassign{
+			Group: *groupName,
+			Interface: *nodeIface,
+			Node: *nodeHostname,
 		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")

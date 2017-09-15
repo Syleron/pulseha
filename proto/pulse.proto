@@ -68,8 +68,9 @@ message PulseGroupAssign {
 message PulseGroupUnassign {
     bool success = 1;
     string message = 2;
-    string name = 3;
-
+    string group = 3;
+    string interface = 4;
+    string node = 5;
 }
 message PulseGroupList {
     bool success = 1;

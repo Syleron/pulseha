@@ -111,7 +111,7 @@ func _clusterCheck(c *Config) (bool) {
 }
 
 /**
- *
+ * Generates an available IP floating group name.
  */
 func _genGroupName(c *Config) (string) {
 	totalGroups := len(c.Groups)
@@ -124,6 +124,9 @@ func _genGroupName(c *Config) (string) {
 	return "group" + strconv.Itoa(totalGroups + 1)
 }
 
+/**
+ * Checks to see if a floating IP group already exists
+ */
 func _groupExist(name string, c *Config) (bool) {
 	if _, ok := c.Groups[name]; ok {
 		return true
@@ -132,11 +135,25 @@ func _groupExist(name string, c *Config) (bool) {
 }
 
 /**
- *
+ * Checks to see if a floating IP already exists inside of a floating ip group
+ * Returns bool - exists/not & int - slice index
  */
 func _groupIPExist(name string, ip string, c *Config) (bool, int) {
 	for index, cip := range c.Groups[name] {
 		if ip == cip {
+			return true, index
+		}
+	}
+	return false, -1
+}
+
+/**
+ * Checks to see if a floating IP group has already been assigned to a node's interface.
+ * Returns bool - exists/not & int - slice index
+ */
+func _nodeInterfaceGroupExists(node, iface, group string, c *Config) (bool, int) {
+	for index, existingGroup := range c.Nodes[node].IPGroups[iface] {
+		if existingGroup == group {
 			return true, index
 		}
 	}
