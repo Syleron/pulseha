@@ -48,13 +48,6 @@ func (c *GroupsCommand) Run(args []string) int {
 
 	cmds := cmdFlags.Args()
 
-	if len(cmds) == 0 {
-		c.Ui.Error("Please specify an action.")
-		c.Ui.Error("")
-		c.Ui.Error(c.Help())
-		return 1
-	}
-
 	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
 	if err != nil {
@@ -65,6 +58,18 @@ func (c *GroupsCommand) Run(args []string) int {
 	defer connection.Close()
 
 	client := proto.NewRequesterClient(connection)
+
+	// If no action is provided then just list our current config
+	if len(cmds) == 0 {
+		r, err := client.GroupList(context.Background(), &proto.PulseGroupList{})
+		if err != nil {
+			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output(err.Error())
+		} else {
+			c.Ui.Output(r.Message)
+		}
+		return 0
+	}
 
 	switch cmds[0] {
 	case "new":

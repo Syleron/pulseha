@@ -100,7 +100,7 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 				// Create a group for the interface
 				s.Config.Groups[groupName] = []string{}
 				// assign the group to the interface
-				_assignGroupToNode(GetHostname(), ifaceName, groupName, s.Config)
+				s.assignGroupToNode(GetHostname(), ifaceName, groupName)
 			}
 		}
 		// Save the config
@@ -274,7 +274,7 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 		}, nil
 	}
 	// Assign group to the interface
-	_assignGroupToNode(in.Node, in.Interface, in.Group, s.Config)
+	s.assignGroupToNode(in.Node, in.Interface, in.Group)
 	// save to config
 	s.Config.Save()
 	// Note: May need to reload the config
@@ -307,7 +307,7 @@ func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign
 		}, nil
 	}
 	// Assign group to the interface
-	_unassignGroupFromNode(in.Node, in.Interface, in.Group, s.Config)
+	s.unassignGroupFromNode(in.Node, in.Interface, in.Group)
 	// save to config
 	s.Config.Save()
 	// Note: May need to reload the config
@@ -324,7 +324,33 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupList() - Getting groups and their IPs")
-	return &proto.PulseGroupList{}, nil
+
+	return &proto.PulseGroupList{
+		Groups: s.Config.Groups,
+	}, nil
+}
+
+/**
+ * Assigns a group to an interface.
+ * Note: This function does not save to config file.
+ */
+func (s *Server) assignGroupToNode(node, iface, group string) {
+	if exists, _ := _nodeInterfaceGroupExists(node, iface, group, s.Config); !exists {
+		s.Config.Nodes[node].IPGroups[iface] = append(s.Config.Nodes[node].IPGroups[iface], group)
+	} else {
+		log.Warning(group + " already exists in node " + node + ".. skipping.")
+	}
+}
+
+/**
+ *
+ */
+func (s * Server) unassignGroupFromNode(node, iface, group string) {
+	if exists, i := _nodeInterfaceGroupExists(node, iface, group, s.Config); exists {
+		s.Config.Nodes[node].IPGroups[iface] = append(s.Config.Nodes[node].IPGroups[iface][:i], s.Config.Nodes[node].IPGroups[iface][i+1:]...)
+	} else {
+		log.Warning(group + " does not exist in node " + node + ".. skipping.")
+	}
 }
 
 /**
@@ -381,24 +407,4 @@ func (s *Server) Setup() {
 	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
 
 	grpcServer.Serve(lis)
-}
-
-/**
- * Assigns a group to an interface.
- * Note: This function does not save to config file.
- */
-func _assignGroupToNode(node, iface, group string, config *Config) {
-	if exists, _ := _nodeInterfaceGroupExists(node, iface, group, config); !exists {
-		config.Nodes[node].IPGroups[iface] = append(config.Nodes[node].IPGroups[iface], group)
-	} else {
-		log.Warning(group + " already exists in node " + node + ".. skipping.")
-	}
-}
-
-func _unassignGroupFromNode(node, iface, group string, config *Config) {
-	if exists, i := _nodeInterfaceGroupExists(node, iface, group, config); exists {
-		config.Nodes[node].IPGroups[iface] = append(config.Nodes[node].IPGroups[iface][:i], config.Nodes[node].IPGroups[iface][i+1:]...)
-	} else {
-		log.Warning(group + " does not exist in node " + node + ".. skipping.")
-	}
 }

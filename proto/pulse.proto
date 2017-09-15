@@ -75,6 +75,7 @@ message PulseGroupUnassign {
 message PulseGroupList {
     bool success = 1;
     string message = 2;
+    map<string, string> groups = 3;
 };
 
 // Services
