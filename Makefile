@@ -1,6 +1,6 @@
 .PHONEY: clean get
 default: build
-build: get testBIN
+build: get test
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 cp config.json ./bin/
 	 env GOOS=linux GOARCH=amd64 go build -v -o ./bin/pulse ./src/
@@ -16,7 +16,7 @@ install: build cli
 	 # Create pulseha folder in /etc/
 testCMD:
 	 go test -timeout 10s -v ./cmd/
-testBIN:
+test:
 	 go test -timeout 10s -v ./src/
 clean:
 	go clean

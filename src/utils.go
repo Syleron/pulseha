@@ -148,6 +148,23 @@ func _groupIPExist(name string, ip string, c *Config) (bool, int) {
 }
 
 /**
+ * Checks to see if a node has any interface assignments.
+ * Note: Eww three for loops.
+ */
+func _nodeAssignedToInterface(group string, c *Config) (bool) {
+	for _, node := range c.Nodes {
+		for _, groups := range node.IPGroups {
+			for _, ifaceGroup := range groups {
+				if ifaceGroup == group {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+/**
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */

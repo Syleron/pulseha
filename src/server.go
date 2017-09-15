@@ -12,6 +12,9 @@ import (
 	"github.com/Syleron/Pulse/proto"
 )
 
+/**
+ * Server struct type
+ */
 type Server struct {
 	sync.Mutex
 	Status proto.HealthCheckResponse_ServingStatus
@@ -121,7 +124,7 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 }
 
 /**
- *
+ * Add a new floating IP group
  * Note: This will probably need to be replicated..
  */
 func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
@@ -134,13 +137,14 @@ func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.
 		// Generate a new name.
 		// Check to see if the group name has already been used!
 		// Define the new group within our config
-		s.Config.Groups[_genGroupName(s.Config)] = []string{}
+		groupName := _genGroupName(s.Config)
+		s.Config.Groups[groupName] = []string{}
 		// Save to the config
 		s.Config.Save()
 		// Note: Do we need to reload?
 		return &proto.PulseGroupNew{
 			Success: true,
-			Message: "Group successfully added.",
+			Message: groupName + " successfully added.",
 		}, nil
 	} else {
 		return &proto.PulseGroupNew{
@@ -151,19 +155,28 @@ func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.
 }
 
 /**
- *
+ * Delete floating IP group
  */
 func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*proto.PulseGroupDelete, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:DeleteGroup() - Delete floating IP group")
 	if _groupExist(in.Name, s.Config) {
-		delete(s.Config.Groups, in.Name)
+		// Check to see if we are assigned to an interface
+		if !_nodeAssignedToInterface(in.Name, s.Config) {
+			delete(s.Config.Groups, in.Name)
+		} else {
+			return &proto.PulseGroupDelete{
+				Success: false,
+				Message: "Group has network interface assignments. Please remove them and try again.",
+			}, nil
+		}
+		// Save config
 		s.Config.Save()
 		// Note: May need to reload!
 		return &proto.PulseGroupDelete{
 			Success: true,
-			Message: "Group " + in.Name + " successfully deleted.",
+			Message: in.Name + " successfully deleted.",
 		}, nil
 	} else {
 		return &proto.PulseGroupDelete{
@@ -185,7 +198,7 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	if !_groupExist(in.Name, s.Config) {
 		return &proto.PulseGroupAdd{
 			Success: false,
-			Message: "IP group does not exist!",
+			Message: "Group does not exist!",
 		}, nil
 	}
 	// find group and add ips
@@ -211,7 +224,7 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	// Note: May need to reload the config
 	return &proto.PulseGroupAdd{
 		Success: true,
-		Message: "IP addresses successfully added to group " + in.Name,
+		Message: "IP addresses successfully added to " + in.Name,
 	}, nil
 }
 
@@ -247,7 +260,7 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 	// Note: May need to reload the config
 	return &proto.PulseGroupRemove{
 		Success: true,
-		Message: "IP addresses successfully removed from group " + in.Name,
+		Message: "IP addresses successfully removed from " + in.Name,
 	}, nil
 }
 
@@ -280,7 +293,7 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 	// Note: May need to reload the config
 	return &proto.PulseGroupAssign{
 		Success: true,
-		Message: "Group " + in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
+		Message: in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
 	}, nil
 }
 
@@ -313,7 +326,7 @@ func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign
 	// Note: May need to reload the config
 	return &proto.PulseGroupUnassign{
 		Success: true,
-		Message: "Group " + in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
+		Message: in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
 	}, nil
 }
 
@@ -325,8 +338,16 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
 	defer s.Unlock()
 	log.Debug("Server:GroupList() - Getting groups and their IPs")
 
+	list := make(map[string]*proto.Group)
+
+	for name, ips := range s.Config.Groups {
+		list[name] = &proto.Group{
+			Ips: ips,
+		}
+	}
+
 	return &proto.PulseGroupList{
-		Groups: s.Config.Groups,
+		Groups: list,
 	}, nil
 }
 

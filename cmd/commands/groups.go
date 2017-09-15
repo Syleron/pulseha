@@ -7,6 +7,8 @@ import (
 	"google.golang.org/grpc"
 	"github.com/Syleron/Pulse/proto"
 	"context"
+	"github.com/olekukonko/tablewriter"
+	"os"
 )
 
 type GroupsCommand struct {
@@ -61,13 +63,7 @@ func (c *GroupsCommand) Run(args []string) int {
 
 	// If no action is provided then just list our current config
 	if len(cmds) == 0 {
-		r, err := client.GroupList(context.Background(), &proto.PulseGroupList{})
-		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
-			c.Ui.Output(err.Error())
-		} else {
-			c.Ui.Output(r.Message)
-		}
+		c.drawGroupsTable(client)
 		return 0
 	}
 
@@ -79,7 +75,11 @@ func (c *GroupsCommand) Run(args []string) int {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n [X] " + r.Message + "\n")
+			}
 		}
 	case "delete":
 		// Make sure we have a group name
@@ -96,7 +96,11 @@ func (c *GroupsCommand) Run(args []string) int {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n[X] " + r.Message + "\n")
+			}
 		}
 	case "add":
 		if *groupName == "" {
@@ -114,13 +118,17 @@ func (c *GroupsCommand) Run(args []string) int {
 		IPslice := strings.Split(*fIPs, ",")
 		r, err := client.GroupIPAdd(context.Background(), &proto.PulseGroupAdd{
 			Name: *groupName,
-			Ips: IPslice,
+			Ips:  IPslice,
 		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n[X] " + r.Message + "\n")
+			}
 		}
 	case "remove":
 		if *groupName == "" {
@@ -138,13 +146,17 @@ func (c *GroupsCommand) Run(args []string) int {
 		IPslice := strings.Split(*fIPs, ",")
 		r, err := client.GroupIPRemove(context.Background(), &proto.PulseGroupRemove{
 			Name: *groupName,
-			Ips: IPslice,
+			Ips:  IPslice,
 		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n[X] " + r.Message + "\n")
+			}
 		}
 	case "assign":
 		if *groupName == "" {
@@ -166,15 +178,19 @@ func (c *GroupsCommand) Run(args []string) int {
 			return 1
 		}
 		r, err := client.GroupAssign(context.Background(), &proto.PulseGroupAssign{
-			Group: *groupName,
+			Group:     *groupName,
 			Interface: *nodeIface,
-			Node: *nodeHostname,
+			Node:      *nodeHostname,
 		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n[X] " + r.Message + "\n")
+			}
 		}
 	case "unassign":
 		if *groupName == "" {
@@ -196,15 +212,19 @@ func (c *GroupsCommand) Run(args []string) int {
 			return 1
 		}
 		r, err := client.GroupUnassign(context.Background(), &proto.PulseGroupUnassign{
-			Group: *groupName,
+			Group:     *groupName,
 			Interface: *nodeIface,
-			Node: *nodeHostname,
+			Node:      *nodeHostname,
 		})
 		if err != nil {
 			c.Ui.Output("PulseHA CLI connection error")
 			c.Ui.Output(err.Error())
 		} else {
-			c.Ui.Output(r.Message)
+			if r.Success {
+				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+			} else {
+				c.Ui.Output("\n[X] " + r.Message + "\n")
+			}
 		}
 	default:
 		c.Ui.Error("Unknown action provided.")
@@ -221,4 +241,43 @@ func (c *GroupsCommand) Run(args []string) int {
  */
 func (c *GroupsCommand) Synopsis() string {
 	return "Manage floating IP groups"
+}
+
+/**
+ *
+ */
+func (c *GroupsCommand) drawGroupsTable(client proto.RequesterClient) {
+	r, err := client.GroupList(context.Background(), &proto.PulseGroupList{})
+	if err != nil {
+		c.Ui.Output("PulseHA CLI connection error")
+		c.Ui.Output(err.Error())
+	} else {
+		data := [][]string{}
+		for name, group := range r.Groups {
+
+			data = append(
+				data,
+				[]string{
+					name,
+					strings.Join(group.Ips, ", "),
+					"",
+					"",
+				})
+		}
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{
+			"Group Name",
+			"IP Assignments",
+			"Nodes",
+			"Ifaces",
+		})
+		table.SetCenterSeparator("-")
+		table.SetColumnSeparator("|")
+		table.SetRowLine(true)
+		table.SetAutoMergeCells(true)
+		for _, v := range data {
+			table.Append(v)
+		}
+		table.Render()
+	}
 }
