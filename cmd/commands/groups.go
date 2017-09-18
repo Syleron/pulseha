@@ -72,7 +72,7 @@ func (c *GroupsCommand) Run(args []string) int {
 		r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{})
 
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {
@@ -93,7 +93,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			Name: *groupName,
 		})
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {
@@ -121,7 +121,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			Ips:  IPslice,
 		})
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {
@@ -149,7 +149,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			Ips:  IPslice,
 		})
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {
@@ -183,7 +183,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			Node:      *nodeHostname,
 		})
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {
@@ -217,7 +217,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			Node:      *nodeHostname,
 		})
 		if err != nil {
-			c.Ui.Output("PulseHA CLI connection error")
+			c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 			c.Ui.Output(err.Error())
 		} else {
 			if r.Success {

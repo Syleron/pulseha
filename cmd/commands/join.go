@@ -49,7 +49,7 @@ func (c *JoinCommand) Run(args []string) int {
 	connection, err := grpc.Dial(addr[0], grpc.WithInsecure())
 
 	if err != nil {
-		c.Ui.Error("GRPC client connection error")
+		c.Ui.Error("GRPC client connection error. Is the PulseHA service running?")
 		c.Ui.Error(err.Error())
 	}
 
@@ -62,7 +62,7 @@ func (c *JoinCommand) Run(args []string) int {
 	})
 
 	if err != nil {
-		c.Ui.Output("PulseHA CLI connection error")
+		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 		c.Ui.Output(err.Error())
 	} else {
 		fmt.Printf("response: %s", r.Success)

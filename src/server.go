@@ -10,6 +10,7 @@ import (
 	"time"
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/Pulse/proto"
+	"path/filepath"
 )
 
 /**
@@ -224,7 +225,7 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	// Note: May need to reload the config
 	return &proto.PulseGroupAdd{
 		Success: true,
-		Message: "IP addresses successfully added to " + in.Name,
+		Message: "IP address(es) successfully added to " + in.Name,
 	}, nil
 }
 
@@ -260,7 +261,7 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 	// Note: May need to reload the config
 	return &proto.PulseGroupRemove{
 		Success: true,
-		Message: "IP addresses successfully removed from " + in.Name,
+		Message: "IP address(es) successfully removed from " + in.Name,
 	}, nil
 }
 
@@ -406,12 +407,17 @@ func (s *Server) Setup() {
 
 	var grpcServer *grpc.Server
 	if s.Config.Pulse.TLS {
-		if CreateFolder("./certs") {
+		// Get project directory location
+		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		if err != nil {
+			log.Emergency(err)
+		}
+		if CreateFolder(dir + "/certs") {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}
 
-		creds, err := credentials.NewServerTLSFromFile("./certs/server.crt", "./certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile(dir + "/certs/server.crt", dir + "/certs/server.key")
 
 		if err != nil {
 			log.Error("Could not load TLS keys.")

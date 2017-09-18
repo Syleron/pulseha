@@ -6,6 +6,7 @@ import (
 	"plugin"
 	"strconv"
 	"github.com/coreos/go-log/log"
+	"os"
 )
 
 /**
@@ -20,9 +21,15 @@ type PluginHC interface {
 func LoadPlugins() ([]PluginHC, error) {
 	var modules []PluginHC
 
-	CreateFolder("./plugins")
+	// Get project directory location
+	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Emergency(err)
+	}
 
-	evtGlob := path.Join("./plugins", "/*.so")
+	CreateFolder(dir + "/plugins")
+
+	evtGlob := path.Join(dir + "/plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {
