@@ -25,9 +25,9 @@ func (c *VersionCommand) Help() string {
 func (c *VersionCommand) Run(_ []string) int {
 	var versionString bytes.Buffer
 
-	fmt.Fprintf(&versionString, "PulseHA v%s", c.Version)
+	fmt.Fprintf(&versionString, "pulseha v%s", c.Version)
 
-	c.Ui.Output(versionString.String() + " Copyright (C) 2017 Andrew Zak <andrew@pulseha.com>")
+	c.Ui.Output(versionString.String() + " Copyright (c) 2017 Andrew Zak <andrew@pulseha.com>")
 
 	return 0
 }

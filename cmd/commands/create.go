@@ -50,11 +50,18 @@ func (c *CreateCommand) Run(args []string) int {
 
 	bindAddrString := strings.Split(*bindAddr, ":")
 
+	if len(bindAddrString) < 2 {
+		c.Ui.Error("Please provide an IP and Port for PulseHA to bind on")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
 	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
 	if err != nil {
 		c.Ui.Error("GRPC client connection error")
 		c.Ui.Error(err.Error())
+		return 1
 	}
 
 	defer connection.Close()
@@ -68,6 +75,7 @@ func (c *CreateCommand) Run(args []string) int {
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
+		return 1
 	} else {
 		c.Ui.Output(r.Message)
 	}
