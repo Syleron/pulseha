@@ -4,7 +4,7 @@ import (
 	"os"
 	"os/signal"
 	"github.com/mitchellh/cli"
-	"github.com/Syleron/Pulse/cmd/commands"
+	"github.com/Syleron/PulseHA/cmd/commands"
 )
 
 var Commands map[string]cli.CommandFactory

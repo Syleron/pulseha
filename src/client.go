@@ -5,7 +5,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"os"
 	"github.com/coreos/go-log/log"
-	"github.com/Syleron/Pulse/proto"
+	"github.com/Syleron/PulseHA/proto"
 )
 
 type Client struct {
