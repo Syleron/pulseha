@@ -5,7 +5,7 @@ import (
 	"strings"
 	"flag"
 	"google.golang.org/grpc"
-	"github.com/Syleron/Pulse/proto"
+	"github.com/Syleron/PulseHA/proto"
 	"context"
 	"github.com/olekukonko/tablewriter"
 	"os"
