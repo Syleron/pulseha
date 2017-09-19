@@ -31,6 +31,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"leave": func() (cli.Command, error) {
+			return &commands.LeaveCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,

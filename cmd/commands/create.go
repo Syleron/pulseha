@@ -77,7 +77,11 @@ func (c *CreateCommand) Run(args []string) int {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 		return 1
 	} else {
-		c.Ui.Output(r.Message)
+		if r.Success {
+			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+		} else {
+			c.Ui.Output("\n[x] " + r.Message + "\n")
+		}
 	}
 
 	return 0

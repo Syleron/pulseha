@@ -23,6 +23,8 @@ type Server struct {
 	Members []Member
 	Config *Config
 	Log log.Logger
+	Server *grpc.Server
+	Listener net.Listener
 }
 
 /**
@@ -74,7 +76,39 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
-	return &proto.PulseLeave{}, nil
+
+	nodeTotal := len(s.Config.Nodes)
+
+	// Are we even in a cluster?
+	if nodeTotal == 0 {
+		return &proto.PulseLeave{
+			Success: false,
+			Message: "Unable to leave as no cluster was found",
+		}, nil
+	}
+
+	// Clear out the groups
+	s.Config.Groups = map[string][]string{}
+	// Clear out the nodes
+	s.Config.Nodes = map[string]Node{}
+	// save our config
+	s.Config.Save()
+	// Shutdown our main server
+	s.Close()
+
+	// Check to see if we are the only member in the cluster
+	if nodeTotal == 1 {
+		return &proto.PulseLeave{
+			Success: true,
+			Message: "Successfully dismantled cluster",
+		}, nil
+	}
+
+	// We need to inform our peers that we have left!
+	return &proto.PulseLeave{
+		Success: true,
+		Message: "Successfully left from cluster",
+	}, nil
 }
 
 /**
@@ -109,6 +143,8 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 		}
 		// Save the config
 		s.Config.Save()
+		// Reload the config
+		//s.Config.Reload()
 		// Setup the listener
 		go s.Setup()
 		// return if we were successful or not
@@ -398,14 +434,14 @@ func (s *Server) Setup() {
 		return
 	}
 
-	lis, err := net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
+	var err error
+	s.Listener, err = net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
 
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 		os.Exit(1)
 	}
 
-	var grpcServer *grpc.Server
 	if s.Config.Pulse.TLS {
 		// Get project directory location
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -424,14 +460,23 @@ func (s *Server) Setup() {
 			os.Exit(1)
 		}
 
-		grpcServer = grpc.NewServer(grpc.Creds(creds))
+		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
-		grpcServer = grpc.NewServer()
+		s.Server = grpc.NewServer()
 	}
 
-	proto.RegisterRequesterServer(grpcServer, s)
+	proto.RegisterRequesterServer(s.Server, s)
 
 	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
 
-	grpcServer.Serve(lis)
+	s.Server.Serve(s.Listener)
+}
+
+/**
+ *
+ */
+func (s *Server) Close() {
+	log.Debug("Shutting down server")
+	s.Server.GracefulStop()
+	s.Listener.Close()
 }

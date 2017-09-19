@@ -86,6 +86,7 @@ func (c *Config) Save() {
  * Note: Need to clear memory value before calling Load()
  */
 func (c *Config) Reload() {
+	log.Debug("Reloading PulseHA config")
 	// Reload the config file
 	c.Load()
 }

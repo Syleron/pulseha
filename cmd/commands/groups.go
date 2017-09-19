@@ -78,7 +78,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n [X] " + r.Message + "\n")
+				c.Ui.Output("\n [x] " + r.Message + "\n")
 			}
 		}
 	case "delete":
@@ -99,7 +99,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n[X] " + r.Message + "\n")
+				c.Ui.Output("\n[x] " + r.Message + "\n")
 			}
 		}
 	case "add":
@@ -127,7 +127,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n[X] " + r.Message + "\n")
+				c.Ui.Output("\n[x] " + r.Message + "\n")
 			}
 		}
 	case "remove":
@@ -155,7 +155,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n[X] " + r.Message + "\n")
+				c.Ui.Output("\n[x] " + r.Message + "\n")
 			}
 		}
 	case "assign":
@@ -189,7 +189,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n[X] " + r.Message + "\n")
+				c.Ui.Output("\n[x] " + r.Message + "\n")
 			}
 		}
 	case "unassign":
@@ -223,7 +223,7 @@ func (c *GroupsCommand) Run(args []string) int {
 			if r.Success {
 				c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 			} else {
-				c.Ui.Output("\n[X] " + r.Message + "\n")
+				c.Ui.Output("\n[x] " + r.Message + "\n")
 			}
 		}
 	default:
