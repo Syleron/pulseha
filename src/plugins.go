@@ -1,24 +1,35 @@
-package plugins
+package main
 
 import (
-	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/Pulse/src/structures"
-	"github.com/Syleron/Pulse/src/utils"
 	"path"
 	"path/filepath"
 	"plugin"
 	"strconv"
+	"github.com/coreos/go-log/log"
+	"os"
 )
 
 /**
- *
- **/
-func Load() ([]structures.PluginHC, error) {
-	var modules []structures.PluginHC
+ * Health Check plugin type
+ */
+type PluginHC interface {
+	Name() string
+	Version() float64
+	Send() (bool, bool)
+}
 
-	utils.CreateFolder("./plugins")
+func LoadPlugins() ([]PluginHC, error) {
+	var modules []PluginHC
 
-	evtGlob := path.Join("./plugins", "/*.so")
+	// Get project directory location
+	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+	if err != nil {
+		log.Emergency(err)
+	}
+
+	CreateFolder(dir + "/plugins")
+
+	evtGlob := path.Join(dir + "/plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {
@@ -41,7 +52,7 @@ func Load() ([]structures.PluginHC, error) {
 			continue
 		}
 
-		e, ok := symEvt.(structures.PluginHC)
+		e, ok := symEvt.(PluginHC)
 
 		if !ok {
 			log.Error("Plugin is not of an PluginHC interface type")
