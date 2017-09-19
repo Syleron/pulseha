@@ -57,20 +57,32 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 }
 
 /**
- *
+ * Attempt to join a configured cluster
  */
 func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Join() - Join Pulse cluster")
 
+	// Are we configured?
+	if _clusterCheck(s.Config) {
+		// This is called by our local daemon/agent
+		// It needs to send a request to the peer/node to get cluster details.
+		// Add the node to the config
+		// Notify our peers that a new member has joined
+		return &proto.PulseJoin{
+			Success: true,
+		}, nil
+	}
+
 	return &proto.PulseJoin{
-		Success: true,
+		Success: false,
+		Message: "Unable to join as node is not in a configured cluster",
 	}, nil
 }
 
 /**
- *
+ * Break cluster / Leave from cluster
  */
 func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
@@ -401,7 +413,8 @@ func (s *Server) assignGroupToNode(node, iface, group string) {
 }
 
 /**
- *
+ * Unassign a group from an interface
+ * Note: This function does not save to config file.
  */
 func (s * Server) unassignGroupFromNode(node, iface, group string) {
 	if exists, i := _nodeInterfaceGroupExists(node, iface, group, s.Config); exists {
@@ -412,7 +425,7 @@ func (s * Server) unassignGroupFromNode(node, iface, group string) {
 }
 
 /**
- *
+ * Setup pulse cli type
  */
 func (s *Server) SetupCLI() {
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
@@ -426,7 +439,7 @@ func (s *Server) SetupCLI() {
 }
 
 /**
- *
+ * Setup pulse server type
  */
 func (s *Server) Setup() {
 	// Only continue if we are in a configured cluster
@@ -473,7 +486,7 @@ func (s *Server) Setup() {
 }
 
 /**
- *
+ * Shutdown pulse server (not cli/cmd)
  */
 func (s *Server) Close() {
 	log.Debug("Shutting down server")

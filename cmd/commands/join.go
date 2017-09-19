@@ -7,7 +7,6 @@ import (
 	"google.golang.org/grpc"
 	"github.com/Syleron/Pulse/proto"
 	"context"
-	"fmt"
 )
 
 type JoinCommand struct {
@@ -65,7 +64,11 @@ func (c *JoinCommand) Run(args []string) int {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 		c.Ui.Output(err.Error())
 	} else {
-		fmt.Printf("response: %s", r.Success)
+		if r.Success {
+			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
+		} else {
+			c.Ui.Output("\n[x] " + r.Message + "\n")
+		}
 	}
 
 	return 0
