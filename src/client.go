@@ -1,3 +1,20 @@
+/*
+    PulseHA - HA Cluster Daemon
+    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 package main
 
 import (
@@ -40,25 +57,6 @@ func (p PulseState) String() string {
  *
  */
 func (c *Client) Setup() {
-	// Are we in a cluster?
-	//if c.ClusterCheck() {
-	//	// We are in a cluster
-	//	// Find the active node
-	//	_, err := c.FindActiveNode()
-	//
-	//	if err != nil {
-	//		// No one is available.. assume we must take responsibility.
-	//		log.Info("No members available.")
-	//	}
-	//
-	//} else {
-	//	// we are not in a cluster
-	//}
-	// Are there any other members in the cluster online?
-
-	// Are they the active appliance? (They should be)
-
-	// If not.. who is the active appliance? (because there should be one)
 }
 
 /**
@@ -93,17 +91,3 @@ func (c *Client) Connect(ip, port string) {
 func (c *Client) Close() {
 	//c.Connection.Close()
 }
-
-/**
- *
- */
-func (c *Client) sendSetup() {}
-
-/**
- *
- */
-func (c *Client) configureCluster() {}
-func (c *Client) Join(ip, port string) {}
-func (c *Client) Leave() {}
-func (c *Client) Broadcast() {}
-
