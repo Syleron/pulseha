@@ -39,21 +39,11 @@ type Server struct {
 	sync.Mutex
 	Status proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
-	Members []Member
+	//Members []Member
 	Config *Config
 	Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
-}
-
-/**
- * Member node struct type
- */
-type Member struct {
-	Name   string
-	Addr   net.IP
-	Port uint16
-	State proto.HealthCheckResponse_ServingStatus
 }
 
 /**

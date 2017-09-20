@@ -26,31 +26,10 @@ import (
 )
 
 type Client struct {
-	State      PulseState
+	//State      PulseState
 	Connection *grpc.ClientConn
 	Requester  proto.RequesterClient
 	Config *Config
-}
-
-type PulseState int
-
-const (
-	PulseConnected    = iota
-	PulseDisconnected
-)
-
-/**
- *
- */
-func (p PulseState) String() string {
-	switch p {
-	case PulseConnected:
-		return "connected"
-	case PulseDisconnected:
-		return "disconnected"
-	default:
-		return "unknown"
-	}
 }
 
 /**
@@ -91,3 +70,5 @@ func (c *Client) Connect(ip, port string) {
 func (c *Client) Close() {
 	//c.Connection.Close()
 }
+
+
