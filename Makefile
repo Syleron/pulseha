@@ -32,6 +32,10 @@ test:
 clean:
 	go clean
 install: build cli
+ifneq ($(shell uname),Linux)
+	echo "Install only available on Linux"
+	exit 1
+endif
 	cp ./bin/pulseha /usr/local/bin/
 	if [ ! -d "/etc/pulseha/" ]; then mkdir /etc/pulseha/; fi
 	cp config.json /etc/pulseha/
