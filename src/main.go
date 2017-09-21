@@ -1,10 +1,15 @@
 package main
 
 import (
+	"fmt"
 	"github.com/coreos/go-log/log"
 	"os"
 	"sync"
-	"fmt"
+)
+
+var (
+	Version string
+	Build   string
 )
 
 /**
@@ -19,7 +24,7 @@ type Pulse struct {
 /**
  * Create a new instance of PulseHA
  */
-func createPulse() (*Pulse) {
+func createPulse() *Pulse {
 	config := &Config{}
 	// Load the config
 	config.Load()
@@ -43,13 +48,14 @@ func createPulse() (*Pulse) {
  */
 func main() {
 	// Draw logo
-	fmt.Println(`
+	fmt.Printf(`
    ___       _                  _
   / _ \_   _| |___  ___  /\  /\/_\
  / /_)/ | | | / __|/ _ \/ /_/ //_\\
-/ ___/| |_| | \__ \  __/ __  /  _  \
-\/     \__,_|_|___/\___\/ /_/\_/ \_/  Version 0.0.1
-	`)
+/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
+\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
+
+`, Version, Build[0:7])
 	pulse := createPulse()
 	// Load plugins
 	_, err := LoadPlugins()

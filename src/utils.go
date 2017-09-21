@@ -1,14 +1,14 @@
 package main
 
 import (
+	"github.com/coreos/go-log/log"
 	"io/ioutil"
+	"net"
 	"os"
 	"os/exec"
-	"net"
-	"time"
-	"github.com/coreos/go-log/log"
-	"strings"
 	"strconv"
+	"strings"
+	"time"
 )
 
 /**
@@ -48,7 +48,7 @@ func Execute(cmd string, args ...string) (string, error) {
  *
  * @return bool
  */
-func ValidIPAddress(ipAddress string) (bool) {
+func ValidIPAddress(ipAddress string) bool {
 	testInput := net.ParseIP(ipAddress)
 	if testInput.To4() == nil {
 		return false
@@ -103,7 +103,7 @@ func GetHostname() string {
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
-func _clusterCheck(c *Config) (bool) {
+func _clusterCheck(c *Config) bool {
 	if len(c.Nodes) > 0 {
 		return true
 	}
@@ -113,7 +113,7 @@ func _clusterCheck(c *Config) (bool) {
 /**
  * Generates an available IP floating group name.
  */
-func _genGroupName(c *Config) (string) {
+func _genGroupName(c *Config) string {
 	totalGroups := len(c.Groups)
 	for i := 1; i <= totalGroups; i++ {
 		newName := "group" + strconv.Itoa(i)
@@ -121,13 +121,13 @@ func _genGroupName(c *Config) (string) {
 			return newName
 		}
 	}
-	return "group" + strconv.Itoa(totalGroups + 1)
+	return "group" + strconv.Itoa(totalGroups+1)
 }
 
 /**
  * Checks to see if a floating IP group already exists
  */
-func _groupExist(name string, c *Config) (bool) {
+func _groupExist(name string, c *Config) bool {
 	if _, ok := c.Groups[name]; ok {
 		return true
 	}
@@ -151,7 +151,7 @@ func _groupIPExist(name string, ip string, c *Config) (bool, int) {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func _nodeAssignedToInterface(group string, c *Config) (bool) {
+func _nodeAssignedToInterface(group string, c *Config) bool {
 	for _, node := range c.Nodes {
 		for _, groups := range node.IPGroups {
 			for _, ifaceGroup := range groups {
