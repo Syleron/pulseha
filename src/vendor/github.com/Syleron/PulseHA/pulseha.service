@@ -1,0 +1,10 @@
+[Unit]
+Description=PulseHA Daemon
+
+[Service]
+User=root
+Group=root
+ExecStart=/etc/pulseha/pulse
+
+[Install]
+WantedBy=multi-user.target
