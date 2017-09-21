@@ -1,24 +1,24 @@
 package main
 
 import (
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/coreos/go-log/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"os"
-	"github.com/coreos/go-log/log"
-	"github.com/Syleron/PulseHA/proto"
 )
 
 type Client struct {
 	State      PulseState
 	Connection *grpc.ClientConn
 	Requester  proto.RequesterClient
-	Config *Config
+	Config     *Config
 }
 
 type PulseState int
 
 const (
-	PulseConnected    = iota
+	PulseConnected = iota
 	PulseDisconnected
 )
 
@@ -102,8 +102,7 @@ func (c *Client) sendSetup() {}
 /**
  *
  */
-func (c *Client) configureCluster() {}
+func (c *Client) configureCluster()    {}
 func (c *Client) Join(ip, port string) {}
-func (c *Client) Leave() {}
-func (c *Client) Broadcast() {}
-
+func (c *Client) Leave()               {}
+func (c *Client) Broadcast()           {}

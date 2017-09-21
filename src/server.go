@@ -1,16 +1,16 @@
 package main
 
 import (
-	"sync"
 	"context"
-	"google.golang.org/grpc"
-	"net"
-	"google.golang.org/grpc/credentials"
-	"os"
-	"time"
-	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
+	"github.com/coreos/go-log/log"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"net"
+	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
 
 /**
@@ -18,22 +18,22 @@ import (
  */
 type Server struct {
 	sync.Mutex
-	Status proto.HealthCheckResponse_ServingStatus
+	Status        proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
-	Members []Member
-	Config *Config
-	Log log.Logger
-	Server *grpc.Server
-	Listener net.Listener
+	Members       []Member
+	Config        *Config
+	Log           log.Logger
+	Server        *grpc.Server
+	Listener      net.Listener
 }
 
 /**
  * Member node struct type
  */
 type Member struct {
-	Name   string
-	Addr   net.IP
-	Port uint16
+	Name  string
+	Addr  net.IP
+	Port  uint16
 	State proto.HealthCheckResponse_ServingStatus
 }
 
@@ -59,7 +59,7 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 /**
  * Attempt to join a configured cluster
  */
-func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Join() - Join Pulse cluster")
@@ -84,7 +84,7 @@ func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJo
 /**
  * Break cluster / Leave from cluster
  */
-func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
+func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
@@ -126,7 +126,7 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 /**
  * Note: This will probably need to be replicated..
  */
-func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
+func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Create() - Create Pulse cluster")
@@ -134,8 +134,8 @@ func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Pul
 	if !_clusterCheck(s.Config) {
 		// we are not in an active cluster
 		newNode := Node{
-			IP: in.BindIp,
-			Port: in.BindPort,
+			IP:       in.BindIp,
+			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
@@ -416,7 +416,7 @@ func (s *Server) assignGroupToNode(node, iface, group string) {
  * Unassign a group from an interface
  * Note: This function does not save to config file.
  */
-func (s * Server) unassignGroupFromNode(node, iface, group string) {
+func (s *Server) unassignGroupFromNode(node, iface, group string) {
 	if exists, i := _nodeInterfaceGroupExists(node, iface, group, s.Config); exists {
 		s.Config.Nodes[node].IPGroups[iface] = append(s.Config.Nodes[node].IPGroups[iface][:i], s.Config.Nodes[node].IPGroups[iface][i+1:]...)
 	} else {
@@ -466,7 +466,7 @@ func (s *Server) Setup() {
 			GenOpenSSL()
 		}
 
-		creds, err := credentials.NewServerTLSFromFile(dir + "/certs/server.crt", dir + "/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
 
 		if err != nil {
 			log.Error("Could not load TLS keys.")

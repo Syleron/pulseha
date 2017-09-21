@@ -8,7 +8,11 @@ import (
 	"os"
 )
 
-const Version = "0.0.1"
+var (
+	Version string
+	Build   string
+)
+
 const VersionRelease = "Development"
 
 /**
