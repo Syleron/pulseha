@@ -173,7 +173,7 @@ func ArpScan(addrWSubnet string) string {
 /**
  * Return network interface names
  */
-func _getInterfaceNames() ([]string) {
+func getInterfaceNames() ([]string) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		log.Errorf("Error retrieving network interfaces: ", err)
@@ -188,7 +188,7 @@ func _getInterfaceNames() ([]string) {
 /**
  * Check if an interface exists on the local node
  */
-func _interfaceExist(name string) (bool) {
+func interfaceExist(name string) (bool) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		log.Errorf("Error retrieving network interfaces: ", err)

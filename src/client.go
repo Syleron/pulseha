@@ -5,13 +5,14 @@ import (
 	"google.golang.org/grpc/credentials"
 	"os"
 	"github.com/coreos/go-log/log"
-	"github.com/Syleron/PulseHA/proto"
+	p "github.com/Syleron/PulseHA/proto"
+	"context"
 )
 
 type Client struct {
 	State      PulseState
 	Connection *grpc.ClientConn
-	Requester  proto.RequesterClient
+	Requester  p.RequesterClient
 	Config *Config
 }
 
@@ -39,36 +40,11 @@ func (p PulseState) String() string {
 /**
  *
  */
-func (c *Client) Setup() {
-	// Are we in a cluster?
-	//if c.ClusterCheck() {
-	//	// We are in a cluster
-	//	// Find the active node
-	//	_, err := c.FindActiveNode()
-	//
-	//	if err != nil {
-	//		// No one is available.. assume we must take responsibility.
-	//		log.Info("No members available.")
-	//	}
-	//
-	//} else {
-	//	// we are not in a cluster
-	//}
-	// Are there any other members in the cluster online?
-
-	// Are they the active appliance? (They should be)
-
-	// If not.. who is the active appliance? (because there should be one)
-}
-
-/**
- *
- */
-func (c *Client) Connect(ip, port string) {
+func (c *Client) Connect(ip, port, hostname string) (error) {
 	var err error
 
 	if c.Config.Pulse.TLS {
-		creds, err := credentials.NewClientTLSFromFile("./certs/client.crt", "")
+		creds, err := credentials.NewClientTLSFromFile("./certs/" + hostname + ".crt", "")
 
 		if err != nil {
 			log.Errorf("Could not load TLS cert: ", err)
@@ -82,9 +58,12 @@ func (c *Client) Connect(ip, port string) {
 
 	if err != nil {
 		log.Errorf("GRPC client connection error: ", err)
+		return err
 	}
 
-	c.Requester = proto.NewRequesterClient(c.Connection)
+	c.Requester = p.NewRequesterClient(c.Connection)
+
+	return nil
 }
 
 /**
@@ -94,16 +73,85 @@ func (c *Client) Close() {
 	//c.Connection.Close()
 }
 
-/**
- *
- */
-func (c *Client) sendSetup() {}
+// Senders. Consider moving these into their own file
 
 /**
  *
  */
-func (c *Client) configureCluster() {}
-func (c *Client) Join(ip, port string) {}
-func (c *Client) Leave() {}
-func (c *Client) Broadcast() {}
+func (c *Client) SendCheck(data *p.HealthCheckRequest) (*p.HealthCheckResponse, error) {
+	r, err := c.Requester.Check(context.Background(), data)
 
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
+ r, err := c.Requester.Join(context.Background(), data)
+
+ return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
+	r, err := c.Requester.Leave(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendGroupNew(data *p.PulseGroupNew) (*p.PulseGroupNew, error) {
+	r, err := c.Requester.NewGroup(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendGroupDelete(data *p.PulseGroupDelete) (*p.PulseGroupDelete, error) {
+	r, err := c.Requester.DeleteGroup(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendGroupIPAdd(data *p.PulseGroupAdd) (*p.PulseGroupAdd, error) {
+	r, err := c.Requester.GroupIPAdd(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendCheckGroupIPRemove(data *p.PulseGroupRemove) (*p.PulseGroupRemove, error) {
+	r, err := c.Requester.GroupIPRemove(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendGroupAssign(data *p.PulseGroupAssign) (*p.PulseGroupAssign, error) {
+	r, err := c.Requester.GroupAssign(context.Background(), data)
+
+	return r, err
+}
+
+/**
+ *
+ */
+func (c *Client) SendGroupUnassign(data *p.PulseGroupUnassign) (*p.PulseGroupUnassign, error) {
+	r, err := c.Requester.GroupUnassign(context.Background(), data)
+
+	return r, err
+}

@@ -30,8 +30,11 @@ message HealthCheckResponse {
 // Pulse Cluster Messages
 message PulseJoin {
     bool success = 1;
-    string address = 2;
-    string message = 3;
+    string message = 2;
+    string ip = 3;
+    string port = 4;
+    string hostname= 5;
+    bool replicated = 6;
 
 }
 message PulseLeave {
