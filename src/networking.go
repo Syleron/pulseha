@@ -1,12 +1,12 @@
 package main
 
 import (
-	"os"
-	"net"
-	"os/exec"
-	"strings"
 	"bytes"
 	"github.com/coreos/go-log/log"
+	"net"
+	"os"
+	"os/exec"
+	"strings"
 )
 
 /**

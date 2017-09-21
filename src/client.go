@@ -19,7 +19,7 @@ type Client struct {
 type PulseState int
 
 const (
-	PulseConnected    = iota
+	PulseConnected = iota
 	PulseDisconnected
 )
 

@@ -1,12 +1,12 @@
 package main
 
 import (
+	"github.com/coreos/go-log/log"
+	"os"
 	"path"
 	"path/filepath"
 	"plugin"
 	"strconv"
-	"github.com/coreos/go-log/log"
-	"os"
 )
 
 /**
@@ -29,7 +29,7 @@ func LoadPlugins() ([]PluginHC, error) {
 
 	CreateFolder(dir + "/plugins")
 
-	evtGlob := path.Join(dir + "/plugins", "/*.so")
+	evtGlob := path.Join(dir+"/plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {

@@ -1,18 +1,18 @@
 package main
 
 import (
-	"io/ioutil"
 	"encoding/json"
-	"os"
 	"github.com/coreos/go-log/log"
+	"io/ioutil"
+	"os"
 	"path/filepath"
 )
 
 type Config struct {
-	Pulse Local `json:"pulse"`
-	Groups map[string][]string `json:"floating_ip_groups"`
-	Nodes map[string]Node `json:"nodes"`
-	Logging Logging `json:"logging"`
+	Pulse   Local               `json:"pulse"`
+	Groups  map[string][]string `json:"floating_ip_groups"`
+	Nodes   map[string]Node     `json:"nodes"`
+	Logging Logging             `json:"logging"`
 }
 
 type Local struct {
@@ -24,14 +24,14 @@ type Nodes struct {
 }
 
 type Node struct {
-	IP   string `json:"bind_address"`
-	Port string `json:"bind_port"`
-	IPGroups map[string][]string  `json:"group_assignments"`
+	IP       string              `json:"bind_address"`
+	Port     string              `json:"bind_port"`
+	IPGroups map[string][]string `json:"group_assignments"`
 }
 
 type Logging struct {
-	ToLogFile bool `json:"to_logfile"`
-	LogFile string `json:"logfile"`
+	ToLogFile bool   `json:"to_logfile"`
+	LogFile   string `json:"logfile"`
 }
 
 /**
@@ -73,7 +73,7 @@ func (c *Config) Save() {
 		log.Emergency(err)
 	}
 	// Save back to file
-	err = ioutil.WriteFile(dir + "/config.json", configJSON, 0644)
+	err = ioutil.WriteFile(dir+"/config.json", configJSON, 0644)
 	// Check for errors
 	if err != nil {
 		log.Error("Unable to save config.json. Does it exist?")
@@ -97,19 +97,19 @@ func (c *Config) Reload() {
 func (c *Config) Validate() {
 }
 
-func (c *Config) LocalNode() (Node) {
+func (c *Config) LocalNode() Node {
 	return c.Nodes[GetHostname()]
 }
 
 /**
  *
  */
-func DefaultLocalConfig() (*Config) {
+func DefaultLocalConfig() *Config {
 	return &Config{
-		//Cluster: {
-		//	//ClusterName: GetHostname(),
-		//	//BindIP: "0.0.0.0",
-		//	//BindPort: "8443",
-		//},
+	//Cluster: {
+	//	//ClusterName: GetHostname(),
+	//	//BindIP: "0.0.0.0",
+	//	//BindPort: "8443",
+	//},
 	}
 }

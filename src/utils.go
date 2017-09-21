@@ -1,14 +1,14 @@
 package main
 
 import (
+	"github.com/coreos/go-log/log"
 	"io/ioutil"
+	"net"
 	"os"
 	"os/exec"
-	"net"
-	"time"
-	"github.com/coreos/go-log/log"
-	"strings"
 	"strconv"
+	"strings"
+	"time"
 )
 
 /**
@@ -48,7 +48,7 @@ func Execute(cmd string, args ...string) (string, error) {
  *
  * @return bool
  */
-func ValidIPAddress(ipAddress string) (bool) {
+func ValidIPAddress(ipAddress string) bool {
 	testInput := net.ParseIP(ipAddress)
 	if testInput.To4() == nil {
 		return false
@@ -121,7 +121,7 @@ func genGroupName(c *Config) (string) {
 			return newName
 		}
 	}
-	return "group" + strconv.Itoa(totalGroups + 1)
+	return "group" + strconv.Itoa(totalGroups+1)
 }
 
 /**
