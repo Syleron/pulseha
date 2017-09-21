@@ -10,12 +10,19 @@ build: get test
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 cp config.json ./bin/
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulse ./src/
+macbuild: get test
+	if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
+	cp config.json ./bin/
+	env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulse ./src/
 get:
 	 go get -d ./src/
 	 go get -d ./cmd/
 cli: get testCMD
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
+maccli: get testCMD
+	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
+	 env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
 protos:
 	 protoc ./proto/pulse.proto --go_out=plugins=grpc:.
 testCMD:

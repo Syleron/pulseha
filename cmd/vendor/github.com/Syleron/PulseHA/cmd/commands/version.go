@@ -9,6 +9,7 @@ import (
 type VersionCommand struct {
 	Version        string
 	VersionRelease string
+	Build		   string
 	Ui             cli.Ui
 }
 
