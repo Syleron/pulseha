@@ -43,7 +43,7 @@ func (c *VersionCommand) Help() string {
 func (c *VersionCommand) Run(_ []string) int {
 	var versionString bytes.Buffer
 
-	fmt.Fprintf(&versionString, "pulseha v%s", c.Version)
+	fmt.Fprintf(&versionString, "pulseha %s", c.Version)
 
 	c.Ui.Output(versionString.String() + " Build " + c.Build[0:7] +
 		" Copyright (c) 2017 Andrew Zak <andrew@pulseha.com>")

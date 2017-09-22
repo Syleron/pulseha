@@ -73,8 +73,17 @@ func (c *JoinCommand) Run(args []string) int {
 
 	client := proto.NewRequesterClient(connection)
 
+	bindAddrString := strings.Split(addr[0], ":")
+
+	if len(bindAddrString) < 2 {
+		c.Ui.Error("Please provide an IP:Port")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
-		Address: addr[0],
+		Ip: bindAddrString[0],
+		Port: bindAddrString[1],
 	})
 
 	if err != nil {

@@ -4,7 +4,9 @@ VERSION=`git describe`
 BUILD=`git rev-parse HEAD`
 LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.Build=${BUILD}"
 
-default: build
+default: all
+
+all: build cli
 
 build: get test
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
