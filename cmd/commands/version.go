@@ -25,6 +25,7 @@ import (
 
 type VersionCommand struct {
 	Version        string
+	Build 			string
 	VersionRelease string
 	Ui             cli.Ui
 }
@@ -44,7 +45,8 @@ func (c *VersionCommand) Run(_ []string) int {
 
 	fmt.Fprintf(&versionString, "pulseha v%s", c.Version)
 
-	c.Ui.Output(versionString.String() + " Copyright (c) 2017 Andrew Zak <andrew@pulseha.com>")
+	c.Ui.Output(versionString.String() + " Build " + c.Build[0:7] +
+		" Copyright (c) 2017 Andrew Zak <andrew@pulseha.com>")
 
 	return 0
 }

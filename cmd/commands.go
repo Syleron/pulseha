@@ -18,10 +18,10 @@
 package main
 
 import (
+	"github.com/Syleron/PulseHA/cmd/commands"
+	"github.com/mitchellh/cli"
 	"os"
 	"os/signal"
-	"github.com/mitchellh/cli"
-	"github.com/Syleron/PulseHA/cmd/commands"
 )
 
 var Commands map[string]cli.CommandFactory
@@ -56,6 +56,7 @@ func init() {
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,
+				Build:          Build,
 				VersionRelease: VersionRelease,
 				Ui:             ui,
 			}, nil

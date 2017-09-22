@@ -18,16 +18,16 @@
 package main
 
 import (
-	"sync"
 	"context"
-	"google.golang.org/grpc"
-	"net"
-	"google.golang.org/grpc/credentials"
-	"os"
-	"time"
-	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
+	"github.com/coreos/go-log/log"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"net"
+	"os"
 	"path/filepath"
+	"sync"
+	"time"
 )
 
 // Note: Perhaps I need to consider splitting the CLI/CMD "server" and the main server into separate struct types.
@@ -37,7 +37,7 @@ import (
  */
 type Server struct {
 	sync.Mutex
-	Status proto.HealthCheckResponse_ServingStatus
+	Status        proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
 	//Members []Member
 	Config *Config
@@ -68,13 +68,31 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 /**
  * Attempt to join a configured cluster
  */
-func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Join() - Join Pulse cluster")
 
 	// Are we configured?
-	if _clusterCheck(s.Config) {
+	if !clusterCheck(s.Config) {
+		// Create a client
+		//client := &Client{}
+
+		// Attempt to connect
+		//err := client.Connect(in., in.Port, in.Hostname)
+
+		//if err != nil {
+		//	return &proto.PulseJoin{
+		//		Success: false,
+		//		Message: "Unable to reach requested node. Join failed.",
+		//	}, nil
+		//}
+
+		//// Send our join request
+		//r, err := client.SendJoin(&proto.PulseJoin{
+		//
+		//})
+
 		// This is called by our local daemon/agent
 		// It needs to send a request to the peer/node to get cluster details.
 		// Add the node to the config
@@ -86,14 +104,14 @@ func (s * Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJo
 
 	return &proto.PulseJoin{
 		Success: false,
-		Message: "Unable to join as node is not in a configured cluster",
+		Message: "Unable to join as PulseHA is already in a cluster.",
 	}, nil
 }
 
 /**
  * Break cluster / Leave from cluster
  */
-func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
+func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
@@ -135,31 +153,31 @@ func (s * Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pulse
 /**
  * Note: This will probably need to be replicated..
  */
-func (s * Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
+func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Create() - Create Pulse cluster")
 	// Method of first checking to see if we are in a cluster.
-	if !_clusterCheck(s.Config) {
+	if !clusterCheck(s.Config) {
 		// we are not in an active cluster
 		newNode := Node{
-			IP: in.BindIp,
-			Port: in.BindPort,
+			IP:       in.BindIp,
+			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
 		s.Config.Nodes[GetHostname()] = newNode
 		// Assign interface names to node
-		for _, ifaceName := range _getInterfaceNames() {
+		for _, ifaceName := range getInterfaceNames() {
 			if ifaceName != "lo" {
 				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
 				// Create a new group name
-				groupName := _genGroupName(s.Config)
+				groupName := genGroupName(s.Config)
 				// Create a group for the interface
 				s.Config.Groups[groupName] = []string{}
 				// assign the group to the interface
-				s.assignGroupToNode(GetHostname(), ifaceName, groupName)
+				GroupAssign(groupName, GetHostname(), ifaceName, s.Config)
 			}
 		}
 		// Save the config
@@ -187,27 +205,18 @@ func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:NewGroup() - Create floating IP group")
-
-	// Check to make sure we are in a cluster
-	if _clusterCheck(s.Config) {
-		// Generate a new name.
-		// Check to see if the group name has already been used!
-		// Define the new group within our config
-		groupName := _genGroupName(s.Config)
-		s.Config.Groups[groupName] = []string{}
-		// Save to the config
-		s.Config.Save()
-		// Note: Do we need to reload?
-		return &proto.PulseGroupNew{
-			Success: true,
-			Message: groupName + " successfully added.",
-		}, nil
-	} else {
+	groupName, err := GroupNew(s.Config)
+	if err != nil {
 		return &proto.PulseGroupNew{
 			Success: false,
-			Message: "Groups can only be created in a configured cluster.",
+			Message: err.Error(),
 		}, nil
 	}
+	s.Config.Save()
+	return &proto.PulseGroupNew{
+		Success: true,
+		Message: groupName + " successfully added.",
+	}, nil
 }
 
 /**
@@ -217,29 +226,18 @@ func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:DeleteGroup() - Delete floating IP group")
-	if _groupExist(in.Name, s.Config) {
-		// Check to see if we are assigned to an interface
-		if !_nodeAssignedToInterface(in.Name, s.Config) {
-			delete(s.Config.Groups, in.Name)
-		} else {
-			return &proto.PulseGroupDelete{
-				Success: false,
-				Message: "Group has network interface assignments. Please remove them and try again.",
-			}, nil
-		}
-		// Save config
-		s.Config.Save()
-		// Note: May need to reload!
-		return &proto.PulseGroupDelete{
-			Success: true,
-			Message: in.Name + " successfully deleted.",
-		}, nil
-	} else {
+	err := GroupDelete(in.Name, s.Config)
+	if err != nil {
 		return &proto.PulseGroupDelete{
 			Success: false,
-			Message: "Unable to delete group that doesn't exist!",
+			Message: err.Error(),
 		}, nil
 	}
+	s.Config.Save()
+	return &proto.PulseGroupDelete{
+		Success: true,
+		Message: in.Name + " successfully deleted.",
+	}, nil
 }
 
 /**
@@ -250,34 +248,14 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupIPAdd() - Add IP addresses to group " + in.Name)
-	// Make sure that the group exists
-	if !_groupExist(in.Name, s.Config) {
+	err := GroupIpAdd(in.Name, in.Ips, s.Config)
+	if err != nil {
 		return &proto.PulseGroupAdd{
 			Success: false,
-			Message: "Group does not exist!",
+			Message: err.Error(),
 		}, nil
 	}
-	// find group and add ips
-	for _, ip := range in.Ips {
-		if ValidIPAddress(ip) {
-			// Do we have at least one?
-			if len(s.Config.Groups[in.Name]) > 0 {
-				// Make sure we don't have any duplicates
-				if exists, _ := _groupIPExist(in.Name, ip, s.Config); !exists {
-					s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
-				} else {
-					log.Warning(ip + " already exists in group " + in.Name + ".. skipping.")
-				}
-			} else {
-				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name], ip)
-			}
-		} else {
-			log.Warning(ip + " is not a valid IP address")
-		}
-	}
-	// save to config
 	s.Config.Save()
-	// Note: May need to reload the config
 	return &proto.PulseGroupAdd{
 		Success: true,
 		Message: "IP address(es) successfully added to " + in.Name,
@@ -292,28 +270,14 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupIPRemove() - Removing IPs from group " + in.Name)
-	// Make sure that the group exists
-	if !_groupExist(in.Name, s.Config) {
+	err := GroupIpRemove(in.Name, in.Ips, s.Config)
+	if err != nil {
 		return &proto.PulseGroupRemove{
 			Success: false,
-			Message: "IP group does not exist!",
+			Message: err.Error(),
 		}, nil
 	}
-	// Find ips and remove them
-	for _, ip := range in.Ips {
-		// Do we have at least one?
-		if len(s.Config.Groups[in.Name]) > 0 {
-			// Make sure we don't have any duplicates
-			if exists, i := _groupIPExist(in.Name, ip, s.Config); exists {
-				s.Config.Groups[in.Name] = append(s.Config.Groups[in.Name][:i], s.Config.Groups[in.Name][i+1:]...)
-			} else {
-				log.Warning(ip + " does not exist in group " + in.Name + ".. skipping.")
-			}
-		}
-	}
-	// Save the config
 	s.Config.Save()
-	// Note: May need to reload the config
 	return &proto.PulseGroupRemove{
 		Success: true,
 		Message: "IP address(es) successfully removed from " + in.Name,
@@ -328,25 +292,14 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
-	// Make sure that the group exists
-	if !_groupExist(in.Group, s.Config) {
+	err := GroupAssign(in.Group, in.Node, in.Interface, s.Config)
+	if err != nil {
 		return &proto.PulseGroupAssign{
 			Success: false,
-			Message: "IP group does not exist!",
+			Message: err.Error(),
 		}, nil
 	}
-	// Make sure the interface exists
-	if !_interfaceExist(in.Interface) {
-		return &proto.PulseGroupAssign{
-			Success: false,
-			Message: "Interface does not exist!",
-		}, nil
-	}
-	// Assign group to the interface
-	s.assignGroupToNode(in.Node, in.Interface, in.Group)
-	// save to config
 	s.Config.Save()
-	// Note: May need to reload the config
 	return &proto.PulseGroupAssign{
 		Success: true,
 		Message: in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
@@ -361,25 +314,14 @@ func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
-	// Make sure that the group exists
-	if !_groupExist(in.Group, s.Config) {
+	err := GroupUnassign(in.Group, in.Node, in.Interface, s.Config)
+	if err != nil {
 		return &proto.PulseGroupUnassign{
 			Success: false,
-			Message: "IP group does not exist!",
+			Message: err.Error(),
 		}, nil
 	}
-	// Make sure the interface exists
-	if !_interfaceExist(in.Interface) {
-		return &proto.PulseGroupUnassign{
-			Success: false,
-			Message: "Interface does not exist!",
-		}, nil
-	}
-	// Assign group to the interface
-	s.unassignGroupFromNode(in.Node, in.Interface, in.Group)
-	// save to config
 	s.Config.Save()
-	// Note: May need to reload the config
 	return &proto.PulseGroupUnassign{
 		Success: true,
 		Message: in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
@@ -408,30 +350,6 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
 }
 
 /**
- * Assigns a group to an interface.
- * Note: This function does not save to config file.
- */
-func (s *Server) assignGroupToNode(node, iface, group string) {
-	if exists, _ := _nodeInterfaceGroupExists(node, iface, group, s.Config); !exists {
-		s.Config.Nodes[node].IPGroups[iface] = append(s.Config.Nodes[node].IPGroups[iface], group)
-	} else {
-		log.Warning(group + " already exists in node " + node + ".. skipping.")
-	}
-}
-
-/**
- * Unassign a group from an interface
- * Note: This function does not save to config file.
- */
-func (s * Server) unassignGroupFromNode(node, iface, group string) {
-	if exists, i := _nodeInterfaceGroupExists(node, iface, group, s.Config); exists {
-		s.Config.Nodes[node].IPGroups[iface] = append(s.Config.Nodes[node].IPGroups[iface][:i], s.Config.Nodes[node].IPGroups[iface][i+1:]...)
-	} else {
-		log.Warning(group + " does not exist in node " + node + ".. skipping.")
-	}
-}
-
-/**
  * Setup pulse cli type
  */
 func (s *Server) SetupCLI() {
@@ -450,7 +368,7 @@ func (s *Server) SetupCLI() {
  */
 func (s *Server) Setup() {
 	// Only continue if we are in a configured cluster
-	if !_clusterCheck(s.Config) {
+	if !clusterCheck(s.Config) {
 		return
 	}
 
@@ -473,7 +391,7 @@ func (s *Server) Setup() {
 			GenOpenSSL()
 		}
 
-		creds, err := credentials.NewServerTLSFromFile(dir + "/certs/server.crt", dir + "/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
 
 		if err != nil {
 			log.Error("Could not load TLS keys.")
