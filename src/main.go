@@ -67,8 +67,6 @@ func main() {
 	wg.Add(1)
 	// Setup cli
 	go pulse.Server.SetupCLI()
-	// Setup go routine for client
-	go pulse.Client.Setup()
 	// Setup server
 	go pulse.Server.Setup()
 	wg.Wait()

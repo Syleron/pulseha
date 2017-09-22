@@ -57,17 +57,17 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	// Are we configured?
 	if !clusterCheck(s.Config) {
 		// Create a client
-		client := &Client{}
+		//client := &Client{}
 
 		// Attempt to connect
-		err := client.Connect(in.Ip, in.Port, in.Hostname)
+		//err := client.Connect(in., in.Port, in.Hostname)
 
-		if err != nil {
-			return &proto.PulseJoin{
-				Success: false,
-				Message: "Unable to reach requested node. Join failed.",
-			}, nil
-		}
+		//if err != nil {
+		//	return &proto.PulseJoin{
+		//		Success: false,
+		//		Message: "Unable to reach requested node. Join failed.",
+		//	}, nil
+		//}
 
 		//// Send our join request
 		//r, err := client.SendJoin(&proto.PulseJoin{
