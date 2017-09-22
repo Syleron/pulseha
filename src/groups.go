@@ -17,7 +17,7 @@ func GroupNew(c *Config) (string, error) {
 		c.Groups[groupName] = []string{}
 		return groupName, nil
 	} else {
-		return "", errors.New("Groups can only be created in a configured cluster")
+		return "", errors.New("groups can only be created in a configured cluster")
 	}
 }
 
@@ -32,9 +32,9 @@ func GroupDelete(groupName string, c *Config) (error) {
 			delete(c.Groups, groupName)
 			return nil
 		}
-		return errors.New("Group has network interface assignments. Please remove them and try again.")
+		return errors.New("group has network interface assignments. Please remove them and try again")
 	} else {
-		return errors.New("Unable to delete group that doesn't exist!")
+		return errors.New("unable to delete group that doesn't exist")
 	}
 }
 
@@ -62,7 +62,7 @@ func GroupIpAdd(groupName string, ips []string, c *Config) (error) {
 		}
 		return nil
 	} else {
-		return errors.New("Group does not exist!")
+		return errors.New("group does not exist")
 	}
 }
 
@@ -84,7 +84,7 @@ func GroupIpRemove(groupName string, ips []string, c *Config) (error) {
 		}
 		return nil
 	} else {
-		return errors.New("Group does not exist!")
+		return errors.New("group does not exist")
 	}
 }
 
@@ -103,9 +103,9 @@ func GroupAssign(groupName, node, iface string, c *Config) (error) {
 			}
 			return nil
 		}
-		return errors.New("Interface does not exist!")
+		return errors.New("interface does not exist")
 	}
-	return errors.New("IP group does not exist!")
+	return errors.New("IP group does not exist")
 }
 
 /**
@@ -123,8 +123,8 @@ func GroupUnassign(groupName, node, iface string, c *Config) (error) {
 			}
 			return nil
 		}
-		return errors.New("Interface does not exist!")
+		return errors.New("interface does not exist")
 	} else {
-		return errors.New("IP group does not exist!")
+		return errors.New("IP group does not exist")
 	}
 }
