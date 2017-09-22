@@ -2,6 +2,12 @@
 
 
 [[projects]]
+  name = "github.com/Syleron/PulseHA"
+  packages = ["proto"]
+  revision = "2561b7ee6c13237337357ff69925cd5957a9efcc"
+  version = "v0.0.1"
+
+[[projects]]
   branch = "master"
   name = "github.com/armon/go-radix"
   packages = ["."]
@@ -94,6 +100,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "1d1cf5cf55dc0d09fc6ef7b62fcd5acf877250ba410b59c8ec5dc2b12c502e0d"
+  inputs-digest = "d03863a32c2c0541a05575dd17e4a255e4bf41efa6835bc35dfe400930ee5e8b"
   solver-name = "gps-cdcl"
   solver-version = 1
