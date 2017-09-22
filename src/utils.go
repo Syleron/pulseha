@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"errors"
 )
 
 /**
@@ -184,7 +185,7 @@ func splitIpPort(ipPort string) (string, string, error) {
 	IPslice := strings.Split(ipPort, ":")
 
 	if len(IPslice) < 2 {
-		return "", "", error("Invalid IP:Port string. Unable to split.")
+		return "", "", errors.New("Invalid IP:Port string. Unable to split.")
 	}
 
 	return IPslice[0], IPslice[1], nil
