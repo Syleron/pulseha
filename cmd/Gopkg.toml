@@ -22,10 +22,6 @@
 
 
 [[constraint]]
-  name = "github.com/Syleron/PulseHA"
-  version = "0.0.1"
-
-[[constraint]]
   branch = "master"
   name = "github.com/mitchellh/cli"
 

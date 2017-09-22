@@ -2,12 +2,6 @@
 
 
 [[projects]]
-  name = "github.com/Syleron/PulseHA"
-  packages = ["proto"]
-  revision = "2561b7ee6c13237337357ff69925cd5957a9efcc"
-  version = "v0.0.1"
-
-[[projects]]
   branch = "master"
   name = "github.com/armon/go-radix"
   packages = ["."]

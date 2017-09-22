@@ -2,12 +2,6 @@
 
 
 [[projects]]
-  name = "github.com/Syleron/PulseHA"
-  packages = ["proto"]
-  revision = "2561b7ee6c13237337357ff69925cd5957a9efcc"
-  version = "v0.0.1"
-
-[[projects]]
   branch = "master"
   name = "github.com/coreos/go-log"
   packages = ["log"]
@@ -58,6 +52,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "b0e1b4904d50bcba25439709b2f6c418d99a8432424a29bd25070c7c9f361416"
+  inputs-digest = "cb933a8af1389916e612eb100de43ba1446352c5a916f18beeb00a804c70de1e"
   solver-name = "gps-cdcl"
   solver-version = 1
