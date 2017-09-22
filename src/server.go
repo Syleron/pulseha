@@ -91,8 +91,8 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 
 		newNode := Node{
-			IP:       in.BindIp,
-			Port:     in.BindPort,
+			IP:       in.Ip,
+			Port:     in.Port,
 			IPGroups: make(map[string][]string, 0),
 		}
 
