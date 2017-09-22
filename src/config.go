@@ -114,6 +114,9 @@ func (c *Config) Reload() {
 func (c *Config) Validate() {
 }
 
+/**
+ *
+ */
 func (c *Config) LocalNode() Node {
 	return c.Nodes[GetHostname()]
 }

@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"bytes"
+	"encoding/binary"
 )
 
 // Note: Perhaps I need to consider splitting the CLI/CMD "server" and the main server into separate struct types.
@@ -76,22 +78,40 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	// Are we configured?
 	if !clusterCheck(s.Config) {
 		// Create a client
-		//client := &Client{}
+		client := &Client{}
 
 		// Attempt to connect
-		//err := client.Connect(in., in.Port, in.Hostname)
+		err := client.Connect(in.Ip, in.Port, in.Hostname)
 
-		//if err != nil {
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: "Unable to reach requested node. Join failed.",
-		//	}, nil
-		//}
+		if err != nil {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+
+		newNode := Node{
+			IP:       in.BindIp,
+			Port:     in.BindPort,
+			IPGroups: make(map[string][]string, 0),
+		}
+
+		// Convert struct into byte array
+		buf := &bytes.Buffer{}
+		err = binary.Write(buf, binary.BigEndian, newNode)
+		if err != nil {
+			log.Emergency(err)
+		}
 
 		//// Send our join request
 		//r, err := client.SendJoin(&proto.PulseJoin{
-		//
+		//	Replicated: true,
 		//})
+
+		// Set our config with the response
+
+		// Close the connection
+		client.Close()
 
 		// This is called by our local daemon/agent
 		// It needs to send a request to the peer/node to get cluster details.
