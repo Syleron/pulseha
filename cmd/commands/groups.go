@@ -9,6 +9,7 @@ import (
 	"context"
 	"github.com/olekukonko/tablewriter"
 	"os"
+	"fmt"
 )
 
 type GroupsCommand struct {
@@ -248,6 +249,7 @@ func (c *GroupsCommand) Synopsis() string {
  */
 func (c *GroupsCommand) drawGroupsTable(client proto.RequesterClient) {
 	r, err := client.GroupList(context.Background(), &proto.PulseGroupList{})
+	fmt.Println(r)
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())

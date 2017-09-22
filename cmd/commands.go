@@ -39,7 +39,7 @@ func init() {
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,
-				Build:          Build,
+				Build: Build,
 				VersionRelease: VersionRelease,
 				Ui:             ui,
 			}, nil
