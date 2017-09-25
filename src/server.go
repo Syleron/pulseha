@@ -77,7 +77,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() - Join Pulse cluster")
 	// This is a replication call?
 	if in.Replicated {
-		// Pass onto another function to handle
+		return s.JoinReplicated()
 	}
 	// Are we configured?
 	if !clusterCheck(s.Config) {
@@ -141,6 +141,13 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		Success: false,
 		Message: "Unable to join as PulseHA is already in a cluster.",
 	}, nil
+}
+
+/**
+ *
+ */
+func (s *Server) JoinReplicated() (*proto.PulseJoin, error) {
+	 return &proto.PulseJoin{}, nil
 }
 
 /**
@@ -450,8 +457,4 @@ func (s *Server) shutdown() {
 	log.Debug("Shutting down server")
 	s.Server.GracefulStop()
 	s.Listener.Close()
-}
-
-func (s *Server) JoinReplicated() (error) {
-
 }
