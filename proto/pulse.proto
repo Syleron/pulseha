@@ -52,7 +52,7 @@ message PulseJoin {
     string port = 4;
     string hostname= 5;
     bool replicated = 6;
-
+    bytes config = 7;
 }
 message PulseLeave {
     bool success = 1;

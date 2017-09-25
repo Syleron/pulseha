@@ -28,8 +28,7 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-	"bytes"
-	"encoding/binary"
+	"encoding/json"
 )
 
 // Note: Perhaps I need to consider splitting the CLI/CMD "server" and the main server into separate struct types.
@@ -43,7 +42,6 @@ type Server struct {
 	Last_response time.Time
 	//Members []Member
 	Config *Config
-	Client *Client
 	Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
@@ -70,60 +68,75 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 
 /**
  * Attempt to join a configured cluster
+ * Notes: We create a new client in attempt to communicate with our peer.
+ *        If successful we acknowledge it and update our memberlist.
  */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Join() - Join Pulse cluster")
-
+	// This is a replication call?
+	if in.Replicated {
+		// Pass onto another function to handle
+	}
 	// Are we configured?
-	if clusterCheck(s.Config) {
-		// Create a client
-		client := &Client{}
-
+	if !clusterCheck(s.Config) {
+		// Create a new client
+		client := &Client{
+			Config: s.Config,
+		}
 		// Attempt to connect
-		err := s.Client.Connect(in.Ip, in.Port, in.Hostname)
-
+		err := client.Connect(in.Ip, in.Port, in.Hostname)
+		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
 			}, nil
 		}
-
-		newNode := Node{
+		// Create new local node config to send
+		newNode := &Node{
 			IP:       in.Ip,
 			Port:     in.Port,
 			IPGroups: make(map[string][]string, 0),
 		}
-
 		// Convert struct into byte array
-		buf := &bytes.Buffer{}
-		err = binary.Write(buf, binary.BigEndian, newNode)
-
+		buf, err := json.Marshal(newNode)
+		// Handle failure to marshal config
 		if err != nil {
-			log.Emergency(err)
+			log.Emergency("Unable to marshal config: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
 		}
-
-		//// Send our join request
-		//r, err := client.SendJoin(&proto.PulseJoin{
-		//	Replicated: true,
-		//})
-
-		// Set our config with the response
-
+		// Send our join request
+		r, err := client.SendJoin(&proto.PulseJoin{
+			Replicated: true,
+			Config: buf,
+		})
+		// Handle a failed request
+		if err != nil {
+			log.Emergency("Response error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		// Handle an unsuccessful request
+		if !r.Success {
+			log.Emergency("Peer error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: r.Message,
+			}, nil
+		}
 		// Close the connection
 		client.Close()
-
-		// This is called by our local daemon/agent
-		// It needs to send a request to the peer/node to get cluster details.
-		// Add the node to the config
-		// Notify our peers that a new member has joined
 		return &proto.PulseJoin{
 			Success: true,
 		}, nil
 	}
-
 	return &proto.PulseJoin{
 		Success: false,
 		Message: "Unable to join as PulseHA is already in a cluster.",
@@ -137,9 +150,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
-
 	nodeTotal := len(s.Config.Nodes)
-
 	// Are we even in a cluster?
 	if nodeTotal == 0 {
 		return &proto.PulseLeave{
@@ -147,7 +158,6 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
-
 	// Clear out the groups
 	s.Config.Groups = map[string][]string{}
 	// Clear out the nodes
@@ -155,8 +165,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	// save our config
 	s.Config.Save()
 	// Shutdown our main server
-	s.Close()
-
+	s.shutdown()
 	// Check to see if we are the only member in the cluster
 	if nodeTotal == 1 {
 		return &proto.PulseLeave{
@@ -437,8 +446,12 @@ func (s *Server) Setup() {
 /**
  * Shutdown pulse server (not cli/cmd)
  */
-func (s *Server) Close() {
+func (s *Server) shutdown() {
 	log.Debug("Shutting down server")
 	s.Server.GracefulStop()
 	s.Listener.Close()
+}
+
+func (s *Server) JoinReplicated() (error) {
+
 }

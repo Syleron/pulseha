@@ -50,9 +50,6 @@ func createPulse() *Pulse {
 	pulse := &Pulse{
 		Server: &Server{
 			Config: config,
-			Client: &Client{
-				Config: config,
-			},
 		},
 		Config: config,
 	}

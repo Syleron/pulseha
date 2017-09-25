@@ -30,7 +30,7 @@ type Client struct {
 	//State      PulseState
 	Connection *grpc.ClientConn
 	Requester  p.RequesterClient
-	Config *Config
+	Config     *Config
 }
 
 /**
@@ -43,10 +43,10 @@ func (c *Client) Setup() {
  *
  */
 func (c *Client) Connect(ip, port, hostname string) (error) {
+	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
 	var err error
-
 	if c.Config.Pulse.TLS {
-		creds, err := credentials.NewClientTLSFromFile("./certs/" + hostname + ".crt", "")
+		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
 
 		if err != nil {
 			log.Errorf("Could not load TLS cert: ", err)
@@ -57,14 +57,11 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 	} else {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
 	}
-
 	if err != nil {
 		log.Errorf("GRPC client connection error: ", err)
 		return err
 	}
-
 	c.Requester = p.NewRequesterClient(c.Connection)
-
 	return nil
 }
 
@@ -72,7 +69,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
  *
  */
 func (c *Client) Close() {
-	//c.Connection.Close()
+	c.Connection.Close()
 }
 
 // Senders. Consider moving these into their own file
@@ -81,6 +78,7 @@ func (c *Client) Close() {
  *
  */
 func (c *Client) SendCheck(data *p.HealthCheckRequest) (*p.HealthCheckResponse, error) {
+	log.Debug("Client:SendCheck() Sending GRPC Check")
 	r, err := c.Requester.Check(context.Background(), data)
 
 	return r, err
@@ -90,15 +88,17 @@ func (c *Client) SendCheck(data *p.HealthCheckRequest) (*p.HealthCheckResponse, 
  *
  */
 func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
- r, err := c.Requester.Join(context.Background(), data)
+	log.Debug("Client:SendJoin() Sending GRPC Join")
+	r, err := c.Requester.Join(context.Background(), data)
 
- return r, err
+	return r, err
 }
 
 /**
  *
  */
 func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
+	log.Debug("Client:SendLeave() Sending GRPC Leave")
 	r, err := c.Requester.Leave(context.Background(), data)
 
 	return r, err
@@ -108,6 +108,7 @@ func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
  *
  */
 func (c *Client) SendGroupNew(data *p.PulseGroupNew) (*p.PulseGroupNew, error) {
+	log.Debug("Client:SendGroupNew() Sending GRPC NewGroup")
 	r, err := c.Requester.NewGroup(context.Background(), data)
 
 	return r, err
@@ -117,6 +118,7 @@ func (c *Client) SendGroupNew(data *p.PulseGroupNew) (*p.PulseGroupNew, error) {
  *
  */
 func (c *Client) SendGroupDelete(data *p.PulseGroupDelete) (*p.PulseGroupDelete, error) {
+	log.Debug("Client:SendGroupDelete() Sending GRPC DeleteGroup")
 	r, err := c.Requester.DeleteGroup(context.Background(), data)
 
 	return r, err
@@ -126,6 +128,7 @@ func (c *Client) SendGroupDelete(data *p.PulseGroupDelete) (*p.PulseGroupDelete,
  *
  */
 func (c *Client) SendGroupIPAdd(data *p.PulseGroupAdd) (*p.PulseGroupAdd, error) {
+	log.Debug("Client:SendGroupIPAdd() Sending GRPC GroupIPAdd")
 	r, err := c.Requester.GroupIPAdd(context.Background(), data)
 
 	return r, err
@@ -134,7 +137,8 @@ func (c *Client) SendGroupIPAdd(data *p.PulseGroupAdd) (*p.PulseGroupAdd, error)
 /**
  *
  */
-func (c *Client) SendCheckGroupIPRemove(data *p.PulseGroupRemove) (*p.PulseGroupRemove, error) {
+func (c *Client) SendGroupIPRemove(data *p.PulseGroupRemove) (*p.PulseGroupRemove, error) {
+	log.Debug("Client:SendGroupIPRemove() Sending GRPC GroupIPRemove")
 	r, err := c.Requester.GroupIPRemove(context.Background(), data)
 
 	return r, err
@@ -144,6 +148,7 @@ func (c *Client) SendCheckGroupIPRemove(data *p.PulseGroupRemove) (*p.PulseGroup
  *
  */
 func (c *Client) SendGroupAssign(data *p.PulseGroupAssign) (*p.PulseGroupAssign, error) {
+	log.Debug("Client:SendGroupAssign() Sending GRPC GroupAssign")
 	r, err := c.Requester.GroupAssign(context.Background(), data)
 
 	return r, err
@@ -153,6 +158,7 @@ func (c *Client) SendGroupAssign(data *p.PulseGroupAssign) (*p.PulseGroupAssign,
  *
  */
 func (c *Client) SendGroupUnassign(data *p.PulseGroupUnassign) (*p.PulseGroupUnassign, error) {
+	log.Debug("Client:SendGroupUnassign() Sending GRPC GroupUnassign")
 	r, err := c.Requester.GroupUnassign(context.Background(), data)
 
 	return r, err
