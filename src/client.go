@@ -36,6 +36,16 @@ type Client struct {
 /**
  *
  */
+func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
+	funcList := map[string]interface{} {
+		"SendJoin": c.SendJoin,
+	}
+	return funcList
+}
+
+/**
+ *
+ */
 func (c *Client) Setup() {
 }
 
@@ -163,3 +173,4 @@ func (c *Client) SendGroupUnassign(data *p.PulseGroupUnassign) (*p.PulseGroupUna
 
 	return r, err
 }
+

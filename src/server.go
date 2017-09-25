@@ -40,11 +40,11 @@ type Server struct {
 	sync.Mutex
 	Status        proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
-	//Members []Member
 	Config *Config
 	Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
+	Memberlist *Memberlist
 }
 
 /**
@@ -77,7 +77,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() - Join Pulse cluster")
 	// This is a replication call?
 	if in.Replicated {
-		return s.JoinReplicated()
+		return s.JoinReplicated(in)
 	}
 	// Are we configured?
 	if !clusterCheck(s.Config) {
@@ -114,6 +114,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		r, err := client.SendJoin(&proto.PulseJoin{
 			Replicated: true,
 			Config: buf,
+			Hostname: GetHostname(),
 		})
 		// Handle a failed request
 		if err != nil {
@@ -146,8 +147,38 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 /**
  *
  */
-func (s *Server) JoinReplicated() (*proto.PulseJoin, error) {
-	 return &proto.PulseJoin{}, nil
+func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
+	// Make sure we are in a configured cluster
+	if !clusterCheck(s.Config) {
+		// Create new Node struct
+		originNode := &Node{}
+		// Unmarshal byte array as type Node
+		err := json.Unmarshal(in.Config, originNode)
+		// Handle the unmarshal error
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// TODO: Node validation?
+		// Add to our config
+
+
+		// This logic should probably go elsewhere
+		s.Config.Nodes[in.Hostname] = *originNode
+		// Save our config
+		s.Config.Save()
+		return &proto.PulseJoin{
+			Success: true,
+			Message: "Successfully added ",
+		}, nil
+	}
+	 return &proto.PulseJoin{
+	 	Success: false,
+	 	Message: "",
+	 }, nil
 }
 
 /**
