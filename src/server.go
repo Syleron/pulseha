@@ -145,7 +145,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 }
 
 /**
- *
+ * Join replicated logic. This is only performed when sent by another peer/node.
  */
 func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	// Make sure we are in a configured cluster
@@ -242,7 +242,7 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
 				// Create a new group name
-				groupName := genGroupName(s.Config)
+				groupName := GenGroupName(s.Config)
 				// Create a group for the interface
 				s.Config.Groups[groupName] = []string{}
 				// assign the group to the interface

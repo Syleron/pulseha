@@ -23,7 +23,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"time"
 	"errors"
@@ -128,72 +127,6 @@ func clusterCheck(c *Config) (bool) {
 	return false
 }
 
-/**
- * Generates an available IP floating group name.
- */
-func genGroupName(c *Config) (string) {
-	totalGroups := len(c.Groups)
-	for i := 1; i <= totalGroups; i++ {
-		newName := "group" + strconv.Itoa(i)
-		if _, ok := c.Groups[newName]; !ok {
-			return newName
-		}
-	}
-	return "group" + strconv.Itoa(totalGroups+1)
-}
-
-/**
- * Checks to see if a floating IP group already exists
- */
-func groupExist(name string, c *Config) (bool) {
-	if _, ok := c.Groups[name]; ok {
-		return true
-	}
-	return false
-}
-
-/**
- * Checks to see if a floating IP already exists inside of a floating ip group
- * Returns bool - exists/not & int - slice index
- */
-func groupIPExist(name string, ip string, c *Config) (bool, int) {
-	for index, cip := range c.Groups[name] {
-		if ip == cip {
-			return true, index
-		}
-	}
-	return false, -1
-}
-
-/**
- * Checks to see if a node has any interface assignments.
- * Note: Eww three for loops.
- */
-func nodeAssignedToInterface(group string, c *Config) (bool) {
-	for _, node := range c.Nodes {
-		for _, groups := range node.IPGroups {
-			for _, ifaceGroup := range groups {
-				if ifaceGroup == group {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-/**
- * Checks to see if a floating IP group has already been assigned to a node's interface.
- * Returns bool - exists/not & int - slice index
- */
-func nodeInterfaceGroupExists(node, iface, group string, c *Config) (bool, int) {
-	for index, existingGroup := range c.Nodes[node].IPGroups[iface] {
-		if existingGroup == group {
-			return true, index
-		}
-	}
-	return false, -1
-}
 
 /**
  * Function to return an IP and Port from a single ip:port string
