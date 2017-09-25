@@ -20,10 +20,10 @@ package main
 import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"os"
 	"github.com/coreos/go-log/log"
 	p "github.com/Syleron/PulseHA/proto"
 	"context"
+	"errors"
 )
 
 type Client struct {
@@ -50,7 +50,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 
 		if err != nil {
 			log.Errorf("Could not load TLS cert: ", err)
-			os.Exit(1)
+			return errors.New("could not load node TLS cert: " + hostname + ".crt")
 		}
 
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))

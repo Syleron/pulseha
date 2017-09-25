@@ -50,22 +50,21 @@ func (c *CreateCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
-	// Get the bind-addr value
-	bindAddr := cmdFlags.String("bind-addr", "127.0.0.1", "Bind address for local Pulse daemon")
-
 	// Make sure we have cmd args
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
+	addr := cmdFlags.Args()
+
 	// If we have the default.. which we don't want.. error out.
-	if *bindAddr == "127.0.0.1" {
+	if addr[0] == "127.0.0.1" {
 		c.Ui.Error("Please specify a bind address.\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
-	bindAddrString := strings.Split(*bindAddr, ":")
+	bindAddrString := strings.Split(addr[0], ":")
 
 	if len(bindAddrString) < 2 {
 		c.Ui.Error("Please provide an IP and Port for PulseHA to bind on")

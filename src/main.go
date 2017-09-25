@@ -33,7 +33,6 @@ var (
  * Main Pulse struct type
  */
 type Pulse struct {
-	Client *Client
 	Server *Server
 	Config *Config
 }
@@ -51,9 +50,9 @@ func createPulse() *Pulse {
 	pulse := &Pulse{
 		Server: &Server{
 			Config: config,
-		},
-		Client: &Client{
-			Config: config,
+			Client: &Client{
+				Config: config,
+			},
 		},
 		Config: config,
 	}

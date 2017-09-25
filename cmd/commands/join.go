@@ -38,6 +38,8 @@ func (c *JoinCommand) Help() string {
 Usage: pulseha join [options] address ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
+Options:
+  - hostname - Hostname of peer node.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -48,6 +50,8 @@ Usage: pulseha join [options] address ...
 func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
+
+	hostName := cmdFlags.String("hostname", "", "Hostname of peer node")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -62,7 +66,7 @@ func (c *JoinCommand) Run(args []string) int {
 		return 1
 	}
 
-	connection, err := grpc.Dial(addr[0], grpc.WithInsecure())
+	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
 	if err != nil {
 		c.Ui.Error("GRPC client connection error. Is the PulseHA service running?")
@@ -81,9 +85,17 @@ func (c *JoinCommand) Run(args []string) int {
 		return 1
 	}
 
+	if *hostName == "" {
+		c.Ui.Error("Please specify the peers hostname")
+		c.Ui.Error("")
+		c.Ui.Error(c.Help())
+		return 1
+	}
+
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
 		Ip: bindAddrString[0],
 		Port: bindAddrString[1],
+		Hostname: *hostName,
 	})
 
 	if err != nil {

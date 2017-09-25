@@ -43,6 +43,7 @@ type Server struct {
 	Last_response time.Time
 	//Members []Member
 	Config *Config
+	Client *Client
 	Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
@@ -76,12 +77,12 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() - Join Pulse cluster")
 
 	// Are we configured?
-	if !clusterCheck(s.Config) {
+	if clusterCheck(s.Config) {
 		// Create a client
 		client := &Client{}
 
 		// Attempt to connect
-		err := client.Connect(in.Ip, in.Port, in.Hostname)
+		err := s.Client.Connect(in.Ip, in.Port, in.Hostname)
 
 		if err != nil {
 			return &proto.PulseJoin{
@@ -99,6 +100,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Convert struct into byte array
 		buf := &bytes.Buffer{}
 		err = binary.Write(buf, binary.BigEndian, newNode)
+
 		if err != nil {
 			log.Emergency(err)
 		}
@@ -373,13 +375,13 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
  * Setup pulse cli type
  */
 func (s *Server) SetupCLI() {
+	log.Info("CLI initialised on 127.0.0.1:9443")
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 	}
 	grpcServer := grpc.NewServer()
 	proto.RegisterRequesterServer(grpcServer, s)
-	log.Info("CLI initialised on 127.0.0.1:9443")
 	grpcServer.Serve(lis)
 }
 
@@ -389,6 +391,7 @@ func (s *Server) SetupCLI() {
 func (s *Server) Setup() {
 	// Only continue if we are in a configured cluster
 	if !clusterCheck(s.Config) {
+		log.Info("PulseHA is currently unconfigured.")
 		return
 	}
 
@@ -420,6 +423,7 @@ func (s *Server) Setup() {
 
 		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
+		log.Warning("TLS Disabled! Pulse server connection unsecured.")
 		s.Server = grpc.NewServer()
 	}
 
