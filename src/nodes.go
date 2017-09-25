@@ -29,7 +29,7 @@ func NodeDelete() {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func nodeAssignedToInterface(group string, c *Config) (bool) {
+func NodeAssignedToInterface(group string, c *Config) (bool) {
 	for _, node := range c.Nodes {
 		for _, groups := range node.IPGroups {
 			for _, ifaceGroup := range groups {
@@ -46,7 +46,7 @@ func nodeAssignedToInterface(group string, c *Config) (bool) {
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */
-func nodeInterfaceGroupExists(node, iface, group string, c *Config) (bool, int) {
+func NodeInterfaceGroupExists(node, iface, group string, c *Config) (bool, int) {
 	for index, existingGroup := range c.Nodes[node].IPGroups[iface] {
 		if existingGroup == group {
 			return true, index

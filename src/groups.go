@@ -29,7 +29,7 @@ func GroupNew(c *Config) (string, error) {
  */
 func GroupDelete(groupName string, c *Config) (error) {
 	if GroupExist(groupName, c) {
-		if !nodeAssignedToInterface(groupName, c) {
+		if !NodeAssignedToInterface(groupName, c) {
 			delete(c.Groups, groupName)
 			return nil
 		}
@@ -97,7 +97,7 @@ func GroupIpRemove(groupName string, ips []string, c *Config) (error) {
 func GroupAssign(groupName, node, iface string, c *Config) (error) {
 	if GroupExist(groupName, c) {
 		if interfaceExist(iface) {
-			if exists, _ := nodeInterfaceGroupExists(node, iface, groupName, c); !exists {
+			if exists, _ := NodeInterfaceGroupExists(node, iface, groupName, c); !exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface], groupName)
 			} else {
 				log.Warning(groupName + " already exists in node " + node + ".. skipping.")
@@ -117,7 +117,7 @@ func GroupAssign(groupName, node, iface string, c *Config) (error) {
 func GroupUnassign(groupName, node, iface string, c *Config) (error) {
 	if GroupExist(groupName, c) {
 		if !interfaceExist(iface) {
-			if exists, i := nodeInterfaceGroupExists(node, iface, groupName, c); exists {
+			if exists, i := NodeInterfaceGroupExists(node, iface, groupName, c); exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface][:i], c.Nodes[node].IPGroups[iface][i+1:]...)
 			} else {
 				log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
