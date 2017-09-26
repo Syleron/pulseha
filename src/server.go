@@ -165,10 +165,9 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 		// TODO: Node validation?
 		// Add to our config
 		NodeAdd(in.Hostname, originNode, s.Config)
-		// This logic should probably go elsewhere
-		s.Config.Nodes[in.Hostname] = *originNode
 		// Save our config
 		s.Config.Save()
+		// Get our entire config so we can send it back
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
@@ -434,7 +433,7 @@ func (s *Server) SetupCLI() {
 func (s *Server) Setup() {
 	// Only continue if we are in a configured cluster
 	if !clusterCheck(s.Config) {
-		log.Info("PulseHA is currently unconfigured.")
+		log.Info("PulseHA is currently un-configured.")
 		return
 	}
 
