@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/coreos/go-log/log"
 	"errors"
+	"strconv"
 )
 
 /**
@@ -13,7 +14,7 @@ import (
  */
 func GroupNew(c *Config) (string, error) {
 	if clusterCheck(c) {
-		groupName := genGroupName(c)
+		groupName := GenGroupName(c)
 		c.Groups[groupName] = []string{}
 		return groupName, nil
 	} else {
@@ -27,8 +28,8 @@ func GroupNew(c *Config) (string, error) {
  * @return error
  */
 func GroupDelete(groupName string, c *Config) (error) {
-	if groupExist(groupName, c) {
-		if !nodeAssignedToInterface(groupName, c) {
+	if GroupExist(groupName, c) {
+		if !NodeAssignedToInterface(groupName, c) {
 			delete(c.Groups, groupName)
 			return nil
 		}
@@ -39,16 +40,23 @@ func GroupDelete(groupName string, c *Config) (error) {
 }
 
 /**
+ * Clear out all local Groups
+ */
+func GroupClearLocal(c *Config) {
+	c.Groups = map[string][]string{}
+}
+
+/**
  * Add floating IP to group
  *
  * @return error
  */
 func GroupIpAdd(groupName string, ips []string, c *Config) (error) {
-	if groupExist(groupName, c) {
+	if GroupExist(groupName, c) {
 		for _, ip := range ips {
 			if ValidIPAddress(ip) {
 				if len(c.Groups[groupName]) > 0 {
-					if exists, _ := groupIPExist(groupName, ip, c); !exists {
+					if exists, _ := GroupIPExist(groupName, ip, c); !exists {
 						c.Groups[groupName] = append(c.Groups[groupName], ip)
 					} else {
 						log.Warning(ip + " already exists in group " + groupName + ".. skipping.")
@@ -72,10 +80,10 @@ func GroupIpAdd(groupName string, ips []string, c *Config) (error) {
  * @return error
  */
 func GroupIpRemove(groupName string, ips []string, c *Config) (error) {
-	if groupExist(groupName, c) {
+	if GroupExist(groupName, c) {
 		for _, ip := range ips {
 			if len(c.Groups[groupName]) > 0 {
-				if exists, i := groupIPExist(groupName, ip, c); exists {
+				if exists, i := GroupIPExist(groupName, ip, c); exists {
 					c.Groups[groupName] = append(c.Groups[groupName][:i], c.Groups[groupName][i+1:]...)
 				} else {
 					log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
@@ -94,9 +102,9 @@ func GroupIpRemove(groupName string, ips []string, c *Config) (error) {
  * @return error
  */
 func GroupAssign(groupName, node, iface string, c *Config) (error) {
-	if groupExist(groupName, c) {
+	if GroupExist(groupName, c) {
 		if interfaceExist(iface) {
-			if exists, _ := nodeInterfaceGroupExists(node, iface, groupName, c); !exists {
+			if exists, _ := NodeInterfaceGroupExists(node, iface, groupName, c); !exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface], groupName)
 			} else {
 				log.Warning(groupName + " already exists in node " + node + ".. skipping.")
@@ -114,9 +122,9 @@ func GroupAssign(groupName, node, iface string, c *Config) (error) {
  * @return error
  */
 func GroupUnassign(groupName, node, iface string, c *Config) (error) {
-	if groupExist(groupName, c) {
+	if GroupExist(groupName, c) {
 		if !interfaceExist(iface) {
-			if exists, i := nodeInterfaceGroupExists(node, iface, groupName, c); exists {
+			if exists, i := NodeInterfaceGroupExists(node, iface, groupName, c); exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface][:i], c.Nodes[node].IPGroups[iface][i+1:]...)
 			} else {
 				log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
@@ -127,4 +135,41 @@ func GroupUnassign(groupName, node, iface string, c *Config) (error) {
 	} else {
 		return errors.New("IP group does not exist")
 	}
+}
+
+/**
+ * Generates an available IP floating group name.
+ */
+func GenGroupName(c *Config) (string) {
+	totalGroups := len(c.Groups)
+	for i := 1; i <= totalGroups; i++ {
+		newName := "group" + strconv.Itoa(i)
+		if _, ok := c.Groups[newName]; !ok {
+			return newName
+		}
+	}
+	return "group" + strconv.Itoa(totalGroups+1)
+}
+
+/**
+ * Checks to see if a floating IP group already exists
+ */
+func GroupExist(name string, c *Config) (bool) {
+	if _, ok := c.Groups[name]; ok {
+		return true
+	}
+	return false
+}
+
+/**
+ * Checks to see if a floating IP already exists inside of a floating ip group
+ * Returns bool - exists/not & int - slice index
+ */
+func GroupIPExist(name string, ip string, c *Config) (bool, int) {
+	for index, cip := range c.Groups[name] {
+		if ip == cip {
+			return true, index
+		}
+	}
+	return false, -1
 }

@@ -1,3 +1,20 @@
+/*
+    PulseHA - HA Cluster Daemon
+    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 package main
 
 import (
@@ -11,6 +28,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"encoding/json"
+	"strconv"
 )
 
 /**
@@ -20,11 +39,11 @@ type Server struct {
 	sync.Mutex
 	Status        proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
-	Members       []Member
-	Config        *Config
-	Log           log.Logger
-	Server        *grpc.Server
-	Listener      net.Listener
+	Config *Config
+	Log log.Logger
+	Server *grpc.Server
+	Listener net.Listener
+	Memberlist *Memberlist
 }
 
 /**
@@ -48,41 +67,77 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 
 /**
  * Attempt to join a configured cluster
+ * Notes: We create a new client in attempt to communicate with our peer.
+ *        If successful we acknowledge it and update our memberlist.
  */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:Join() - Join Pulse cluster")
-
+	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	// This is a replication call?
+	if in.Replicated {
+		return s.JoinReplicated(in)
+	}
 	// Are we configured?
 	if !clusterCheck(s.Config) {
-		// Create a client
-		//client := &Client{}
-
+		// Create a new client
+		client := &Client{
+			Config: s.Config,
+		}
 		// Attempt to connect
-		//err := client.Connect(in., in.Port, in.Hostname)
-
-		//if err != nil {
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: "Unable to reach requested node. Join failed.",
-		//	}, nil
-		//}
-
-		//// Send our join request
-		//r, err := client.SendJoin(&proto.PulseJoin{
-		//
-		//})
-
-		// This is called by our local daemon/agent
-		// It needs to send a request to the peer/node to get cluster details.
-		// Add the node to the config
-		// Notify our peers that a new member has joined
+		err := client.Connect(in.Ip, in.Port, in.Hostname)
+		// Handle a client connection error
+		if err != nil {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		// Create new local node config to send
+		newNode := &Node{
+			IP:       in.Ip,
+			Port:     in.Port,
+			IPGroups: make(map[string][]string, 0),
+		}
+		// Convert struct into byte array
+		buf, err := json.Marshal(newNode)
+		// Handle failure to marshal config
+		if err != nil {
+			log.Emergency("Unable to marshal config: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		// Send our join request
+		r, err := client.SendJoin(&proto.PulseJoin{
+			Replicated: true,
+			Config: buf,
+			Hostname: GetHostname(),
+		})
+		// Handle a failed request
+		if err != nil {
+			log.Emergency("Response error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		// Handle an unsuccessful request
+		if !r.Success {
+			log.Emergency("Peer error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: r.Message,
+			}, nil
+		}
+		// Update our local config
+		// Close the connection
+		client.Close()
 		return &proto.PulseJoin{
 			Success: true,
 		}, nil
 	}
-
 	return &proto.PulseJoin{
 		Success: false,
 		Message: "Unable to join as PulseHA is already in a cluster.",
@@ -90,40 +145,71 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 }
 
 /**
+ * Join replicated logic. This is only performed when sent by another peer/node.
+ */
+func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
+	// Make sure we are in a configured cluster
+	if clusterCheck(s.Config) {
+		// Create new Node struct
+		originNode := &Node{}
+		// Unmarshal byte array as type Node
+		err := json.Unmarshal(in.Config, originNode)
+		// Handle the unmarshal error
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// TODO: Node validation?
+		// Add to our config
+		NodeAdd(in.Hostname, originNode, s.Config)
+		// This logic should probably go elsewhere
+		s.Config.Nodes[in.Hostname] = *originNode
+		// Save our config
+		s.Config.Save()
+		return &proto.PulseJoin{
+			Success: true,
+			Message: "Successfully added ",
+		}, nil
+	}
+	 return &proto.PulseJoin{
+	 	Success: false,
+	 	Message: "This node is not in a configured cluster.",
+	 }, nil
+}
+
+/**
  * Break cluster / Leave from cluster
+ * TODO: Leave from cluster. At the moment it will only break if we are the sole member.
  */
 func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
-
-	nodeTotal := len(s.Config.Nodes)
-
 	// Are we even in a cluster?
-	if nodeTotal == 0 {
+	if !clusterCheck(s.Config) {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
-
 	// Clear out the groups
-	s.Config.Groups = map[string][]string{}
+	GroupClearLocal(s.Config)
 	// Clear out the nodes
-	s.Config.Nodes = map[string]Node{}
+	NodesClearLocal(s.Config)
 	// save our config
 	s.Config.Save()
 	// Shutdown our main server
-	s.Close()
-
+	s.shutdown()
 	// Check to see if we are the only member in the cluster
-	if nodeTotal == 1 {
+	if clusterTotal(s.Config) == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
 		}, nil
 	}
-
 	// We need to inform our peers that we have left!
 	return &proto.PulseLeave{
 		Success: true,
@@ -141,20 +227,20 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 	// Method of first checking to see if we are in a cluster.
 	if !clusterCheck(s.Config) {
 		// we are not in an active cluster
-		newNode := Node{
+		newNode := &Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
-		s.Config.Nodes[GetHostname()] = newNode
+		NodeAdd(GetHostname(), newNode, s.Config)
 		// Assign interface names to node
 		for _, ifaceName := range getInterfaceNames() {
 			if ifaceName != "lo" {
 				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
 				// Create a new group name
-				groupName := genGroupName(s.Config)
+				groupName := GenGroupName(s.Config)
 				// Create a group for the interface
 				s.Config.Groups[groupName] = []string{}
 				// assign the group to the interface
@@ -163,8 +249,6 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 		}
 		// Save the config
 		s.Config.Save()
-		// Reload the config
-		//s.Config.Reload()
 		// Setup the listener
 		go s.Setup()
 		// return if we were successful or not
@@ -318,9 +402,7 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupList() - Getting groups and their IPs")
-
 	list := make(map[string]*proto.Group)
-
 	for name, ips := range s.Config.Groups {
 		list[name] = &proto.Group{
 			Ips: ips,
@@ -336,13 +418,13 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
  * Setup pulse cli type
  */
 func (s *Server) SetupCLI() {
+	log.Info("CLI initialised on 127.0.0.1:9443")
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 	}
 	grpcServer := grpc.NewServer()
 	proto.RegisterRequesterServer(grpcServer, s)
-	log.Info("CLI initialised on 127.0.0.1:9443")
 	grpcServer.Serve(lis)
 }
 
@@ -352,6 +434,7 @@ func (s *Server) SetupCLI() {
 func (s *Server) Setup() {
 	// Only continue if we are in a configured cluster
 	if !clusterCheck(s.Config) {
+		log.Info("PulseHA is currently unconfigured.")
 		return
 	}
 
@@ -383,6 +466,7 @@ func (s *Server) Setup() {
 
 		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
+		log.Warning("TLS Disabled! Pulse server connection unsecured.")
 		s.Server = grpc.NewServer()
 	}
 
@@ -396,7 +480,7 @@ func (s *Server) Setup() {
 /**
  * Shutdown pulse server (not cli/cmd)
  */
-func (s *Server) Close() {
+func (s *Server) shutdown() {
 	log.Debug("Shutting down server")
 	s.Server.GracefulStop()
 	s.Listener.Close()

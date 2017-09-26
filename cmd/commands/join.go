@@ -1,3 +1,20 @@
+/*
+    PulseHA - HA Cluster Daemon
+    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 package commands
 
 import (
@@ -21,6 +38,8 @@ func (c *JoinCommand) Help() string {
 Usage: pulseha join [options] address ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
+Options:
+  - hostname - Hostname of peer node.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -31,6 +50,8 @@ Usage: pulseha join [options] address ...
 func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
+
+	hostName := cmdFlags.String("hostname", "", "Hostname of peer node")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -45,7 +66,7 @@ func (c *JoinCommand) Run(args []string) int {
 		return 1
 	}
 
-	connection, err := grpc.Dial(addr[0], grpc.WithInsecure())
+	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
 	if err != nil {
 		c.Ui.Error("GRPC client connection error. Is the PulseHA service running?")
@@ -64,9 +85,17 @@ func (c *JoinCommand) Run(args []string) int {
 		return 1
 	}
 
+	if *hostName == "" {
+		c.Ui.Error("Please specify the peers hostname")
+		c.Ui.Error("")
+		c.Ui.Error(c.Help())
+		return 1
+	}
+
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
 		Ip: bindAddrString[0],
 		Port: bindAddrString[1],
+		Hostname: *hostName,
 	})
 
 	if err != nil {
