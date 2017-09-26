@@ -17,14 +17,18 @@
  */
 package main
 
-import "errors"
+import (
+	"errors"
+	"github.com/coreos/go-log/log"
+)
 
 /**
  * Add a node type Node to our config.
  */
-func NodeAdd(hostName string, node Node, c *Config) (error) {
-	if !NodeExists(hostName, c) {
-		c.Nodes[hostName] = node
+func NodeAdd(hostname string, node *Node, c *Config) (error) {
+	log.Debug(hostname + " added to local node")
+	if !NodeExists(hostname, c) {
+		c.Nodes[hostname] = *node
 		return nil
 	}
 	return errors.New("unable to add node as it already exists")
@@ -33,9 +37,10 @@ func NodeAdd(hostName string, node Node, c *Config) (error) {
 /**
  * Remove a node from our config by hostname.
  */
-func NodeDelete(hostName string, c *Config) (error) {
-	if NodeExists(hostName, c)	{
-		delete(c.Nodes, hostName)
+func NodeDelete(hostname string, c *Config) (error) {
+	log.Debug(hostname + " remove from the local node")
+	if NodeExists(hostname, c)	{
+		delete(c.Nodes, hostname)
 		return nil
 	}
 	return errors.New("unable to delete node as it doesn't exist")
@@ -45,6 +50,7 @@ func NodeDelete(hostName string, c *Config) (error) {
  * Clear out local Nodes section of config.
  */
 func NodesClearLocal(c *Config) {
+	log.Debug("All nodes cleared from local config")
 	c.Nodes = map[string]Node{}
 }
 

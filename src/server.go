@@ -29,9 +29,8 @@ import (
 	"sync"
 	"time"
 	"encoding/json"
+	"strconv"
 )
-
-// Note: Perhaps I need to consider splitting the CLI/CMD "server" and the main server into separate struct types.
 
 /**
  * Server struct type
@@ -74,7 +73,7 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("Server:Join() - Join Pulse cluster")
+	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	// This is a replication call?
 	if in.Replicated {
 		return s.JoinReplicated(in)
@@ -132,6 +131,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: r.Message,
 			}, nil
 		}
+		// Update our local config
 		// Close the connection
 		client.Close()
 		return &proto.PulseJoin{
@@ -149,7 +149,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
  */
 func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	// Make sure we are in a configured cluster
-	if !clusterCheck(s.Config) {
+	if clusterCheck(s.Config) {
 		// Create new Node struct
 		originNode := &Node{}
 		// Unmarshal byte array as type Node
@@ -164,8 +164,7 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 		}
 		// TODO: Node validation?
 		// Add to our config
-
-
+		NodeAdd(in.Hostname, originNode, s.Config)
 		// This logic should probably go elsewhere
 		s.Config.Nodes[in.Hostname] = *originNode
 		// Save our config
@@ -177,19 +176,20 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	}
 	 return &proto.PulseJoin{
 	 	Success: false,
-	 	Message: "",
+	 	Message: "This node is not in a configured cluster.",
 	 }, nil
 }
 
 /**
  * Break cluster / Leave from cluster
+ * TODO: Leave from cluster. At the moment it will only break if we are the sole member.
  */
 func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
 	// Are we even in a cluster?
-	if clusterCheck(s.Config) {
+	if !clusterCheck(s.Config) {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
@@ -227,7 +227,7 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 	// Method of first checking to see if we are in a cluster.
 	if !clusterCheck(s.Config) {
 		// we are not in an active cluster
-		newNode := Node{
+		newNode := &Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),

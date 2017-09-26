@@ -106,9 +106,10 @@ func CheckFolderExist(path string) bool {
 
 /**
  * Get local hostname
+ * Note: This may break with FQDs
  */
 func GetHostname() string {
-	output, err := Execute("hostname", "-f")
+	output, err := Execute("hostname")
 	if err != nil {
 		log.Error("Failed to obtain hostname.")
 		os.Exit(1)

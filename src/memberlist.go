@@ -40,7 +40,7 @@ type Member struct {
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) AddMember(hostname string, client Client) {
+func (m *Memberlist) MemberAdd(hostname string, client Client) {
 	newMember := &Member{
 		Hostname: hostname,
 		Client:client,
@@ -52,7 +52,7 @@ func (m *Memberlist) AddMember(hostname string, client Client) {
 /**
  * Remove a member from the client list by hostname
  */
-func (m *Memberlist) RemoveMemberByName(hostname string) () {
+func (m *Memberlist) MemberRemoveByName(hostname string) () {
 	for i, member := range m.Members {
 		if member.Hostname == hostname {
 			m.Members = append(m.Members[:i], m.Members[i+1:]...)
@@ -70,6 +70,18 @@ func (m *Memberlist) GetMemberByHostname(hostname string) (*Member) {
 		}
 	}
 	return nil
+}
+
+/**
+ * Return true/false whether a member exists or not.
+ */
+func (m *Memberlist) MemberExists(hostname string) (bool) {
+	for _, member := range m.Members {
+		if member.Hostname == hostname {
+			return true
+		}
+	}
+	return false
 }
 
 /**

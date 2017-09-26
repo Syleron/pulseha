@@ -77,6 +77,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
  *
  */
 func (c *Client) Close() {
+	log.Debug("Client:Close() Connection closed")
 	c.Connection.Close()
 }
 
