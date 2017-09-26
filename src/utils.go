@@ -127,6 +127,13 @@ func clusterCheck(c *Config) (bool) {
 	return false
 }
 
+/**
+ * Return the total number of configured nodes we have in our config.
+ */
+func clusterTotal(c *Config) (int) {
+ return len(c.Nodes)
+}
+
 
 /**
  * Function to return an IP and Port from a single ip:port string

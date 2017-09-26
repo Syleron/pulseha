@@ -33,16 +33,16 @@ type Memberlist struct {
  * Member struct type
  */
 type Member struct {
-	Name   string
+	Hostname   string
 	Client Client
 }
 
 /**
- *
+ * Add a member to the client list
  */
 func (m *Memberlist) AddMember(hostname string, client Client) {
 	newMember := &Member{
-		Name: hostname,
+		Hostname: hostname,
 		Client:client,
 	}
 
@@ -50,22 +50,22 @@ func (m *Memberlist) AddMember(hostname string, client Client) {
 }
 
 /**
- *
+ * Remove a member from the client list by hostname
  */
 func (m *Memberlist) RemoveMemberByName(hostname string) () {
 	for i, member := range m.Members {
-		if member.Name == hostname {
+		if member.Hostname == hostname {
 			m.Members = append(m.Members[:i], m.Members[i+1:]...)
 		}
 	}
 }
 
 /**
- *
+ * Return Member by hostname
  */
 func (m *Memberlist) GetMemberByHostname(hostname string) (*Member) {
 	for _, member := range m.Members {
-		if member.Name == hostname {
+		if member.Hostname == hostname {
 			return member
 		}
 	}
@@ -82,7 +82,6 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 		if len(params) != f.Type().NumIn() {
 			return nil, errors.New("the number of passed parameters do not match the function")
 		}
-
 		vals := make([]reflect.Value, len(params))
 		for k, param := range params {
 			vals[k] = reflect.ValueOf(param)

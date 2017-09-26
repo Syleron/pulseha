@@ -57,12 +57,10 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 	var err error
 	if c.Config.Pulse.TLS {
 		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
-
 		if err != nil {
 			log.Errorf("Could not load TLS cert: ", err)
 			return errors.New("could not load node TLS cert: " + hostname + ".crt")
 		}
-
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())

@@ -188,30 +188,28 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
-	nodeTotal := len(s.Config.Nodes)
 	// Are we even in a cluster?
-	if nodeTotal == 0 {
+	if clusterCheck(s.Config) {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
 	// Clear out the groups
-	s.Config.Groups = map[string][]string{}
+	GroupClearLocal(s.Config)
 	// Clear out the nodes
-	s.Config.Nodes = map[string]Node{}
+	NodesClearLocal(s.Config)
 	// save our config
 	s.Config.Save()
 	// Shutdown our main server
 	s.shutdown()
 	// Check to see if we are the only member in the cluster
-	if nodeTotal == 1 {
+	if clusterTotal(s.Config) == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
 		}, nil
 	}
-
 	// We need to inform our peers that we have left!
 	return &proto.PulseLeave{
 		Success: true,
@@ -235,7 +233,7 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
-		s.Config.Nodes[GetHostname()] = newNode
+		NodeAdd(GetHostname(), newNode, s.Config)
 		// Assign interface names to node
 		for _, ifaceName := range getInterfaceNames() {
 			if ifaceName != "lo" {
@@ -404,9 +402,7 @@ func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*prot
 	s.Lock()
 	defer s.Unlock()
 	log.Debug("Server:GroupList() - Getting groups and their IPs")
-
 	list := make(map[string]*proto.Group)
-
 	for name, ips := range s.Config.Groups {
 		list[name] = &proto.Group{
 			Ips: ips,

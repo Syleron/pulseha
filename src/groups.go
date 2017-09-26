@@ -40,6 +40,13 @@ func GroupDelete(groupName string, c *Config) (error) {
 }
 
 /**
+ * Clear out all local Groups
+ */
+func GroupClearLocal(c *Config) {
+	c.Groups = map[string][]string{}
+}
+
+/**
  * Add floating IP to group
  *
  * @return error

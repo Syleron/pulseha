@@ -17,12 +17,48 @@
  */
 package main
 
-func NodeAdd() {
+import "errors"
 
+/**
+ * Add a node type Node to our config.
+ */
+func NodeAdd(hostName string, node Node, c *Config) (error) {
+	if !NodeExists(hostName, c) {
+		c.Nodes[hostName] = node
+		return nil
+	}
+	return errors.New("unable to add node as it already exists")
 }
 
-func NodeDelete() {
+/**
+ * Remove a node from our config by hostname.
+ */
+func NodeDelete(hostName string, c *Config) (error) {
+	if NodeExists(hostName, c)	{
+		delete(c.Nodes, hostName)
+		return nil
+	}
+	return errors.New("unable to delete node as it doesn't exist")
+}
 
+/**
+ * Clear out local Nodes section of config.
+ */
+func NodesClearLocal(c *Config) {
+	c.Nodes = map[string]Node{}
+}
+
+/**
+ * Determines whether a Node already exists in a config based
+   off the nodes hostname.
+ */
+func NodeExists(hostName string, c *Config) (bool) {
+	for key, _ := range c.Nodes {
+		if key == hostName {
+			return true
+		}
+	}
+	return false
 }
 
 /**
