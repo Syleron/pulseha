@@ -117,6 +117,7 @@ func (m *Memberlist) Setup() {
 		if clusterTotal(m.Config) == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
+			m.PromoteMember(GetHostname())
 		} else {
 			// Contact a member in the list to see who is the "active" node.
 			// Iterate through the memberlist until a response is receive.
@@ -126,10 +127,19 @@ func (m *Memberlist) Setup() {
 }
 
 /**
+	load the nodes in our config into our memberlist
+ */
+func (m *Memberlist) LoadMembers() {
+	//for key, node := range m.Config.Nodes {
+	//
+	//}
+}
+
+/**
 	Promote a member within the memberlist to become the active
 	node
  */
-func (m *Member) PromoteMember() {
+func (m *Memberlist) PromoteMember(hostname string) {
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 }
