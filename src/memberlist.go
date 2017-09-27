@@ -103,4 +103,13 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 	return nil, nil
 }
 
+/**
+ * check how many are in the cluster
+ * if more than one, request who's active.
+ * if no one responds assume active.
+ */
+func (m *Memberlist) Setup() {
+
+}
+
 

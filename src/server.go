@@ -436,15 +436,12 @@ func (s *Server) Setup() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
-
 	var err error
 	s.Listener, err = net.Listen("tcp", s.Config.LocalNode().IP+":"+s.Config.LocalNode().Port)
-
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 		os.Exit(1)
 	}
-
 	if s.Config.Pulse.TLS {
 		// Get project directory location
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
@@ -455,24 +452,19 @@ func (s *Server) Setup() {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}
-
 		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
-
 		if err != nil {
 			log.Error("Could not load TLS keys.")
 			os.Exit(1)
 		}
-
 		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
 		log.Warning("TLS Disabled! Pulse server connection unsecured.")
 		s.Server = grpc.NewServer()
 	}
-
 	proto.RegisterRequesterServer(s.Server, s)
-
+	s.Memberlist.Setup()
 	log.Info("Pulse initialised on " + s.Config.LocalNode().IP + ":" + s.Config.LocalNode().Port)
-
 	s.Server.Serve(s.Listener)
 }
 
