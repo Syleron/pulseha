@@ -49,7 +49,9 @@ func createPulse() *Pulse {
 	pulse := &Pulse{
 		Server: &Server{
 			Config: config,
-			Memberlist: &Memberlist{},
+			Memberlist: &Memberlist{
+				Config: config,
+			},
 		},
 	}
 	return pulse

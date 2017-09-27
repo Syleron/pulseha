@@ -27,6 +27,7 @@ import (
  */
 type Memberlist struct {
 	Members []*Member
+	Config *Config
 }
 
 /**
@@ -109,7 +110,9 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
  * if no one responds assume active.
  */
 func (m *Memberlist) Setup() {
-
+	if clusterCheck(m.Config) {
+		// we are in a cluster
+	}
 }
 
 
