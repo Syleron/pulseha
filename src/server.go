@@ -398,20 +398,44 @@ func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign
 /**
  *
  */
-func (s *Server) GroupList(ctx context.Context, in *proto.PulseGroupList) (*proto.PulseGroupList, error) {
+func (s *Server) GroupList(ctx context.Context, in *proto.GroupTable) (*proto.GroupTable, error) {
 	s.Lock()
 	defer s.Unlock()
+	//var rows []proto.GroupRow
 	log.Debug("Server:GroupList() - Getting groups and their IPs")
-	list := make(map[string]*proto.Group)
+
+	table := new(proto.GroupTable)
 	for name, ips := range s.Config.Groups {
-		list[name] = &proto.Group{
-			Ips: ips,
-		}
+		nodes, interfaces := getGroupNodes(name, *s.Config)
+		row := &proto.GroupRow{Name:name, Ip:ips, Nodes:nodes, Interfaces:interfaces }
+		table.Row = append(table.Row, row)
 	}
 
-	return &proto.PulseGroupList{
-		Groups: list,
-	}, nil
+	return table, nil
+}
+
+/**
+ *function to get the nodes and interfaces that relate to the specified node
+ */
+func getGroupNodes(group string, config Config)([]string, []string) {
+	var hosts []string
+	var interfaces []string
+	var found = false
+	for name, node := range config.Nodes {
+		for iface, groupNameSlice := range node.IPGroups {
+			for _, groupName := range groupNameSlice{
+				if group == groupName{
+				hosts = append(hosts, name)
+				interfaces = append(interfaces, iface)
+				found = true
+				}
+			}
+		}
+	}
+	if found {
+		return hosts, interfaces
+	}
+	return nil, nil
 }
 
 /**

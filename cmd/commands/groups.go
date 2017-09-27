@@ -26,7 +26,6 @@ import (
 	"context"
 	"github.com/olekukonko/tablewriter"
 	"os"
-	"fmt"
 )
 
 type GroupsCommand struct {
@@ -117,22 +116,21 @@ func (c *GroupsCommand) Synopsis() string {
  *
  */
 func (c *GroupsCommand) drawGroupsTable(client proto.RequesterClient) {
-	r, err := client.GroupList(context.Background(), &proto.PulseGroupList{})
-	fmt.Println(r)
+	r, err := client.GroupList(context.Background(), &proto.GroupTable{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())
 	} else {
 		data := [][]string{}
-		for name, group := range r.Groups {
+		for _, group := range r.Row {
 
 			data = append(
 				data,
 				[]string{
-					name,
-					strings.Join(group.Ips, ", "),
-					"",
-					"",
+					group.Name,
+					strings.Join(group.Ip, ", "),
+					strings.Join(group.Nodes,"\n"),
+					strings.Join(group.Interfaces,"\n"),
 				})
 		}
 		table := tablewriter.NewWriter(os.Stdout)
