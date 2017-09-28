@@ -21,6 +21,7 @@ import (
 	"github.com/coreos/go-log/log"
 	"os"
 	"path/filepath"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -32,7 +33,7 @@ func GenOpenSSL() {
 	if err != nil {
 		log.Emergency(err)
 	}
-	_, err = Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/server.crt", "-days", "365", "-subj", "/CN="+GetHostname(), "-sha256", "-nodes")
+	_, err = utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/server.crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
 
 	if err != nil {
 		log.Emergency("Failed to create private server key.")

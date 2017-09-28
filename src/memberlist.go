@@ -20,6 +20,7 @@ package main
 import (
 	"reflect"
 	"errors"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -117,7 +118,7 @@ func (m *Memberlist) Setup() {
 		if clusterTotal(m.Config) == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			m.PromoteMember(GetHostname())
+			m.PromoteMember(utils.GetHostname())
 		} else {
 			// Contact a member in the list to see who is the "active" node.
 			// Iterate through the memberlist until a response is receive.

@@ -23,6 +23,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type Config struct {
@@ -118,7 +119,7 @@ func (c *Config) Validate() {
  *
  */
 func (c *Config) LocalNode() Node {
-	return c.Nodes[GetHostname()]
+	return c.Nodes[utils.GetHostname()]
 }
 
 /**

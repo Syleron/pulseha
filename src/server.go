@@ -30,6 +30,8 @@ import (
 	"time"
 	"encoding/json"
 	"strconv"
+	"github.com/Syleron/PulseHA/src/netUtils"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -113,7 +115,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		r, err := client.SendJoin(&proto.PulseJoin{
 			Replicated: true,
 			Config: buf,
-			Hostname: GetHostname(),
+			Hostname: utils.GetHostname(),
 		})
 		// Handle a failed request
 		if err != nil {
@@ -232,9 +234,9 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
-		NodeAdd(GetHostname(), newNode, s.Config)
+		NodeAdd(utils.GetHostname(), newNode, s.Config)
 		// Assign interface names to node
-		for _, ifaceName := range getInterfaceNames() {
+		for _, ifaceName := range netUtils.GetInterfaceNames() {
 			if ifaceName != "lo" {
 				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
@@ -243,7 +245,7 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 				// Create a group for the interface
 				s.Config.Groups[groupName] = []string{}
 				// assign the group to the interface
-				GroupAssign(groupName, GetHostname(), ifaceName, s.Config)
+				GroupAssign(groupName, utils.GetHostname(), ifaceName, s.Config)
 			}
 		}
 		// Save the config
@@ -472,7 +474,7 @@ func (s *Server) Setup() {
 		if err != nil {
 			log.Emergency(err)
 		}
-		if CreateFolder(dir + "/certs") {
+		if utils.CreateFolder(dir + "/certs") {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}

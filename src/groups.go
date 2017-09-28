@@ -4,6 +4,8 @@ import (
 	"github.com/coreos/go-log/log"
 	"errors"
 	"strconv"
+	"github.com/Syleron/PulseHA/src/netUtils"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -54,7 +56,7 @@ func GroupClearLocal(c *Config) {
 func GroupIpAdd(groupName string, ips []string, c *Config) (error) {
 	if GroupExist(groupName, c) {
 		for _, ip := range ips {
-			if ValidIPAddress(ip) {
+			if utils.ValidIPAddress(ip) {
 				if len(c.Groups[groupName]) > 0 {
 					if exists, _ := GroupIPExist(groupName, ip, c); !exists {
 						c.Groups[groupName] = append(c.Groups[groupName], ip)
@@ -103,7 +105,7 @@ func GroupIpRemove(groupName string, ips []string, c *Config) (error) {
  */
 func GroupAssign(groupName, node, iface string, c *Config) (error) {
 	if GroupExist(groupName, c) {
-		if interfaceExist(iface) {
+		if netUtils.InterfaceExist(iface) {
 			if exists, _ := NodeInterfaceGroupExists(node, iface, groupName, c); !exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface], groupName)
 			} else {
@@ -123,7 +125,7 @@ func GroupAssign(groupName, node, iface string, c *Config) (error) {
  */
 func GroupUnassign(groupName, node, iface string, c *Config) (error) {
 	if GroupExist(groupName, c) {
-		if !interfaceExist(iface) {
+		if !netUtils.InterfaceExist(iface) {
 			if exists, i := NodeInterfaceGroupExists(node, iface, groupName, c); exists {
 				c.Nodes[node].IPGroups[iface] = append(c.Nodes[node].IPGroups[iface][:i], c.Nodes[node].IPGroups[iface][i+1:]...)
 			} else {

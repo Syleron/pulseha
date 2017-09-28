@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"strconv"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -44,7 +45,7 @@ func LoadPlugins() ([]PluginHC, error) {
 		log.Emergency(err)
 	}
 
-	CreateFolder(dir + "/plugins")
+	utils.CreateFolder(dir + "/plugins")
 
 	evtGlob := path.Join(dir+"/plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
