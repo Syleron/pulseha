@@ -44,6 +44,16 @@ message HealthCheckResponse {
     ServingStatus status = 1;
 }
 
+message MemberStatus {
+    enum Status {
+        ACTIVE = 0;
+        LEAVING = 1;
+        PASSIVE = 2;
+        UNAVAILABLE = 3;
+    }
+    Status status = 1;
+}
+
 // Pulse Cluster Messages
 message PulseJoin {
     bool success = 1;

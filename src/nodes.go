@@ -58,13 +58,25 @@ func NodesClearLocal(c *Config) {
  * Determines whether a Node already exists in a config based
    off the nodes hostname.
  */
-func NodeExists(hostName string, c *Config) (bool) {
+func NodeExists(hostname string, c *Config) (bool) {
 	for key, _ := range c.Nodes {
-		if key == hostName {
+		if key == hostname {
 			return true
 		}
 	}
 	return false
+}
+
+/**
+	Get node by its hostname
+ */
+func NodeGetByName(hostname string, c *Config) (Node, error) {
+	for key, node := range c.Nodes {
+		if key == hostname {
+			return node, nil
+		}
+	}
+	return Node{}, errors.New("unable to find node in config")
 }
 
 /**
