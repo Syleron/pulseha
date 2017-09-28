@@ -18,8 +18,6 @@
 package commands
 
 import (
-	"bytes"
-	"fmt"
 	"github.com/mitchellh/cli"
 )
 
@@ -41,12 +39,7 @@ func (c *VersionCommand) Help() string {
  *
  */
 func (c *VersionCommand) Run(_ []string) int {
-	var versionString bytes.Buffer
-
-	fmt.Fprintf(&versionString, "pulseha %s", c.Version)
-
-	c.Ui.Output(versionString.String() + " Build " + c.Build[0:7])
-
+	c.Ui.Output("PulseHA " + c.Version + " Build " + c.Build[0:7])
 	return 0
 }
 
