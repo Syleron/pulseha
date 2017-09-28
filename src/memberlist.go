@@ -163,6 +163,18 @@ func (m *Memberlist) MembersConnect() {
 }
 
 /**
+	Get status of a specific member by hostname
+ */
+func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status, error) {
+	for _, member := range m.Members {
+		if member.Hostname == hostname {
+			return member.Status, nil
+		}
+	}
+	return proto.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
+}
+
+/**
 	Promote a member within the memberlist to become the active
 	node
  */
