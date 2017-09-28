@@ -92,3 +92,8 @@ func LoadPlugins() ([]PluginHC, error) {
 
 	return modules, nil
 }
+
+
+func loadNetPlugin(){
+
+}
