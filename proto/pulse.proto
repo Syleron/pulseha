@@ -50,7 +50,7 @@ message PulseJoin {
     string message = 2;
     string ip = 3;
     string port = 4;
-    string hostname= 5;
+    string hostname = 5;
     bool replicated = 6;
     bytes config = 7;
 }

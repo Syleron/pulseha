@@ -27,6 +27,7 @@ import (
  */
 type Memberlist struct {
 	Members []*Member
+	Config *Config
 }
 
 /**
@@ -101,6 +102,46 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 		f.Call(vals)
 	}
 	return nil, nil
+}
+
+/**
+ * check how many are in the cluster
+ * if more than one, request who's active.
+ * if no one responds assume active.
+ * This should probably populate the memberlist
+ */
+func (m *Memberlist) Setup() {
+	// Check to see if we are in a cluster
+	if clusterCheck(m.Config) {
+		// Are we the only member in the cluster?
+		if clusterTotal(m.Config) == 1 {
+			// We are the only member in the cluster so
+			// we are assume that we are now the active appliance.
+			m.PromoteMember(GetHostname())
+		} else {
+			// Contact a member in the list to see who is the "active" node.
+			// Iterate through the memberlist until a response is receive.
+			// If no response has been made then assume we should become the active appliance.
+		}
+	}
+}
+
+/**
+	load the nodes in our config into our memberlist
+ */
+func (m *Memberlist) LoadMembers() {
+	//for key, node := range m.Config.Nodes {
+	//
+	//}
+}
+
+/**
+	Promote a member within the memberlist to become the active
+	node
+ */
+func (m *Memberlist) PromoteMember(hostname string) {
+	// Inform everyone in the cluster that a specific node is now the new active
+	// Demote if old active is no longer active. promote if the passive is the new active.
 }
 
 

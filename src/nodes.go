@@ -26,7 +26,7 @@ import (
  * Add a node type Node to our config.
  */
 func NodeAdd(hostname string, node *Node, c *Config) (error) {
-	log.Debug(hostname + " added to local node")
+	log.Debug(hostname + " added to local cluster config")
 	if !NodeExists(hostname, c) {
 		c.Nodes[hostname] = *node
 		return nil
