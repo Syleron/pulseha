@@ -157,7 +157,11 @@ func (m *Memberlist) MembersConnect() {
 			if err != nil {
 				log.Warning(member.Hostname + " could not be found.")
 			}
-			member.Client.Connect(node.IP, node.Port, member.Hostname)
+			err = member.Client.Connect(node.IP, node.Port, member.Hostname)
+			if err != nil {
+				continue
+			}
+			member.Status = proto.MemberStatus_PASSIVE
 		}
 	}
 }
