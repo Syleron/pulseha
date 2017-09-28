@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"github.com/Syleron/PulseHA/src/utils"
 	"errors"
+	"fmt"
 )
 
 type Config struct {
@@ -55,16 +56,29 @@ type Logging struct {
 }
 
 /**
+ * Returns a copy of the config
+ */
+func (c *Config)GetConfig()Config{
+	return *c
+}
+
+/**
  * Sets the local node name
  */
 func (c *Config)setLocalNode()(error) {
+	//We only want to error if we have not yet been configured
+	fmt.Println(c)
+	fmt.Printf("Count of nodes is %d", len(c.Nodes))
+	if !(len(c.Nodes) > 0) {
+		return nil
+	}
 	hostname := utils.GetHostname()
 	for name := range c.Nodes {
-		if name == hostname {
+		if  name == hostname {
 			return nil
 		}
 	}
-	return  errors.New("local Hostname is not in configuration")
+	return errors.New("local Hostname is not in configuration")
 }
 
 /**
@@ -83,9 +97,18 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Emergency(err)
 	}
+	newCF := Config{}
 	b, err := ioutil.ReadFile(dir + "/config.json")
-	err = json.Unmarshal([]byte(b), c)
+	if err != nil {
+		log.Errorf("Error reading config file: %s", err)
+		os.Exit(1)
+	}
+	err = json.Unmarshal([]byte(b), &newCF)
 
+	c = &newCF
+
+	fmt.Println(b)
+	fmt.Println(newCF)
 	if err != nil {
 		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
@@ -101,6 +124,12 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
+	fmt.Printf("%t",newCF)
+//	fmt.Printf(reflect.TypeOf(config.Config)
+
+
+
+
 }
 
 /**

@@ -8,7 +8,7 @@ func makeActive(groupName string) {
 	// get group details and any plugin config
 	//
 
-	groupConfig :=
+	//groupConfig :=
 	//if plugin loaded call plugin bringIPUP for each item in config
 
 

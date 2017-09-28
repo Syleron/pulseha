@@ -23,11 +23,23 @@ import (
 	"os"
 	"sync"
 )
+type globalConfig struct {
+	sync.Mutex
+	*Config
+}
+/**
+ * Returns a copy of the config
+ */
+func (c *globalConfig)GetConfig()Config{
+	return *c.Config
+}
 
 var (
 	Version string
 	Build   string
+	config globalConfig
 )
+
 
 /**
  * Main Pulse struct type
@@ -40,7 +52,7 @@ type Pulse struct {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
-	config := &Config{}
+	//config := &Config{}
 	// Load the config
 	config.Load()
 	// Validate the config
@@ -48,9 +60,7 @@ func createPulse() *Pulse {
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &Server{
-			Config: config,
 			Memberlist: &Memberlist{
-				Config: config,
 			},
 		},
 	}
