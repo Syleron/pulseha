@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"github.com/Syleron/PulseHA/src/utils"
+	"errors"
 )
 
 type Config struct {
@@ -31,6 +32,7 @@ type Config struct {
 	Groups  map[string][]string `json:"floating_ip_groups"`
 	Nodes   map[string]Node     `json:"nodes"`
 	Logging Logging             `json:"logging"`
+	localNode string
 }
 
 type Local struct {
@@ -53,6 +55,25 @@ type Logging struct {
 }
 
 /**
+ * Sets the local node name
+ */
+func (c *Config)setLocalNode()(error) {
+	hostname := utils.GetHostname()
+	for name := range c.Nodes {
+		if name == hostname {
+			return nil
+		}
+	}
+	return  errors.New("local Hostname is not in configuration")
+}
+
+/**
+ * Return the local node name
+ */
+func (c *Config)getLocalNode()string {
+	return c.localNode
+}
+/**
  * Function used to load the config
  */
 func (c *Config) Load() {
@@ -74,6 +95,11 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Error("Unable to load config.json. Does it exist?")
 		os.Exit(1)
+	}
+
+	err = c.setLocalNode()
+	if err != nil {
+		log.Fatalf("The local Hostname does not match the configuration")
 	}
 }
 
