@@ -21,6 +21,7 @@ package main
  * Private - Check to see if we are in a configured cluster or not.
  */
 func clusterCheck(c *Config) (bool) {
+	c.localNode = "dave"
 	if len(c.Nodes) > 0 {
 		return true
 	}
