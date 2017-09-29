@@ -17,15 +17,11 @@
  */
 package main
 
-import "fmt"
 
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
 func clusterCheck(c *Config) (bool) {
-	fmt.Println(c)
-	fmt.Println("nodes....................")
-	fmt.Println("nodes:", c.Nodes)
 	c.localNode = "dave"
 	if len(c.Nodes) > 0 {
 		return true
