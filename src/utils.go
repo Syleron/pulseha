@@ -20,9 +20,9 @@ package main
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
-func clusterCheck(c *Config) (bool) {
-	c.localNode = "dave"
-	if len(c.Nodes) > 0 {
+func clusterCheck() (bool) {
+	config := gconf.GetConfig()
+	if len(config.Nodes) > 0 {
 		return true
 	}
 	return false
@@ -31,8 +31,9 @@ func clusterCheck(c *Config) (bool) {
 /**
  * Return the total number of configured nodes we have in our config.
  */
-func clusterTotal(c *Config) (int) {
- return len(c.Nodes)
+func clusterTotal() (int) {
+	config := gconf.GetConfig()
+	return len(config.Nodes)
 }
 
 

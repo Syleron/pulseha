@@ -37,7 +37,7 @@ func (c *globalConfig)GetConfig()Config{
 var (
 	Version string
 	Build   string
-	config  globalConfig
+	gconf  globalConfig
 )
 
 
@@ -53,13 +53,10 @@ type Pulse struct {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
-	//config.Config = Config{}
 	// Load the config
-	config.Load()
-	fmt.Println("Hey Andy!")
-	fmt.Println(config)
+	gconf.Load()
 	// Validate the config
-	config.Validate()
+	gconf.Validate()
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &Server{

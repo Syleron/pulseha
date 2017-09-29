@@ -25,10 +25,12 @@ import (
 /**
  * Add a node type Node to our config.
  */
-func NodeAdd(hostname string, node *Node, c *Config) (error) {
+func NodeAdd(hostname string, node *Node) (error) {
+	gconf.Lock()
+	defer gconf.Unlock()
 	log.Debug(hostname + " added to local cluster config")
-	if !NodeExists(hostname, c) {
-		c.Nodes[hostname] = *node
+	if !NodeExists(hostname) {
+		gconf.Nodes[hostname] = *node
 		return nil
 	}
 	return errors.New("unable to add node as it already exists")
@@ -37,10 +39,12 @@ func NodeAdd(hostname string, node *Node, c *Config) (error) {
 /**
  * Remove a node from our config by hostname.
  */
-func NodeDelete(hostname string, c *Config) (error) {
+func NodeDelete(hostname string) (error) {
 	log.Debug(hostname + " remove from the local node")
-	if NodeExists(hostname, c)	{
-		delete(c.Nodes, hostname)
+	gconf.Lock()
+	defer gconf.Unlock()
+	if NodeExists(hostname)	{
+		delete(gconf.Nodes, hostname)
 		return nil
 	}
 	return errors.New("unable to delete node as it doesn't exist")
@@ -49,17 +53,20 @@ func NodeDelete(hostname string, c *Config) (error) {
 /**
  * Clear out local Nodes section of config.
  */
-func NodesClearLocal(c *Config) {
+func NodesClearLocal() {
 	log.Debug("All nodes cleared from local config")
-	c.Nodes = map[string]Node{}
+	gconf.Lock()
+	defer gconf.Unlock()
+	gconf.Nodes = map[string]Node{}
 }
 
 /**
  * Determines whether a Node already exists in a config based
    off the nodes hostname.
  */
-func NodeExists(hostname string, c *Config) (bool) {
-	for key, _ := range c.Nodes {
+func NodeExists(hostname string) (bool) {
+	config := gconf.GetConfig()
+	for key, _ := range config.Nodes {
 		if key == hostname {
 			return true
 		}
@@ -70,8 +77,9 @@ func NodeExists(hostname string, c *Config) (bool) {
 /**
 	Get node by its hostname
  */
-func NodeGetByName(hostname string, c *Config) (Node, error) {
-	for key, node := range c.Nodes {
+func NodeGetByName(hostname string) (Node, error) {
+	config := gconf.GetConfig()
+	for key, node := range config.Nodes {
 		if key == hostname {
 			return node, nil
 		}
@@ -83,8 +91,9 @@ func NodeGetByName(hostname string, c *Config) (Node, error) {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func NodeAssignedToInterface(group string, c *Config) (bool) {
-	for _, node := range c.Nodes {
+func NodeAssignedToInterface(group string) (bool) {
+	config := gconf.GetConfig()
+	for _, node := range config.Nodes {
 		for _, groups := range node.IPGroups {
 			for _, ifaceGroup := range groups {
 				if ifaceGroup == group {
@@ -100,8 +109,9 @@ func NodeAssignedToInterface(group string, c *Config) (bool) {
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */
-func NodeInterfaceGroupExists(node, iface, group string, c *Config) (bool, int) {
-	for index, existingGroup := range c.Nodes[node].IPGroups[iface] {
+func NodeInterfaceGroupExists(node, iface, group string) (bool, int) {
+	config := gconf.GetConfig()
+	for index, existingGroup := range config.Nodes[node].IPGroups[iface] {
 		if existingGroup == group {
 			return true, index
 		}

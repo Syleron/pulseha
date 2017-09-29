@@ -30,7 +30,6 @@ type Client struct {
 	//State      PulseState
 	Connection *grpc.ClientConn
 	Requester  p.RequesterClient
-	Config     *Config
 }
 
 /**
@@ -55,7 +54,8 @@ func (c *Client) Setup() {
 func (c *Client) Connect(ip, port, hostname string) (error) {
 	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
 	var err error
-	if c.Config.Pulse.TLS {
+	config := gconf.GetConfig()
+	if config.Pulse.TLS {
 		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
 		if err != nil {
 			log.Errorf("Could not load TLS cert: ", err)
