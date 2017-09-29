@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"github.com/Syleron/PulseHA/src/utils"
 	"errors"
-	"fmt"
 )
 
 type Config struct {
@@ -58,17 +57,15 @@ type Logging struct {
 /**
  * Returns a copy of the config
  */
-func (c *Config)GetConfig()Config{
+func (c *Config) GetConfig()Config{
 	return *c
 }
 
 /**
  * Sets the local node name
  */
-func (c *Config)setLocalNode()(error) {
+func (c *Config) setLocalNode()(error) {
 	//We only want to error if we have not yet been configured
-	fmt.Println(c)
-	fmt.Printf("Count of nodes is %d", len(c.Nodes))
 	if !(len(c.Nodes) > 0) {
 		return nil
 	}
@@ -84,7 +81,7 @@ func (c *Config)setLocalNode()(error) {
 /**
  * Return the local node name
  */
-func (c *Config)getLocalNode()string {
+func (c *Config) getLocalNode()string {
 	return c.localNode
 }
 /**
@@ -92,50 +89,37 @@ func (c *Config)getLocalNode()string {
  */
 func (c *Config) Load() {
 	log.Info("Loading configuration file")
-	// Get project directory location
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
 		log.Emergency(err)
 	}
-	//newCF := Config{}
 	b, err := ioutil.ReadFile(dir + "/config.json")
 	if err != nil {
 		log.Errorf("Error reading config file: %s", err)
 		os.Exit(1)
 	}
 	err = json.Unmarshal([]byte(b), &c)
- config.Config = *c
-	//c = newCF
-
-	fmt.Println(b)
-	//fmt.Println(newCF)
+ 	gconf.Config = *c
 	if err != nil {
 		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
 	}
-
-	// We had an error attempting to decode the json into our struct! oops!
 	if err != nil {
 		log.Error("Unable to load config.json. Does it exist?")
 		os.Exit(1)
 	}
-
 	err = c.setLocalNode()
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
-	//fmt.Printf("%t",newCF)
-//	fmt.Printf(reflect.TypeOf(config.Config)
-
-
-
-
 }
 
 /**
  * Function used to save the config
  */
 func (c *Config) Save() {
+	gconf.Lock()
+	defer gconf.Unlock()
 	// Validate before we save
 	c.Validate()
 	// Convert struct back to JSON format

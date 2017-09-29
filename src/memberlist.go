@@ -30,7 +30,6 @@ import (
  */
 type Memberlist struct {
 	Members []*Member
-	Config *Config
 }
 
 /**
@@ -119,9 +118,9 @@ func (m *Memberlist) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	if clusterCheck(&config.Config) {
+	if clusterCheck() {
 		// Are we the only member in the cluster?
-		if clusterTotal(&config.Config) == 1 {
+		if clusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
 			m.PromoteMember(utils.GetHostname())
@@ -137,11 +136,10 @@ func (m *Memberlist) Setup() {
 	load the nodes in our config into our memberlist
  */
 func (m *Memberlist) LoadMembers() {
-	for key, _ := range m.Config.Nodes {
+	config := gconf.GetConfig()
+	for key, _ := range config.Nodes {
 		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
-		newClient := &Client{
-			Config: m.Config,
-		}
+		newClient := &Client{}
 		m.MemberAdd(key, newClient)
 	}
 }
@@ -153,7 +151,7 @@ func (m *Memberlist) MembersConnect() {
 	for _, member := range m.Members {
 		// Make sure we are not connecting to ourself!
 		if member.Hostname != utils.GetHostname() {
-			node, err := NodeGetByName(member.Hostname, m.Config)
+			node, err := NodeGetByName(member.Hostname)
 			if err != nil {
 				log.Warning(member.Hostname + " could not be found.")
 			}
