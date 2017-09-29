@@ -50,7 +50,7 @@ func (c *Client) Setup() {
 }
 
 /**
- *
+	Note: Hostname is required for TLS as the certs are named after the hostname.
  */
 func (c *Client) Connect(ip, port, hostname string) (error) {
 	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)

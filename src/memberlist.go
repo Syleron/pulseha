@@ -21,6 +21,8 @@ import (
 	"reflect"
 	"errors"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/coreos/go-log/log"
+	"github.com/Syleron/PulseHA/proto"
 )
 
 /**
@@ -36,16 +38,18 @@ type Memberlist struct {
  */
 type Member struct {
 	Hostname   string
+	Status proto.MemberStatus_Status
 	Client Client
 }
 
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) MemberAdd(hostname string, client Client) {
+func (m *Memberlist) MemberAdd(hostname string, client *Client) {
 	newMember := &Member{
 		Hostname: hostname,
-		Client:client,
+		Status: proto.MemberStatus_UNAVAILABLE,
+		Client: *client,
 	}
 
 	m.Members = append(m.Members, newMember)
@@ -112,6 +116,8 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
  * This should probably populate the memberlist
  */
 func (m *Memberlist) Setup() {
+	// Load members into our memberlist slice
+	m.LoadMembers()
 	// Check to see if we are in a cluster
 	if clusterCheck(&config.Config) {
 		// Are we the only member in the cluster?
@@ -131,9 +137,41 @@ func (m *Memberlist) Setup() {
 	load the nodes in our config into our memberlist
  */
 func (m *Memberlist) LoadMembers() {
-	//for key, node := range m.Config.Nodes {
-	//
-	//}
+	for key, _ := range m.Config.Nodes {
+		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
+		newClient := &Client{
+			Config: m.Config,
+		}
+		m.MemberAdd(key, newClient)
+	}
+}
+
+/**
+	Attempt to connect to all nodes within the memberlist.
+ */
+func (m *Memberlist) MembersConnect() {
+	for _, member := range m.Members {
+		// Make sure we are not connecting to ourself!
+		if member.Hostname != utils.GetHostname() {
+			node, err := NodeGetByName(member.Hostname, m.Config)
+			if err != nil {
+				log.Warning(member.Hostname + " could not be found.")
+			}
+			member.Client.Connect(node.IP, node.Port, member.Hostname)
+		}
+	}
+}
+
+/**
+	Get status of a specific member by hostname
+ */
+func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status, error) {
+	for _, member := range m.Members {
+		if member.Hostname == hostname {
+			return member.Status, nil
+		}
+	}
+	return proto.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
 }
 
 /**

@@ -17,7 +17,6 @@
  */
 package main
 
-
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
