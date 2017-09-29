@@ -185,4 +185,13 @@ func (m *Memberlist) PromoteMember(hostname string) {
 	// Demote if old active is no longer active. promote if the passive is the new active.
 }
 
+/**
+	Sync local config with each member in the cluster.
+ */
+func (m *Memberlist) SyncConfig() {
+	config := gconf.GetConfig()
+
+
+}
+
 

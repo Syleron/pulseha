@@ -26,11 +26,11 @@ import (
  * Add a node type Node to our config.
  */
 func NodeAdd(hostname string, node *Node) (error) {
-	gconf.Lock()
-	defer gconf.Unlock()
 	log.Debug(hostname + " added to local cluster config")
 	if !NodeExists(hostname) {
+		gconf.Lock()
 		gconf.Nodes[hostname] = *node
+		gconf.Unlock()
 		return nil
 	}
 	return errors.New("unable to add node as it already exists")
@@ -41,10 +41,10 @@ func NodeAdd(hostname string, node *Node) (error) {
  */
 func NodeDelete(hostname string) (error) {
 	log.Debug(hostname + " remove from the local node")
-	gconf.Lock()
-	defer gconf.Unlock()
 	if NodeExists(hostname)	{
+		gconf.Lock()
 		delete(gconf.Nodes, hostname)
+		gconf.Unlock()
 		return nil
 	}
 	return errors.New("unable to delete node as it doesn't exist")
@@ -56,8 +56,8 @@ func NodeDelete(hostname string) (error) {
 func NodesClearLocal() {
 	log.Debug("All nodes cleared from local config")
 	gconf.Lock()
-	defer gconf.Unlock()
 	gconf.Nodes = map[string]Node{}
+	gconf.Unlock()
 }
 
 /**
@@ -66,7 +66,7 @@ func NodesClearLocal() {
  */
 func NodeExists(hostname string) (bool) {
 	config := gconf.GetConfig()
-	for key, _ := range config.Nodes {
+	for key := range config.Nodes {
 		if key == hostname {
 			return true
 		}

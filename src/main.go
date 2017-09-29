@@ -40,9 +40,7 @@ var (
 	gconf  globalConfig
 )
 
-
 /**
-
  * Main Pulse struct type
  */
 type Pulse struct {

@@ -75,32 +75,24 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	// This is a replication call?
 	if in.Replicated {
 		return s.JoinReplicated(in)
 	}
-	// Are we configured?
 	if !clusterCheck() {
-		// Create a new client
 		client := &Client{}
-		// Attempt to connect
 		err := client.Connect(in.Ip, in.Port, in.Hostname)
-		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
 			}, nil
 		}
-		// Create new local node config to send
 		newNode := &Node{
 			IP:       in.Ip,
 			Port:     in.Port,
 			IPGroups: make(map[string][]string, 0),
 		}
-		// Convert struct into byte array
 		buf, err := json.Marshal(newNode)
-		// Handle failure to marshal config
 		if err != nil {
 			log.Emergency("Unable to marshal config: %s", err)
 			return &proto.PulseJoin{
@@ -108,13 +100,11 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: err.Error(),
 			}, nil
 		}
-		// Send our join request
 		r, err := client.SendJoin(&proto.PulseJoin{
 			Replicated: true,
 			Config: buf,
 			Hostname: utils.GetHostname(),
 		})
-		// Handle a failed request
 		if err != nil {
 			log.Emergency("Response error: %s", err)
 			return &proto.PulseJoin{
@@ -122,7 +112,6 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: err.Error(),
 			}, nil
 		}
-		// Handle an unsuccessful request
 		if !r.Success {
 			log.Emergency("Peer error: %s", err)
 			return &proto.PulseJoin{
@@ -130,8 +119,6 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: r.Message,
 			}, nil
 		}
-		// Update our local config
-		// Close the connection
 		client.Close()
 		return &proto.PulseJoin{
 			Success: true,
@@ -147,14 +134,9 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
  * Join replicated logic. This is only performed when sent by another peer/node.
  */
 func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	s.Lock()
-	defer s.Unlock()
 	if clusterCheck() {
-		// Create new Node struct
 		originNode := &Node{}
-		// Unmarshal byte array as type Node
 		err := json.Unmarshal(in.Config, originNode)
-		// Handle the unmarshal error
 		if err != nil {
 			log.Error("Unable to unmarshal config node.")
 			return &proto.PulseJoin{
@@ -163,11 +145,9 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 			}, nil
 		}
 		// TODO: Node validation?
-		// Add to our config
 		NodeAdd(in.Hostname, originNode)
-		// Save our config
 		gconf.Save()
-		// Get our entire config so we can send it back
+		// we need to return the entire conf
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
@@ -216,34 +196,23 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 	log.Debug("Server:Create() - Create Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	// Method of first checking to see if we are in a cluster.
 	if !clusterCheck() {
-		// we are not in an active cluster
 		newNode := &Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
-		// Add the node to the nodes config
 		NodeAdd(utils.GetHostname(), newNode)
-		// Assign interface names to node
 		for _, ifaceName := range netUtils.GetInterfaceNames() {
 			if ifaceName != "lo" {
-				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
-				// Create a new group name
 				groupName := GenGroupName()
-				// Create a group for the interface
 				gconf.Groups[groupName] = []string{}
-				// assign the group to the interface
 				GroupAssign(groupName, utils.GetHostname(), ifaceName)
 			}
 		}
-		// Save the config
 		gconf.Save()
-		// Setup the listener
 		go s.Setup()
-		// return if we were successful or not
 		return &proto.PulseCreate{
 			Success: true,
 			Message: "Pulse cluster successfully created!",
@@ -448,7 +417,6 @@ func (s *Server) SetupCLI() {
  */
 func (s *Server) Setup() {
 	configCopy := gconf.GetConfig()
-	// Only continue if we are in a configured cluster
 	if !clusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
