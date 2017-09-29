@@ -97,18 +97,18 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Emergency(err)
 	}
-	newCF := Config{}
+	//newCF := Config{}
 	b, err := ioutil.ReadFile(dir + "/config.json")
 	if err != nil {
 		log.Errorf("Error reading config file: %s", err)
 		os.Exit(1)
 	}
-	err = json.Unmarshal([]byte(b), &newCF)
-
-	c = &newCF
+	err = json.Unmarshal([]byte(b), &c)
+ config.Config = *c
+	//c = newCF
 
 	fmt.Println(b)
-	fmt.Println(newCF)
+	//fmt.Println(newCF)
 	if err != nil {
 		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
@@ -124,7 +124,7 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
-	fmt.Printf("%t",newCF)
+	//fmt.Printf("%t",newCF)
 //	fmt.Printf(reflect.TypeOf(config.Config)
 
 
@@ -161,7 +161,7 @@ func (c *Config) Save() {
 func (c *Config) Reload() {
 	log.Debug("Reloading PulseHA config")
 	// Reload the config file
-	c.Load()
+	//c.Load()
 }
 
 /**

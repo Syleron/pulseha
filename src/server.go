@@ -41,7 +41,6 @@ type Server struct {
 	sync.Mutex
 	Status        proto.HealthCheckResponse_ServingStatus
 	Last_response time.Time
-	//Config *Config
 	Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
@@ -154,7 +153,7 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	// Make sure we are in a configured cluster
 	config.Lock()
 	defer config.Unlock()
-	if clusterCheck(config.Config) {
+	if clusterCheck(&config.Config) {
 		// Create new Node struct
 		originNode := &Node{}
 		// Unmarshal byte array as type Node
@@ -169,7 +168,7 @@ func (s *Server) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
 		}
 		// TODO: Node validation?
 		// Add to our config
-		NodeAdd(in.Hostname, originNode, config.Config)
+		NodeAdd(in.Hostname, originNode, &config.Config)
 		// Save our config
 		config.Save()
 		// Get our entire config so we can send it back
@@ -195,22 +194,22 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	defer config.Unlock()
 	log.Debug("Server:Leave() - Leave Pulse cluster")
 	// Are we even in a cluster?
-	if !clusterCheck(config.Config) {
+	if !clusterCheck(&config.Config) {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
 	// Clear out the groups
-	GroupClearLocal(config.Config)
+	GroupClearLocal(&config.Config)
 	// Clear out the nodes
-	NodesClearLocal(config.Config)
+	NodesClearLocal(&config.Config)
 	// save our config
 	config.Save()
 	// Shutdown our main server
 	s.shutdown()
 	// Check to see if we are the only member in the cluster
-	if clusterTotal(config.Config) == 1 {
+	if clusterTotal(&config.Config) == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
@@ -233,7 +232,7 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 	defer config.Unlock()
 	log.Debug("Server:Create() - Create Pulse cluster")
 	// Method of first checking to see if we are in a cluster.
-	if !clusterCheck(config.Config) {
+	if !clusterCheck(&config.Config) {
 		// we are not in an active cluster
 		newNode := &Node{
 			IP:       in.BindIp,
@@ -241,18 +240,18 @@ func (s *Server) Create(ctx context.Context, in *proto.PulseCreate) (*proto.Puls
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Add the node to the nodes config
-		NodeAdd(utils.GetHostname(), newNode, config.Config)
+		NodeAdd(utils.GetHostname(), newNode, &config.Config)
 		// Assign interface names to node
 		for _, ifaceName := range netUtils.GetInterfaceNames() {
 			if ifaceName != "lo" {
 				// Add the interface to the node
 				newNode.IPGroups[ifaceName] = make([]string, 0)
 				// Create a new group name
-				groupName := GenGroupName(config.Config)
+				groupName := GenGroupName(&config.Config)
 				// Create a group for the interface
 				config.Groups[groupName] = []string{}
 				// assign the group to the interface
-				GroupAssign(groupName, utils.GetHostname(), ifaceName, config.Config)
+				GroupAssign(groupName, utils.GetHostname(), ifaceName, &config.Config)
 			}
 		}
 		// Save the config
@@ -282,7 +281,7 @@ func (s *Server) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:NewGroup() - Create floating IP group")
-	groupName, err := GroupNew(config.Config)
+	groupName, err := GroupNew(&config.Config)
 	if err != nil {
 		return &proto.PulseGroupNew{
 			Success: false,
@@ -305,7 +304,7 @@ func (s *Server) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:DeleteGroup() - Delete floating IP group")
-	err := GroupDelete(in.Name, config.Config)
+	err := GroupDelete(in.Name, &config.Config)
 	if err != nil {
 		return &proto.PulseGroupDelete{
 			Success: false,
@@ -329,7 +328,7 @@ func (s *Server) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*prot
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:GroupIPAdd() - Add IP addresses to group " + in.Name)
-	err := GroupIpAdd(in.Name, in.Ips, config.Config)
+	err := GroupIpAdd(in.Name, in.Ips, &config.Config)
 	if err != nil {
 		return &proto.PulseGroupAdd{
 			Success: false,
@@ -353,7 +352,7 @@ func (s *Server) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) 
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:GroupIPRemove() - Removing IPs from group " + in.Name)
-	err := GroupIpRemove(in.Name, in.Ips, config.Config)
+	err := GroupIpRemove(in.Name, in.Ips, &config.Config)
 	if err != nil {
 		return &proto.PulseGroupRemove{
 			Success: false,
@@ -377,7 +376,7 @@ func (s *Server) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
-	err := GroupAssign(in.Group, in.Node, in.Interface, config.Config)
+	err := GroupAssign(in.Group, in.Node, in.Interface, &config.Config)
 	if err != nil {
 		return &proto.PulseGroupAssign{
 			Success: false,
@@ -401,7 +400,7 @@ func (s *Server) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign
 	config.Lock()
 	defer config.Unlock()
 	log.Debug("Server:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
-	err := GroupUnassign(in.Group, in.Node, in.Interface, config.Config)
+	err := GroupUnassign(in.Group, in.Node, in.Interface, &config.Config)
 	if err != nil {
 		return &proto.PulseGroupUnassign{
 			Success: false,
@@ -477,19 +476,19 @@ func (s *Server) SetupCLI() {
  * Setup pulse server type
  */
 func (s *Server) Setup() {
-	localConfig := config.GetConfig()
+	configCopy := config.GetConfig()
 	// Only continue if we are in a configured cluster
-	if !clusterCheck(&localConfig) {
+	if !clusterCheck(&configCopy) {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
 	var err error
-	s.Listener, err = net.Listen("tcp", localConfig.LocalNode().IP+":"+localConfig.LocalNode().Port)
+	s.Listener, err = net.Listen("tcp", configCopy.LocalNode().IP+":"+configCopy.LocalNode().Port)
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 		os.Exit(1)
 	}
-	if localConfig.Pulse.TLS {
+	if configCopy.Pulse.TLS {
 		// Get project directory location
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 		if err != nil {
@@ -511,7 +510,7 @@ func (s *Server) Setup() {
 	}
 	proto.RegisterRequesterServer(s.Server, s)
 	s.Memberlist.Setup()
-	log.Info("Pulse initialised on " + localConfig.LocalNode().IP + ":" + localConfig.LocalNode().Port)
+	log.Info("Pulse initialised on " + configCopy.LocalNode().IP + ":" + configCopy.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }
 

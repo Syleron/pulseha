@@ -113,9 +113,9 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
  */
 func (m *Memberlist) Setup() {
 	// Check to see if we are in a cluster
-	if clusterCheck(m.Config) {
+	if clusterCheck(&config.Config) {
 		// Are we the only member in the cluster?
-		if clusterTotal(m.Config) == 1 {
+		if clusterTotal(&config.Config) == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
 			m.PromoteMember(utils.GetHostname())
