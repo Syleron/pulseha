@@ -189,9 +189,7 @@ func (m *Memberlist) PromoteMember(hostname string) {
 	Sync local config with each member in the cluster.
  */
 func (m *Memberlist) SyncConfig() {
-	config := gconf.GetConfig()
-
-
+	//config := gconf.GetConfig()
 }
 
 
