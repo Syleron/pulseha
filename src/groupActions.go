@@ -28,6 +28,7 @@ func makeActive(groupName string) {
 		for _, group := range groupSlice {
 			if groupName == group {
 				bringUpIPs(iface, configCopy.Groups[group])
+				//garp?
 			}
 		}
 	}
