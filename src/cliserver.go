@@ -35,7 +35,7 @@ import (
  */
 type CLIServer struct {
 	sync.Mutex
-	Server Server
+	Server *Server
 	Listener net.Listener
 	Memberlist *Memberlist
 }

@@ -65,6 +65,7 @@ func createPulse() *Pulse {
 			Memberlist: &Memberlist{},
 		},
 	}
+	pulse.CLI.Server = pulse.Server
 	return pulse
 }
 
