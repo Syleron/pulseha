@@ -84,7 +84,7 @@ func (m *Memberlist) MemberAdd(hostname string, client *Client) {
 	newMember.setHostname(hostname)
 	newMember.setStatus(proto.MemberStatus_UNAVAILABLE)
 	newMember.setClient(*client)
-
+	
 	m.Members = append(m.Members, newMember)
 }
 
