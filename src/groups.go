@@ -62,26 +62,26 @@ func GroupClearLocal() {
 func GroupIpAdd(groupName string, ips []string) (error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if GroupExist(groupName) {
-		for _, ip := range ips {
-			if utils.ValidIPAddress(ip) {
-				if len(gconf.Groups[groupName]) > 0 {
-					if exists, _ := GroupIPExist(groupName, ip); !exists {
-						gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
-					} else {
-						log.Warning(ip + " already exists in group " + groupName + ".. skipping.")
-					}
-				} else {
-					gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
-				}
-			} else {
-				log.Warning(ip + " is not a valid IP address")
-			}
-		}
-		return nil
-	} else {
+	if !GroupExist(groupName) {
 		return errors.New("group does not exist")
 	}
+	for _, ip := range ips {
+		if utils.ValidIPAddress(ip) {
+			if len(gconf.Groups[groupName]) > 0 {
+				if exists, _ := GroupIPExist(groupName, ip); !exists {
+					gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
+				} else {
+					log.Warning(ip + " already exists in group " + groupName + ".. skipping.")
+				}
+			} else {
+				gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
+				//todo I think we need to make a call to bring up the new ip here?
+			}
+		} else {
+			log.Warning(ip + " is not a valid IP address")
+		}
+	}
+	return nil
 }
 
 /**
@@ -92,20 +92,19 @@ func GroupIpAdd(groupName string, ips []string) (error) {
 func GroupIpRemove(groupName string, ips []string) (error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if GroupExist(groupName) {
-		for _, ip := range ips {
-			if len(gconf.Groups[groupName]) > 0 {
-				if exists, i := GroupIPExist(groupName, ip); exists {
-					gconf.Groups[groupName] = append(gconf.Groups[groupName][:i], gconf.Groups[groupName][i+1:]...)
-				} else {
-					log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
-				}
-			}
-		}
-		return nil
-	} else {
+	if !GroupExist(groupName) {
 		return errors.New("group does not exist")
 	}
+	for _, ip := range ips {
+		if len(gconf.Groups[groupName]) > 0 {
+			if exists, i := GroupIPExist(groupName, ip); exists {
+				gconf.Groups[groupName] = append(gconf.Groups[groupName][:i], gconf.Groups[groupName][i+1:]...)
+			} else {
+				log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
+			}
+		}
+	}
+	return nil
 }
 
 /**
@@ -116,18 +115,18 @@ func GroupIpRemove(groupName string, ips []string) (error) {
 func GroupAssign(groupName, node, iface string) (error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if GroupExist(groupName) {
-		if netUtils.InterfaceExist(iface) {
-			if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
-				gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
-			} else {
-				log.Warning(groupName + " already exists in node " + node + ".. skipping.")
-			}
-			return nil
-		}
-		return errors.New("interface does not exist")
+	if !GroupExist(groupName) {
+		return errors.New("IP group does not exist")
 	}
-	return errors.New("IP group does not exist")
+	if netUtils.InterfaceExist(iface) {
+		if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
+			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
+		} else {
+			log.Warning(groupName + " already exists in node " + node + ".. skipping.")
+		}
+		return nil
+	}
+	return errors.New("interface does not exist")
 }
 
 /**
@@ -138,19 +137,18 @@ func GroupAssign(groupName, node, iface string) (error) {
 func GroupUnassign(groupName, node, iface string) (error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if GroupExist(groupName) {
-		if !netUtils.InterfaceExist(iface) {
-			if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
-				gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
-			} else {
-				log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
-			}
-			return nil
-		}
-		return errors.New("interface does not exist")
-	} else {
+	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
+	if !netUtils.InterfaceExist(iface) {
+		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
+			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
+		} else {
+			log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
+		}
+		return nil
+	}
+	return errors.New("interface does not exist")
 }
 
 /**

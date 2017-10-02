@@ -73,6 +73,23 @@ func (m *Member) setStatus(status proto.MemberStatus_Status) {
 func (m *Member) setClient(client Client) {
 	m.Client = client
 }
+
+/*
+	Make the node active (bring up its groups)
+ */
+func (m *Member) makeActive()bool{
+	log.Debugf("Making active %s", m.getHostname())
+	return true
+}
+
+/**
+	Make the node passive (take down its groups)
+ */
+func (m *Member) makePassive()bool {
+	log.Debugf("Making passive %s", m.getHostname())
+	return true
+}
+
 /**
  * Add a member to the client list
  */
@@ -157,7 +174,8 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
  * This should probably populate the memberlist
  */
 func (m *Memberlist) Setup() {
-	// todo work out hwo to handle mutex in here
+	// todo work out how to handle mutex in here
+	log.Debug("Running member Setup")
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
@@ -223,6 +241,20 @@ func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status
 	return proto.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
 }
 
+/*
+	Return the hostname of the active member
+	or empty string if non are active
+ */
+func (m *Memberlist) getActiveMember()string {
+	for _, member := range m.Members {
+		if member.getStatus() == proto.MemberStatus_ACTIVE {
+			return member.getHostname()
+		}
+	}
+	return ""
+}
+
+
 /**
 	Promote a member within the memberlist to become the active
 	node
@@ -234,17 +266,32 @@ func (m *Memberlist) PromoteMember(hostname string)error {
 	// Demote if old active is no longer active. promote if the passive is the new active.
 
 	// get host is it active?
-	node := m.GetMemberByHostname(hostname)
-	if node == nil {
+	member := m.GetMemberByHostname(hostname)
+	if member == nil {
 		log.Errorf("Unknown hostname % give in call to promoteMember",hostname)
-		return errors.New("Unknown hostname")
+		return errors.New("unknown hostname")
 	}
 	// if unavailable check it works or do nothing?
-
+	switch member.getStatus(){
+	case proto.MemberStatus_UNAVAILABLE:
+		log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
+		return errors.New("unable to promote member because it is unavailable")
+	case proto.MemberStatus_ACTIVE:
+		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
+		return nil
+	}
 
 	// make current active node passive
+	activeMember := m.GetMemberByHostname(m.getActiveMember())
+	if !activeMember.makePassive() {
+		log.Errorf("Failed to make % passive, continuing", activeMember.getHostname())
+	}
 	// make new node active
+	if !member.makeActive() {
+		log.Errorf("Failed to promote % to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
+	}
 	// update all members
+	m.SyncConfig()
 
 	return nil
 }
