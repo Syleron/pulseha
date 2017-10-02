@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"sync"
 	"github.com/Syleron/PulseHA/src/utils"
+	"encoding/json"
 )
 
 /**
@@ -66,10 +67,44 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 	Join request for a configured cluster
  */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+	log.Debug("Server:Join() - Join Pulse request")
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("join test")
-	return nil, nil
+	if clusterCheck() {
+		originNode := &Node{}
+		err := json.Unmarshal(in.Config, originNode)
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// TODO: Node validation?
+		// Add node to config
+		NodeAdd(in.Hostname, originNode)
+		// Save our new config to file
+		gconf.Save()
+		// Return with our new updated config
+		buf, err := json.Marshal(gconf.GetConfig())
+		// Handle failure to marshal config
+		if err != nil {
+			log.Emergency("Unable to marshal config: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		return &proto.PulseJoin{
+			Success: true,
+			Message: "Successfully added ",
+			Config: buf,
+		}, nil
+	}
+	return &proto.PulseJoin{
+		Success: false,
+		Message: "This node is not in a configured cluster.",
+	}, nil
 }
 
 /**
