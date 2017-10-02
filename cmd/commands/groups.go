@@ -76,7 +76,7 @@ func (c *GroupsCommand) Run(args []string) int {
 
 	defer connection.Close()
 
-	client := proto.NewRequesterClient(connection)
+	client := proto.NewCLIClient(connection)
 
 	// If no action is provided then just list our current config
 	if len(cmds) == 0 {
@@ -115,7 +115,7 @@ func (c *GroupsCommand) Synopsis() string {
 /**
  *
  */
-func (c *GroupsCommand) drawGroupsTable(client proto.RequesterClient) {
+func (c *GroupsCommand) drawGroupsTable(client proto.CLIClient) {
 	r, err := client.GroupList(context.Background(), &proto.GroupTable{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
@@ -154,7 +154,7 @@ func (c *GroupsCommand) drawGroupsTable(client proto.RequesterClient) {
 /**
  *
  */
-func (c *GroupsCommand) New(client proto.RequesterClient) (int) {
+func (c *GroupsCommand) New(client proto.CLIClient) (int) {
 	r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
@@ -172,7 +172,7 @@ func (c *GroupsCommand) New(client proto.RequesterClient) (int) {
 /**
  *
  */
-func (c *GroupsCommand) Delete(groupName *string, client proto.RequesterClient) (int) {
+func (c *GroupsCommand) Delete(groupName *string, client proto.CLIClient) (int) {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -198,7 +198,7 @@ func (c *GroupsCommand) Delete(groupName *string, client proto.RequesterClient) 
 /**
  *
  */
-func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.RequesterClient) (int) {
+func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.CLIClient) (int) {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -232,7 +232,7 @@ func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.RequesterClien
 /**
  *
  */
-func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.RequesterClient) (int) {
+func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.CLIClient) (int) {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -266,7 +266,7 @@ func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.RequesterCl
 /**
  *
  */
-func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, client proto.RequesterClient) (int) {
+func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) (int) {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -306,7 +306,7 @@ func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, clien
 /**
  *
  */
-func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, client proto.RequesterClient) (int) {
+func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) (int) {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
