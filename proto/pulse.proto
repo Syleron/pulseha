@@ -138,11 +138,7 @@ message GroupTable {
 
 
 // Services
-service Requester {
-    // Perform GRPC Health Check
-    rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
-    // Join Cluster
-    rpc Join (PulseJoin) returns (PulseJoin);
+service CLI {
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Create Cluster
@@ -161,4 +157,11 @@ service Requester {
     rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
     // Get group list
     rpc GroupList (GroupTable) returns (GroupTable);
+}
+
+service Server {
+    // Perform GRPC Health Check
+    rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
+    // Join Cluster
+    rpc Join (PulseJoin) returns (PulseJoin);
 }

@@ -82,7 +82,7 @@ func (c *CreateCommand) Run(args []string) int {
 
 	defer connection.Close()
 
-	client := proto.NewRequesterClient(connection)
+	client := proto.NewCLIClient(connection)
 
 	r, err := client.Create(context.Background(), &proto.PulseCreate{
 		BindIp:   bindAddrString[0],

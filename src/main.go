@@ -45,6 +45,7 @@ var (
  */
 type Pulse struct {
 	Server *Server
+	CLI *CLIServer
 }
 
 /**
@@ -58,10 +59,13 @@ func createPulse() *Pulse {
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &Server{
-			Memberlist: &Memberlist{
-			},
+			Memberlist: &Memberlist{},
+		},
+		CLI: &CLIServer{
+			Memberlist: &Memberlist{},
 		},
 	}
+	pulse.CLI.Server = pulse.Server
 	return pulse
 }
 
@@ -88,7 +92,7 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
-	go pulse.Server.SetupCLI()
+	go pulse.CLI.Setup()
 	// Setup server
 	go pulse.Server.Setup()
 	wg.Wait()

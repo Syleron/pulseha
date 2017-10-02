@@ -72,7 +72,7 @@ func (c *JoinCommand) Run(args []string) int {
 
 	defer connection.Close()
 
-	client := proto.NewRequesterClient(connection)
+	client := proto.NewCLIClient(connection)
 
 	bindAddrString := strings.Split(addr[0], ":")
 

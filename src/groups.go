@@ -192,3 +192,28 @@ func GroupIPExist(name string, ip string) (bool, int) {
 	}
 	return false, -1
 }
+
+/**
+ *function to get the nodes and interfaces that relate to the specified node
+ */
+func getGroupNodes(group string)([]string, []string) {
+	var hosts []string
+	var interfaces []string
+	var found = false
+	config := gconf.GetConfig()
+	for name, node := range config.Nodes {
+		for iface, groupNameSlice := range node.IPGroups {
+			for _, groupName := range groupNameSlice{
+				if group == groupName{
+					hosts = append(hosts, name)
+					interfaces = append(interfaces, iface)
+					found = true
+				}
+			}
+		}
+	}
+	if found {
+		return hosts, interfaces
+	}
+	return nil, nil
+}
