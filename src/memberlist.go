@@ -38,9 +38,9 @@ type Memberlist struct {
  * Member struct type
  */
 type Member struct {
-	Hostname   string
-	Status proto.MemberStatus_Status
-	Client Client
+	hostname   string
+	status proto.MemberStatus_Status
+	Client
 	sync.Mutex
 }
 
@@ -51,37 +51,39 @@ type Member struct {
 func (m *Member) getHostname()string {
 	m.Lock()
 	defer m.Unlock()
-	return m.Hostname
+	return m.hostname
 }
 func (m *Member) setHostname(hostname string){
 	m.Lock()
 	defer m.Unlock()
-	m.Hostname = hostname
+	m.hostname = hostname
 }
 
 func (m *Member) getStatus()proto.MemberStatus_Status {
 	m.Lock()
 	defer m.Unlock()
-	return m.Status
+	return m.status
 }
 
 func (m *Member) setStatus(status proto.MemberStatus_Status) {
 	m.Lock()
 	defer m.Unlock()
-	m.Status = status
+	m.status = status
 }
-
+func (m *Member) setClient(client Client) {
+	m.Client = client
+}
 /**
  * Add a member to the client list
  */
 func (m *Memberlist) MemberAdd(hostname string, client *Client) {
 	m.Lock()
 	defer m.Unlock()
-	newMember := &Member{
-		Hostname: hostname,
-		Status: proto.MemberStatus_UNAVAILABLE,
-		Client: *client,
-	}
+	newMember := &Member{}
+
+	newMember.setHostname(hostname)
+	newMember.setStatus(proto.MemberStatus_UNAVAILABLE)
+	newMember.setClient(*client)
 
 	m.Members = append(m.Members, newMember)
 }
@@ -93,7 +95,7 @@ func (m *Memberlist) MemberRemoveByName(hostname string) () {
 	m.Lock()
 	defer m.Unlock()
 	for i, member := range m.Members {
-		if member.Hostname == hostname {
+		if member.getHostname() == hostname {
 			m.Members = append(m.Members[:i], m.Members[i+1:]...)
 		}
 	}
@@ -106,7 +108,7 @@ func (m *Memberlist) GetMemberByHostname(hostname string) (*Member) {
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		if member.Hostname == hostname {
+		if member.getHostname() == hostname {
 			return member
 		}
 	}
@@ -120,7 +122,7 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		if member.Hostname == hostname {
+		if member.getHostname() == hostname {
 			return true
 		}
 	}
@@ -134,7 +136,7 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		funcList := member.Client.GetFuncBroadcastList()
+		funcList := member.GetFuncBroadcastList()
 		f := reflect.ValueOf(funcList[funcName])
 		if len(params) != f.Type().NumIn() {
 			return nil, errors.New("the number of passed parameters do not match the function")
@@ -193,16 +195,16 @@ func (m *Memberlist) MembersConnect() {
 	defer m.Unlock()
 	for _, member := range m.Members {
 		// Make sure we are not connecting to ourself!
-		if member.Hostname != utils.GetHostname() {
-			node, err := NodeGetByName(member.Hostname)
+		if member.getHostname() != utils.GetHostname() {
+			node, err := NodeGetByName(member.getHostname())
 			if err != nil {
-				log.Warning(member.Hostname + " could not be found.")
+				log.Warning(member.getHostname() + " could not be found.")
 			}
-			err = member.Client.Connect(node.IP, node.Port, member.Hostname)
+			err = member.Client.Connect(node.IP, node.Port, member.getHostname())
 			if err != nil {
 				continue
 			}
-			member.Status = proto.MemberStatus_PASSIVE
+			member.setStatus(proto.MemberStatus_PASSIVE)
 		}
 	}
 }
@@ -214,8 +216,8 @@ func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		if member.Hostname == hostname {
-			return member.Status, nil
+		if member.getHostname() == hostname {
+			return member.getStatus(), nil
 		}
 	}
 	return proto.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
