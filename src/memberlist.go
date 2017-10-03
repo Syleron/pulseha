@@ -184,7 +184,7 @@ func (m *Memberlist) Setup() {
 		if clusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			m.PromoteMember(utils.GetHostname())
+			//m.PromoteMember(utils.GetHostname())
 		} else {
 			// Contact a member in the list to see who is the "active" node.
 			// Iterate through the memberlist until a response is receive.
@@ -199,10 +199,20 @@ func (m *Memberlist) Setup() {
 func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
-		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
-		newClient := &Client{}
-		m.MemberAdd(key, newClient)
+		if _, ok := m.Members[key]; ok {
+			log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
+			newClient := &Client{}
+			m.MemberAdd(key, newClient)
+		}
 	}
+}
+
+func (m *Memberlist) ReloadMembers() {
+	// Do a config reload
+	gconf.Reload()
+	// clear local members
+	// Reloading the memberlist
+	m.LoadMembers()
 }
 
 /**
