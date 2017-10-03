@@ -28,10 +28,19 @@ type globalConfig struct {
 	Config
 }
 /**
- * Returns a copy of the config
+	Returns a copy of the config
  */
-func (c *globalConfig)GetConfig()Config{
+func (c *globalConfig) GetConfig() Config {
 	return c.Config
+}
+
+/**
+	Should this save auto?
+ */
+func (c *globalConfig) SetConfig(config Config) {
+	c.Lock()
+	c.Config = config
+	c.Unlock()
 }
 
 var (

@@ -23,6 +23,7 @@ import (
 	"github.com/coreos/go-log/log"
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
+	"context"
 )
 
 type Client struct {
@@ -91,17 +92,17 @@ func (c *Client) Close() {
 //
 //	return r, err
 //}
-//
-///**
-// *
-// */
-//func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
-//	log.Debug("Client:SendJoin() Sending GRPC Join")
-//	r, err := c.Requester.Join(context.Background(), data)
-//
-//	return r, err
-//}
-//
+
+/**
+ *
+ */
+func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
+	log.Debug("Client:SendJoin() Sending GRPC Join")
+	r, err := c.Requester.Join(context.Background(), data)
+
+	return r, err
+}
+
 ///**
 // *
 // */

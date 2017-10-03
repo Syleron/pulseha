@@ -25,7 +25,6 @@ import (
 "net"
 "sync"
 "encoding/json"
-"strconv"
 "github.com/Syleron/PulseHA/src/netUtils"
 "github.com/Syleron/PulseHA/src/utils"
 )
@@ -46,12 +45,9 @@ type CLIServer struct {
 	       If successful we acknowledge it and update our memberlist.
  */
 func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if in.Replicated {
-		return s.JoinReplicated(in)
-	}
 	if !clusterCheck() {
 		// Create a new client
 		client := &Client{}
@@ -65,27 +61,26 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Create new local node config to send
-		//newNode := &Node{
-		//	IP:       in.Ip,
-		//	Port:     in.Port,
-		//	IPGroups: make(map[string][]string, 0),
-		//}
+		newNode := &Node{
+			IP:       in.BindIp,
+			Port:     in.BindPort,
+			IPGroups: make(map[string][]string, 0),
+		}
 		// Convert struct into byte array
-		//buf, err := json.Marshal(newNode)
+		buf, err := json.Marshal(newNode)
 		// Handle failure to marshal config
-		//if err != nil {
-		//	log.Emergency("Unable to marshal config: %s", err)
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: err.Error(),
-		//	}, nil
-		//}
+		if err != nil {
+			log.Emergency("Unable to marshal config: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
 		// Send our join request
-		//r, err := client.SendJoin(&proto.PulseJoin{
-		//	Replicated: true,
-		//	Config: buf,
-		//	Hostname: utils.GetHostname(),
-		//})
+		r, err := client.SendJoin(&proto.PulseJoin{
+			Config: buf,
+			Hostname: utils.GetHostname(),
+		})
 		// Handle a failed request
 		if err != nil {
 			log.Emergency("Response error: %s", err)
@@ -95,33 +90,17 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Handle an unsuccessful request
-		//if !r.Success {
-		//	log.Emergency("Peer error: %s", err)
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: r.Message,
-		//	}, nil
-		//}
+		if !r.Success {
+			log.Emergency("Peer error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: r.Message,
+			}, nil
+		}
 		// Update our local config
-		// Close the connection
-		client.Close()
-		return &proto.PulseJoin{
-			Success: true,
-		}, nil
-	}
-	return &proto.PulseJoin{
-		Success: false,
-		Message: "Unable to join as PulseHA is already in a cluster.",
-	}, nil
-}
-
-/**
-	Join replicated logic. This is only performed when sent by another peer/node.
- */
-func (s *CLIServer) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	if clusterCheck() {
-		originNode := &Node{}
-		err := json.Unmarshal(in.Config, originNode)
+		peerConfig := &Config{}
+		err = json.Unmarshal(r.Config, peerConfig)
+		// handle errors
 		if err != nil {
 			log.Error("Unable to unmarshal config node.")
 			return &proto.PulseJoin{
@@ -129,18 +108,24 @@ func (s *CLIServer) JoinReplicated(in *proto.PulseJoin) (*proto.PulseJoin, error
 				Message: "Unable to unmarshal config node.",
 			}, nil
 		}
-		// TODO: Node validation?
-		NodeAdd(in.Hostname, originNode)
+		// Set the config
+		gconf.SetConfig(*peerConfig)
+		// Save the config
 		gconf.Save()
-		// we need to return the entire conf
+		// Reload config in memory
+		gconf.Reload()
+		// Setup our daemon server
+		go s.Server.Setup()
+		// Close the connection
+		client.Close()
+		// TODO: Broadcast this function
 		return &proto.PulseJoin{
 			Success: true,
-			Message: "Successfully added ",
 		}, nil
 	}
 	return &proto.PulseJoin{
 		Success: false,
-		Message: "This node is not in a configured cluster.",
+		Message: "Unable to join as PulseHA is already in a cluster.",
 	}, nil
 }
 

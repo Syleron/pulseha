@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"sync"
 	"github.com/Syleron/PulseHA/src/utils"
+	"encoding/json"
+	"strconv"
 )
 
 /**
@@ -66,28 +68,65 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 	Join request for a configured cluster
  */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	log.Debug("join test")
-	return nil, nil
+	if clusterCheck() {
+		// Define new node
+		originNode := &Node{}
+		// unmarshal byte data to new node
+		err := json.Unmarshal(in.Config, originNode)
+		// handle errors
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// TODO: Node validation?
+		// Add node to config
+		NodeAdd(in.Hostname, originNode)
+		// Save our new config to file
+		gconf.Save()
+		// Return with our new updated config
+		buf, err := json.Marshal(gconf.GetConfig())
+		// Handle failure to marshal config
+		if err != nil {
+			log.Emergency("Unable to marshal config: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		return &proto.PulseJoin{
+			Success: true,
+			Message: "Successfully added ",
+			Config: buf,
+		}, nil
+	}
+	return &proto.PulseJoin{
+		Success: false,
+		Message: "This node is not in a configured cluster.",
+	}, nil
 }
 
 /**
  * Setup pulse server type
  */
 func (s *Server) Setup() {
-	configCopy := gconf.GetConfig()
+	config := gconf.GetConfig()
 	if !clusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
 	var err error
-	s.Listener, err = net.Listen("tcp", configCopy.LocalNode().IP+":"+configCopy.LocalNode().Port)
+	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 		os.Exit(1)
 	}
-	if configCopy.Pulse.TLS {
+	if config.Pulse.TLS {
 		// Get project directory location
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 		if err != nil {
@@ -109,7 +148,7 @@ func (s *Server) Setup() {
 	}
 	proto.RegisterServerServer(s.Server, s)
 	s.Memberlist.Setup()
-	log.Info("Pulse initialised on " + configCopy.LocalNode().IP + ":" + configCopy.LocalNode().Port)
+	log.Info("Pulse initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }
 

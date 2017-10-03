@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"github.com/Syleron/PulseHA/proto"
 	"context"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type JoinCommand struct {
@@ -39,6 +40,7 @@ Usage: pulseha join [options] address ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
+  -bind-addr Pulse daemon bind address and port
 `
 	return strings.TrimSpace(helpText)
 }
@@ -49,6 +51,8 @@ Options:
 func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
+
+	bindAddr := cmdFlags.String("bind-addr", "127.0.0.1:9443", "Bind address for local Pulse daemon")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
@@ -62,6 +66,15 @@ func (c *JoinCommand) Run(args []string) int {
 		c.Ui.Error(c.Help())
 		return 1
 	}
+
+	// If we have the default.. which we don't want.. error out.
+	if *bindAddr == "127.0.0.1:9443" {
+		c.Ui.Error("Please specify a bind address.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
+	bindIP, bindPort, _ :=utils.SplitIpPort(*bindAddr)
 
 	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
@@ -85,6 +98,8 @@ func (c *JoinCommand) Run(args []string) int {
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
 		Ip: bindAddrString[0],
 		Port: bindAddrString[1],
+		BindIp: bindIP,
+		BindPort: bindPort,
 	})
 
 	if err != nil {

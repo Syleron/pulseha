@@ -145,7 +145,7 @@ func (c *Config) Save() {
 func (c *Config) Reload() {
 	log.Debug("Reloading PulseHA config")
 	// Reload the config file
-	//c.Load()
+	c.Load()
 }
 
 /**

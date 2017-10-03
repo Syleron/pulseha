@@ -38,7 +38,6 @@ func (c *CreateCommand) Help() string {
 Usage: pulseha create [options] ...
   Tells the PulseHA daemon to configure a new cluster.
 Options:
-  -bind-addr Pulse daemon bind address and port
 `
 	return strings.TrimSpace(helpText)
 }
@@ -56,6 +55,13 @@ func (c *CreateCommand) Run(args []string) int {
 	}
 
 	addr := cmdFlags.Args()
+
+	// If no action is provided then just list our current config
+	if len(addr) == 0 {
+		c.Ui.Error("Please specify an action\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
 
 	// If we have the default.. which we don't want.. error out.
 	if addr[0] == "127.0.0.1" {

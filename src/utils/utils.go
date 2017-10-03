@@ -121,7 +121,7 @@ func GetHostname() string {
 /**
  * Function to return an IP and Port from a single ip:port string
  */
-func splitIpPort(ipPort string) (string, string, error) {
+func SplitIpPort(ipPort string) (string, string, error) {
 	IPslice := strings.Split(ipPort, ":")
 
 	if len(IPslice) < 2 {

@@ -58,11 +58,13 @@ message MemberStatus {
 message PulseJoin {
     bool success = 1;
     string message = 2;
-    string ip = 3;
-    string port = 4;
-    string hostname = 5;
-    bool replicated = 6;
-    bytes config = 7;
+    string bind_ip = 3;
+    string bind_port = 4;
+    string ip = 5;
+    string port = 6;
+    string hostname = 7;
+    bool replicated = 8;
+    bytes config = 9;
 }
 message PulseLeave {
     bool success = 1;
@@ -139,6 +141,8 @@ message GroupTable {
 
 // Services
 service CLI {
+    // Join Cluster
+    rpc Join (PulseJoin) returns (PulseJoin);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Create Cluster
@@ -164,6 +168,4 @@ service Server {
     rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
-
-    rpc MakeActive ()
 }
