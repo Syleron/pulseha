@@ -86,6 +86,15 @@ func (c *Client) Close() {
 /**
 
  */
+func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
+	log.Debug("Client:SendJoin() Sending GRPC Join")
+	r, err := c.Requester.Leave(context.Background(), data)
+	return r, err
+}
+
+/**
+
+ */
 func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
 	log.Debug("Client:SendJoin() Sending GRPC Join")
 	r, err := c.Requester.Join(context.Background(), data)

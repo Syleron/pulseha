@@ -69,6 +69,7 @@ message PulseJoin {
 message PulseLeave {
     bool success = 1;
     string message = 2;
+    bool replicated = 3;
 }
 message PulseCreate {
     bool success = 1;

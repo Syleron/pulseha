@@ -121,6 +121,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		// TODO: Broadcast this function
 		return &proto.PulseJoin{
 			Success: true,
+			Message: "Successfully joined cluster",
 		}, nil
 	}
 	return &proto.PulseJoin{
@@ -145,7 +146,9 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	if clusterTotal() > 1 {
-		s.Memberlist.Broadcast("")
+		s.Memberlist.Broadcast("SendLeave", &proto.PulseLeave{
+
+		})
 	}
 
 	GroupClearLocal()
