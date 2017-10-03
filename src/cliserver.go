@@ -62,8 +62,8 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		}
 		// Create new local node config to send
 		newNode := &Node{
-			IP:       in.Ip,
-			Port:     in.Port,
+			IP:       in.BindIp,
+			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
 		// Convert struct into byte array
@@ -78,7 +78,6 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		}
 		// Send our join request
 		r, err := client.SendJoin(&proto.PulseJoin{
-			Replicated: true,
 			Config: buf,
 			Hostname: utils.GetHostname(),
 		})
@@ -113,6 +112,10 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		gconf.SetConfig(*peerConfig)
 		// Save the config
 		gconf.Save()
+		// Reload config in memory
+		gconf.Reload()
+		// Setup our daemon server
+		go s.Server.Setup()
 		// Close the connection
 		client.Close()
 		// TODO: Broadcast this function

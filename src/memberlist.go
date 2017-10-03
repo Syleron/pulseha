@@ -34,8 +34,6 @@ type Memberlist struct {
 	sync.Mutex
 }
 
-
-
 /**
  * Add a member to the client list
  */
@@ -145,11 +143,9 @@ func (m *Memberlist) Setup() {
 func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
-		if _, ok := m.Members[key]; ok {
-			log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
-			newClient := &Client{}
-			m.MemberAdd(key, newClient)
-		}
+		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
+		newClient := &Client{}
+		m.MemberAdd(key, newClient)
 	}
 }
 
@@ -257,6 +253,7 @@ func (m *Memberlist) PromoteMember(hostname string)error {
  */
 func (m *Memberlist) SyncConfig() {
 	//config := gconf.GetConfig()
+
 }
 
 
