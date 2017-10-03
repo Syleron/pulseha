@@ -25,7 +25,6 @@ import (
 "net"
 "sync"
 "encoding/json"
-"strconv"
 "github.com/Syleron/PulseHA/src/netUtils"
 "github.com/Syleron/PulseHA/src/utils"
 )
@@ -46,7 +45,7 @@ type CLIServer struct {
 	       If successful we acknowledge it and update our memberlist.
  */
 func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !clusterCheck() {
@@ -100,8 +99,23 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Update our local config
+		peerConfig := &Config{}
+		err = json.Unmarshal(r.Config, peerConfig)
+		// handle errors
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// Set the config
+		gconf.SetConfig(*peerConfig)
+		// Save the config
+		gconf.Save()
 		// Close the connection
 		client.Close()
+		// TODO: Broadcast this function
 		return &proto.PulseJoin{
 			Success: true,
 		}, nil
