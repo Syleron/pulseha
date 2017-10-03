@@ -177,4 +177,6 @@ service Server {
     rpc Join (PulseJoin) returns (PulseJoin);
     // Sync Config
     rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
+    // Leave Cluster
+    rpc Leave (PulseLeave) returns (PulseLeave);
 }

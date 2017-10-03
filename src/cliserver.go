@@ -131,7 +131,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 
 /**
 	Break cluster / Leave from cluster
-	TODO: Leave from cluster. At the moment it will only break if we are the sole member.
+	TODO: Remember to reassign active role on leave
  */
 func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
@@ -143,6 +143,11 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
+	// Check to see if we are not the only one in the "cluster"
+	if clusterTotal() > 1 {
+		s.Memberlist.Broadcast("")
+	}
+
 	GroupClearLocal()
 	NodesClearLocal()
 	gconf.Save()

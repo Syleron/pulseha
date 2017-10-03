@@ -37,7 +37,7 @@ type Client struct {
  */
 func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
 	funcList := map[string]interface{} {
-		//"SendJoin": c.SendJoin,
+		"SendLeave": c.SendLeave,
 	}
 	return funcList
 }
