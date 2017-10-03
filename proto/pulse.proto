@@ -164,4 +164,6 @@ service Server {
     rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
+
+    rpc MakeActive ()
 }

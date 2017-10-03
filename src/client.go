@@ -172,3 +172,11 @@ func (c *Client) Close() {
 //	return r, err
 //}
 
+/*
+func (c *Client) SendMakeActive(data *p.PulseGroupUnassign) (*p.PulseGroupUnassign, error) {
+	log.Debug("Client:SendGroupUnassign() Sending GRPC GroupUnassign")
+	r, err := c.Requester.GroupUnassign(context.Background(), data)
+
+	return r, err
+}
+*/
