@@ -22,8 +22,9 @@ import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/coreos/go-log/log"
-	"github.com/Syleron/PulseHA/proto"
+	p "github.com/Syleron/PulseHA/proto"
 	"sync"
+	"encoding/json"
 )
 
 /**
@@ -38,15 +39,17 @@ type Memberlist struct {
  * Add a member to the client list
  */
 func (m *Memberlist) MemberAdd(hostname string, client *Client) {
-	m.Lock()
-	defer m.Unlock()
-	newMember := &Member{}
-
-	newMember.setHostname(hostname)
-	newMember.setStatus(proto.MemberStatus_UNAVAILABLE)
-	newMember.setClient(*client)
-	
-	m.Members = append(m.Members, newMember)
+	if !m.MemberExists(hostname) {
+		m.Lock()
+		newMember := &Member{}
+		newMember.setHostname(hostname)
+		newMember.setStatus(p.MemberStatus_UNAVAILABLE)
+		newMember.setClient(*client)
+		m.Members = append(m.Members, newMember)
+		m.Unlock()
+	} else {
+		log.Warning("Member " + hostname + " already exists. Skipping.")
+	}
 }
 
 /**
@@ -143,19 +146,20 @@ func (m *Memberlist) Setup() {
 func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
-		//if _, ok := m.Members[key]; ok {
 		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
 		newClient := &Client{}
 		m.MemberAdd(key, newClient)
-		//}
 	}
 }
 
+/**
+
+ */
 func (m *Memberlist) ReloadMembers() {
+	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
 	// Do a config reload
 	gconf.Reload()
 	// clear local members
-	// Reloading the memberlist
 	m.LoadMembers()
 }
 
@@ -176,7 +180,7 @@ func (m *Memberlist) MembersConnect() {
 			if err != nil {
 				continue
 			}
-			member.setStatus(proto.MemberStatus_PASSIVE)
+			member.setStatus(p.MemberStatus_PASSIVE)
 		}
 	}
 }
@@ -184,7 +188,7 @@ func (m *Memberlist) MembersConnect() {
 /**
 	Get status of a specific member by hostname
  */
-func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status, error) {
+func (m *Memberlist) MemberGetStatus(hostname string) (p.MemberStatus_Status, error) {
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
@@ -192,22 +196,21 @@ func (m *Memberlist) MemberGetStatus(hostname string) (proto.MemberStatus_Status
 			return member.getStatus(), nil
 		}
 	}
-	return proto.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
+	return p.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
 }
 
 /*
 	Return the hostname of the active member
 	or empty string if non are active
  */
-func (m *Memberlist) getActiveMember()string {
+func (m *Memberlist) getActiveMember() string {
 	for _, member := range m.Members {
-		if member.getStatus() == proto.MemberStatus_ACTIVE {
+		if member.getStatus() == p.MemberStatus_ACTIVE {
 			return member.getHostname()
 		}
 	}
 	return ""
 }
-
 
 /**
 	Promote a member within the memberlist to become the active
@@ -227,10 +230,10 @@ func (m *Memberlist) PromoteMember(hostname string)error {
 	}
 	// if unavailable check it works or do nothing?
 	switch member.getStatus(){
-	case proto.MemberStatus_UNAVAILABLE:
+	case p.MemberStatus_UNAVAILABLE:
 		log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
 		return errors.New("unable to promote member because it is unavailable")
-	case proto.MemberStatus_ACTIVE:
+	case p.MemberStatus_ACTIVE:
 		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
 		return nil
 	}
@@ -252,10 +255,43 @@ func (m *Memberlist) PromoteMember(hostname string)error {
 
 /**
 	Sync local config with each member in the cluster.
+    TODO: Consider reloading the config before syncing?
  */
-func (m *Memberlist) SyncConfig() {
-	//config := gconf.GetConfig()
-
+func (m *Memberlist) SyncConfig() error {
+	m.Lock()
+	defer m.Unlock()
+	// Return with our new updated config
+	buf, err := json.Marshal(gconf.GetConfig())
+	// Handle failure to marshal config
+	if err != nil {
+		return errors.New("unable to sync config " + err.Error())
+	}
+	for _, member := range m.Members {
+		if member.hostname == utils.GetHostname() {
+			continue
+		}
+		nodeDetails, _ := NodeGetByName(member.hostname)
+		err := member.Connect(nodeDetails.IP, nodeDetails.Port, member.hostname)
+		if err != nil {
+			// TODO: Perhaps we should inform & set peer status
+			return errors.New("unable to connect to node " + member.hostname)
+		}
+		r, err := member.SendConfigSync(&p.PulseConfigSync{
+			Replicated: true,
+			Config: buf,
+		})
+		if err != nil {
+			log.Warning("failed syncing config to " + member.hostname + ": " + err.Error())
+			continue
+		}
+		if !r.Success {
+			log.Warning("failed syncing config to " + member.hostname + ": " + r.Message)
+			continue
+		}
+		member.Close()
+		log.Info("Successfully synced config to " + member.hostname)
+	}
+	return nil
 }
 
 
