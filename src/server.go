@@ -123,7 +123,11 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
-	return &proto.PulseLeave{}, nil
+	NodeDelete(in.Hostname)
+	return &proto.PulseLeave{
+		Success: true,
+		Message: "Successfully removed node from local config",
+	}, nil
 }
 
 /**

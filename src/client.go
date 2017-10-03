@@ -38,6 +38,7 @@ type Client struct {
 func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
 	funcList := map[string]interface{} {
 		"SendLeave": c.SendLeave,
+		"SendConfigSync": c.SendConfigSync,
 	}
 	return funcList
 }
@@ -87,7 +88,7 @@ func (c *Client) Close() {
 
  */
 func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
-	log.Debug("Client:SendJoin() Sending GRPC Join")
+	log.Debug("Client:SendLeave() Sending GRPC Leave")
 	r, err := c.Requester.Leave(context.Background(), data)
 	return r, err
 }

@@ -19,12 +19,6 @@ syntax = "proto3";
 
 package proto;
 
-// Statuses
-// Alive
-// Leaving
-// Left
-// Failed
-
 // Types
 message HealthCheckRequest {
     enum ServingRequest {
@@ -69,7 +63,8 @@ message PulseJoin {
 message PulseLeave {
     bool success = 1;
     string message = 2;
-    bool replicated = 3;
+    string hostname = 3;
+    bool replicated = 4;
 }
 message PulseCreate {
     bool success = 1;

@@ -147,7 +147,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	// Check to see if we are not the only one in the "cluster"
 	if clusterTotal() > 1 {
 		s.Memberlist.Broadcast("SendLeave", &proto.PulseLeave{
-
+			Replicated: true,
 		})
 	}
 
