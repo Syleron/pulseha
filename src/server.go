@@ -89,6 +89,11 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		NodeAdd(in.Hostname, originNode)
 		// Save our new config to file
 		gconf.Save()
+		// Update the cluster config
+		s.Memberlist.SyncConfig()
+		// Add node to the memberlist
+		// TODO: Reconsider how this is done. Perhaps a member reload
+		s.Memberlist.ReloadMembers()
 		// Return with our new updated config
 		buf, err := json.Marshal(gconf.GetConfig())
 		// Handle failure to marshal config
@@ -111,6 +116,36 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	}, nil
 }
 
+/**
+	Update our local config from a Resync request
+ */
+func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
+	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
+	s.Lock()
+	defer s.Unlock()
+	// Define new node
+	newConfig := &Config{}
+	// unmarshal byte data to new node
+	err := json.Unmarshal(in.Config, newConfig)
+	// Handle failure to marshal config
+	if err != nil {
+		log.Emergency("Unable to marshal config: %s", err)
+		return &proto.PulseConfigSync{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	// Set our new config in memory
+	gconf.SetConfig(*newConfig)
+	// Save our config to file
+	gconf.Save()
+	// Let the logs know
+	log.Info("Successfully updated local config")
+	// Return with yay
+	return &proto.PulseConfigSync{
+		Success: true,
+	}, nil
+}
 /**
  * Setup pulse server type
  */

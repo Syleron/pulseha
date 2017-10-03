@@ -138,6 +138,13 @@ message GroupTable {
     repeated GroupRow row = 3;
 }
 
+message PulseConfigSync {
+    bool success = 1;
+    string message = 2;
+    bytes config = 3;
+    bool replicated = 4;
+}
+
 
 // Services
 service CLI {
@@ -168,4 +175,6 @@ service Server {
     rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
+    // Sync Config
+    rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
 }
