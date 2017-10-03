@@ -143,11 +143,11 @@ func (m *Memberlist) Setup() {
 func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
-		if _, ok := m.Members[key]; ok {
-			log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
-			newClient := &Client{}
-			m.MemberAdd(key, newClient)
-		}
+		//if _, ok := m.Members[key]; ok {
+		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
+		newClient := &Client{}
+		m.MemberAdd(key, newClient)
+		//}
 	}
 }
 
