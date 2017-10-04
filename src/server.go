@@ -123,7 +123,14 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
-	NodeDelete(in.Hostname)
+	err := NodeDelete(in.Hostname)
+	if err != nil {
+		return &proto.PulseLeave{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	gconf.Save()
 	return &proto.PulseLeave{
 		Success: true,
 		Message: "Successfully removed node from local config",
@@ -134,7 +141,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	Update our local config from a Resync request
  */
 func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
-	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
+	log.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
 	// Define new node

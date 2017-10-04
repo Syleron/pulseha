@@ -148,6 +148,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	if clusterTotal() > 1 {
 		s.Memberlist.Broadcast("SendLeave", &proto.PulseLeave{
 			Replicated: true,
+			Hostname: utils.GetHostname(),
 		})
 	}
 
