@@ -37,7 +37,8 @@ type Client struct {
  */
 func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
 	funcList := map[string]interface{} {
-		//"SendJoin": c.SendJoin,
+		"SendLeave": c.SendLeave,
+		"SendConfigSync": c.SendConfigSync,
 	}
 	return funcList
 }
@@ -86,9 +87,24 @@ func (c *Client) Close() {
 /**
 
  */
+func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
+	log.Debug("Client:SendLeave() Sending GRPC Leave")
+	r, err := c.Requester.Leave(context.Background(), data)
+	if err != nil {
+		log.Error(err.Error())
+	}
+	return r, err
+}
+
+/**
+
+ */
 func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
 	log.Debug("Client:SendJoin() Sending GRPC Join")
 	r, err := c.Requester.Join(context.Background(), data)
+	if err != nil {
+		log.Error(err.Error())
+	}
 	return r, err
 }
 
@@ -98,6 +114,9 @@ func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
 func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, error) {
 	log.Debug("Client:SendJoin() Sending GRPC ConfigSync")
 	r, err := c.Requester.ConfigSync(context.Background(), data)
+	if err != nil {
+		log.Error(err.Error())
+	}
 	return r, err
 }
 

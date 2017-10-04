@@ -19,12 +19,6 @@ syntax = "proto3";
 
 package proto;
 
-// Statuses
-// Alive
-// Leaving
-// Left
-// Failed
-
 // Types
 message HealthCheckRequest {
     enum ServingRequest {
@@ -69,6 +63,8 @@ message PulseJoin {
 message PulseLeave {
     bool success = 1;
     string message = 2;
+    string hostname = 3;
+    bool replicated = 4;
 }
 message PulseCreate {
     bool success = 1;
@@ -177,4 +173,6 @@ service Server {
     rpc Join (PulseJoin) returns (PulseJoin);
     // Sync Config
     rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
+    // Leave Cluster
+    rpc Leave (PulseLeave) returns (PulseLeave);
 }

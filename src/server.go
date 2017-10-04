@@ -119,8 +119,32 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 /**
 	Update our local config from a Resync request
  */
+func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
+	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
+	s.Lock()
+	defer s.Unlock()
+	// Remove from our memberlist
+	s.Memberlist.MemberRemoveByName(in.Hostname)
+	// Remove from our config
+	err := NodeDelete(in.Hostname)
+	if err != nil {
+		return &proto.PulseLeave{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	gconf.Save()
+	return &proto.PulseLeave{
+		Success: true,
+		Message: "Successfully removed node from local config",
+	}, nil
+}
+
+/**
+	Update our local config from a Resync request
+ */
 func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
-	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
+	log.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
 	// Define new node
@@ -139,8 +163,10 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	gconf.SetConfig(*newConfig)
 	// Save our config to file
 	gconf.Save()
+	// Update our member list
+	s.Memberlist.ReloadMembers()
 	// Let the logs know
-	log.Info("Successfully updated local config")
+	log.Info("Successfully r-synced local config")
 	// Return with yay
 	return &proto.PulseConfigSync{
 		Success: true,

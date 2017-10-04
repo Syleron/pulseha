@@ -40,6 +40,7 @@ type Memberlist struct {
  */
 func (m *Memberlist) MemberAdd(hostname string, client *Client) {
 	if !m.MemberExists(hostname) {
+		log.Debug("Memberlist:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
 		newMember := &Member{}
 		newMember.setHostname(hostname)
@@ -48,7 +49,7 @@ func (m *Memberlist) MemberAdd(hostname string, client *Client) {
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
-		log.Warning("Member " + hostname + " already exists. Skipping.")
+		log.Warning("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
 	}
 }
 
@@ -97,9 +98,25 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
 func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interface{}, error) {
+	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName)
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
+		// We don't want to broadcast to our self!
+		if member.hostname == utils.GetHostname() {
+			continue
+		}
+		// check to see if we have a connection state
+		if member.Connection == nil {
+			nodeDetails, _ := NodeGetByName(member.hostname)
+			err := member.Connect(nodeDetails.IP, nodeDetails.Port, member.hostname)
+			if err != nil {
+				log.Warning("Unable to connect to " + member.hostname)
+				continue
+			}
+			// TODO: Possible memory leak defer in for loop
+			defer member.Close()
+		}
 		funcList := member.GetFuncBroadcastList()
 		f := reflect.ValueOf(funcList[funcName])
 		if len(params) != f.Type().NumIn() {
@@ -110,6 +127,7 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 			vals[k] = reflect.ValueOf(param)
 		}
 		f.Call(vals)
+		// TODO: Mark a node dead if it cannot be reached
 	}
 	return nil, nil
 }
@@ -146,7 +164,6 @@ func (m *Memberlist) Setup() {
 func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
-		log.Debug("Memberlist:LoadMembers() " + key + " added to memberlist")
 		newClient := &Client{}
 		m.MemberAdd(key, newClient)
 	}
@@ -216,7 +233,7 @@ func (m *Memberlist) getActiveMember() string {
 	Promote a member within the memberlist to become the active
 	node
  */
-func (m *Memberlist) PromoteMember(hostname string)error {
+func (m *Memberlist) PromoteMember(hostname string) error {
 	m.Lock()
 	defer m.Unlock()
 	// Inform everyone in the cluster that a specific node is now the new active
@@ -225,11 +242,11 @@ func (m *Memberlist) PromoteMember(hostname string)error {
 	// get host is it active?
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
-		log.Errorf("Unknown hostname % give in call to promoteMember",hostname)
+		log.Errorf("Unknown hostname % give in call to promoteMember", hostname)
 		return errors.New("unknown hostname")
 	}
 	// if unavailable check it works or do nothing?
-	switch member.getStatus(){
+	switch member.getStatus() {
 	case p.MemberStatus_UNAVAILABLE:
 		log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
 		return errors.New("unable to promote member because it is unavailable")
@@ -256,42 +273,26 @@ func (m *Memberlist) PromoteMember(hostname string)error {
 /**
 	Sync local config with each member in the cluster.
     TODO: Consider reloading the config before syncing?
+	TODO: Why isn't this using the broadcast function?
  */
 func (m *Memberlist) SyncConfig() error {
-	m.Lock()
-	defer m.Unlock()
 	// Return with our new updated config
 	buf, err := json.Marshal(gconf.GetConfig())
 	// Handle failure to marshal config
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	for _, member := range m.Members {
-		if member.hostname == utils.GetHostname() {
-			continue
-		}
-		nodeDetails, _ := NodeGetByName(member.hostname)
-		err := member.Connect(nodeDetails.IP, nodeDetails.Port, member.hostname)
-		if err != nil {
-			// TODO: Perhaps we should inform & set peer status
-			return errors.New("unable to connect to node " + member.hostname)
-		}
-		r, err := member.SendConfigSync(&p.PulseConfigSync{
-			Replicated: true,
-			Config: buf,
-		})
-		if err != nil {
-			log.Warning("failed syncing config to " + member.hostname + ": " + err.Error())
-			continue
-		}
-		if !r.Success {
-			log.Warning("failed syncing config to " + member.hostname + ": " + r.Message)
-			continue
-		}
-		member.Close()
-		log.Info("Successfully synced config to " + member.hostname)
+	_, err = m.Broadcast("SendConfigSync", &p.PulseConfigSync{
+		Replicated: true,
+		Config:     buf,
+	})
+	if err != nil {
+		log.Warning("failed syncing: " + err.Error())
 	}
+	//if !r.Success {
+	//	log.Warning("failed syncing config to " + member.hostname + ": " + r.Message)
+	//}
+	//member.Close()
+	//log.Info("Successfully synced config to " + member.hostname)
 	return nil
 }
-
-

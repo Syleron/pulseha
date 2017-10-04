@@ -118,6 +118,7 @@ func (c *Config) Load() {
  * Function used to save the config
  */
 func (c *Config) Save() {
+	log.Debug("Saving config..")
 	gconf.Lock()
 	defer gconf.Unlock()
 	// Validate before we save

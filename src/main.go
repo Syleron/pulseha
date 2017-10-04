@@ -65,13 +65,15 @@ func createPulse() *Pulse {
 	gconf.Load()
 	// Validate the config
 	gconf.Validate()
+	// Define new Memberlist
+	memberList := &Memberlist{}
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &Server{
-			Memberlist: &Memberlist{},
+			Memberlist: memberList,
 		},
 		CLI: &CLIServer{
-			Memberlist: &Memberlist{},
+			Memberlist: memberList,
 		},
 	}
 	pulse.CLI.Server = pulse.Server
