@@ -17,7 +17,7 @@ import (
 func GroupNew() (string, error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if clusterCheck() {
+	if gconf.ClusterCheck() {
 		groupName := GenGroupName()
 		gconf.Groups[groupName] = []string{}
 		return groupName, nil

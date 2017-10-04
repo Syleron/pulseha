@@ -48,7 +48,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !clusterCheck() {
+	if !gconf.ClusterCheck() {
 		// Create a new client
 		client := &Client{}
 		// Attempt to connect
@@ -138,14 +138,14 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !clusterCheck() {
+	if !gconf.ClusterCheck() {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
 		}, nil
 	}
 	// Check to see if we are not the only one in the "cluster"
-	if clusterTotal() > 1 {
+	if gconf.ClusterTotal() > 1 {
 		s.Memberlist.Broadcast("SendLeave", &proto.PulseLeave{
 			Replicated: true,
 			Hostname: utils.GetHostname(),
@@ -156,7 +156,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	NodesClearLocal()
 	gconf.Save()
 	s.Server.shutdown()
-	if clusterTotal() == 1 {
+	if gconf.ClusterTotal() == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
@@ -175,7 +175,7 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	log.Debug("CLIServer:Create() - Create Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !clusterCheck() {
+	if !gconf.ClusterCheck() {
 		newNode := &Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,

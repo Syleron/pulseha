@@ -57,6 +57,7 @@ func (m *Memberlist) MemberAdd(hostname string, client *Client) {
  * Remove a member from the client list by hostname
  */
 func (m *Memberlist) MemberRemoveByName(hostname string) () {
+	log.Debug("Memberlist:MemberRemoveByName() " + hostname + " removed from the memberlist")
 	m.Lock()
 	defer m.Unlock()
 	for i, member := range m.Members {
@@ -114,8 +115,6 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 				log.Warning("Unable to connect to " + member.hostname)
 				continue
 			}
-			// TODO: Possible memory leak defer in for loop
-			defer member.Close()
 		}
 		funcList := member.GetFuncBroadcastList()
 		f := reflect.ValueOf(funcList[funcName])
@@ -128,6 +127,9 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 		}
 		f.Call(vals)
 		// TODO: Mark a node dead if it cannot be reached
+		if member.Connection == nil {
+			member.Close()
+		}
 	}
 	return nil, nil
 }
@@ -144,9 +146,9 @@ func (m *Memberlist) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	if clusterCheck() {
+	if gconf.ClusterCheck() {
 		// Are we the only member in the cluster?
-		if clusterTotal() == 1 {
+		if gconf.ClusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
 			//m.PromoteMember(utils.GetHostname())

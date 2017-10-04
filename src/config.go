@@ -163,6 +163,25 @@ func (c *Config) LocalNode() Node {
 }
 
 /**
+ * Private - Check to see if we are in a configured cluster or not.
+ */
+func (c *Config) ClusterCheck() (bool) {
+	config := gconf.GetConfig()
+	if len(config.Nodes) > 0 {
+		return true
+	}
+	return false
+}
+
+/**
+ * Return the total number of configured nodes we have in our config.
+ */
+func (c *Config) ClusterTotal() (int) {
+	config := gconf.GetConfig()
+	return len(config.Nodes)
+}
+
+/**
  *
  */
 func DefaultLocalConfig() *Config {

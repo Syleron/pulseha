@@ -71,7 +71,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if clusterCheck() {
+	if gconf.ClusterCheck() {
 		// Define new node
 		originNode := &Node{}
 		// unmarshal byte data to new node
@@ -177,7 +177,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
  */
 func (s *Server) Setup() {
 	config := gconf.GetConfig()
-	if !clusterCheck() {
+	if !gconf.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
