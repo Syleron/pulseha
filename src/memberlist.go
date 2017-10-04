@@ -127,6 +127,7 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 			vals[k] = reflect.ValueOf(param)
 		}
 		f.Call(vals)
+		// TODO: Mark a node dead if it cannot be reached
 	}
 	return nil, nil
 }

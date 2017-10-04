@@ -123,6 +123,9 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
+	// Remove from our memberlist
+	s.Memberlist.MemberRemoveByName(in.Hostname)
+	// Remove from our config
 	err := NodeDelete(in.Hostname)
 	if err != nil {
 		return &proto.PulseLeave{
@@ -160,8 +163,10 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	gconf.SetConfig(*newConfig)
 	// Save our config to file
 	gconf.Save()
+	// Update our member list
+	s.Memberlist.ReloadMembers()
 	// Let the logs know
-	log.Info("Successfully updated local config")
+	log.Info("Successfully r-synced local config")
 	// Return with yay
 	return &proto.PulseConfigSync{
 		Success: true,

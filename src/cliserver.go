@@ -220,6 +220,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupNew{
 		Success: true,
 		Message: groupName + " successfully added.",
@@ -241,6 +242,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupDelete{
 		Success: true,
 		Message: in.Name + " successfully deleted.",
@@ -262,6 +264,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupAdd{
 		Success: true,
 		Message: "IP address(es) successfully added to " + in.Name,
@@ -283,6 +286,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupRemove{
 		Success: true,
 		Message: "IP address(es) successfully removed from " + in.Name,
@@ -304,6 +308,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupAssign{
 		Success: true,
 		Message: in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
@@ -325,6 +330,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 		}, nil
 	}
 	gconf.Save()
+	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupUnassign{
 		Success: true,
 		Message: in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
