@@ -43,7 +43,6 @@ func (c *globalConfig) SetConfig(config Config) {
 	c.Lock()
 	c.Config = config
 	//set who we are might need to go somewhere else
-	c.setLocalNode()
 	c.Unlock()
 }
 
