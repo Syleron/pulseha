@@ -25,6 +25,7 @@ import (
 	p "github.com/Syleron/PulseHA/proto"
 	"sync"
 	"encoding/json"
+	"fmt"
 )
 
 /**
@@ -284,10 +285,11 @@ func (m *Memberlist) SyncConfig() error {
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	_, err = m.Broadcast("SendConfigSync", &p.PulseConfigSync{
+	r, err := m.Broadcast("SendConfigSync", &p.PulseConfigSync{
 		Replicated: true,
 		Config:     buf,
 	})
+	fmt.Println(r.(p.PulseConfigSync))
 	if err != nil {
 		log.Warning("failed syncing: " + err.Error())
 	}
