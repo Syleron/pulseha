@@ -108,32 +108,28 @@ message PulseGroupUnassign {
     string interface = 4;
     string node = 5;
 }
-message PulseGroupList {
+message PulseStatus {
     bool success = 1;
     string message = 2;
-    map<string, Group> groups = 3;
-};
-message Group {
-    repeated string ips = 1;
-    map<string, Interfaces> nodeInterface = 2;
+    repeated StatusRow row = 3;
 }
-message Interfaces {
-    repeated string interfaces = 1;
+message StatusRow {
+    string hostname = 1;
+    repeated string ip = 2;
+    repeated string ping = 3;
+    repeated string status = 4;
 }
-
+message GroupTable {
+    bool success = 1;
+    string message = 2;
+    repeated GroupRow row = 3;
+}
 message GroupRow {
     string name = 1;
     repeated string ip = 2;
     repeated string nodes = 3;
     repeated string interfaces = 4;
 }
-
-message GroupTable {
-    bool success = 1;
-    string message = 2;
-    repeated GroupRow row = 3;
-}
-
 message PulseConfigSync {
     bool success = 1;
     string message = 2;
@@ -164,6 +160,8 @@ service CLI {
     rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
     // Get group list
     rpc GroupList (GroupTable) returns (GroupTable);
+    // Pulse Status
+    rpc Status (PulseStatus) returns (PulseStatus);
 }
 
 service Server {
@@ -175,4 +173,6 @@ service Server {
     rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
+    // Pulse Status
+    rpc Status (PulseStatus) returns (PulseStatus);
 }

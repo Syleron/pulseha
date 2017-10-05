@@ -37,9 +37,6 @@ import (
  */
 type Server struct {
 	sync.Mutex
-	Status        proto.HealthCheckResponse_ServingStatus
-	//Last_response time.Time
-	//Log log.Logger
 	Server *grpc.Server
 	Listener net.Listener
 	Memberlist *Memberlist
@@ -61,6 +58,16 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 		}, nil
 	default:
 	}
+	return nil, nil
+}
+
+/**
+
+ */
+func (s *Server) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
+	//log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	s.Lock()
+	defer s.Unlock()
 	return nil, nil
 }
 
@@ -92,7 +99,6 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
-		// TODO: Reconsider how this is done. Perhaps a member reload
 		s.Memberlist.ReloadMembers()
 		// Return with our new updated config
 		buf, err := json.Marshal(gconf.GetConfig())
