@@ -221,3 +221,10 @@ func (s *Server) shutdown() {
 	s.Server.GracefulStop()
 	s.Listener.Close()
 }
+
+
+// network action functions
+
+func rpcMakeActive()error{
+	return makeActive()
+}

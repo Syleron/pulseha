@@ -6,9 +6,16 @@ import (
 )
 
 /**
- * Make a group of
+	Bring up the groups on the current node
  */
-func makeActive(groupName string) {
+func makeActive()error{
+
+	return nil
+}
+/**
+ * Make a group of IPs active
+ */
+func makeActiveGroup(groupName string) {
 	//get group config
 	// check if we are active?
 	// if not active go active

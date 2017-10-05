@@ -84,6 +84,7 @@ func (c *Client) Close() {
 
 //// Senders. Consider moving these into their own file
 
+
 /**
 
  */
@@ -108,6 +109,7 @@ func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
 	return r, err
 }
 
+
 /**
 
  */
@@ -120,3 +122,7 @@ func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, er
 	return r, err
 }
 
+func (c *Client) SendMakeActive(data *p.PulseGroupUnassign) (*p.PulseGroupUnassign, error) {
+	log.Debug("Client:SendGroupUnassign() Sending GRPC GroupUnassign")
+	r, err := c.Requester.Join(context.Background(), data)
+}
