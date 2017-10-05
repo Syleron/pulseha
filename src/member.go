@@ -70,6 +70,13 @@ func (m *Member) makeActive()bool{
 	log.Debugf("Making active %s", m.getHostname())
 	//get all groups send
 	//r, err := m.SendMakeActive()
+	log.Debug("member make active" + m.hostname + gconf.getLocalNode())
+
+
+	if m.hostname == gconf.getLocalNode() {
+		log.Debug("member make active" + m.hostname + gconf.getLocalNode())
+		makeActive()
+	}
 	return true
 }
 

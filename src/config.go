@@ -65,17 +65,24 @@ func (c *Config) GetConfig()Config{
  * Sets the local node name
  */
 func (c *Config) setLocalNode()(error) {
-	//We only want to error if we have not yet been configured
-	if !(len(c.Nodes) > 0) {
-		return nil
-	}
+
 	hostname := utils.GetHostname()
+	log.Debugf("setLocalNode hostname is: %s", hostname)
 	for name := range c.Nodes {
 		if  name == hostname {
 			return nil
 		}
 	}
+	c.localNode = hostname
+	//We only want to error if we have not yet been configured
+	if !(len(c.Nodes) > 0) {
+		return nil
+	}
 	return errors.New("local Hostname is not in configuration")
+}
+
+func (c *Config) nodeCount()int{
+	return len(c.Nodes)
 }
 
 /**
@@ -112,6 +119,7 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
+	log.Debug(c)
 }
 
 /**
