@@ -21,6 +21,11 @@ import (
 	"strings"
 	"flag"
 	"github.com/mitchellh/cli"
+	"google.golang.org/grpc"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/olekukonko/tablewriter"
+	"os"
+	"context"
 )
 
 type StatusCommand struct {
@@ -45,7 +50,55 @@ func (c *StatusCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("status", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
+	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
+	if err != nil {
+		c.Ui.Error("GRPC client connection error")
+		c.Ui.Error(err.Error())
+	}
+	defer connection.Close()
+	client := proto.NewCLIClient(connection)
+	c.drawStatusTable(client)
+
 	return 0
+}
+
+/**
+ *
+ */
+func (c *StatusCommand) drawStatusTable(client proto.CLIClient) {
+	r, err := client.GroupList(context.Background(), &proto.GroupTable{})
+	if err != nil {
+		c.Ui.Output("PulseHA CLI connection error")
+		c.Ui.Output(err.Error())
+	} else {
+		data := [][]string{}
+		for _, group := range r.Row {
+
+			data = append(
+				data,
+				[]string{
+					group.Name,
+					strings.Join(group.Ip, ", "),
+					strings.Join(group.Nodes,"\n"),
+					strings.Join(group.Interfaces,"\n"),
+				})
+		}
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{
+			"Node Hostname",
+			"Bind Address",
+			"Ping",
+			"Status",
+		})
+		table.SetCenterSeparator("-")
+		table.SetColumnSeparator("|")
+		table.SetRowLine(true)
+		table.SetAutoMergeCells(true)
+		for _, v := range data {
+			table.Append(v)
+		}
+		table.Render()
+	}
 }
 
 /**

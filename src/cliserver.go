@@ -357,6 +357,28 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 }
 
 /**
+	Return the status for each node within the cluster
+ */
+func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
+	log.Debug("CLIServer:Status() - Getting cluster node statuses")
+	s.Lock()
+	defer s.Unlock()
+	table := new(proto.PulseStatus)
+	config := gconf.GetConfig()
+	for name, ips := range config.Groups {
+		nodes, interfaces := getGroupNodes(name)
+		row := &proto.StatusRow {
+			Hostname: name,
+			Ip: ips,
+			Ping: nodes,
+			Status: interfaces,
+		}
+		table.Row = append(table.Row, row)
+	}
+	return nil, nil
+}
+
+/**
 	Setup pulse cli type
  */
 func (s *CLIServer) Setup() {

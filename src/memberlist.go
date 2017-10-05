@@ -111,7 +111,7 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interface{}, error) {
+func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (error) {
 	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName)
 
 	m.Lock()
@@ -135,20 +135,26 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 		funcList := member.GetFuncBroadcastList()
 		f := reflect.ValueOf(funcList[funcName])
 		if len(params) != f.Type().NumIn() {
-			return nil, errors.New("the number of passed parameters do not match the function")
+			return errors.New("the number of passed parameters do not match the function")
 		}
 		vals := make([]reflect.Value, len(params))
 		for k, param := range params {
 			vals[k] = reflect.ValueOf(param)
 		}
-		f.Call(vals)
+		value := f.Call(vals)
+		// checking the length is probably unnecessary
+		if len(value) == 2 {
+			err := value[1].Interface().(error)
+			if err != nil {
+				log.Error(err.Error())
+			}
+		}
 		// TODO: Mark a node dead if it cannot be reached
 		if member.Connection == nil {
 			member.Close()
 		}
 	}
-	log.Debugf("Completed broadcast of %s", funcName)
-	return nil, nil
+	return nil
 }
 
 /**
@@ -297,8 +303,6 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 
 /**
 	Sync local config with each member in the cluster.
-    TODO: Consider reloading the config before syncing?
-	TODO: Why isn't this using the broadcast function?
  */
 func (m *Memberlist) SyncConfig() error {
 	// Return with our new updated config
@@ -309,19 +313,9 @@ func (m *Memberlist) SyncConfig() error {
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	_, err = m.Broadcast("SendConfigSync", &p.PulseConfigSync{
+	m.Broadcast("SendConfigSync", &p.PulseConfigSync{
 		Replicated: true,
 		Config:     buf,
 	})
-
-//	fmt.Println(r.(p.PulseConfigSync))
-	if err != nil {
-		log.Warning("failed syncing: " + err.Error())
-	}
-	//if !r.Success {
-	//	log.Warning("failed syncing config to " + member.hostname + ": " + r.Message)
-	//}
-	//member.Close()
-	//log.Info("Successfully synced config to " + member.hostname)
 	return nil
 }
