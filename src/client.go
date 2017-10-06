@@ -23,8 +23,8 @@ import (
 	"github.com/coreos/go-log/log"
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
-	"reflect"
 	"context"
+	"reflect"
 )
 
 type Client struct {

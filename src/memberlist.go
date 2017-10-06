@@ -134,6 +134,7 @@ func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
 			member.Send(funcName, params)
 		}
 	}
+	return nil
 }
 
 /**
