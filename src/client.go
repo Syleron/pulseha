@@ -24,6 +24,7 @@ import (
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
 	"context"
+	"reflect"
 )
 
 type Client struct {
@@ -43,10 +44,21 @@ func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
 	return funcList
 }
 
+
+func (c *Client) GetProtoFuncList() (map[string]interface{}) {
+	funcList := map[string]interface{} {
+		"ConfigSync": c.Requester.ConfigSync,
+		"Join": c.Requester.Join,
+		"Leave": c.Requester.Leave,
+	}
+	return funcList
+}
+
 /**
 
  */
 func (c *Client) Setup() {
+
 }
 
 /**
@@ -82,43 +94,18 @@ func (c *Client) Close() {
 	c.Connection.Close()
 }
 
-//// Senders. Consider moving these into their own file
-
-
-/**
-
- */
-func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
-	log.Debug("Client:SendLeave() Sending GRPC Leave")
-	r, err := c.Requester.Leave(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
+func (c *Client) Send(funcName string, params ... interface{}) (interface{}, error) {
+	funcList := c.GetProtoFuncList()
+	f := reflect.ValueOf(funcList[funcName])
+	if len(params) != f.Type().NumIn() {
+		return nil, errors.New("the number of passed parameters do not match the function")
 	}
-	return r, err
-}
-
-/**
-
- */
-func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
-	log.Debug("Client:SendJoin() Sending GRPC Join")
-	r, err := c.Requester.Join(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
+	vals := make([]reflect.Value, len(params))
+	for k, param := range params {
+		vals[k] = reflect.ValueOf(param)
 	}
-	return r, err
-}
-
-/**
-
- */
-func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, error) {
-	log.Debug("Client:SendJoin() Sending GRPC ConfigSync")
-	r, err := c.Requester.ConfigSync(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
-	}
-	return r, err
+	f.Call(vals)
+	return nil, nil
 }
 
 func (c *Client) SendMakeActive(data *p.PulsePromote) (error) {

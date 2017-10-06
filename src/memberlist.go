@@ -141,14 +141,14 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (error) 
 		for k, param := range params {
 			vals[k] = reflect.ValueOf(param)
 		}
-		value := f.Call(vals)
+		f.Call(vals)
 		// checking the length is probably unnecessary
-		if len(value) == 2 {
-			err := value[1].Interface().(error)
-			if err != nil {
-				log.Error(err.Error())
-			}
-		}
+		//if len(value) == 2 {
+		//	err := value[1].Interface().(error)
+		//	if err != nil {
+		//		log.Error(err.Error())
+		//	}
+		//}
 		// TODO: Mark a node dead if it cannot be reached
 		if member.Connection == nil {
 			member.Close()
