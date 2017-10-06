@@ -18,7 +18,6 @@
 package main
 
 import (
-	"reflect"
 	"errors"
 	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/coreos/go-log/log"
@@ -37,14 +36,14 @@ type Memberlist struct {
 }
 
 func (m *Memberlist) Lock() {
-	_, file, no, _ := runtime.Caller(1)
-	log.Debugf("Lock File: %s Line: %d",file,no )
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Memberlist:Unlock() Lock File Line: %s", no)
 	m.Mutex.Lock()
 }
 
 func (m *Memberlist) Unlock() {
-	_, file, no, _ := runtime.Caller(1)
-	log.Debugf("Unlock File: %s Line: %d",file,no )
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Memberlist:Unlock() Unlock File Line: %s", no)
 	m.Mutex.Unlock()
 }
 
@@ -111,18 +110,16 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (error) {
-	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName)
-
+func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
+	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
-	log.Debug("BroadCast got lock")
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
 		if member.hostname == utils.GetHostname() {
 			continue
 		}
-		log.Debugf("Broadcast: %s to member %s", funcName, member.hostname)
+		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.hostname)
 		// check to see if we have a connection state
 		if member.Connection == nil {
 			nodeDetails, _ := NodeGetByName(member.hostname)
@@ -131,30 +128,12 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (error) 
 				log.Warning("Unable to connect to " + member.hostname)
 				continue
 			}
-		}
-		funcList := member.GetFuncBroadcastList()
-		f := reflect.ValueOf(funcList[funcName])
-		if len(params) != f.Type().NumIn() {
-			return errors.New("the number of passed parameters do not match the function")
-		}
-		vals := make([]reflect.Value, len(params))
-		for k, param := range params {
-			vals[k] = reflect.ValueOf(param)
-		}
-		f.Call(vals)
-		// checking the length is probably unnecessary
-		//if len(value) == 2 {
-		//	err := value[1].Interface().(error)
-		//	if err != nil {
-		//		log.Error(err.Error())
-		//	}
-		//}
-		// TODO: Mark a node dead if it cannot be reached
-		if member.Connection == nil {
+			member.Send(funcName, params)
 			member.Close()
+		} else {
+			member.Send(funcName, params)
 		}
 	}
-	return nil
 }
 
 /**
@@ -164,9 +143,6 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (error) 
  * This should probably populate the memberlist
  */
 func (m *Memberlist) Setup() {
-	// todo work out how to handle mutex in here
-	log.Debug("Running member Setup")
-	log.Debugf("Local node is: %s", gconf.getLocalNode())
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
@@ -305,15 +281,14 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	Sync local config with each member in the cluster.
  */
 func (m *Memberlist) SyncConfig() error {
+	log.Debug("Memberlist:SyncConfig Syncing config with peers..")
 	// Return with our new updated config
-	log.Debug("SyncConfig")
 	buf, err := json.Marshal(gconf.GetConfig())
 	// Handle failure to marshal config
-	log.Debug("SyncConfig, got config")
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	m.Broadcast("SendConfigSync", &p.PulseConfigSync{
+	m.Broadcast(SendConfigSync, &p.PulseConfigSync{
 		Replicated: true,
 		Config:     buf,
 	})

@@ -204,7 +204,7 @@ service Server {
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Promote
-    rpc RpcMakeActive(PulsePromote) returns (PulsePromote);
+    rpc MakeActive (PulsePromote) returns (PulsePromote);
     // Pulse Status
     rpc Status (PulseStatus) returns (PulseStatus);
 }

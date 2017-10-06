@@ -65,11 +65,14 @@ func (c *Config) GetConfig() Config {
  */
 func (c *Config) setLocalNode() (error) {
 	hostname := utils.GetHostname()
-	log.Debugf("setLocalNode hostname is: %s", hostname)
+	log.Debugf("Config:setLocalNode Hostname is: %s", hostname)
 	c.localNode = hostname
 	return nil
 }
 
+/**
+
+ */
 func (c *Config) nodeCount() int {
 	return len(c.Nodes)
 }
@@ -109,7 +112,6 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
-	log.Debug(c)
 }
 
 /**

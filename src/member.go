@@ -17,17 +17,18 @@
  */
 package main
 
-import  (
+import (
 	"sync"
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
 )
+
 /**
  * Member struct type
  */
 type Member struct {
-	hostname   string
-	status proto.MemberStatus_Status
+	hostname string
+	status   proto.MemberStatus_Status
 	Client
 	sync.Mutex
 }
@@ -36,19 +37,19 @@ type Member struct {
  Getters and setters for Member which allow us to make them go routine safe
  */
 
-func (m *Member) getHostname()string {
+func (m *Member) getHostname() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.hostname
 }
 
-func (m *Member) setHostname(hostname string){
+func (m *Member) setHostname(hostname string) {
 	m.Lock()
 	defer m.Unlock()
 	m.hostname = hostname
 }
 
-func (m *Member) getStatus()proto.MemberStatus_Status {
+func (m *Member) getStatus() proto.MemberStatus_Status {
 	m.Lock()
 	defer m.Unlock()
 	return m.status
@@ -66,7 +67,7 @@ func (m *Member) setClient(client Client) {
 /*
 	Make the node active (bring up its groups)
  */
-func (m *Member) makeActive()bool{
+func (m *Member) makeActive() bool {
 	log.Debugf("Making active %s", m.getHostname())
 
 	if m.hostname == gconf.getLocalNode() {
@@ -74,7 +75,14 @@ func (m *Member) makeActive()bool{
 		makeMemberActive()
 	} else {
 		log.Debug("member is not localnode makeing grpc call")
-		err := m.SendMakeActive(&proto.PulsePromote{Success:false, Message:"", Member: m.getHostname()})
+		_, err := m.Send(
+			SendMakeActive,
+			&proto.PulsePromote{
+				Success: false,
+				Message: "",
+				Member:  m.getHostname(),
+			},
+		)
 		if err != nil {
 			log.Error(err)
 			log.Errorf("Error making %s active. Error: %s", m.getHostname(), err.Error())
@@ -87,7 +95,7 @@ func (m *Member) makeActive()bool{
 /**
 	Make the node passive (take down its groups)
  */
-func (m *Member) makePassive()bool {
+func (m *Member) makePassive() bool {
 	log.Debugf("Making passive %s", m.getHostname())
 	return true
 }

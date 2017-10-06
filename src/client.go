@@ -23,8 +23,8 @@ import (
 	"github.com/coreos/go-log/log"
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
-	"context"
 	"reflect"
+	"context"
 )
 
 type Client struct {
@@ -33,32 +33,39 @@ type Client struct {
 	Requester  p.ServerClient
 }
 
+// This should probably go into an enums folder
+type protoFunction int
+
+const (
+	SendConfigSync protoFunction = 1 + iota
+	SendJoin
+	SendLeave
+	SendMakeActive
+)
+
+var protoFunctions = [...]string {
+	"ConfigSync",
+	"Join",
+	"Leave",
+	"MakeActive",
+}
+
+func (p protoFunction) String() string {
+	return protoFunctions[p - 1]
+}
+// -----
+
 /**
 
  */
-func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
-	funcList := map[string]interface{} {
-		"SendLeave": c.SendLeave,
-		"SendConfigSync": c.SendConfigSync,
-	}
-	return funcList
-}
-
-
 func (c *Client) GetProtoFuncList() (map[string]interface{}) {
 	funcList := map[string]interface{} {
 		"ConfigSync": c.Requester.ConfigSync,
 		"Join": c.Requester.Join,
 		"Leave": c.Requester.Leave,
+		"MakeActive": c.Requester.MakeActive,
 	}
 	return funcList
-}
-
-/**
-
- */
-func (c *Client) Setup() {
-
 }
 
 /**
@@ -94,26 +101,22 @@ func (c *Client) Close() {
 	c.Connection.Close()
 }
 
-func (c *Client) Send(funcName string, params ... interface{}) (interface{}, error) {
+/**
+	Send a specific GRPC call
+ */
+func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
+	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
-	f := reflect.ValueOf(funcList[funcName])
-	if len(params) != f.Type().NumIn() {
-		return nil, errors.New("the number of passed parameters do not match the function")
+	f := reflect.ValueOf(funcList[funcName.String()])
+	params := []reflect.Value{
+		reflect.ValueOf(context.Background()),
+		reflect.ValueOf(data),
 	}
-	vals := make([]reflect.Value, len(params))
-	for k, param := range params {
-		vals[k] = reflect.ValueOf(param)
+	res := f.Call(params)
+	ret := res[0].Interface()
+	var err error
+	if v := res[1].Interface(); v != nil {
+		err = v.(error)
 	}
-	f.Call(vals)
-	return nil, nil
-}
-
-func (c *Client) SendMakeActive(data *p.PulsePromote) (error) {
-	log.Debug("sendMakeActive")
-	r, err := c.Requester.RpcMakeActive(context.Background(), data)
-	if err != nil || r.Success !=true {
-		log.Error(r.Message)
-		log.Error(err.Error())
-	}
-	return err
+	return ret, err
 }
