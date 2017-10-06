@@ -214,11 +214,11 @@ service Server {
     // Pulse Status
     rpc Status (PulseStatus) returns (PulseStatus);
     // demote
-    rpc RpcMakePassive(PulsePromote) returns (PulsePromote);
-
-    rpc RpcBringUpIp(PulseBringIP) returns (PulseBringIP);
-
-    rpc RpcBringDownIp(PulseBringIP) returns (PulseBringIP);
+    rpc MakePassive(PulsePromote) returns (PulsePromote);
+    // Bring up IP
+    rpc BringUpIP(PulseBringIP) returns (PulseBringIP);
+    // Bring down IP
+    rpc BringDownIP(PulseBringIP) returns (PulseBringIP);
 }
 
 

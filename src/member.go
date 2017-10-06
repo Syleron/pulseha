@@ -68,13 +68,12 @@ func (m *Member) setClient(client Client) {
 	Make the node active (bring up its groups)
  */
 func (m *Member) makeActive() bool {
-	log.Debugf("Making active %s", m.getHostname())
+	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
 
 	if m.hostname == gconf.getLocalNode() {
-		log.Debug("member is local node making active")
 		makeMemberActive()
 	} else {
-		log.Debug("member is not localnode makeing grpc call")
+		log.Debug("member is not local node making grpc call")
 		_, err := m.Send(
 			SendMakeActive,
 			&proto.PulsePromote{
@@ -97,13 +96,18 @@ func (m *Member) makeActive() bool {
 	Make the node passive (take down its groups)
  */
 func (m *Member) makePassive() bool {
-	log.Debugf("Making passive %s", m.getHostname())
+	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
 	if m.hostname == gconf.getLocalNode() {
-		log.Debug("member is local node making active")
 		makeMemberPassive()
 	} else {
-		log.Debug("member is not localnode making grpc call")
-		err := m.SendMakePassive(&proto.PulsePromote{Success: false, Message: "", Member: m.getHostname()})
+		log.Debug("member is not local node making grpc call")
+		_, err := m.Send(
+			SendMakePassive,
+			&proto.PulsePromote{
+				Success: false,
+				Message: "",
+				Member:  m.getHostname(),
+			})
 		if err != nil {
 			log.Error(err)
 			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
@@ -126,8 +130,13 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 		log.Debug("member is local node bringing up IP's")
 		bringUpIPs(iface, ips)
 	} else {
-		log.Debug("member is not localnode making grpc call")
-		err := m.SendBringUpIPs(&proto.PulseBringIP{Iface: iface, Ips: ips})
+		log.Debug("member is not local node making grpc call")
+		_, err := m.Send(
+			SendBringUpIP,
+			&proto.PulseBringIP{
+				Iface: iface,
+				Ips:   ips,
+			})
 		if err != nil {
 			log.Error(err)
 			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
