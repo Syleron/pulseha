@@ -73,7 +73,7 @@ func (m *Member) makeActive()bool{
 		log.Debug("member is local node making active")
 		makeMemberActive()
 	} else {
-		log.Debug("member is not localnode makeing grpc call")
+		log.Debug("member is not localnode making grpc call")
 		err := m.SendMakeActive(&proto.PulsePromote{Success:false, Message:"", Member: m.getHostname()})
 		if err != nil {
 			log.Error(err)
@@ -81,6 +81,7 @@ func (m *Member) makeActive()bool{
 			return false
 		}
 	}
+	m.status = proto.MemberStatus_ACTIVE
 	return true
 }
 
@@ -89,5 +90,41 @@ func (m *Member) makeActive()bool{
  */
 func (m *Member) makePassive()bool {
 	log.Debugf("Making passive %s", m.getHostname())
+	if m.hostname == gconf.getLocalNode() {
+		log.Debug("member is local node making active")
+		makeMemberPassive()
+	} else {
+		log.Debug("member is not localnode making grpc call")
+		err := m.SendMakePassive(&proto.PulsePromote{Success:false, Message:"", Member: m.getHostname()})
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
+	}
+	m.status = proto.MemberStatus_PASSIVE
+	return true
+}
+/**
+	Used to bring up a single IP on member
+	We need to know the group to work out what interface to
+	bring it up on.
+ */
+func (m *Member)bringUpIPs(ips []string,group string)bool{
+	configCopy := gconf.GetConfig()
+	iface := configCopy.GetGroupIface(m.hostname, group)
+	if m.hostname == gconf.getLocalNode() {
+		log.Debug("member is local node bringing up IP's")
+		bringUpIPs(iface,ips)
+	} else {
+		log.Debug("member is not localnode making grpc call")
+		err := m.SendBringUpIPs(&proto.PulseBringIP{Iface:iface, Ips:ips})
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
+	}
+	m.status = proto.MemberStatus_PASSIVE
 	return true
 }

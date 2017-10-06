@@ -283,15 +283,20 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		if !activeMember.makePassive() {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
+		activeMember.status = p.MemberStatus_PASSIVE
 	}
 
 	// make new node active
 	if !member.makeActive() {
 		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
-	}
-	// update all members
 
-	m.SyncConfig()
+		if !activeMember.makeActive() {
+			log.Error("Failed to make reinstate the active node. Something is really wrong")
+		}
+	}
+
+	//Dont think we need this here
+	//m.SyncConfig()
 	return nil
 }
 
