@@ -129,10 +129,11 @@ func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
 				continue
 			}
 			member.Send(funcName, params)
-			member.Close()
 		} else {
 			member.Send(funcName, params)
 		}
+		// Close the connection
+		member.Close()
 	}
 }
 
