@@ -120,3 +120,23 @@ func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, er
 	}
 	return ret, err
 }
+
+func (c *Client) SendMakePassive(data *p.PulsePromote) (error) {
+	log.Debug("sendMakeActive")
+	r, err := c.Requester.RpcMakePassive(context.Background(), data)
+	if err != nil || r.Success !=true {
+		log.Error(r.Message)
+		log.Error(err.Error())
+	}
+	return err
+}
+
+func (c *Client) SendBringUpIPs(data *p.PulseBringIP)(error) {
+	log.Debug("SendBringUpIPs")
+	r, err := c.Requester.RpcBringUpIp(context.Background(), data)
+	if err != nil || r.Success !=true {
+		log.Error(r.Message)
+		log.Error(err.Error())
+	}
+	return err
+}

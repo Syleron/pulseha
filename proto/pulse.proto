@@ -167,6 +167,12 @@ message PulsePromote {
     string member =3;
 }
 
+message PulseBringIP {
+    bool success =1;
+    string message =2;
+    string iface =3;
+    repeated string ips =4;
+}
 
 // Services
 service CLI {
@@ -207,6 +213,12 @@ service Server {
     rpc MakeActive (PulsePromote) returns (PulsePromote);
     // Pulse Status
     rpc Status (PulseStatus) returns (PulseStatus);
+    // demote
+    rpc RpcMakePassive(PulsePromote) returns (PulsePromote);
+
+    rpc RpcBringUpIp(PulseBringIP) returns (PulseBringIP);
+
+    rpc RpcBringDownIp(PulseBringIP) returns (PulseBringIP);
 }
 
 

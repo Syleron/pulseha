@@ -81,6 +81,7 @@ func GroupIpAdd(groupName string, ips []string) (error) {
 			log.Warning(ip + " is not a valid IP address")
 		}
 	}
+
 	return nil
 }
 

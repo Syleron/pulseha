@@ -92,10 +92,10 @@ func NodeGetByName(hostname string) (Node, error) {
  * Note: Eww three for loops.
  */
 func NodeAssignedToInterface(group string) (bool) {
-	config := gconf.GetConfig()
-	for _, node := range config.Nodes {
-		for _, groups := range node.IPGroups {
-			for _, ifaceGroup := range groups {
+	config := gconf.GetConfig()					// :-)
+	for _, node := range config.Nodes {			// :-|
+		for _, groups := range node.IPGroups {	// :-s
+			for _, ifaceGroup := range groups {	// :-(
 				if ifaceGroup == group {
 					return true
 				}
