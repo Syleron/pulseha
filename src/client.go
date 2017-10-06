@@ -24,6 +24,7 @@ import (
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
 	"context"
+	"reflect"
 )
 
 type Client struct {
@@ -32,21 +33,39 @@ type Client struct {
 	Requester  p.ServerClient
 }
 
-/**
+// This should probably go into an enums folder
+type protoFunction int
 
- */
-func (c *Client) GetFuncBroadcastList() (map[string]interface{}) {
-	funcList := map[string]interface{} {
-		"SendLeave": c.SendLeave,
-		"SendConfigSync": c.SendConfigSync,
-	}
-	return funcList
+const (
+	SendConfigSync protoFunction = 1 + iota
+	SendJoin
+	SendLeave
+	SendMakeActive
+)
+
+var protoFunctions = [...]string {
+	"ConfigSync",
+	"Join",
+	"Leave",
+	"MakeActive",
 }
 
+func (p protoFunction) String() string {
+	return protoFunctions[p - 1]
+}
+// -----
+
 /**
 
  */
-func (c *Client) Setup() {
+func (c *Client) GetProtoFuncList() (map[string]interface{}) {
+	funcList := map[string]interface{} {
+		"ConfigSync": c.Requester.ConfigSync,
+		"Join": c.Requester.Join,
+		"Leave": c.Requester.Leave,
+		"MakeActive": c.Requester.MakeActive,
+	}
+	return funcList
 }
 
 /**
@@ -82,53 +101,24 @@ func (c *Client) Close() {
 	c.Connection.Close()
 }
 
-//// Senders. Consider moving these into their own file
-
-
 /**
-
+	Send a specific GRPC call
  */
-func (c *Client) SendLeave(data *p.PulseLeave) (*p.PulseLeave, error) {
-	log.Debug("Client:SendLeave() Sending GRPC Leave")
-	r, err := c.Requester.Leave(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
+func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
+	log.Debug("Client:Send() Sending " + funcName.String())
+	funcList := c.GetProtoFuncList()
+	f := reflect.ValueOf(funcList[funcName.String()])
+	params := []reflect.Value{
+		reflect.ValueOf(context.Background()),
+		reflect.ValueOf(data),
 	}
-	return r, err
-}
-
-/**
-
- */
-func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
-	log.Debug("Client:SendJoin() Sending GRPC Join")
-	r, err := c.Requester.Join(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
+	res := f.Call(params)
+	ret := res[0].Interface()
+	var err error
+	if v := res[1].Interface(); v != nil {
+		err = v.(error)
 	}
-	return r, err
-}
-
-/**
-
- */
-func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, error) {
-	log.Debug("Client:SendJoin() Sending GRPC ConfigSync")
-	r, err := c.Requester.ConfigSync(context.Background(), data)
-	if err != nil {
-		log.Error(err.Error())
-	}
-	return r, err
-}
-
-func (c *Client) SendMakeActive(data *p.PulsePromote) (error) {
-	log.Debug("sendMakeActive")
-	r, err := c.Requester.RpcMakeActive(context.Background(), data)
-	if err != nil || r.Success !=true {
-		log.Error(r.Message)
-		log.Error(err.Error())
-	}
-	return err
+	return ret, err
 }
 
 func (c *Client) SendMakePassive(data *p.PulsePromote) (error) {

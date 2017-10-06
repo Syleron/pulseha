@@ -77,7 +77,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Send our join request
-		r, err := client.SendJoin(&proto.PulseJoin{
+		_, err = client.Send(SendJoin, &proto.PulseJoin{
 			Config: buf,
 			Hostname: utils.GetHostname(),
 		})
@@ -90,26 +90,26 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Handle an unsuccessful request
-		if !r.Success {
-			log.Emergency("Peer error: %s", err)
-			return &proto.PulseJoin{
-				Success: false,
-				Message: r.Message,
-			}, nil
-		}
+		//if !r.Success {
+		//	log.Emergency("Peer error: %s", err)
+		//	return &proto.PulseJoin{
+		//		Success: false,
+		//		Message: r.Message,
+		//	}, nil
+		//}
 		// Update our local config
-		peerConfig := &Config{}
-		err = json.Unmarshal(r.Config, peerConfig)
+		//peerConfig := &Config{}
+		//err = json.Unmarshal(r.Config, peerConfig)
 		// handle errors
-		if err != nil {
-			log.Error("Unable to unmarshal config node.")
-			return &proto.PulseJoin{
-				Success: false,
-				Message: "Unable to unmarshal config node.",
-			}, nil
-		}
+		//if err != nil {
+		//	log.Error("Unable to unmarshal config node.")
+		//	return &proto.PulseJoin{
+		//		Success: false,
+		//		Message: "Unable to unmarshal config node.",
+		//	}, nil
+		//}
 		// Set the config
-		gconf.SetConfig(*peerConfig)
+		//gconf.SetConfig(*peerConfig)
 		// Save the config
 		gconf.Save()
 		// Reload config in memory
@@ -146,10 +146,13 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	if gconf.ClusterTotal() > 1 {
-		s.Memberlist.Broadcast("SendLeave", &proto.PulseLeave{
-			Replicated: true,
-			Hostname: utils.GetHostname(),
-		})
+		s.Memberlist.Broadcast(
+			SendLeave,
+			&proto.PulseLeave{
+				Replicated: true,
+				Hostname: utils.GetHostname(),
+			},
+		)
 	}
 
 	GroupClearLocal()
@@ -346,14 +349,34 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 	defer s.Unlock()
 	table := new(proto.GroupTable)
 	config := gconf.GetConfig()
-	log.Debug("config here")
-	log.Debug(config)
 	for name, ips := range config.Groups {
 		nodes, interfaces := getGroupNodes(name)
 		row := &proto.GroupRow{Name:name, Ip:ips, Nodes:nodes, Interfaces:interfaces }
 		table.Row = append(table.Row, row)
 	}
 	return table, nil
+}
+
+/**
+	Return the status for each node within the cluster
+ */
+func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
+	log.Debug("CLIServer:Status() - Getting cluster node statuses")
+	s.Lock()
+	defer s.Unlock()
+	table := new(proto.PulseStatus)
+	config := gconf.GetConfig()
+	for name, ips := range config.Groups {
+		nodes, interfaces := getGroupNodes(name)
+		row := &proto.StatusRow {
+			Hostname: name,
+			Ip: ips,
+			Ping: nodes,
+			Status: interfaces,
+		}
+		table.Row = append(table.Row, row)
+	}
+	return nil, nil
 }
 
 /**

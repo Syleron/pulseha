@@ -37,12 +37,59 @@ import (
  */
 type Server struct {
 	sync.Mutex
-	Status        proto.HealthCheckResponse_ServingStatus
-	//Last_response time.Time
-	//Log log.Logger
-	Server *grpc.Server
-	Listener net.Listener
+	Server     *grpc.Server
+	Listener   net.Listener
 	Memberlist *Memberlist
+}
+
+/**
+ * Setup pulse server type
+ */
+func (s *Server) Setup() {
+	config := gconf.GetConfig()
+	if !gconf.ClusterCheck() {
+		log.Info("PulseHA is currently un-configured.")
+		return
+	}
+	var err error
+	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
+	if err != nil {
+		log.Errorf("Failed to listen: %s", err)
+		os.Exit(1)
+	}
+	if config.Pulse.TLS {
+		// Get project directory location
+		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
+		if err != nil {
+			log.Emergency(err)
+		}
+		if utils.CreateFolder(dir + "/certs") {
+			log.Warning("TLS keys are missing! Generating..")
+			GenOpenSSL()
+		}
+		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
+		if err != nil {
+			log.Error("Could not load TLS keys.")
+			os.Exit(1)
+		}
+		s.Server = grpc.NewServer(grpc.Creds(creds))
+	} else {
+		log.Warning("TLS Disabled! Pulse server connection unsecured.")
+		s.Server = grpc.NewServer()
+	}
+	proto.RegisterServerServer(s.Server, s)
+	s.Memberlist.Setup()
+	log.Info("Pulse initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
+	s.Server.Serve(s.Listener)
+}
+
+/**
+ * Shutdown pulse server (not cli/cmd)
+ */
+func (s *Server) shutdown() {
+	log.Debug("Shutting down server")
+	s.Server.GracefulStop()
+	s.Listener.Close()
 }
 
 /**
@@ -61,6 +108,16 @@ func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*prot
 		}, nil
 	default:
 	}
+	return nil, nil
+}
+
+/**
+
+ */
+func (s *Server) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
+	//log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	s.Lock()
+	defer s.Unlock()
 	return nil, nil
 }
 
@@ -92,7 +149,6 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
-		// TODO: Reconsider how this is done. Perhaps a member reload
 		s.Memberlist.ReloadMembers()
 		// Return with our new updated config
 		buf, err := json.Marshal(gconf.GetConfig())
@@ -107,7 +163,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
-			Config: buf,
+			Config:  buf,
 		}, nil
 	}
 	return &proto.PulseJoin{
@@ -172,72 +228,24 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 		Success: true,
 	}, nil
 }
-/**
- * Setup pulse server type
- */
-func (s *Server) Setup() {
-	config := gconf.GetConfig()
-	if !gconf.ClusterCheck() {
-		log.Info("PulseHA is currently un-configured.")
-		return
-	}
-	var err error
-	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
-	if err != nil {
-		log.Errorf("Failed to listen: %s", err)
-		os.Exit(1)
-	}
-	if config.Pulse.TLS {
-		// Get project directory location
-		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-		if err != nil {
-			log.Emergency(err)
-		}
-		if utils.CreateFolder(dir + "/certs") {
-			log.Warning("TLS keys are missing! Generating..")
-			GenOpenSSL()
-		}
-		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
-		if err != nil {
-			log.Error("Could not load TLS keys.")
-			os.Exit(1)
-		}
-		s.Server = grpc.NewServer(grpc.Creds(creds))
-	} else {
-		log.Warning("TLS Disabled! Pulse server connection unsecured.")
-		s.Server = grpc.NewServer()
-	}
-	proto.RegisterServerServer(s.Server, s)
-	s.Memberlist.Setup()
-	log.Info("Pulse initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
-	s.Server.Serve(s.Listener)
-}
 
 /**
- * Shutdown pulse server (not cli/cmd)
+	Network action functions
  */
-func (s *Server) shutdown() {
-	log.Debug("Shutting down server")
-	s.Server.GracefulStop()
-	s.Listener.Close()
-}
-
-
-// network action functions
-
-func (s *Server)RpcMakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote,error){
-	log.Notice("RpcMakeActive called")
+func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	if in.Member != gconf.getLocalNode() {
-		return &proto.PulsePromote{Success:false,
-		Message:"cannot promote a node other than ourself by rpcMakeActive",
-		Member:""}, nil
+		return &proto.PulsePromote{
+			Success: false,
+			Message: "cannot promote a node other than ourself by MakeActive",
+			Member: "",
+		}, nil
 	}
 	err := makeMemberActive()
 	success := false
 	if err != nil {
 		success = true
 	}
-	return &proto.PulsePromote{Success:success,Message:err.Error(),Member:""}, nil
+	return &proto.PulsePromote{Success: success, Message: err.Error(), Member: ""}, nil
 }
 
 func (s *Server)RpcMakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote,error){
