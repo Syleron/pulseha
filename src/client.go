@@ -41,6 +41,9 @@ const (
 	SendJoin
 	SendLeave
 	SendMakeActive
+	SendMakePassive
+	SendBringUpIP
+	SendBringDownIP
 )
 
 var protoFunctions = [...]string {
@@ -48,6 +51,9 @@ var protoFunctions = [...]string {
 	"Join",
 	"Leave",
 	"MakeActive",
+	"MakePassive",
+	"BringUpIP",
+	"BringDownIP",
 }
 
 func (p protoFunction) String() string {
@@ -64,6 +70,9 @@ func (c *Client) GetProtoFuncList() (map[string]interface{}) {
 		"Join": c.Requester.Join,
 		"Leave": c.Requester.Leave,
 		"MakeActive": c.Requester.MakeActive,
+		"MakePassive": c.Requester.MakePassive,
+		"BringUpIP": c.Requester.BringUpIP,
+		"BringDownIP": c.Requester.BringDownIP,
 	}
 	return funcList
 }
@@ -119,24 +128,4 @@ func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, er
 		err = v.(error)
 	}
 	return ret, err
-}
-
-func (c *Client) SendMakePassive(data *p.PulsePromote) (error) {
-	log.Debug("sendMakeActive")
-	r, err := c.Requester.RpcMakePassive(context.Background(), data)
-	if err != nil || r.Success !=true {
-		log.Error(r.Message)
-		log.Error(err.Error())
-	}
-	return err
-}
-
-func (c *Client) SendBringUpIPs(data *p.PulseBringIP)(error) {
-	log.Debug("SendBringUpIPs")
-	r, err := c.Requester.RpcBringUpIp(context.Background(), data)
-	if err != nil || r.Success !=true {
-		log.Error(r.Message)
-		log.Error(err.Error())
-	}
-	return err
 }
