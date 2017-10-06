@@ -346,6 +346,8 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 	defer s.Unlock()
 	table := new(proto.GroupTable)
 	config := gconf.GetConfig()
+	log.Debug("config here")
+	log.Debug(config)
 	for name, ips := range config.Groups {
 		nodes, interfaces := getGroupNodes(name)
 		row := &proto.GroupRow{Name:name, Ip:ips, Nodes:nodes, Interfaces:interfaces }

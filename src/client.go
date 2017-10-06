@@ -59,7 +59,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 	if config.Pulse.TLS {
 		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
 		if err != nil {
-			log.Errorf("Could not load TLS cert: ", err)
+			log.Errorf("Could not load TLS cert: %s", err.Error())
 			return errors.New("could not load node TLS cert: " + hostname + ".crt")
 		}
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
@@ -67,7 +67,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
 	}
 	if err != nil {
-		log.Errorf("GRPC client connection error: ", err)
+		log.Errorf("GRPC client connection error: %s", err.Error())
 		return err
 	}
 	c.Requester = p.NewServerClient(c.Connection)
@@ -83,6 +83,7 @@ func (c *Client) Close() {
 }
 
 //// Senders. Consider moving these into their own file
+
 
 /**
 
@@ -120,3 +121,12 @@ func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, er
 	return r, err
 }
 
+func (c *Client) SendMakeActive(data *p.PulsePromote) (error) {
+	log.Debug("sendMakeActive")
+	r, err := c.Requester.RpcMakeActive(context.Background(), data)
+	if err != nil || r.Success !=true {
+		log.Error(r.Message)
+		log.Error(err.Error())
+	}
+	return err
+}

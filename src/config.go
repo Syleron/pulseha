@@ -24,14 +24,13 @@ import (
 	"os"
 	"path/filepath"
 	"github.com/Syleron/PulseHA/src/utils"
-	"errors"
 )
 
 type Config struct {
-	Pulse   Local               `json:"pulse"`
-	Groups  map[string][]string `json:"floating_ip_groups"`
-	Nodes   map[string]Node     `json:"nodes"`
-	Logging Logging             `json:"logging"`
+	Pulse     Local               `json:"pulse"`
+	Groups    map[string][]string `json:"floating_ip_groups"`
+	Nodes     map[string]Node     `json:"nodes"`
+	Logging   Logging             `json:"logging"`
 	localNode string
 }
 
@@ -57,33 +56,31 @@ type Logging struct {
 /**
  * Returns a copy of the config
  */
-func (c *Config) GetConfig()Config{
+func (c *Config) GetConfig() Config {
 	return *c
 }
 
 /**
  * Sets the local node name
  */
-func (c *Config) setLocalNode()(error) {
-	//We only want to error if we have not yet been configured
-	if !(len(c.Nodes) > 0) {
-		return nil
-	}
+func (c *Config) setLocalNode() (error) {
 	hostname := utils.GetHostname()
-	for name := range c.Nodes {
-		if  name == hostname {
-			return nil
-		}
-	}
-	return errors.New("local Hostname is not in configuration")
+	log.Debugf("setLocalNode hostname is: %s", hostname)
+	c.localNode = hostname
+	return nil
+}
+
+func (c *Config) nodeCount() int {
+	return len(c.Nodes)
 }
 
 /**
  * Return the local node name
  */
-func (c *Config) getLocalNode()string {
+func (c *Config) getLocalNode() string {
 	return c.localNode
 }
+
 /**
  * Function used to load the config
  */
@@ -99,7 +96,7 @@ func (c *Config) Load() {
 		os.Exit(1)
 	}
 	err = json.Unmarshal([]byte(b), &c)
- 	gconf.Config = *c
+	gconf.Config = *c
 	if err != nil {
 		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
@@ -112,6 +109,7 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
+	log.Debug(c)
 }
 
 /**
@@ -186,10 +184,10 @@ func (c *Config) ClusterTotal() (int) {
  */
 func DefaultLocalConfig() *Config {
 	return &Config{
-	//Cluster: {
-	//	//ClusterName: GetHostname(),
-	//	//BindIP: "0.0.0.0",
-	//	//BindPort: "8443",
-	//},
+		//Cluster: {
+		//	//ClusterName: GetHostname(),
+		//	//BindIP: "0.0.0.0",
+		//	//BindPort: "8443",
+		//},
 	}
 }

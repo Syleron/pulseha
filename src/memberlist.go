@@ -25,6 +25,7 @@ import (
 	p "github.com/Syleron/PulseHA/proto"
 	"sync"
 	"encoding/json"
+	"runtime"
 )
 
 /**
@@ -33,6 +34,18 @@ import (
 type Memberlist struct {
 	Members []*Member
 	sync.Mutex
+}
+
+func (m *Memberlist) Lock() {
+	_, file, no, _ := runtime.Caller(1)
+	log.Debugf("Lock File: %s Line: %d",file,no )
+	m.Mutex.Lock()
+}
+
+func (m *Memberlist) Unlock() {
+	_, file, no, _ := runtime.Caller(1)
+	log.Debugf("Unlock File: %s Line: %d",file,no )
+	m.Mutex.Unlock()
 }
 
 /**
@@ -100,13 +113,16 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
  */
 func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interface{}, error) {
 	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName)
+
 	m.Lock()
 	defer m.Unlock()
+	log.Debug("BroadCast got lock")
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
 		if member.hostname == utils.GetHostname() {
 			continue
 		}
+		log.Debugf("Broadcast: %s to member %s", funcName, member.hostname)
 		// check to see if we have a connection state
 		if member.Connection == nil {
 			nodeDetails, _ := NodeGetByName(member.hostname)
@@ -131,6 +147,7 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 			member.Close()
 		}
 	}
+	log.Debugf("Completed broadcast of %s", funcName)
 	return nil, nil
 }
 
@@ -143,6 +160,7 @@ func (m *Memberlist) Broadcast(funcName string, params ... interface{}) (interfa
 func (m *Memberlist) Setup() {
 	// todo work out how to handle mutex in here
 	log.Debug("Running member Setup")
+	log.Debugf("Local node is: %s", gconf.getLocalNode())
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
@@ -151,7 +169,7 @@ func (m *Memberlist) Setup() {
 		if gconf.ClusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			//m.PromoteMember(utils.GetHostname())
+			m.PromoteMember(utils.GetHostname())
 		} else {
 			// Contact a member in the list to see who is the "active" node.
 			// Iterate through the memberlist until a response is receive.
@@ -236,22 +254,24 @@ func (m *Memberlist) getActiveMember() string {
 	node
  */
 func (m *Memberlist) PromoteMember(hostname string) error {
-	m.Lock()
-	defer m.Unlock()
+
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
-
+	log.Debugf("PromoteMember %s", hostname)
 	// get host is it active?
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
-		log.Errorf("Unknown hostname % give in call to promoteMember", hostname)
+		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
 		return errors.New("unknown hostname")
 	}
 	// if unavailable check it works or do nothing?
 	switch member.getStatus() {
 	case p.MemberStatus_UNAVAILABLE:
-		log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
-		return errors.New("unable to promote member because it is unavailable")
+		//If we are the only node and just configured we will be unavailable
+		if gconf.nodeCount() > 1 {
+			log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
+			return errors.New("unable to promote member because it is unavailable")
+		}
 	case p.MemberStatus_ACTIVE:
 		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
 		return nil
@@ -259,16 +279,19 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 
 	// make current active node passive
 	activeMember := m.GetMemberByHostname(m.getActiveMember())
-	if !activeMember.makePassive() {
-		log.Errorf("Failed to make % passive, continuing", activeMember.getHostname())
+	if activeMember != nil {
+		if !activeMember.makePassive() {
+			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
+		}
 	}
+
 	// make new node active
 	if !member.makeActive() {
-		log.Errorf("Failed to promote % to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
+		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
 	}
 	// update all members
-	m.SyncConfig()
 
+	m.SyncConfig()
 	return nil
 }
 
@@ -279,8 +302,10 @@ func (m *Memberlist) PromoteMember(hostname string) error {
  */
 func (m *Memberlist) SyncConfig() error {
 	// Return with our new updated config
+	log.Debug("SyncConfig")
 	buf, err := json.Marshal(gconf.GetConfig())
 	// Handle failure to marshal config
+	log.Debug("SyncConfig, got config")
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
@@ -288,6 +313,8 @@ func (m *Memberlist) SyncConfig() error {
 		Replicated: true,
 		Config:     buf,
 	})
+
+//	fmt.Println(r.(p.PulseConfigSync))
 	if err != nil {
 		log.Warning("failed syncing: " + err.Error())
 	}

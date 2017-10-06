@@ -6,43 +6,45 @@ import (
 )
 
 /**
- * Make a group of
+	Bring up the groups on the current node
  */
-func makeActive(groupName string) {
-	//get group config
-	// check if we are active?
-	// if not active go active
-	// get group details and any plugin config
-	//
-
-	//groupConfig :=
-	//if plugin loaded call plugin bringIPUP for each item in config
-
-	/*
-	Check
-	 */
+func makeMemberActive()error{
+	log.Debug("Making this node active")
 	configCopy := gconf.GetConfig()
-	//configCopy.getLocalNode()
-	localNode := configCopy.LocalNode()
-	for iface, groupSlice := range localNode.IPGroups {
-		for _, group := range groupSlice {
-			if groupName == group {
-				bringUpIPs(iface, configCopy.Groups[group])
-				//garp?
+	for name, node := range configCopy.Nodes{
+		if name == gconf.getLocalNode() {
+			for iface, groups := range node.IPGroups {
+				for _, groupName := range groups {
+					makeGroupActive(iface, groupName)
+				}
 			}
 		}
 	}
+	return nil
+}
+
+/**
+ * Make a group of IPs active
+ */
+func makeGroupActive(iface string, groupName string) {
+	log.Debugf("Make group active. Interface: %s, group: %s",iface ,groupName)
+	// gconf.Reload()
+	configCopy := gconf.GetConfig()
+	bringUpIPs(iface, configCopy.Groups[groupName])
+	//garp?
+}
 
 
 	//confirm takeover was successful if not shout
 	// tell other nodes we are active
-}
+
 
 /**
  * Bring up a group of ip addresses
  */
 func bringUpIPs(iface string, ips []string) {
 	for _, ip := range ips {
+		log.Debugf("Bringing up up %s on interface %s" ,ip, iface)
 		success := netUtils.BringIPup(iface, ip)
 		if !success {
 			log.Errorf("Failed to bring up %s on interface %s", ip, iface)
