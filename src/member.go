@@ -68,16 +68,13 @@ func (m *Member) setClient(client Client) {
  */
 func (m *Member) makeActive()bool{
 	log.Debugf("Making active %s", m.getHostname())
-	//get all groups send
-	//r, err := m.SendMakeActive()
-	log.Debug("member make active" + m.hostname + gconf.getLocalNode())
-
 
 	if m.hostname == gconf.getLocalNode() {
-		log.Debug("member make active" + m.hostname + gconf.getLocalNode())
+		log.Debug("member is local node making active")
 		makeMemberActive()
 	} else {
-		err := m.SendMakeActive(&proto.PulsePromote{false,"", m.getHostname()})
+		log.Debug("member is not localnode makeing grpc call")
+		err := m.SendMakeActive(&proto.PulsePromote{Success:false, Message:"", Member: m.getHostname()})
 		if err != nil {
 			log.Error(err)
 			log.Errorf("Error making %s active. Error: %s", m.getHostname(), err.Error())

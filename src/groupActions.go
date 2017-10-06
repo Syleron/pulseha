@@ -27,19 +27,7 @@ func makeMemberActive()error{
  * Make a group of IPs active
  */
 func makeGroupActive(iface string, groupName string) {
-	//get group config
-	// check if we are active?
-	// if not active go active
-	// get group details and any plugin config
-	//
-
-	//groupConfig :=
-	//if plugin loaded call plugin bringIPUP for each item in config
-
-	/*
-	Check
-	 */
-	 log.Debugf("Make group active. Interface: %s, group: %s",iface ,groupName)
+	log.Debugf("Make group active. Interface: %s, group: %s",iface ,groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringUpIPs(iface, configCopy.Groups[groupName])

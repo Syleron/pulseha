@@ -59,7 +59,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 	if config.Pulse.TLS {
 		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
 		if err != nil {
-			log.Errorf("Could not load TLS cert: ", err)
+			log.Errorf("Could not load TLS cert: %s", err.Error())
 			return errors.New("could not load node TLS cert: " + hostname + ".crt")
 		}
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
@@ -67,7 +67,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
 	}
 	if err != nil {
-		log.Errorf("GRPC client connection error: ", err)
+		log.Errorf("GRPC client connection error: %s", err.Error())
 		return err
 	}
 	c.Requester = p.NewServerClient(c.Connection)
@@ -108,7 +108,6 @@ func (c *Client) SendJoin(data *p.PulseJoin) (*p.PulseJoin, error) {
 	}
 	return r, err
 }
-
 
 /**
 

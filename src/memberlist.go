@@ -261,7 +261,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	// get host is it active?
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
-		log.Errorf("Unknown hostname % give in call to promoteMember", hostname)
+		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
 		return errors.New("unknown hostname")
 	}
 	// if unavailable check it works or do nothing?
@@ -281,13 +281,13 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	activeMember := m.GetMemberByHostname(m.getActiveMember())
 	if activeMember != nil {
 		if !activeMember.makePassive() {
-			log.Errorf("Failed to make % passive, continuing", activeMember.getHostname())
+			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
 	}
 
 	// make new node active
 	if !member.makeActive() {
-		log.Errorf("Failed to promote % to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
+		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
 	}
 	// update all members
 
