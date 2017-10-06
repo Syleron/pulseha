@@ -8,7 +8,7 @@ import (
 /**
 	Bring up the groups on the current node
  */
-func makeActive()error{
+func makeMemberActive()error{
 	log.Debug("Making this node active")
 	configCopy := gconf.GetConfig()
 	for name, node := range configCopy.Nodes{
@@ -40,13 +40,10 @@ func makeGroupActive(iface string, groupName string) {
 	Check
 	 */
 	 log.Debugf("Make group active. Interface: %s, group: %s",iface ,groupName)
-	 gconf.Reload()
+	// gconf.Reload()
 	configCopy := gconf.GetConfig()
-log.Debug(configCopy)
 	bringUpIPs(iface, configCopy.Groups[groupName])
-				//garp?
-
-
+	//garp?
 }
 
 

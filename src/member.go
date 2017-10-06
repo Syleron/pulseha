@@ -75,7 +75,14 @@ func (m *Member) makeActive()bool{
 
 	if m.hostname == gconf.getLocalNode() {
 		log.Debug("member make active" + m.hostname + gconf.getLocalNode())
-		makeActive()
+		makeMemberActive()
+	} else {
+		err := m.SendMakeActive(&proto.PulsePromote{false,"", m.getHostname()})
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s active. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
 	}
 	return true
 }

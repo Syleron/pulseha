@@ -122,8 +122,12 @@ func (c *Client) SendConfigSync(data *p.PulseConfigSync) (*p.PulseConfigSync, er
 	return r, err
 }
 
-func (c *Client) SendMakeActive(data *p.PulseGroupUnassign) (*p.PulseGroupUnassign, error) {
-	log.Debug("Client:SendGroupUnassign() Sending GRPC GroupUnassign")
-//	r, err := c.Requester.Join(context.Background(), data)
-return nil, nil
+func (c *Client) SendMakeActive(data *p.PulsePromote) (error) {
+	log.Debug("sendMakeActive")
+	r, err := c.Requester.RpcMakeActive(context.Background(), data)
+	if err != nil || r.Success !=true {
+		log.Error(r.Message)
+		log.Error(err.Error())
+	}
+	return err
 }

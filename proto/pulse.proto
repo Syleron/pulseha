@@ -19,6 +19,7 @@ syntax = "proto3";
 
 package proto;
 
+
 // Types
 message HealthCheckRequest {
     enum ServingRequest {
@@ -142,6 +143,35 @@ message PulseConfigSync {
 }
 
 
+//abstract class APIStatus extends Enums
+//{
+//	const ERROR   = 'error';
+//	const SUCCESS = 'success';
+//	const FAIL    = 'fail';
+//	const BUSY    = 'busy';
+//	const WARNING = 'warning';
+//}
+
+//message APIResponse {
+//    enum Status {
+  //      ERROR = 0;
+    //    SUCCESS = 1;
+//        FAIL = 2;
+//        BUSY = 3;
+//        WARNING = 4;
+//    }
+//    Status status = 1;
+//    string message = 2;
+//    google.protobuf.Any data =3;/
+//}
+
+message PulsePromote {
+    bool success =1;
+    string message =2;
+    string member =3;
+}
+
+
 // Services
 service CLI {
     // Join Cluster
@@ -175,4 +205,6 @@ service Server {
     rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
+    // Promote
+    rpc rpcMakeActive(PulsePromote) returns (PulsePromote);
 }

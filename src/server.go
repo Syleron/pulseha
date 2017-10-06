@@ -225,6 +225,16 @@ func (s *Server) shutdown() {
 
 // network action functions
 
-func rpcMakeActive()error{
-	return makeActive()
+func rpcMakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote){
+	if in.Member != gconf.getLocalNode() {
+		return &proto.PulsePromote{false,
+		"cannot promote a node other than ourself by rpcMakeActive",
+		nil}
+	}
+	err := makeMemberActive()
+	success := false
+	if err != nil {
+		success = true
+	}
+	return &proto.PulsePromote{success,err.Error(),nil}
 }
