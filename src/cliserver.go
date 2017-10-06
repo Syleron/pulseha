@@ -77,7 +77,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Send our join request
-		_, err = client.Send(SendJoin, &proto.PulseJoin{
+		r, err := client.Send(SendJoin, &proto.PulseJoin{
 			Config: buf,
 			Hostname: utils.GetHostname(),
 		})
@@ -90,26 +90,26 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Handle an unsuccessful request
-		//if !r.Success {
-		//	log.Emergency("Peer error: %s", err)
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: r.Message,
-		//	}, nil
-		//}
+		if !r.(*proto.PulseJoin).Success {
+			log.Emergency("Peer error: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: r.(*proto.PulseJoin).Message,
+			}, nil
+		}
 		// Update our local config
-		//peerConfig := &Config{}
-		//err = json.Unmarshal(r.Config, peerConfig)
+		peerConfig := &Config{}
+		err = json.Unmarshal(r.(*proto.PulseJoin).Config, peerConfig)
 		// handle errors
-		//if err != nil {
-		//	log.Error("Unable to unmarshal config node.")
-		//	return &proto.PulseJoin{
-		//		Success: false,
-		//		Message: "Unable to unmarshal config node.",
-		//	}, nil
-		//}
+		if err != nil {
+			log.Error("Unable to unmarshal config node.")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
 		// Set the config
-		//gconf.SetConfig(*peerConfig)
+		gconf.SetConfig(*peerConfig)
 		// Save the config
 		gconf.Save()
 		// Reload config in memory
