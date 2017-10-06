@@ -226,6 +226,7 @@ func (s *Server) shutdown() {
 // network action functions
 
 func (s *Server)RpcMakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote,error){
+	log.Notice("RpcMakeActive called")
 	if in.Member != gconf.getLocalNode() {
 		return &proto.PulsePromote{Success:false,
 		Message:"cannot promote a node other than ourself by rpcMakeActive",
@@ -237,4 +238,37 @@ func (s *Server)RpcMakeActive(ctx context.Context, in *proto.PulsePromote) (*pro
 		success = true
 	}
 	return &proto.PulsePromote{Success:success,Message:err.Error(),Member:""}, nil
+}
+
+func (s *Server)RpcMakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote,error){
+	log.Notice("RpcMakePassive called")
+	if in.Member != gconf.getLocalNode() {
+		return &proto.PulsePromote{Success:false,
+			Message:"cannot demote a node other than ourself by rpcMakeActive",
+			Member:""}, nil
+	}
+	err := makeMemberPassive()
+	success := false
+	msg := "success"
+	if err != nil {
+		success = true
+		msg = err.Error()
+	}
+	return &proto.PulsePromote{Success:success,Message:msg,Member:""}, nil
+}
+
+func (s *Server)RpcBringUpIp(ctx context.Context, in *proto.PulseBringIP)(*proto.PulseBringIP, error){
+	log.Notice("RpcBringUpIP")
+	err := bringUpIPs(in.Iface, in.Ips)
+	success := false
+	msg := "success"
+	if err != nil {
+		success = true
+		msg = err.Error()
+	}
+	return &proto.PulseBringIP{Success:success, Message:msg}, nil
+}
+
+func (s *Server)RpcBringDownIp(ctx context.Context, in *proto.PulseBringIP)(*proto.PulseBringIP, error){
+return nil, nil
 }

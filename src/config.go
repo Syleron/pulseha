@@ -180,6 +180,23 @@ func (c *Config) ClusterTotal() (int) {
 }
 
 /**
+	Returns the interface the group is assigned to
+ */
+func (c *Config) GetGroupIface(node string, groupName string)string {
+	for nodeName, n := range c.Nodes {
+		if nodeName == node {
+			for iface, groups := range n.IPGroups {
+				for _, group := range groups {
+					if group == groupName {
+						return iface
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+/**
  *
  */
 func DefaultLocalConfig() *Config {
