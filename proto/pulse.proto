@@ -116,9 +116,9 @@ message PulseStatus {
 }
 message StatusRow {
     string hostname = 1;
-    repeated string ip = 2;
-    repeated string ping = 3;
-    repeated string status = 4;
+    string ip = 2;
+    string ping = 3;
+    MemberStatus.Status status = 4;
 }
 message GroupTable {
     bool success = 1;

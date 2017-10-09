@@ -193,7 +193,7 @@ func GroupIPExist(name string, ip string) (bool, int) {
 }
 
 /**
- *function to get the nodes and interfaces that relate to the specified node
+ * function to get the nodes and interfaces that relate to the specified node
  */
 func getGroupNodes(group string)([]string, []string) {
 	var hosts []string

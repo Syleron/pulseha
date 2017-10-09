@@ -365,18 +365,17 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
-	config := gconf.GetConfig()
-	for name, ips := range config.Groups {
-		nodes, interfaces := getGroupNodes(name)
+	for _, member := range s.Memberlist.Members {
+		details, _ := NodeGetByName(member.hostname)
 		row := &proto.StatusRow {
-			Hostname: name,
-			Ip: ips,
-			Ping: nodes,
-			Status: interfaces,
+			Hostname: member.hostname,
+			Ip: details.IP,
+			Ping: "",
+			Status: member.status,
 		}
 		table.Row = append(table.Row, row)
 	}
-	return nil, nil
+	return table, nil
 }
 
 /**

@@ -66,21 +66,21 @@ func (c *StatusCommand) Run(args []string) int {
  *
  */
 func (c *StatusCommand) drawStatusTable(client proto.CLIClient) {
-	r, err := client.GroupList(context.Background(), &proto.GroupTable{})
+	r, err := client.Status(context.Background(), &proto.PulseStatus{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())
 	} else {
 		data := [][]string{}
-		for _, group := range r.Row {
+		for _, node := range r.Row {
 
 			data = append(
 				data,
 				[]string{
-					group.Name,
-					strings.Join(group.Ip, ", "),
-					strings.Join(group.Nodes,"\n"),
-					strings.Join(group.Interfaces,"\n"),
+					node.Hostname,
+					node.Ip,
+					node.Ping,
+					node.Status.String(),
 				})
 		}
 		table := tablewriter.NewWriter(os.Stdout)
