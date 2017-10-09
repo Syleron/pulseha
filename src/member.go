@@ -24,7 +24,7 @@ import (
 )
 
 /**
- * Member struct type
+	Member struct type
  */
 type Member struct {
 	hostname string
@@ -34,7 +34,7 @@ type Member struct {
 }
 
 /*
- Getters and setters for Member which allow us to make them go routine safe
+	Getters and setters for Member which allow us to make them go routine safe
  */
 
 func (m *Member) getHostname() string {

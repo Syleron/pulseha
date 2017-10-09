@@ -54,6 +54,9 @@ func bringUpIPs(iface string, ips []string) error {
 	return nil
 }
 
+/**
+
+ */
 func bringDownIPs(iface string, ips []string) {
 	for _, ip := range ips {
 		log.Debugf("Taking down up %s on interface %s", ip, iface)
