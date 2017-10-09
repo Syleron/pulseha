@@ -19,26 +19,11 @@ syntax = "proto3";
 
 package proto;
 
-
-// Types
-message HealthCheckRequest {
-    enum ServingRequest {
-        SETUP = 0;
-        STATUS = 1;
-    }
-    ServingRequest request = 1;
+// Pulse Cluster Messages
+message PulseHealthCheck {
+    bool success = 1;
+    bytes memberlist = 2;
 }
-message HealthCheckResponse {
-    enum ServingStatus {
-        UNKNOWN = 0;
-        UNCONFIGURED = 1;
-        CONFIGURED = 2;
-        FAILVER = 3;
-        HEALTHY = 4;
-    }
-    ServingStatus status = 1;
-}
-
 message MemberStatus {
     enum Status {
         ACTIVE = 0;
@@ -48,8 +33,6 @@ message MemberStatus {
     }
     Status status = 1;
 }
-
-// Pulse Cluster Messages
 message PulseJoin {
     bool success = 1;
     string message = 2;
@@ -137,36 +120,11 @@ message PulseConfigSync {
     bytes config = 3;
     bool replicated = 4;
 }
-
-
-//abstract class APIStatus extends Enums
-//{
-//	const ERROR   = 'error';
-//	const SUCCESS = 'success';
-//	const FAIL    = 'fail';
-//	const BUSY    = 'busy';
-//	const WARNING = 'warning';
-//}
-
-//message APIResponse {
-//    enum Status {
-  //      ERROR = 0;
-    //    SUCCESS = 1;
-//        FAIL = 2;
-//        BUSY = 3;
-//        WARNING = 4;
-//    }
-//    Status status = 1;
-//    string message = 2;
-//    google.protobuf.Any data =3;/
-//}
-
 message PulsePromote {
     bool success =1;
     string message =2;
     string member =3;
 }
-
 message PulseBringIP {
     bool success =1;
     string message =2;
@@ -202,7 +160,7 @@ service CLI {
 
 service Server {
     // Perform GRPC Health Check
-    rpc Check (HealthCheckRequest) returns (HealthCheckResponse);
+    rpc HealthCheck (PulseHealthCheck) returns (PulseHealthCheck);
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
     // Sync Config

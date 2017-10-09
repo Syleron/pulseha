@@ -25,6 +25,8 @@ import (
 	"sync"
 	"encoding/json"
 	"runtime"
+	"google.golang.org/grpc/connectivity"
+	"time"
 )
 
 /**
@@ -37,13 +39,13 @@ type Memberlist struct {
 
 func (m *Memberlist) Lock() {
 	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Lock File Line: %s", no)
+	log.Debugf("Memberlist:Unlock() Lock set line: %d", no)
 	m.Mutex.Lock()
 }
 
 func (m *Memberlist) Unlock() {
 	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Unlock File Line: %s", no)
+	log.Debugf("Memberlist:Unlock() Unlock set line: %d", no)
 	m.Mutex.Unlock()
 }
 
@@ -110,7 +112,7 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
+func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
@@ -120,19 +122,8 @@ func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
 			continue
 		}
 		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.hostname)
-		// check to see if we have a connection state
-		if member.Connection == nil {
-			nodeDetails, _ := NodeGetByName(member.hostname)
-			err := member.Connect(nodeDetails.IP, nodeDetails.Port, member.hostname)
-			if err != nil {
-				log.Warning("Unable to connect to " + member.hostname)
-				continue
-			}
-			member.Send(funcName, params)
-		} else {
-			member.Send(funcName, params)
-		}
-		// Close the connection
+		member.Connect()
+		member.Send(funcName, data)
 		member.Close()
 	}
 }
@@ -237,10 +228,9 @@ func (m *Memberlist) getActiveMember() string {
 	node
  */
 func (m *Memberlist) PromoteMember(hostname string) error {
-
+	log.Debug("Memberlist:PromoteMember() Memberlist promoting " + hostname + " as active member..")
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
-	log.Debugf("PromoteMember %s", hostname)
 	// get host is it active?
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
@@ -276,11 +266,37 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		if !activeMember.makeActive() {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
+	} else {
+		// Start performing health checks
+		//log.Debug("Memberlist:PromoteMember() Starting RPC health check scheduler..")
+		go utils.Scheduler(m.checkConnections, 1 * time.Second)
 	}
 
 	//Dont think we need this here
 	//m.SyncConfig()
 	return nil
+}
+
+/**
+	Function is only to be run on the active appliance
+	Note: THis is not the final function name.. or not sure if this is
+          where this logic will stay.. just playing around at this point.
+ */
+func (m *Memberlist) checkConnections() {
+	for _, member := range m.Members {
+		if member.hostname == gconf.localNode {
+			continue
+		}
+		err := member.Connect()
+		if err != nil {
+			member.setStatus(p.MemberStatus_UNAVAILABLE)
+			continue
+		} else if member.Connection.GetState() == connectivity.TransientFailure {
+			member.setStatus(p.MemberStatus_UNAVAILABLE)
+			continue
+		}
+		member.setStatus(p.MemberStatus_PASSIVE)
+	}
 }
 
 /**
