@@ -40,6 +40,7 @@ type Server struct {
 	Server     *grpc.Server
 	Listener   net.Listener
 	Memberlist *Memberlist
+	HCScheduler func()
 }
 
 /**
@@ -95,20 +96,13 @@ func (s *Server) shutdown() {
 /**
 	Perform appr. health checks
  */
-func (s *Server) Check(ctx context.Context, in *proto.HealthCheckRequest) (*proto.HealthCheckResponse, error) {
+func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
+	log.Debug("Server:HealthCheck() Perform health check")
 	s.Lock()
 	defer s.Unlock()
-	switch in.Request {
-	case proto.HealthCheckRequest_SETUP:
-		log.Debug("Server:Check() - HealthCheckRequest Setup")
-	case proto.HealthCheckRequest_STATUS:
-		log.Debug("Server:Check() - HealthCheckRequest Status")
-		return &proto.HealthCheckResponse{
-			Status: proto.HealthCheckResponse_CONFIGURED,
-		}, nil
-	default:
-	}
-	return nil, nil
+	return &proto.PulseHealthCheck{
+		Success: false,
+	}, nil
 }
 
 /**

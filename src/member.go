@@ -21,6 +21,9 @@ import (
 	"sync"
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
+	"errors"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc"
 )
 
 /**
@@ -43,25 +46,85 @@ func (m *Member) getHostname() string {
 	return m.hostname
 }
 
+/**
+
+ */
 func (m *Member) setHostname(hostname string) {
 	m.Lock()
 	defer m.Unlock()
 	m.hostname = hostname
 }
 
+/**
+
+ */
 func (m *Member) getStatus() proto.MemberStatus_Status {
 	m.Lock()
 	defer m.Unlock()
 	return m.status
 }
 
+/**
+
+ */
 func (m *Member) setStatus(status proto.MemberStatus_Status) {
 	m.Lock()
 	defer m.Unlock()
 	m.status = status
 }
+
+/**
+
+ */
 func (m *Member) setClient(client Client) {
 	m.Client = client
+}
+
+/**
+	Note: Hostname is required for TLS as the certs are named after the hostname.
+ */
+func (m *Member) Connect() (error) {
+	if m.Connection == nil {
+		nodeDetails, _ := NodeGetByName(m.hostname)
+		log.Debug("Member:Connect() Connection made to " + nodeDetails.IP + ":" + nodeDetails.Port)
+		var err error
+		config := gconf.GetConfig()
+		if config.Pulse.TLS {
+			creds, err := credentials.NewClientTLSFromFile("./certs/"+m.hostname+".crt", "")
+			if err != nil {
+				log.Errorf("Could not load TLS cert: %s", err.Error())
+				return errors.New("could not load node TLS cert: " + m.hostname + ".crt")
+			}
+			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithTransportCredentials(creds))
+		} else {
+			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithInsecure())
+		}
+		if err != nil {
+			log.Errorf("GRPC client connection error: %s", err.Error())
+			return err
+		}
+		m.Requester = proto.NewServerClient(m.Connection)
+	}
+	return nil
+}
+
+/**
+	Close the client connection
+ */
+func (m *Member) Close() {
+	log.Debug("Member:Close() Connection closed")
+	m.Connection.Close()
+}
+
+/**
+	Send GRPC health check to current member
+ */
+func (m *Member) sendHealthCheck() (interface{}, error) {
+	if m.Connection == nil {
+		return nil, errors.New("unable to send health check as member connection has not been initiated")
+	}
+	r, err := m.Send(SendHealthCheck, &proto.PulseHealthCheck{})
+	return r, err
 }
 
 /*

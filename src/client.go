@@ -27,7 +27,6 @@ import (
 )
 
 type Client struct {
-	//State      PulseState
 	Connection *grpc.ClientConn
 	Requester  p.ServerClient
 }
@@ -43,6 +42,7 @@ const (
 	SendMakePassive
 	SendBringUpIP
 	SendBringDownIP
+	SendHealthCheck
 )
 
 var protoFunctions = []string {
@@ -53,6 +53,7 @@ var protoFunctions = []string {
 	"MakePassive",
 	"BringUpIP",
 	"BringDownIP",
+	"HealthCheck",
 }
 
 func (p protoFunction) String() string {
@@ -85,6 +86,9 @@ func (c *Client) GetProtoFuncList() (map[string]interface{}) {
 		},
 		"BringDownIP": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.BringDownIP(ctx, data.(*p.PulseBringIP))
+		},
+		"HealthCheck": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.HealthCheck(ctx, data.(*p.PulseHealthCheck))
 		},
 	}
 	return funcList
