@@ -37,13 +37,13 @@ type Memberlist struct {
 
 func (m *Memberlist) Lock() {
 	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Lock File Line: %s", no)
+	log.Debugf("Memberlist:Unlock() Lock set line: %s", no)
 	m.Mutex.Lock()
 }
 
 func (m *Memberlist) Unlock() {
 	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Unlock File Line: %s", no)
+	log.Debugf("Memberlist:Unlock() Unlock set line: %s", no)
 	m.Mutex.Unlock()
 }
 
@@ -110,7 +110,7 @@ func (m *Memberlist) MemberExists(hostname string) (bool) {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
+func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
@@ -128,10 +128,11 @@ func (m *Memberlist) Broadcast(funcName protoFunction, params ... interface{}) {
 				log.Warning("Unable to connect to " + member.hostname)
 				continue
 			}
-			member.Send(funcName, params)
+			member.Send(funcName, data)
 		} else {
-			member.Send(funcName, params)
+			member.Send(funcName, data)
 		}
+		log.Debug("Broadcast: closing connection with " + member.hostname)
 		// Close the connection
 		member.Close()
 	}

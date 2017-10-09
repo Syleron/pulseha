@@ -24,7 +24,6 @@ import (
 	p "github.com/Syleron/PulseHA/proto"
 	"errors"
 	"context"
-	"reflect"
 )
 
 type Client struct {
@@ -46,7 +45,7 @@ const (
 	SendBringDownIP
 )
 
-var protoFunctions = [...]string {
+var protoFunctions = []string {
 	"ConfigSync",
 	"Join",
 	"Leave",
@@ -65,14 +64,28 @@ func (p protoFunction) String() string {
 
  */
 func (c *Client) GetProtoFuncList() (map[string]interface{}) {
-	funcList := map[string]interface{} {
-		"ConfigSync": c.Requester.ConfigSync,
-		"Join": c.Requester.Join,
-		"Leave": c.Requester.Leave,
-		"MakeActive": c.Requester.MakeActive,
-		"MakePassive": c.Requester.MakePassive,
-		"BringUpIP": c.Requester.BringUpIP,
-		"BringDownIP": c.Requester.BringDownIP,
+	funcList := map[string]interface{}{
+		"ConfigSync": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.ConfigSync(ctx, data.(*p.PulseConfigSync))
+		},
+		"Join": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.Join(ctx, data.(*p.PulseJoin))
+		},
+		"Leave": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.Leave(ctx, data.(*p.PulseLeave))
+		},
+		"MakeActive": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.MakeActive(ctx, data.(*p.PulsePromote))
+		},
+		"MakePassive": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.MakePassive(ctx, data.(*p.PulsePromote))
+		},
+		"BringUpIP": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.BringUpIP(ctx, data.(*p.PulseBringIP))
+		},
+		"BringDownIP": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.BringDownIP(ctx, data.(*p.PulseBringIP))
+		},
 	}
 	return funcList
 }
@@ -116,16 +129,7 @@ func (c *Client) Close() {
 func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
-	f := reflect.ValueOf(funcList[funcName.String()])
-	params := []reflect.Value{
-		reflect.ValueOf(context.Background()),
-		reflect.ValueOf(data),
-	}
-	res := f.Call(params)
-	ret := res[0].Interface()
-	var err error
-	if v := res[1].Interface(); v != nil {
-		err = v.(error)
-	}
-	return ret, err
+	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
+		context.Background(), data,
+	)
 }
