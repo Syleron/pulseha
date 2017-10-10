@@ -30,6 +30,7 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 	"encoding/json"
 	"strconv"
+	"time"
 )
 
 /**
@@ -101,6 +102,8 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	s.Lock()
 	defer s.Unlock()
 	if s.Memberlist.getActiveMember() != gconf.localNode {
+		localMember := s.Memberlist.GetMemberByHostname(gconf.localNode)
+		localMember.setLast_HC_Response(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
 		// we are active and recieved a health check.. act on it

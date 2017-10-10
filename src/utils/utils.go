@@ -78,9 +78,12 @@ func ValidIPAddress(ipAddress string) bool {
 /**
  * Function to schedule the execution every x time as time.Duration.
  */
-func Scheduler(method func(), delay time.Duration) {
+func Scheduler(method func() bool, delay time.Duration) {
 	for _ = range time.Tick(delay) {
-		method()
+		end := method()
+		if end {
+			break
+		}
 	}
 }
 

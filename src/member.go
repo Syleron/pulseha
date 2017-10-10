@@ -23,14 +23,16 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"errors"
 	"google.golang.org/grpc/connectivity"
+	"time"
 )
 
 /**
 	Member struct type
  */
 type Member struct {
-	hostname string
-	status   proto.MemberStatus_Status
+	Hostname         string
+	Status           proto.MemberStatus_Status
+	Last_HC_Response time.Time
 	Client
 	sync.Mutex
 }
@@ -39,41 +41,62 @@ type Member struct {
 	Getters and setters for Member which allow us to make them go routine safe
  */
 
-func (m *Member) getHostname() string {
+/**
+   Set the last time this member received a health check
+ */
+func (m *Member) setLast_HC_Response(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
-	return m.hostname
+	m.Last_HC_Response = time
 }
 
 /**
+	Get the last time this member received a health check
+ */
+func (m *Member) getLast_HC_Response() time.Time {
+	m.Lock()
+	defer m.Unlock()
+	return m.Last_HC_Response
+}
 
+/**
+	Get member hostname
+ */
+func (m *Member) getHostname() string {
+	m.Lock()
+	defer m.Unlock()
+	return m.Hostname
+}
+
+/**
+	Set member hostname
  */
 func (m *Member) setHostname(hostname string) {
 	m.Lock()
 	defer m.Unlock()
-	m.hostname = hostname
+	m.Hostname = hostname
 }
 
 /**
-
+	Get member status
  */
 func (m *Member) getStatus() proto.MemberStatus_Status {
 	m.Lock()
 	defer m.Unlock()
-	return m.status
+	return m.Status
 }
 
 /**
-
+	Set member status
  */
 func (m *Member) setStatus(status proto.MemberStatus_Status) {
 	m.Lock()
 	defer m.Unlock()
-	m.status = status
+	m.Status = status
 }
 
 /**
-
+	Set member Client GRPC
  */
 func (m *Member) setClient(client Client) {
 	m.Client = client
@@ -85,8 +108,8 @@ func (m *Member) setClient(client Client) {
 func (m *Member) Connect() (error) {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		log.Debug("creating new connection")
-		nodeDetails, _ := NodeGetByName(m.hostname)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.hostname)
+		nodeDetails, _ := NodeGetByName(m.Hostname)
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname)
 		if err != nil {
 			return err
 		}
@@ -119,7 +142,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
 
-	if m.hostname == gconf.getLocalNode() {
+	if m.Hostname == gconf.getLocalNode() {
 		makeMemberActive()
 	} else {
 		log.Debug("member is not local node making grpc call")
@@ -137,7 +160,7 @@ func (m *Member) makeActive() bool {
 			return false
 		}
 	}
-	m.status = proto.MemberStatus_ACTIVE
+	m.Status = proto.MemberStatus_ACTIVE
 	return true
 }
 
@@ -146,7 +169,7 @@ func (m *Member) makeActive() bool {
  */
 func (m *Member) makePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
-	if m.hostname == gconf.getLocalNode() {
+	if m.Hostname == gconf.getLocalNode() {
 		makeMemberPassive()
 	} else {
 		log.Debug("member is not local node making grpc call")
@@ -163,7 +186,7 @@ func (m *Member) makePassive() bool {
 			return false
 		}
 	}
-	m.status = proto.MemberStatus_PASSIVE
+	m.Status = proto.MemberStatus_PASSIVE
 	return true
 }
 
@@ -174,8 +197,8 @@ func (m *Member) makePassive() bool {
  */
 func (m *Member) bringUpIPs(ips []string, group string) bool {
 	configCopy := gconf.GetConfig()
-	iface := configCopy.GetGroupIface(m.hostname, group)
-	if m.hostname == gconf.getLocalNode() {
+	iface := configCopy.GetGroupIface(m.Hostname, group)
+	if m.Hostname == gconf.getLocalNode() {
 		log.Debug("member is local node bringing up IP's")
 		bringUpIPs(iface, ips)
 	} else {
@@ -192,6 +215,30 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 			return false
 		}
 	}
-	m.status = proto.MemberStatus_PASSIVE
+	m.Status = proto.MemberStatus_PASSIVE
 	return true
+}
+
+/**
+	Monitor the last time we received a health check and or failover
+ */
+func (m *Member) monitorReceivedHCs() (bool) {
+	elapsed := int64(time.Since(m.getLast_HC_Response())) / 1e9
+	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
+		log.Warning("No health checks are being made.. Perhaps a failover is required?")
+	}
+	// If 30 seconds has gone by.. something is wrong.
+	if int(elapsed) >= 30 {
+		var addHCSuccess bool = false
+		// TODO: Perform additional health checks plugin stuff HERE
+		if !addHCSuccess {
+			// Nothing has worked.. assume the master has failed. Fail over.
+			log.Info("Attempting a failover..")
+			// TODO: Failover
+			return true
+		} else {
+			m.setLast_HC_Response(time.Now())
+		}
+	}
+	return false
 }

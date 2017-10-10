@@ -366,12 +366,12 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
 	for _, member := range s.Memberlist.Members {
-		details, _ := NodeGetByName(member.hostname)
+		details, _ := NodeGetByName(member.Hostname)
 		row := &proto.StatusRow {
-			Hostname: member.hostname,
+			Hostname: member.Hostname,
 			Ip: details.IP,
 			Ping: "",
-			Status: member.status,
+			Status: member.Status,
 		}
 		table.Row = append(table.Row, row)
 	}

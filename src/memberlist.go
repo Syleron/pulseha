@@ -124,20 +124,17 @@ func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 	defer m.Unlock()
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
-		if member.hostname == utils.GetHostname() {
+		if member.Hostname == utils.GetHostname() {
 			continue
 		}
-		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.hostname)
+		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.Hostname)
 		member.Connect()
 		member.Send(funcName, data)
 	}
 }
 
 /**
- * check how many are in the cluster
- * if more than one, request who's active.
- * if no one responds assume active.
- * This should probably populate the memberlist
+	Setup process for the memberlist
  */
 func (m *Memberlist) Setup() {
 	// Load members into our memberlist slice
@@ -150,9 +147,10 @@ func (m *Memberlist) Setup() {
 			// we are assume that we are now the active appliance.
 			m.PromoteMember(utils.GetHostname())
 		} else {
-			// Contact a member in the list to see who is the "active" node.
-			// Iterate through the memberlist until a response is receive.
-			// If no response has been made then assume we should become the active appliance.
+			// come up passive and monitoring health checks
+			localMember := m.GetMemberByHostname(gconf.localNode)
+			localMember.setLast_HC_Response(time.Now())
+			go utils.Scheduler(localMember.monitorReceivedHCs, 1000 * time.Millisecond)
 		}
 	}
 }
@@ -261,7 +259,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		if !activeMember.makePassive() {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
-		activeMember.status = p.MemberStatus_PASSIVE
+		activeMember.Status = p.MemberStatus_PASSIVE
 	}
 
 	// make new node active
@@ -287,9 +285,9 @@ func (m *Memberlist) PromoteMember(hostname string) error {
           where this logic will stay.. just playing around at this point.
 	monitors the connections states for each member
  */
-func (m *Memberlist) monitorClientConns() {
+func (m *Memberlist) monitorClientConns() bool {
 	for _, member := range m.Members {
-		if member.hostname == gconf.localNode {
+		if member.Hostname == gconf.localNode {
 			continue
 		}
 		member.Connect()
@@ -305,23 +303,24 @@ func (m *Memberlist) monitorClientConns() {
 			}
 		}()
 	}
+	return false
 }
 
 /**
 	Send health checks to users who have a healthy connection
  */
-func (m *Memberlist) healthCheckHandler() {
+func (m *Memberlist) healthCheckHandler() bool {
 	for _, member := range m.Members {
-		if member.hostname == gconf.localNode {
+		if member.Hostname == gconf.localNode {
 			continue
 		}
-		if member.status == p.MemberStatus_PASSIVE {
+		if member.Status == p.MemberStatus_PASSIVE {
 			memberCopy := member
 			memberlist := new(p.PulseHealthCheck)
 			for _, member := range m.Members {
 				newMember := &p.MemberlistMember {
-					Hostname: member.hostname,
-					Status: member.status,
+					Hostname: member.Hostname,
+					Status: member.Status,
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -334,6 +333,7 @@ func (m *Memberlist) healthCheckHandler() {
 			}()
 		}
 	}
+	return false
 }
 
 /**
@@ -358,11 +358,14 @@ func (m *Memberlist) SyncConfig() error {
 	Update the local memberlist statuses based on the proto memberlist message
  */
 func (m *Memberlist) update(members []*p.MemberlistMember) {
+	log.Debug("Memberlist:update() Updating memberlist")
+	m.Lock()
+	defer m.Unlock()
 	for _, member := range members {
 		found := false
 		for _, localMember := range m.Members {
-			if member.Hostname == localMember.hostname {
-				localMember.status = member.Status
+			if member.Hostname == localMember.Hostname {
+				localMember.Status = member.Status
 				found = true
 				break
 			}
