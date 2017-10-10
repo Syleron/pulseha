@@ -37,12 +37,18 @@ type Memberlist struct {
 	sync.Mutex
 }
 
+/**
+
+ */
 func (m *Memberlist) Lock() {
 	_, _, no, _ := runtime.Caller(1)
 	log.Debugf("Memberlist:Unlock() Lock set line: %d", no)
 	m.Mutex.Lock()
 }
 
+/**
+
+ */
 func (m *Memberlist) Unlock() {
 	_, _, no, _ := runtime.Caller(1)
 	log.Debugf("Memberlist:Unlock() Unlock set line: %d", no)
@@ -279,7 +285,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	Function is only to be run on the active appliance
 	Note: THis is not the final function name.. or not sure if this is
           where this logic will stay.. just playing around at this point.
-monitors the connections states for each member
+	monitors the connections states for each member
  */
 func (m *Memberlist) monitorClientConns() {
 	for _, member := range m.Members {
@@ -311,8 +317,16 @@ func (m *Memberlist) healthCheckHandler() {
 		}
 		if member.status == p.MemberStatus_PASSIVE {
 			memberCopy := member
+			memberlist := new(p.PulseHealthCheck)
+			for _, member := range m.Members {
+				newMember := &p.MemberlistMember {
+					Hostname: member.hostname,
+					Status: member.status,
+				}
+				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
+			}
 			go func() {
-				_, err := memberCopy.sendHealthCheck()
+				_, err := memberCopy.sendHealthCheck(memberlist)
 				if err != nil {
 					log.Warning(err.Error())
 					memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
@@ -338,4 +352,27 @@ func (m *Memberlist) SyncConfig() error {
 		Config:     buf,
 	})
 	return nil
+}
+
+/**
+	Update the local memberlist statuses based on the proto memberlist message
+ */
+func (m *Memberlist) update(members []*p.MemberlistMember) {
+	for _, member := range members {
+		found := false
+		for _, localMember := range m.Members {
+			if member.Hostname == localMember.hostname {
+				localMember.status = member.Status
+				found = true
+				break
+			}
+		}
+		if !found {
+			log.Emergency("Member " + member.Hostname + " does not exist in local memberlist!")
+			// doesnt exist panic!
+			// Consider shutting off at this point as we are borked.
+			// Perhaps request a config resync?
+			// Perhaps reload the memberlist?
+		}
+	}
 }

@@ -105,11 +105,11 @@ func (m *Member) Close() {
 /**
 	Send GRPC health check to current member
  */
-func (m *Member) sendHealthCheck() (interface{}, error) {
+func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
-	r, err := m.Send(SendHealthCheck, &proto.PulseHealthCheck{})
+	r, err := m.Send(SendHealthCheck, data)
 	return r, err
 }
 
