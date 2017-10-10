@@ -124,7 +124,6 @@ func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.hostname)
 		member.Connect()
 		member.Send(funcName, data)
-		member.Close()
 	}
 }
 
@@ -268,12 +267,11 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		}
 	} else {
 		// Start performing health checks
-		//log.Debug("Memberlist:PromoteMember() Starting RPC health check scheduler..")
-		go utils.Scheduler(m.checkConnections, 1 * time.Second)
+		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
+		go utils.Scheduler(m.monitorClientConns, 1 * time.Second)
+		log.Debug("Memberlist:PromoteMember() Starting health check handler")
+		go utils.Scheduler(m.healthCheckHandler, 1 * time.Second)
 	}
-
-	//Dont think we need this here
-	//m.SyncConfig()
 	return nil
 }
 
@@ -281,23 +279,46 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	Function is only to be run on the active appliance
 	Note: THis is not the final function name.. or not sure if this is
           where this logic will stay.. just playing around at this point.
+monitors the connections states for each member
  */
-func (m *Memberlist) checkConnections() {
+func (m *Memberlist) monitorClientConns() {
 	for _, member := range m.Members {
+		if member.hostname == gconf.localNode {
+			continue
+		}
+		member.Connect()
+		memberCopy := member
 		go func() {
-			if member.hostname == gconf.localNode {
-				return
+			switch memberCopy.Connection.GetState() {
+			case connectivity.TransientFailure:
+				memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
+			case connectivity.Shutdown:
+				memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
+			default:
+				memberCopy.setStatus(p.MemberStatus_PASSIVE)
 			}
-			err := member.Connect()
-			if err != nil {
-				member.setStatus(p.MemberStatus_UNAVAILABLE)
-				return
-			} else if member.Connection.GetState() == connectivity.TransientFailure {
-				member.setStatus(p.MemberStatus_UNAVAILABLE)
-				return
-			}
-			member.setStatus(p.MemberStatus_PASSIVE)
 		}()
+	}
+}
+
+/**
+	Send health checks to users who have a healthy connection
+ */
+func (m *Memberlist) healthCheckHandler() {
+	for _, member := range m.Members {
+		if member.hostname == gconf.localNode {
+			continue
+		}
+		if member.status == p.MemberStatus_PASSIVE {
+			memberCopy := member
+			go func() {
+				_, err := memberCopy.sendHealthCheck()
+				if err != nil {
+					log.Warning(err.Error())
+					memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
+				}
+			}()
+		}
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
 	"errors"
+	"google.golang.org/grpc/connectivity"
 )
 
 /**
@@ -82,7 +83,8 @@ func (m *Member) setClient(client Client) {
 	Note: Hostname is required for TLS as the certs are named after the hostname.
  */
 func (m *Member) Connect() (error) {
-	if m.Connection == nil {
+	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
+		log.Debug("creating new connection")
 		nodeDetails, _ := NodeGetByName(m.hostname)
 		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.hostname)
 		if err != nil {
@@ -97,7 +99,7 @@ func (m *Member) Connect() (error) {
  */
 func (m *Member) Close() {
 	log.Debug("Member:Close() Connection closed")
-	m.Connection.Close()
+	m.Client.Close()
 }
 
 /**

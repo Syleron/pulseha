@@ -116,6 +116,7 @@ func (c *Client) Connect(ip, port, hostname string) (error) {
 		return err
 	}
 	c.Requester = p.NewServerClient(c.Connection)
+	log.Debug(">>>>>>>>>>>>>>>>>>>>> " + c.Connection.GetState().String())
 	return nil
 }
 
