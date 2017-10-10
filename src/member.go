@@ -86,24 +86,10 @@ func (m *Member) setClient(client Client) {
 func (m *Member) Connect() (error) {
 	if m.Connection == nil {
 		nodeDetails, _ := NodeGetByName(m.hostname)
-		log.Debug("Member:Connect() Connection made to " + nodeDetails.IP + ":" + nodeDetails.Port)
-		var err error
-		config := gconf.GetConfig()
-		if config.Pulse.TLS {
-			creds, err := credentials.NewClientTLSFromFile("./certs/"+m.hostname+".crt", "")
-			if err != nil {
-				log.Errorf("Could not load TLS cert: %s", err.Error())
-				return errors.New("could not load node TLS cert: " + m.hostname + ".crt")
-			}
-			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithTransportCredentials(creds))
-		} else {
-			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithInsecure())
-		}
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.hostname)
 		if err != nil {
-			log.Errorf("GRPC client connection error: %s", err.Error())
 			return err
 		}
-		m.Requester = proto.NewServerClient(m.Connection)
 	}
 	return nil
 }

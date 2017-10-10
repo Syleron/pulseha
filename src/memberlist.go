@@ -284,18 +284,20 @@ func (m *Memberlist) PromoteMember(hostname string) error {
  */
 func (m *Memberlist) checkConnections() {
 	for _, member := range m.Members {
-		if member.hostname == gconf.localNode {
-			continue
-		}
-		err := member.Connect()
-		if err != nil {
-			member.setStatus(p.MemberStatus_UNAVAILABLE)
-			continue
-		} else if member.Connection.GetState() == connectivity.TransientFailure {
-			member.setStatus(p.MemberStatus_UNAVAILABLE)
-			continue
-		}
-		member.setStatus(p.MemberStatus_PASSIVE)
+		go func() {
+			if member.hostname == gconf.localNode {
+				return
+			}
+			err := member.Connect()
+			if err != nil {
+				member.setStatus(p.MemberStatus_UNAVAILABLE)
+				return
+			} else if member.Connection.GetState() == connectivity.TransientFailure {
+				member.setStatus(p.MemberStatus_UNAVAILABLE)
+				return
+			}
+			member.setStatus(p.MemberStatus_PASSIVE)
+		}()
 	}
 }
 
