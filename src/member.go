@@ -22,8 +22,6 @@ import (
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
 	"errors"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc"
 )
 
 /**
