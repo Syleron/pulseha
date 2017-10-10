@@ -100,8 +100,13 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	log.Debug("Server:HealthCheck() Perform health check")
 	s.Lock()
 	defer s.Unlock()
+	if s.Memberlist.getActiveMember() != gconf.localNode {
+		s.Memberlist.update(in.Memberlist)
+	} else {
+		// we are active and recieved a health check.. act on it
+	}
 	return &proto.PulseHealthCheck{
-		Success: false,
+		Success: true,
 	}, nil
 }
 

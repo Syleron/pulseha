@@ -22,8 +22,7 @@ import (
 	"github.com/coreos/go-log/log"
 	"github.com/Syleron/PulseHA/proto"
 	"errors"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
 )
 
 /**
@@ -84,26 +83,13 @@ func (m *Member) setClient(client Client) {
 	Note: Hostname is required for TLS as the certs are named after the hostname.
  */
 func (m *Member) Connect() (error) {
-	if m.Connection == nil {
+	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
+		log.Debug("creating new connection")
 		nodeDetails, _ := NodeGetByName(m.hostname)
-		log.Debug("Member:Connect() Connection made to " + nodeDetails.IP + ":" + nodeDetails.Port)
-		var err error
-		config := gconf.GetConfig()
-		if config.Pulse.TLS {
-			creds, err := credentials.NewClientTLSFromFile("./certs/"+m.hostname+".crt", "")
-			if err != nil {
-				log.Errorf("Could not load TLS cert: %s", err.Error())
-				return errors.New("could not load node TLS cert: " + m.hostname + ".crt")
-			}
-			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithTransportCredentials(creds))
-		} else {
-			m.Connection, err = grpc.Dial(nodeDetails.IP+":"+nodeDetails.Port, grpc.WithInsecure())
-		}
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.hostname)
 		if err != nil {
-			log.Errorf("GRPC client connection error: %s", err.Error())
 			return err
 		}
-		m.Requester = proto.NewServerClient(m.Connection)
 	}
 	return nil
 }
@@ -113,17 +99,17 @@ func (m *Member) Connect() (error) {
  */
 func (m *Member) Close() {
 	log.Debug("Member:Close() Connection closed")
-	m.Connection.Close()
+	m.Client.Close()
 }
 
 /**
 	Send GRPC health check to current member
  */
-func (m *Member) sendHealthCheck() (interface{}, error) {
+func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
-	r, err := m.Send(SendHealthCheck, &proto.PulseHealthCheck{})
+	r, err := m.Send(SendHealthCheck, data)
 	return r, err
 }
 

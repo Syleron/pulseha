@@ -26,6 +26,7 @@ import (
 	"strings"
 	"github.com/coreos/go-log/log"
 	"errors"
+	"reflect"
 )
 
 /**
@@ -129,4 +130,24 @@ func SplitIpPort(ipPort string) (string, string, error) {
 	}
 
 	return IPslice[0], IPslice[1], nil
+}
+
+/**
+	Checks if a value exists inside of a slice
+ */
+func in_array(val interface{}, array interface{}) (exists bool, index int) {
+	exists = false
+	index = -1
+	switch reflect.TypeOf(array).Kind() {
+	case reflect.Slice:
+		s := reflect.ValueOf(array)
+		for i := 0; i < s.Len(); i++ {
+			if reflect.DeepEqual(val, s.Index(i).Interface()) == true {
+				index = i
+				exists = true
+				return
+			}
+		}
+	}
+	return
 }
