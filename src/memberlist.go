@@ -150,7 +150,7 @@ func (m *Memberlist) Setup() {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.localNode)
 			localMember.setLast_HC_Response(time.Now())
-			go utils.Scheduler(localMember.monitorReceivedHCs, 1000 * time.Millisecond)
+			go utils.Scheduler(localMember.monitorReceivedHCs, 10000 * time.Millisecond)
 		}
 	}
 }
@@ -378,4 +378,21 @@ func (m *Memberlist) update(members []*p.MemberlistMember) {
 			// Perhaps reload the memberlist?
 		}
 	}
+}
+
+/**
+	Calculate who's next to become active in the memberlist
+ */
+func (m *Memberlist) getNextActiveMember() (string, error) {
+	currentActive := m.getActiveMember()
+	selectedIndex := 0
+	membersTotal := len(m.Members) - 1
+	for i, member := range m.Members {
+		if member.Hostname == currentActive {
+			if i < membersTotal {
+				selectedIndex++
+			}
+		}
+	}
+	return m.Members[selectedIndex].Hostname, errors.New("unable to calculate next active member")
 }

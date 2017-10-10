@@ -52,6 +52,8 @@ var (
 	gconf  globalConfig
 )
 
+var pulse *Pulse
+
 /**
  * Main Pulse struct type
  */
@@ -96,7 +98,7 @@ func main() {
 \/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
 
 `, Version, Build[0:7])
-	pulse := createPulse()
+	pulse = createPulse()
 	// Load plugins
 	_, err := LoadPlugins()
 	if err != nil {

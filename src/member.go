@@ -234,8 +234,13 @@ func (m *Member) monitorReceivedHCs() (bool) {
 		if !addHCSuccess {
 			// Nothing has worked.. assume the master has failed. Fail over.
 			log.Info("Attempting a failover..")
-			// TODO: Failover
-			return true
+			hostname, _ := pulse.Server.Memberlist.getNextActiveMember()
+			if hostname == gconf.localNode {
+				m.makeActive()
+				return true
+			}
+			m.setLast_HC_Response(time.Now())
+			return false
 		} else {
 			m.setLast_HC_Response(time.Now())
 		}
