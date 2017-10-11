@@ -370,8 +370,9 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 		row := &proto.StatusRow{
 			Hostname: member.Hostname,
 			Ip:       details.IP,
-			Ping:     "",
+			Latency:     member.Latency,
 			Status:   member.Status,
+			LastReceived: member.Last_HC_Response.String(),
 		}
 		table.Row = append(table.Row, row)
 	}

@@ -79,16 +79,18 @@ func (c *StatusCommand) drawStatusTable(client proto.CLIClient) {
 				[]string{
 					node.Hostname,
 					node.Ip,
-					node.Ping,
+					node.Latency,
 					node.Status.String(),
+					node.LastReceived,
 				})
 		}
 		table := tablewriter.NewWriter(os.Stdout)
 		table.SetHeader([]string{
 			"Node Hostname",
 			"Bind Address",
-			"Ping",
+			"Latency",
 			"Status",
+			"Last Received",
 		})
 		table.SetCenterSeparator("-")
 		table.SetColumnSeparator("|")

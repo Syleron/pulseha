@@ -315,6 +315,8 @@ func (m *Memberlist) healthCheckHandler() bool {
 				newMember := &p.MemberlistMember{
 					Hostname: member.Hostname,
 					Status:   member.Status,
+					Latency: member.Latency,
+					//LastReceived: member.Last_HC_Response.String(),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -360,6 +362,7 @@ func (m *Memberlist) update(members []*p.MemberlistMember) {
 		for _, localMember := range m.Members {
 			if member.Hostname == localMember.Hostname {
 				localMember.Status = member.Status
+				localMember.Latency = member.Latency
 				found = true
 				break
 			}
@@ -380,12 +383,11 @@ Note: This function will return -1 and cause a crash if for some reason which it
 	  return an appliance who is not "passive"
 */
 func (m *Memberlist) getNextActiveMember() (string) {
-	selected := -1
-	for i, member := range m.Members {
+	for hostname, _ := range gconf.Nodes {
+		member := m.GetMemberByHostname(hostname)
 		if member.Status == p.MemberStatus_PASSIVE {
-			selected = i
+			return member.Hostname
 		}
 	}
-	log.Debug("Memberlist:getNextActiveMember() " + m.Members[selected].Hostname + " selected as new active node..")
-	return m.Members[selected].Hostname
+	return ""
 }
