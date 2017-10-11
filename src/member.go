@@ -149,6 +149,9 @@ func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
 	if m.Hostname == gconf.getLocalNode() {
 		makeMemberActive()
+		// Reset vars
+		m.Latency = ""
+		m.Last_HC_Response = time.Time{}
 		// Start performing health checks
 		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
