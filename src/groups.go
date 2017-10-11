@@ -1,11 +1,11 @@
 package main
 
 import (
-	"github.com/coreos/go-log/log"
 	"errors"
-	"strconv"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/coreos/go-log/log"
+	"strconv"
 )
 
 /**
@@ -31,7 +31,7 @@ func GroupNew() (string, error) {
  *
  * @return error
  */
-func GroupDelete(groupName string) (error) {
+func GroupDelete(groupName string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if GroupExist(groupName) {
@@ -59,7 +59,7 @@ func GroupClearLocal() {
  *
  * @return error
  */
-func GroupIpAdd(groupName string, ips []string) (error) {
+func GroupIpAdd(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if !GroupExist(groupName) {
@@ -90,7 +90,7 @@ func GroupIpAdd(groupName string, ips []string) (error) {
  *
  * @return error
  */
-func GroupIpRemove(groupName string, ips []string) (error) {
+func GroupIpRemove(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if !GroupExist(groupName) {
@@ -113,7 +113,7 @@ func GroupIpRemove(groupName string, ips []string) (error) {
  *
  * @return error
  */
-func GroupAssign(groupName, node, iface string) (error) {
+func GroupAssign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if !GroupExist(groupName) {
@@ -135,7 +135,7 @@ func GroupAssign(groupName, node, iface string) (error) {
  *
  * @return error
  */
-func GroupUnassign(groupName, node, iface string) (error) {
+func GroupUnassign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if !GroupExist(groupName) {
@@ -155,7 +155,7 @@ func GroupUnassign(groupName, node, iface string) (error) {
 /**
  * Generates an available IP floating group name.
  */
-func GenGroupName() (string) {
+func GenGroupName() string {
 	config := gconf.GetConfig()
 	totalGroups := len(config.Groups)
 	for i := 1; i <= totalGroups; i++ {
@@ -170,7 +170,7 @@ func GenGroupName() (string) {
 /**
  * Checks to see if a floating IP group already exists
  */
-func GroupExist(name string) (bool) {
+func GroupExist(name string) bool {
 	config := gconf.GetConfig()
 	if _, ok := config.Groups[name]; ok {
 		return true
@@ -195,15 +195,15 @@ func GroupIPExist(name string, ip string) (bool, int) {
 /**
  * function to get the nodes and interfaces that relate to the specified node
  */
-func getGroupNodes(group string)([]string, []string) {
+func getGroupNodes(group string) ([]string, []string) {
 	var hosts []string
 	var interfaces []string
 	var found = false
 	config := gconf.GetConfig()
 	for name, node := range config.Nodes {
 		for iface, groupNameSlice := range node.IPGroups {
-			for _, groupName := range groupNameSlice{
-				if group == groupName{
+			for _, groupName := range groupNameSlice {
+				if group == groupName {
 					hosts = append(hosts, name)
 					interfaces = append(interfaces, iface)
 					found = true
@@ -221,7 +221,7 @@ func getGroupNodes(group string)([]string, []string) {
  * Make a group of IPs active
  */
 func makeGroupActive(iface string, groupName string) {
-	log.Debugf("Make group active. Interface: %s, group: %s",iface ,groupName)
+	log.Debugf("Make group active. Interface: %s, group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringUpIPs(iface, configCopy.Groups[groupName])
@@ -229,7 +229,7 @@ func makeGroupActive(iface string, groupName string) {
 }
 
 func makeGroupPassive(iface string, groupName string) {
-	log.Debugf("Make group passive. Interface: %s, group: %s",iface ,groupName)
+	log.Debugf("Make group passive. Interface: %s, group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringDownIPs(iface, configCopy.Groups[groupName])

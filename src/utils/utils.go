@@ -1,32 +1,32 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package utils
 
 import (
+	"errors"
+	"github.com/coreos/go-log/log"
 	"io/ioutil"
+	"net"
 	"os"
 	"os/exec"
-	"net"
-	"time"
-	"strings"
-	"github.com/coreos/go-log/log"
-	"errors"
 	"reflect"
+	"strings"
+	"time"
 )
 
 /**
@@ -43,7 +43,6 @@ func LoadFile(file string) []byte {
 
 	return []byte(c)
 }
-
 
 /**
  * Execute system command.
@@ -78,9 +77,12 @@ func ValidIPAddress(ipAddress string) bool {
 /**
  * Function to schedule the execution every x time as time.Duration.
  */
-func Scheduler(method func(), delay time.Duration) {
+func Scheduler(method func() bool, delay time.Duration) {
 	for _ = range time.Tick(delay) {
-		method()
+		end := method()
+		if end {
+			break
+		}
 	}
 }
 
@@ -119,6 +121,7 @@ func GetHostname() string {
 	// Remove new line characters
 	return strings.TrimSuffix(output, "\n")
 }
+
 /**
  * Function to return an IP and Port from a single ip:port string
  */
@@ -133,8 +136,8 @@ func SplitIpPort(ipPort string) (string, string, error) {
 }
 
 /**
-	Checks if a value exists inside of a slice
- */
+Checks if a value exists inside of a slice
+*/
 func in_array(val interface{}, array interface{}) (exists bool, index int) {
 	exists = false
 	index = -1

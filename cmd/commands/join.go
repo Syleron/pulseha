@@ -1,30 +1,30 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package commands
 
 import (
-	"github.com/mitchellh/cli"
-	"strings"
-	"flag"
-	"google.golang.org/grpc"
-	"github.com/Syleron/PulseHA/proto"
 	"context"
+	"flag"
+	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/mitchellh/cli"
+	"google.golang.org/grpc"
+	"strings"
 )
 
 type JoinCommand struct {
@@ -74,7 +74,7 @@ func (c *JoinCommand) Run(args []string) int {
 		return 1
 	}
 
-	bindIP, bindPort, _ :=utils.SplitIpPort(*bindAddr)
+	bindIP, bindPort, _ := utils.SplitIpPort(*bindAddr)
 
 	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
 
@@ -96,9 +96,9 @@ func (c *JoinCommand) Run(args []string) int {
 	}
 
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
-		Ip: bindAddrString[0],
-		Port: bindAddrString[1],
-		BindIp: bindIP,
+		Ip:       bindAddrString[0],
+		Port:     bindAddrString[1],
+		BindIp:   bindIP,
 		BindPort: bindPort,
 	})
 

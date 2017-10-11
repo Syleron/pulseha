@@ -1,29 +1,29 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package main
 
 import (
 	"encoding/json"
+	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/coreos/go-log/log"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type Config struct {
@@ -63,7 +63,7 @@ func (c *Config) GetConfig() Config {
 /**
  * Sets the local node name
  */
-func (c *Config) setLocalNode() (error) {
+func (c *Config) setLocalNode() error {
 	hostname := utils.GetHostname()
 	log.Debugf("Config:setLocalNode Hostname is: %s", hostname)
 	c.localNode = hostname
@@ -165,7 +165,7 @@ func (c *Config) LocalNode() Node {
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
-func (c *Config) ClusterCheck() (bool) {
+func (c *Config) ClusterCheck() bool {
 	config := gconf.GetConfig()
 	if len(config.Nodes) > 0 {
 		return true
@@ -176,15 +176,15 @@ func (c *Config) ClusterCheck() (bool) {
 /**
  * Return the total number of configured nodes we have in our config.
  */
-func (c *Config) ClusterTotal() (int) {
+func (c *Config) ClusterTotal() int {
 	config := gconf.GetConfig()
 	return len(config.Nodes)
 }
 
 /**
-	Returns the interface the group is assigned to
- */
-func (c *Config) GetGroupIface(node string, groupName string)string {
+Returns the interface the group is assigned to
+*/
+func (c *Config) GetGroupIface(node string, groupName string) string {
 	for nodeName, n := range c.Nodes {
 		if nodeName == node {
 			for iface, groups := range n.IPGroups {
@@ -198,15 +198,16 @@ func (c *Config) GetGroupIface(node string, groupName string)string {
 	}
 	return ""
 }
+
 /**
  *
  */
 func DefaultLocalConfig() *Config {
 	return &Config{
-		//Cluster: {
-		//	//ClusterName: GetHostname(),
-		//	//BindIP: "0.0.0.0",
-		//	//BindPort: "8443",
-		//},
+	//Cluster: {
+	//	//ClusterName: GetHostname(),
+	//	//BindIP: "0.0.0.0",
+	//	//BindPort: "8443",
+	//},
 	}
 }
