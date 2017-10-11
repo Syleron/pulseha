@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 	"github.com/Syleron/PulseHA/src/utils"
+	"fmt"
 )
 
 /**
@@ -34,6 +35,7 @@ type Member struct {
 	Hostname         string
 	Status           proto.MemberStatus_Status
 	Last_HC_Response time.Time
+	Latency             string
 	Client
 	sync.Mutex
 }
@@ -130,10 +132,13 @@ func (m *Member) Close() {
 Send GRPC health check to current member
 */
 func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
+	startTime := time.Now()
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
 	r, err := m.Send(SendHealthCheck, data)
+	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
+	m.Latency = elapsed
 	return r, err
 }
 
@@ -144,6 +149,9 @@ func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
 	if m.Hostname == gconf.getLocalNode() {
 		makeMemberActive()
+		// Reset vars
+		m.Latency = ""
+		m.Last_HC_Response = time.Time{}
 		// Start performing health checks
 		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
@@ -218,7 +226,7 @@ func (m *Member) monitorReceivedHCs() bool {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
 	// If 30 seconds has gone by.. something is wrong.
-	if int(elapsed) >= 30 {
+	if int(elapsed) >= 1 {
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {

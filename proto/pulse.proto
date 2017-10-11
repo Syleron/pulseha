@@ -27,6 +27,8 @@ message PulseHealthCheck {
 message MemberlistMember {
     string hostname = 1;
     MemberStatus.Status status = 2;
+    string lastReceived = 3;
+    string latency = 4;
 }
 message MemberStatus {
     enum Status {
@@ -105,8 +107,9 @@ message PulseStatus {
 message StatusRow {
     string hostname = 1;
     string ip = 2;
-    string ping = 3;
+    string latency = 3;
     MemberStatus.Status status = 4;
+    string lastReceived = 5;
 }
 message GroupTable {
     bool success = 1;
@@ -174,8 +177,6 @@ service Server {
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Promote
     rpc MakeActive (PulsePromote) returns (PulsePromote);
-    // Pulse Status
-    rpc Status (PulseStatus) returns (PulseStatus);
     // demote
     rpc MakePassive(PulsePromote) returns (PulsePromote);
     // Bring up IP

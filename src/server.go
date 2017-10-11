@@ -114,16 +114,6 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 }
 
 /**
-
- */
-func (s *Server) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
-	//log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
-	s.Lock()
-	defer s.Unlock()
-	return nil, nil
-}
-
-/**
 Join request for a configured cluster
 */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
