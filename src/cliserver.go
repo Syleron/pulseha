@@ -1,49 +1,49 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package main
 
 import (
-"context"
-"github.com/Syleron/PulseHA/proto"
-"github.com/coreos/go-log/log"
-"google.golang.org/grpc"
-"net"
-"sync"
-"encoding/json"
-"github.com/Syleron/PulseHA/src/netUtils"
-"github.com/Syleron/PulseHA/src/utils"
+	"context"
+	"encoding/json"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/netUtils"
+	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/coreos/go-log/log"
+	"google.golang.org/grpc"
+	"net"
+	"sync"
 )
 
 /**
-	Server struct type
- */
+Server struct type
+*/
 type CLIServer struct {
 	sync.Mutex
-	Server *Server
-	Listener net.Listener
+	Server     *Server
+	Listener   net.Listener
 	Memberlist *Memberlist
 }
 
 /**
-	Attempt to join a configured cluster
-	Notes: We create a new client in attempt to communicate with our peer.
-	       If successful we acknowledge it and update our memberlist.
- */
+Attempt to join a configured cluster
+Notes: We create a new client in attempt to communicate with our peer.
+       If successful we acknowledge it and update our memberlist.
+*/
 func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
@@ -78,7 +78,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		}
 		// Send our join request
 		r, err := client.Send(SendJoin, &proto.PulseJoin{
-			Config: buf,
+			Config:   buf,
 			Hostname: utils.GetHostname(),
 		})
 		// Handle a failed request
@@ -131,9 +131,9 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 }
 
 /**
-	Break cluster / Leave from cluster
-	TODO: Remember to reassign active role on leave
- */
+Break cluster / Leave from cluster
+TODO: Remember to reassign active role on leave
+*/
 func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
@@ -150,7 +150,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			SendLeave,
 			&proto.PulseLeave{
 				Replicated: true,
-				Hostname: utils.GetHostname(),
+				Hostname:   utils.GetHostname(),
 			},
 		)
 	}
@@ -172,8 +172,8 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 }
 
 /**
-	Note: This will probably need to be replicated..
- */
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	log.Debug("CLIServer:Create() - Create Pulse cluster")
 	s.Lock()
@@ -208,9 +208,9 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 }
 
 /**
-	Add a new floating IP group
-	Note: This will probably need to be replicated..
- */
+Add a new floating IP group
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
 	log.Debug("CLIServer:NewGroup() - Create floating IP group")
 	s.Lock()
@@ -231,8 +231,8 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 }
 
 /**
-	Delete floating IP group
- */
+Delete floating IP group
+*/
 func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*proto.PulseGroupDelete, error) {
 	log.Debug("CLIServer:DeleteGroup() - Delete floating IP group")
 	s.Lock()
@@ -253,8 +253,8 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 }
 
 /**
-	Note: This will probably need to be replicated..
- */
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
 	log.Debug("CLIServer:GroupIPAdd() - Add IP addresses to group " + in.Name)
 	s.Lock()
@@ -275,8 +275,8 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 }
 
 /**
-	Note: This will probably need to be replicated..
- */
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
 	log.Debug("CLIServer:GroupIPRemove() - Removing IPs from group " + in.Name)
 	s.Lock()
@@ -297,8 +297,8 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 }
 
 /**
-	Note: This will probably need to be replicated..
- */
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
 	log.Debug("CLIServer:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
@@ -319,8 +319,8 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 }
 
 /**
-	Note: This will probably need to be replicated..
- */
+Note: This will probably need to be replicated..
+*/
 func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
 	log.Debug("CLIServer:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
@@ -351,15 +351,15 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 	config := gconf.GetConfig()
 	for name, ips := range config.Groups {
 		nodes, interfaces := getGroupNodes(name)
-		row := &proto.GroupRow{Name:name, Ip:ips, Nodes:nodes, Interfaces:interfaces }
+		row := &proto.GroupRow{Name: name, Ip: ips, Nodes: nodes, Interfaces: interfaces}
 		table.Row = append(table.Row, row)
 	}
 	return table, nil
 }
 
 /**
-	Return the status for each node within the cluster
- */
+Return the status for each node within the cluster
+*/
 func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
 	log.Debug("CLIServer:Status() - Getting cluster node statuses")
 	s.Lock()
@@ -367,11 +367,11 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	table := new(proto.PulseStatus)
 	for _, member := range s.Memberlist.Members {
 		details, _ := NodeGetByName(member.Hostname)
-		row := &proto.StatusRow {
+		row := &proto.StatusRow{
 			Hostname: member.Hostname,
-			Ip: details.IP,
-			Ping: "",
-			Status: member.Status,
+			Ip:       details.IP,
+			Ping:     "",
+			Status:   member.Status,
 		}
 		table.Row = append(table.Row, row)
 	}
@@ -379,8 +379,8 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 }
 
 /**
-	Setup pulse cli type
- */
+Setup pulse cli type
+*/
 func (s *CLIServer) Setup() {
 	log.Info("CLI initialised on 127.0.0.1:9443")
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")

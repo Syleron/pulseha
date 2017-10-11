@@ -1,31 +1,31 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package commands
 
 import (
-	"github.com/mitchellh/cli"
-	"strings"
-	"flag"
-	"google.golang.org/grpc"
-	"github.com/Syleron/PulseHA/proto"
 	"context"
+	"flag"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/mitchellh/cli"
 	"github.com/olekukonko/tablewriter"
+	"google.golang.org/grpc"
 	"os"
+	"strings"
 )
 
 type GroupsCommand struct {
@@ -129,8 +129,8 @@ func (c *GroupsCommand) drawGroupsTable(client proto.CLIClient) {
 				[]string{
 					group.Name,
 					strings.Join(group.Ip, ", "),
-					strings.Join(group.Nodes,"\n"),
-					strings.Join(group.Interfaces,"\n"),
+					strings.Join(group.Nodes, "\n"),
+					strings.Join(group.Interfaces, "\n"),
 				})
 		}
 		table := tablewriter.NewWriter(os.Stdout)
@@ -152,7 +152,7 @@ func (c *GroupsCommand) drawGroupsTable(client proto.CLIClient) {
 /**
  *
  */
-func (c *GroupsCommand) New(client proto.CLIClient) (int) {
+func (c *GroupsCommand) New(client proto.CLIClient) int {
 	r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
@@ -170,7 +170,7 @@ func (c *GroupsCommand) New(client proto.CLIClient) (int) {
 /**
  *
  */
-func (c *GroupsCommand) Delete(groupName *string, client proto.CLIClient) (int) {
+func (c *GroupsCommand) Delete(groupName *string, client proto.CLIClient) int {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -196,7 +196,7 @@ func (c *GroupsCommand) Delete(groupName *string, client proto.CLIClient) (int) 
 /**
  *
  */
-func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.CLIClient) (int) {
+func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.CLIClient) int {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -230,7 +230,7 @@ func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.CLIClient) (in
 /**
  *
  */
-func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.CLIClient) (int) {
+func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.CLIClient) int {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -264,7 +264,7 @@ func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.CLIClient) 
 /**
  *
  */
-func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) (int) {
+func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) int {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")
@@ -304,7 +304,7 @@ func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, clien
 /**
  *
  */
-func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) (int) {
+func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, client proto.CLIClient) int {
 	if *groupName == "" {
 		c.Ui.Error("Please specify a group name")
 		c.Ui.Error("")

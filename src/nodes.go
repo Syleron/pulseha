@@ -1,20 +1,20 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package main
 
 import (
@@ -25,7 +25,7 @@ import (
 /**
  * Add a node type Node to our config.
  */
-func NodeAdd(hostname string, node *Node) (error) {
+func NodeAdd(hostname string, node *Node) error {
 	log.Debug(hostname + " added to local cluster config")
 	if !NodeExists(hostname) {
 		gconf.Lock()
@@ -39,9 +39,9 @@ func NodeAdd(hostname string, node *Node) (error) {
 /**
  * Remove a node from our config by hostname.
  */
-func NodeDelete(hostname string) (error) {
+func NodeDelete(hostname string) error {
 	log.Debug(hostname + " remove from the local node")
-	if NodeExists(hostname)	{
+	if NodeExists(hostname) {
 		gconf.Lock()
 		delete(gconf.Nodes, hostname)
 		gconf.Unlock()
@@ -61,10 +61,10 @@ func NodesClearLocal() {
 }
 
 /**
- * Determines whether a Node already exists in a config based
-   off the nodes hostname.
- */
-func NodeExists(hostname string) (bool) {
+* Determines whether a Node already exists in a config based
+  off the nodes hostname.
+*/
+func NodeExists(hostname string) bool {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
 		if key == hostname {
@@ -75,8 +75,8 @@ func NodeExists(hostname string) (bool) {
 }
 
 /**
-	Get node by its hostname
- */
+Get node by its hostname
+*/
 func NodeGetByName(hostname string) (Node, error) {
 	config := gconf.GetConfig()
 	for key, node := range config.Nodes {
@@ -91,11 +91,11 @@ func NodeGetByName(hostname string) (Node, error) {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func NodeAssignedToInterface(group string) (bool) {
-	config := gconf.GetConfig()					// :-)
-	for _, node := range config.Nodes {			// :-|
-		for _, groups := range node.IPGroups {	// :-s
-			for _, ifaceGroup := range groups {	// :-(
+func NodeAssignedToInterface(group string) bool {
+	config := gconf.GetConfig()         // :-)
+	for _, node := range config.Nodes { // :-|
+		for _, groups := range node.IPGroups { // :-s
+			for _, ifaceGroup := range groups { // :-(
 				if ifaceGroup == group {
 					return true
 				}

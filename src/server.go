@@ -1,35 +1,35 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/coreos/go-log/log"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"net"
 	"os"
 	"path/filepath"
-	"sync"
-	"github.com/Syleron/PulseHA/src/utils"
-	"encoding/json"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -38,9 +38,9 @@ import (
  */
 type Server struct {
 	sync.Mutex
-	Server     *grpc.Server
-	Listener   net.Listener
-	Memberlist *Memberlist
+	Server      *grpc.Server
+	Listener    net.Listener
+	Memberlist  *Memberlist
 	HCScheduler func()
 }
 
@@ -95,8 +95,8 @@ func (s *Server) shutdown() {
 }
 
 /**
-	Perform appr. health checks
- */
+Perform appr. health checks
+*/
 func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
 	log.Debug("Server:HealthCheck() Perform health check")
 	s.Lock()
@@ -124,8 +124,8 @@ func (s *Server) Status(ctx context.Context, in *proto.PulseStatus) (*proto.Puls
 }
 
 /**
-	Join request for a configured cluster
- */
+Join request for a configured cluster
+*/
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
@@ -175,8 +175,8 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 }
 
 /**
-	Update our local config from a Resync request
- */
+Update our local config from a Resync request
+*/
 func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
@@ -199,8 +199,8 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 }
 
 /**
-	Update our local config from a Resync request
- */
+Update our local config from a Resync request
+*/
 func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
 	log.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
@@ -232,8 +232,8 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 }
 
 /**
-	Network action functions
- */
+Network action functions
+*/
 func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Notice("Server:MakeActive() Making node active")
 	s.Lock()
@@ -263,7 +263,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 	if in.Member != gconf.getLocalNode() {
 		return &proto.PulsePromote{Success: false,
 			Message: "cannot demote a node other than ourself by rpcMakeActive",
-			Member: ""}, nil
+			Member:  ""}, nil
 	}
 	err := makeMemberPassive()
 	success := false

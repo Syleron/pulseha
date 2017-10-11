@@ -1,14 +1,14 @@
 package main
 
 import (
+	"errors"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/coreos/go-log/log"
-	"errors"
 )
 
 /**
-	Bring up the groups on the current node
- */
+Bring up the groups on the current node
+*/
 func makeMemberActive() error {
 	log.Debug("Utils:makeMemberActive() Local node now active")
 	configCopy := gconf.GetConfig()

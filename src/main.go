@@ -1,20 +1,20 @@
 /*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
 
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
 
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
 package main
 
 import (
@@ -23,13 +23,15 @@ import (
 	"os"
 	"sync"
 )
+
 type globalConfig struct {
 	sync.Mutex
 	Config
 }
+
 /**
-	Returns a copy of the config
- */
+Returns a copy of the config
+*/
 func (c *globalConfig) GetConfig() Config {
 	//c.Lock()
 	//defer c.Unlock()
@@ -37,8 +39,8 @@ func (c *globalConfig) GetConfig() Config {
 }
 
 /**
-	Should this save auto?
- */
+Should this save auto?
+*/
 func (c *globalConfig) SetConfig(config Config) {
 	c.Lock()
 	c.Config = config
@@ -49,7 +51,7 @@ func (c *globalConfig) SetConfig(config Config) {
 var (
 	Version string
 	Build   string
-	gconf  globalConfig
+	gconf   globalConfig
 )
 
 var pulse *Pulse
@@ -59,7 +61,7 @@ var pulse *Pulse
  */
 type Pulse struct {
 	Server *Server
-	CLI *CLIServer
+	CLI    *CLIServer
 }
 
 /**
