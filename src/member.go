@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -141,24 +142,13 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 */
 func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
-
 	if m.Hostname == gconf.getLocalNode() {
 		makeMemberActive()
-	} else {
-		log.Debug("member is not local node making grpc call")
-		_, err := m.Send(
-			SendMakeActive,
-			&proto.PulsePromote{
-				Success: false,
-				Message: "",
-				Member:  m.getHostname(),
-			},
-		)
-		if err != nil {
-			log.Error(err)
-			log.Errorf("Error making %s active. Error: %s", m.getHostname(), err.Error())
-			return false
-		}
+		// Start performing health checks
+		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
+		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
+		log.Debug("Memberlist:PromoteMember() Starting health check handler")
+		go utils.Scheduler(pulse.Server.Memberlist.healthCheckHandler, 1*time.Second)
 	}
 	m.Status = proto.MemberStatus_ACTIVE
 	return true
@@ -233,15 +223,22 @@ func (m *Member) monitorReceivedHCs() bool {
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
 			// Nothing has worked.. assume the master has failed. Fail over.
-			hostname, _ := pulse.Server.Memberlist.getNextActiveMember()
-			activeMember := pulse.Server.Memberlist.GetMemberByHostname(hostname)
+			hostname := pulse.Server.Memberlist.getNextActiveMember()
+			newMember := pulse.Server.Memberlist.GetMemberByHostname(hostname)
+			activeHostname := pulse.Server.Memberlist.getActiveMember()
+			// If we have an active appliance mark it unavailable
+			if activeHostname != "" {
+				activeMember := pulse.Server.Memberlist.GetMemberByHostname(activeHostname) // YUCK
+				activeMember.setStatus(proto.MemberStatus_UNAVAILABLE)
+			}
+			newMember.makeActive()
 			// set the current active appliance as unavailable
-			activeMember.setStatus(proto.MemberStatus_UNAVAILABLE)
+			// we no longer need to be monitoring health checks as we are no active
 			if hostname == gconf.localNode {
-				log.Info("Attempting a failover..")
-				m.makeActive()
 				return true
 			}
+			// acknowledge who the next one in line is
+			// wait for a response.. if one is not set
 			log.Info("Waiting on " + hostname + " to become active")
 			m.setLast_HC_Response(time.Now())
 			return false

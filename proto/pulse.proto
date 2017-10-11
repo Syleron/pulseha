@@ -30,10 +30,11 @@ message MemberlistMember {
 }
 message MemberStatus {
     enum Status {
-        ACTIVE = 0;
-        LEAVING = 1;
-        PASSIVE = 2;
-        UNAVAILABLE = 3;
+        ACTIVE = 0; // everyhting is okay
+        LEAVING = 1; // ??
+        PASSIVE = 2; // okay and waiting to become active
+        UNAVAILABLE = 3; // dead
+        SUSPICIOUS = 4; // potentially dead but given the benefit of the doubt.
     }
     Status status = 1;
 }

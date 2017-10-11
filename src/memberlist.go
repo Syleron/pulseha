@@ -269,12 +269,6 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		if !activeMember.makeActive() {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
-	} else {
-		// Start performing health checks
-		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(m.monitorClientConns, 1*time.Second)
-		log.Debug("Memberlist:PromoteMember() Starting health check handler")
-		go utils.Scheduler(m.healthCheckHandler, 1*time.Second)
 	}
 	return nil
 }
@@ -382,18 +376,16 @@ func (m *Memberlist) update(members []*p.MemberlistMember) {
 
 /**
 Calculate who's next to become active in the memberlist
-TODO: Next active should check for passive status
+Note: This function will return -1 and cause a crash if for some reason which it should NEVER
+	  return an appliance who is not "passive"
 */
-func (m *Memberlist) getNextActiveMember() (string, error) {
-	currentActive := m.getActiveMember()
-	selectedIndex := 0
-	membersTotal := len(m.Members) - 1
+func (m *Memberlist) getNextActiveMember() (string) {
+	selected := -1
 	for i, member := range m.Members {
-		if member.Hostname == currentActive {
-			if i < membersTotal {
-				selectedIndex++
-			}
+		if member.Status == p.MemberStatus_PASSIVE {
+			selected = i
 		}
 	}
-	return m.Members[selectedIndex].Hostname, errors.New("unable to calculate next active member")
+	log.Debug("Memberlist:getNextActiveMember() " + m.Members[selected].Hostname + " selected as new active node..")
+	return m.Members[selected].Hostname
 }
