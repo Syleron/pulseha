@@ -98,15 +98,15 @@ func (s *Server) shutdown() {
 Perform appr. health checks
 */
 func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
-	log.Debug("Server:HealthCheck() Perform health check")
+	log.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
-	if s.Memberlist.getActiveMember() != gconf.localNode {
-		localMember := s.Memberlist.GetMemberByHostname(gconf.localNode)
+	if s.Memberlist.getActiveMember() != gconf.getLocalNode() {
+		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
 		localMember.setLast_HC_Response(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
-		// we are active and recieved a health check.. act on it
+		// we are active and received a health check.. act on it
 	}
 	return &proto.PulseHealthCheck{
 		Success: true,
