@@ -105,6 +105,8 @@ func main() {
 
 `, Version, Build[0:7])
 	pulse = createPulse()
+	// Set the logging level
+	//setLogLevel(gconf.Logging.level)
 	// Load plugins
 	_, err := LoadPlugins()
 	if err != nil {

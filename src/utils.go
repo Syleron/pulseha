@@ -25,6 +25,9 @@ func makeMemberActive() error {
 	return nil
 }
 
+/**
+
+ */
 func makeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
 	configCopy := gconf.GetConfig()
