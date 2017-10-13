@@ -20,11 +20,11 @@ package netUtils
 import (
 	"bytes"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
+	log "github.com/Sirupsen/logrus"
 )
 
 /**

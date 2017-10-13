@@ -3,7 +3,7 @@ package main
 import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/netUtils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"runtime"
 )
 
@@ -68,6 +68,9 @@ func bringDownIPs(iface string, ips []string) {
 	}
 }
 
+/**
+
+ */
 func MyCaller() string {
 
 	// we get the callers as uintptrs - but we just need 1

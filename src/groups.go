@@ -4,7 +4,7 @@ import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"strconv"
 )
 

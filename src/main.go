@@ -19,7 +19,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"os"
 	"sync"
 )

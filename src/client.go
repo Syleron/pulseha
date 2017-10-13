@@ -21,7 +21,7 @@ import (
 	"context"
 	"errors"
 	p "github.com/Syleron/PulseHA/proto"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )

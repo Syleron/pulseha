@@ -19,7 +19,7 @@ package utils
 
 import (
 	"errors"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"net"
 	"os"
