@@ -64,6 +64,10 @@ type Pulse struct {
 	CLI    *CLIServer
 }
 
+func (p *Pulse) getMemberlist() (*Memberlist) {
+	return pulse.Server.Memberlist
+}
+
 /**
  * Create a new instance of PulseHA
  */

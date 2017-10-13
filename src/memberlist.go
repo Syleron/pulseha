@@ -24,7 +24,6 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/coreos/go-log/log"
 	"google.golang.org/grpc/connectivity"
-	"runtime"
 	"sync"
 	"time"
 )
@@ -41,8 +40,8 @@ type Memberlist struct {
 
  */
 func (m *Memberlist) Lock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Lock set line: %d", no)
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -50,8 +49,8 @@ func (m *Memberlist) Lock() {
 
  */
 func (m *Memberlist) Unlock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Unlock set line: %d", no)
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -93,6 +92,9 @@ func (m *Memberlist) MemberRemoveByName(hostname string) {
 func (m *Memberlist) GetMemberByHostname(hostname string) *Member {
 	m.Lock()
 	defer m.Unlock()
+	if hostname == "" {
+		log.Warning("Memberlist:GetMemberByHostname() Unable to get get member by hostname as hostname is empty!")
+	}
 	for _, member := range m.Members {
 		if member.getHostname() == hostname {
 			return member
@@ -124,10 +126,10 @@ func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 	defer m.Unlock()
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
-		if member.Hostname == utils.GetHostname() {
+		if member.getHostname() == utils.GetHostname() {
 			continue
 		}
-		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.Hostname)
+		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.getHostname())
 		member.Connect()
 		member.Send(funcName, data)
 	}
@@ -145,11 +147,12 @@ func (m *Memberlist) Setup() {
 		if gconf.ClusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			m.PromoteMember(utils.GetHostname())
+			m.PromoteMember(gconf.getLocalNode())
 		} else {
 			// come up passive and monitoring health checks
-			localMember := m.GetMemberByHostname(gconf.localNode)
+			localMember := m.GetMemberByHostname(gconf.getLocalNode())
 			localMember.setLast_HC_Response(time.Now())
+			localMember.setStatus(p.MemberStatus_PASSIVE)
 			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	}
@@ -175,28 +178,6 @@ func (m *Memberlist) ReloadMembers() {
 	gconf.Reload()
 	// clear local members
 	m.LoadMembers()
-}
-
-/**
-Attempt to connect to all nodes within the memberlist.
-*/
-func (m *Memberlist) MembersConnect() {
-	m.Lock()
-	defer m.Unlock()
-	for _, member := range m.Members {
-		// Make sure we are not connecting to ourself!
-		if member.getHostname() != utils.GetHostname() {
-			node, err := NodeGetByName(member.getHostname())
-			if err != nil {
-				log.Warning(member.getHostname() + " could not be found.")
-			}
-			err = member.Client.Connect(node.IP, node.Port, member.getHostname())
-			if err != nil {
-				continue
-			}
-			member.setStatus(p.MemberStatus_PASSIVE)
-		}
-	}
 }
 
 /**
@@ -252,16 +233,14 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
 		return nil
 	}
-
 	// make current active node passive
 	activeMember := m.GetMemberByHostname(m.getActiveMember())
 	if activeMember != nil {
 		if !activeMember.makePassive() {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
-		activeMember.Status = p.MemberStatus_PASSIVE
+		activeMember.setStatus(p.MemberStatus_PASSIVE)
 	}
-
 	// make new node active
 	if !member.makeActive() {
 		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
@@ -281,21 +260,18 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 */
 func (m *Memberlist) monitorClientConns() bool {
 	for _, member := range m.Members {
-		if member.Hostname == gconf.localNode {
+		if member.getHostname() == gconf.getLocalNode() {
 			continue
 		}
 		member.Connect()
-		memberCopy := member
-		go func() {
-			switch memberCopy.Connection.GetState() {
-			case connectivity.TransientFailure:
-				memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
-			case connectivity.Shutdown:
-				memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
-			default:
-				memberCopy.setStatus(p.MemberStatus_PASSIVE)
-			}
-		}()
+		log.Debug(member.Hostname + " connection status is " + member.Connection.GetState().String())
+		switch member.Connection.GetState() {
+		case connectivity.Idle:
+		case connectivity.Ready:
+			member.setStatus(p.MemberStatus_PASSIVE)
+		default:
+			member.setStatus(p.MemberStatus_UNAVAILABLE)
+		}
 	}
 	return false
 }
@@ -303,30 +279,22 @@ func (m *Memberlist) monitorClientConns() bool {
 /**
 Send health checks to users who have a healthy connection
 */
-func (m *Memberlist) healthCheckHandler() bool {
+func (m *Memberlist) addHealthCheckHandler() bool{
 	for _, member := range m.Members {
-		if member.Hostname == gconf.localNode {
+		if member.getHostname() == gconf.getLocalNode() {
 			continue
 		}
-		if member.Status == p.MemberStatus_PASSIVE {
-			memberCopy := member
+		if !member.getHCBusy() && member.getStatus() == p.MemberStatus_PASSIVE {
 			memberlist := new(p.PulseHealthCheck)
 			for _, member := range m.Members {
 				newMember := &p.MemberlistMember{
-					Hostname: member.Hostname,
-					Status:   member.Status,
-					Latency: member.Latency,
-					//LastReceived: member.Last_HC_Response.String(),
+					Hostname: member.getHostname(),
+					Status:   member.getStatus(),
+					Latency: member.getLatency(),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
-			go func() {
-				_, err := memberCopy.sendHealthCheck(memberlist)
-				if err != nil {
-					log.Warning(err.Error())
-					memberCopy.setStatus(p.MemberStatus_UNAVAILABLE)
-				}
-			}()
+			go member.routineHC(memberlist)
 		}
 	}
 	return false
@@ -353,41 +321,35 @@ func (m *Memberlist) SyncConfig() error {
 /**
 Update the local memberlist statuses based on the proto memberlist message
 */
-func (m *Memberlist) update(members []*p.MemberlistMember) {
+func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 	log.Debug("Memberlist:update() Updating memberlist")
 	m.Lock()
 	defer m.Unlock()
-	for _, member := range members {
-		found := false
+	 //do not update the memberlist if we are active
+	for _, member := range memberlist {
 		for _, localMember := range m.Members {
-			if member.Hostname == localMember.Hostname {
-				localMember.Status = member.Status
-				localMember.Latency = member.Latency
-				found = true
+			if member.GetHostname() == localMember.getHostname(){
+				localMember.setStatus(member.Status)
+				localMember.setLatency(member.Latency)
 				break
 			}
-		}
-		if !found {
-			log.Emergency("Member " + member.Hostname + " does not exist in local memberlist!")
-			// doesnt exist panic!
-			// Consider shutting off at this point as we are borked.
-			// Perhaps request a config resync?
-			// Perhaps reload the memberlist?
 		}
 	}
 }
 
 /**
 Calculate who's next to become active in the memberlist
-Note: This function will return -1 and cause a crash if for some reason which it should NEVER
-	  return an appliance who is not "passive"
 */
-func (m *Memberlist) getNextActiveMember() (string) {
+func (m *Memberlist) getNextActiveMember() (*Member, error) {
 	for hostname, _ := range gconf.Nodes {
 		member := m.GetMemberByHostname(hostname)
-		if member.Status == p.MemberStatus_PASSIVE {
-			return member.Hostname
+		if member == nil {
+			panic("Memberlist:getNextActiveMember() Cannot get member by hostname " + hostname)
+		}
+		if member.getStatus() == p.MemberStatus_PASSIVE {
+			log.Debug("Memberlist:getNextActiveMember() " + member.getHostname() + " is the new active appliance")
+			return member, nil
 		}
 	}
-	return ""
+	return &Member{}, errors.New("Memberlist:getNextActiveMember() No new active member found")
 }

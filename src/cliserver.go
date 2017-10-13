@@ -368,11 +368,11 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	for _, member := range s.Memberlist.Members {
 		details, _ := NodeGetByName(member.Hostname)
 		row := &proto.StatusRow{
-			Hostname: member.Hostname,
+			Hostname: member.getHostname(),
 			Ip:       details.IP,
-			Latency:     member.Latency,
-			Status:   member.Status,
-			LastReceived: member.Last_HC_Response.String(),
+			Latency:     member.getLatency(),
+			Status:   member.getStatus(),
+			LastReceived: member.getLast_HC_Response().String(),
 		}
 		table.Row = append(table.Row, row)
 	}
