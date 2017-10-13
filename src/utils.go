@@ -91,3 +91,13 @@ func MyCaller() string {
 	// return its name
 	return fun.Name()
 }
+/**
+
+ */
+func setLogLevel(level string) {
+	logLevel, err := log.ParseLevel(level)
+	if err != nil {
+		panic(err.Error())
+	}
+	log.SetLevel(logLevel)
+}
