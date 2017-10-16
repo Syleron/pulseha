@@ -19,7 +19,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"os"
 	"sync"
 )
@@ -105,6 +105,8 @@ func main() {
 
 `, Version, Build[0:7])
 	pulse = createPulse()
+	// Set the logging level
+	//setLogLevel(gconf.Logging.level)
 	// Load plugins
 	_, err := LoadPlugins()
 	if err != nil {

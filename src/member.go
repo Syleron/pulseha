@@ -20,7 +20,7 @@ package main
 import (
 	"errors"
 	"github.com/Syleron/PulseHA/proto"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
@@ -302,7 +302,7 @@ func (m *Member) monitorReceivedHCs() bool {
 			member, err := pulse.getMemberlist().getNextActiveMember()
 			// no new active appliance was found
 			if err != nil {
-				log.Emergency(err.Error())
+				log.Fatal(err.Error())
 				// make ourself active as no new active can be found apparently
 				m.makeActive()
 				return true

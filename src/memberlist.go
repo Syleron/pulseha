@@ -22,7 +22,7 @@ import (
 	"errors"
 	p "github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"

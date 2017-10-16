@@ -23,7 +23,7 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"net"
 	"sync"
@@ -70,7 +70,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		buf, err := json.Marshal(newNode)
 		// Handle failure to marshal config
 		if err != nil {
-			log.Emergency("Unable to marshal config: %s", err)
+			log.Fatal("Unable to marshal config: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
@@ -83,7 +83,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		})
 		// Handle a failed request
 		if err != nil {
-			log.Emergency("Response error: %s", err)
+			log.Fatal("Response error: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
@@ -91,7 +91,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		}
 		// Handle an unsuccessful request
 		if !r.(*proto.PulseJoin).Success {
-			log.Emergency("Peer error: %s", err)
+			log.Fatal("Peer error: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: r.(*proto.PulseJoin).Message,

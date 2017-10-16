@@ -1,10 +1,11 @@
 {
     "pulse": {
-        "tls": true
+        "tls": false
     },
     "floating_ip_groups": {},
     "nodes": {},
     "logging": {
+        "level": "debug",
         "to_logfile": false,
         "logfile": "/var/log/pulseha.log"
     }

@@ -22,7 +22,7 @@ import (
 	"encoding/json"
 	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"net"
@@ -63,7 +63,7 @@ func (s *Server) Setup() {
 		// Get project directory location
 		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 		if err != nil {
-			log.Emergency(err)
+			log.Fatal(err)
 		}
 		if utils.CreateFolder(dir + "/certs") {
 			log.Warning("TLS keys are missing! Generating..")
@@ -146,7 +146,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		buf, err := json.Marshal(gconf.GetConfig())
 		// Handle failure to marshal config
 		if err != nil {
-			log.Emergency("Unable to marshal config: %s", err)
+			log.Fatal("Unable to marshal config: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
@@ -201,7 +201,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	err := json.Unmarshal(in.Config, newConfig)
 	// Handle failure to marshal config
 	if err != nil {
-		log.Emergency("Unable to marshal config: %s", err)
+		log.Fatal("Unable to marshal config: %s", err)
 		return &proto.PulseConfigSync{
 			Success: false,
 			Message: err.Error(),
@@ -225,7 +225,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 Network action functions
 */
 func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Notice("Server:MakeActive() Making node active")
+	log.Info("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != gconf.getLocalNode() {
@@ -247,7 +247,7 @@ func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto
 
  */
 func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Notice("Server:MakePassive() Making node passive")
+	log.Info("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != gconf.getLocalNode() {
@@ -269,7 +269,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 
  */
 func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Notice("Server:BringUpIP() Bringing up IP(s)")
+	log.Info("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	err := bringUpIPs(in.Iface, in.Ips)
@@ -286,7 +286,7 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 
  */
 func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Notice("Server:BringDownIP() Bringing down IP(s)")
+	log.Info("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	return nil, nil

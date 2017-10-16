@@ -20,7 +20,7 @@ package main
 import (
 	"encoding/json"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -49,6 +49,7 @@ type Node struct {
 }
 
 type Logging struct {
+	level     string `json:"level"`
 	ToLogFile bool   `json:"to_logfile"`
 	LogFile   string `json:"logfile"`
 }
@@ -91,7 +92,7 @@ func (c *Config) Load() {
 	log.Info("Loading configuration file")
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
-		log.Emergency(err)
+		log.Fatal(err)
 	}
 	b, err := ioutil.ReadFile(dir + "/config.json")
 	if err != nil {
@@ -128,7 +129,7 @@ func (c *Config) Save() {
 	// Get project directory location
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
-		log.Emergency(err)
+		log.Fatal(err)
 	}
 	// Save back to file
 	err = ioutil.WriteFile(dir+"/config.json", configJSON, 0644)

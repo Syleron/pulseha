@@ -3,7 +3,7 @@ package main
 import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/netUtils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"runtime"
 )
 
@@ -25,6 +25,9 @@ func makeMemberActive() error {
 	return nil
 }
 
+/**
+
+ */
 func makeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
 	configCopy := gconf.GetConfig()
@@ -68,6 +71,9 @@ func bringDownIPs(iface string, ips []string) {
 	}
 }
 
+/**
+
+ */
 func MyCaller() string {
 
 	// we get the callers as uintptrs - but we just need 1
@@ -87,4 +93,14 @@ func MyCaller() string {
 
 	// return its name
 	return fun.Name()
+}
+/**
+
+ */
+func setLogLevel(level string) {
+	logLevel, err := log.ParseLevel(level)
+	if err != nil {
+		panic(err.Error())
+	}
+	log.SetLevel(logLevel)
 }

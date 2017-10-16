@@ -19,7 +19,7 @@ package main
 
 import (
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-log/log"
+	log "github.com/Sirupsen/logrus"
 	"os"
 	"path"
 	"path/filepath"
@@ -42,7 +42,7 @@ func LoadPlugins() ([]PluginHC, error) {
 	// Get project directory location
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
-		log.Emergency(err)
+		log.Fatal(err)
 	}
 
 	utils.CreateFolder(dir + "/plugins")
