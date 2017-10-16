@@ -101,7 +101,8 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	log.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
-	if s.Memberlist.getActiveMember() != gconf.getLocalNode() {
+	activeHostname, _ := s.Memberlist.getActiveMember()
+	if activeHostname != gconf.getLocalNode() {
 		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
 		localMember.setLast_HC_Response(time.Now())
 		s.Memberlist.update(in.Memberlist)

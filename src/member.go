@@ -236,7 +236,7 @@ Make the node passive (take down its groups)
 */
 func (m *Member) makePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
-	if m.Hostname == gconf.getLocalNode() {
+	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberPassive()
 	} else {
 		log.Debug("member is not local node making grpc call")
@@ -309,7 +309,7 @@ func (m *Member) monitorReceivedHCs() bool {
 				return true
 			}
 			// get our current active member
-			activeHostname := pulse.getMemberlist().getActiveMember()
+			activeHostname, _ := pulse.getMemberlist().getActiveMember()
 			// If we have an active appliance mark it unavailable
 			if activeHostname != "" {
 				activeMember := pulse.getMemberlist().GetMemberByHostname(activeHostname) // YUCK

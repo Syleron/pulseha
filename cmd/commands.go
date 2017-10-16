@@ -58,6 +58,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"promote": func() (cli.Command, error) {
+			return &commands.PromoteCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,

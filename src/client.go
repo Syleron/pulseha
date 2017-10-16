@@ -135,7 +135,7 @@ Send a specific GRPC call
 func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
 		ctx, data,

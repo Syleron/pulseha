@@ -198,13 +198,13 @@ func (m *Memberlist) MemberGetStatus(hostname string) (p.MemberStatus_Status, er
 	Return the hostname of the active member
 	or empty string if non are active
 */
-func (m *Memberlist) getActiveMember() string {
+func (m *Memberlist) getActiveMember() (string, *Member) {
 	for _, member := range m.Members {
 		if member.getStatus() == p.MemberStatus_ACTIVE {
-			return member.getHostname()
+			return member.getHostname(), member
 		}
 	}
-	return ""
+	return "", nil
 }
 
 /**
@@ -219,7 +219,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
 		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
-		return errors.New("unknown hostname")
+		return errors.New("the specified host does not exist in the configured cluster")
 	}
 	// if unavailable check it works or do nothing?
 	switch member.getStatus() {
@@ -227,14 +227,14 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		//If we are the only node and just configured we will be unavailable
 		if gconf.nodeCount() > 1 {
 			log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
-			return errors.New("unable to promote member because it is unavailable")
+			return errors.New("unable to promote member as it is unavailable")
 		}
 	case p.MemberStatus_ACTIVE:
-		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
-		return nil
+		log.Errorf("Unable to promote member %s as it is active", member.getHostname())
+		return errors.New("unable to promote member as it is already active")
 	}
 	// make current active node passive
-	activeMember := m.GetMemberByHostname(m.getActiveMember())
+	_, activeMember := m.getActiveMember()
 	if activeMember != nil {
 		if !activeMember.makePassive() {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())

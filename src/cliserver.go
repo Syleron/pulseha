@@ -380,6 +380,25 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 }
 
 /**
+Handle CLI promote request
+ */
+func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
+	log.Debug("CLIServer:Promote() - Promote a new member")
+	s.Lock()
+	defer s.Unlock()
+	err := s.Memberlist.PromoteMember(in.Member)
+	if err != nil {
+		return &proto.PulsePromote{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	return &proto.PulsePromote{
+		Success: true,
+	}, nil
+}
+
+/**
 Setup pulse cli type
 */
 func (s *CLIServer) Setup() {
