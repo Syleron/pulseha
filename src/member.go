@@ -205,6 +205,7 @@ func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 	m.setHCBusy(true)
 	_, err := m.sendHealthCheck(data)
 	if err != nil {
+		m.Close()
 		m.setStatus(proto.MemberStatus_UNAVAILABLE)
 	}
 	m.setHCBusy(false)

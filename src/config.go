@@ -49,7 +49,7 @@ type Node struct {
 }
 
 type Logging struct {
-	level     string `json:"level"`
+	Level     string `json:"level"`
 	ToLogFile bool   `json:"to_logfile"`
 	LogFile   string `json:"logfile"`
 }

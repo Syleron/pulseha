@@ -76,6 +76,8 @@ func createPulse() *Pulse {
 	gconf.Load()
 	// Validate the config
 	gconf.Validate()
+	// Set the logging level
+	setLogLevel(gconf.Logging.Level)
 	// Define new Memberlist
 	memberList := &Memberlist{}
 	// Create the Pulse object
@@ -105,8 +107,6 @@ func main() {
 
 `, Version, Build[0:7])
 	pulse = createPulse()
-	// Set the logging level
-	//setLogLevel(gconf.Logging.level)
 	// Load plugins
 	_, err := LoadPlugins()
 	if err != nil {

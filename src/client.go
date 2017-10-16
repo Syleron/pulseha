@@ -24,6 +24,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"time"
 )
 
 type Client struct {
@@ -134,7 +135,9 @@ Send a specific GRPC call
 func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
 	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
-		context.Background(), data,
+		ctx, data,
 	)
 }
