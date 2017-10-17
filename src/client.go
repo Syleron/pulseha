@@ -39,22 +39,22 @@ const (
 	SendConfigSync protoFunction = 1 + iota
 	SendJoin
 	SendLeave
-	SendMakeActive
 	SendMakePassive
 	SendBringUpIP
 	SendBringDownIP
 	SendHealthCheck
+	SendPromote
 )
 
 var protoFunctions = []string{
 	"ConfigSync",
 	"Join",
 	"Leave",
-	"MakeActive",
 	"MakePassive",
 	"BringUpIP",
 	"BringDownIP",
 	"HealthCheck",
+	"Promote",
 }
 
 func (p protoFunction) String() string {
@@ -77,9 +77,6 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		"Leave": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.Leave(ctx, data.(*p.PulseLeave))
 		},
-		"MakeActive": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.MakeActive(ctx, data.(*p.PulsePromote))
-		},
 		"MakePassive": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.MakePassive(ctx, data.(*p.PulsePromote))
 		},
@@ -91,6 +88,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"HealthCheck": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.HealthCheck(ctx, data.(*p.PulseHealthCheck))
+		},
+		"Promote": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.Promote(ctx, data.(*p.PulsePromote))
 		},
 	}
 	return funcList

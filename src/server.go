@@ -225,7 +225,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 /**
 Network action functions
 */
-func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
+func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Info("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()

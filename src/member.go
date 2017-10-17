@@ -216,6 +216,7 @@ func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 */
 func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
+	// Make ourself active if we are refering to ourself
 	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberActive()
 		// Reset vars
@@ -227,6 +228,25 @@ func (m *Member) makeActive() bool {
 		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
 		log.Debug("Memberlist:PromoteMember() Starting health check handler")
 		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
+	} else {
+		// Inform the active member and make them active
+		err := m.Connect()
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
+		_, err = m.Send(
+			SendPromote,
+			&proto.PulsePromote{
+				Member: m.getHostname(),
+			})
+		// Handle if we have an error
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
 	}
 	return true
 }
@@ -243,8 +263,6 @@ func (m *Member) makePassive() bool {
 		_, err := m.Send(
 			SendMakePassive,
 			&proto.PulsePromote{
-				Success: false,
-				Message: "",
 				Member:  m.getHostname(),
 			})
 		if err != nil {

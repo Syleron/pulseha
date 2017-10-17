@@ -291,6 +291,7 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 					Hostname: member.getHostname(),
 					Status:   member.getStatus(),
 					Latency: member.getLatency(),
+					LastReceived: member.getLast_HC_Response().String(),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -331,6 +332,8 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 			if member.GetHostname() == localMember.getHostname(){
 				localMember.setStatus(member.Status)
 				localMember.setLatency(member.Latency)
+				time, _ := time.Parse("2006-01-02 15:04:05 -0700 MST", member.LastReceived)
+				localMember.setLast_HC_Response(time)
 				break
 			}
 		}

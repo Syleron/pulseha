@@ -174,17 +174,17 @@ service Server {
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
     // Sync Config
-    rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
+    rpc ConfigSync (PulseConfigSync) returns (PulseConfigSync);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Promote
-    rpc MakeActive (PulsePromote) returns (PulsePromote);
+    rpc Promote (PulsePromote) returns (PulsePromote);
     // demote
-    rpc MakePassive(PulsePromote) returns (PulsePromote);
+    rpc MakePassive (PulsePromote) returns (PulsePromote);
     // Bring up IP
-    rpc BringUpIP(PulseBringIP) returns (PulseBringIP);
+    rpc BringUpIP (PulseBringIP) returns (PulseBringIP);
     // Bring down IP
-    rpc BringDownIP(PulseBringIP) returns (PulseBringIP);
+    rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
 }
 
 
