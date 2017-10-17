@@ -27,6 +27,7 @@ import (
 	"google.golang.org/grpc"
 	"net"
 	"sync"
+	"time"
 )
 
 /**
@@ -367,12 +368,19 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	table := new(proto.PulseStatus)
 	for _, member := range s.Memberlist.Members {
 		details, _ := NodeGetByName(member.Hostname)
+		tym := member.getLastHCResponse()
+		var tymFormat string
+		if tym == (time.Time{}) {
+			tymFormat = ""
+		} else {
+			tymFormat = tym.Format(time.RFC1123)
+		}
 		row := &proto.StatusRow{
 			Hostname: member.getHostname(),
 			Ip:       details.IP,
 			Latency:     member.getLatency(),
 			Status:   member.getStatus(),
-			LastReceived: member.getLast_HC_Response().String(),
+			LastReceived: tymFormat,
 		}
 		table.Row = append(table.Row, row)
 	}

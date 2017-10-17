@@ -32,12 +32,22 @@ import (
 Member struct type
 */
 type Member struct {
+	// The hostname of the repented node
 	Hostname         string
+	// The status of the local member
 	Status           proto.MemberStatus_Status
-	Last_HC_Response time.Time
+	// The last time a health check was received
+	LastHCResponse time.Time
+	// The latency between the active and the current passive member
 	Latency             string
+	// The fail over count and time which us used to determine who should be the active member
+	FOCount		int32
+	FOTime     time.Time
+	// Determines if the health check is being made.
 	HCBusy bool
+	// The client for the member that is used to send GRPC calls
 	Client
+	// The mutex to lock the member object
 	sync.Mutex
 }
 
@@ -64,8 +74,36 @@ func (m *Member) Unlock() {
 */
 
 /**
-  Set the last time this member received a health check
-/*/
+Increments the fail over count
+ */
+func (m *Member) incFOCount() {
+	m.Lock()
+	defer m.Unlock()
+	m.FOCount++
+	m.FOTime = time.Now()
+}
+
+/**
+Returns the failover count for this member
+ */
+func (m *Member) getFOCount() int32 {
+	m.Lock()
+	defer m.Unlock()
+	return m.FOCount
+}
+
+/**
+Returns the failover count for this member
+ */
+func (m *Member) getFOTime() time.Time {
+	m.Lock()
+	defer m.Unlock()
+	return m.FOTime
+}
+
+/**
+
+*/
 func (m *Member) setHCBusy(busy bool) {
 	m.Lock()
 	defer m.Unlock()
@@ -73,7 +111,7 @@ func (m *Member) setHCBusy(busy bool) {
 }
 
 /**
-Get the last time this member received a health check
+
 */
 func (m *Member) getHCBusy() bool {
 	m.Lock()
@@ -82,7 +120,7 @@ func (m *Member) getHCBusy() bool {
 }
 
 /**
-  Set the last time this member received a health check
+
 */
 func (m *Member) setLatency(latency string) {
 	m.Lock()
@@ -91,7 +129,7 @@ func (m *Member) setLatency(latency string) {
 }
 
 /**
-Get the last time this member received a health check
+
 */
 func (m *Member) getLatency() string {
 	m.Lock()
@@ -102,19 +140,19 @@ func (m *Member) getLatency() string {
 /**
   Set the last time this member received a health check
 */
-func (m *Member) setLast_HC_Response(time time.Time) {
+func (m *Member) setLastHCResponse(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
-	m.Last_HC_Response = time
+	m.LastHCResponse = time
 }
 
 /**
 Get the last time this member received a health check
 */
-func (m *Member) getLast_HC_Response() time.Time {
+func (m *Member) getLastHCResponse() time.Time {
 	m.Lock()
 	defer m.Unlock()
-	return m.Last_HC_Response
+	return m.LastHCResponse
 }
 
 /**
@@ -193,6 +231,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 	}
 	startTime := time.Now()
 	r, err := m.Send(SendHealthCheck, data)
+	m.setLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
 	m.setLatency(elapsed)
 	return r, err
@@ -219,9 +258,11 @@ func (m *Member) makeActive() bool {
 	// Make ourself active if we are refering to ourself
 	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberActive()
+		// increase the FO counter
+		m.incFOCount()
 		// Reset vars
 		m.setLatency("")
-		m.setLast_HC_Response(time.Time{})
+		m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
@@ -229,24 +270,24 @@ func (m *Member) makeActive() bool {
 		log.Debug("Memberlist:PromoteMember() Starting health check handler")
 		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
 	} else {
-		// Inform the active member and make them active
-		err := m.Connect()
-		if err != nil {
-			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-			return false
-		}
-		_, err = m.Send(
-			SendPromote,
-			&proto.PulsePromote{
-				Member: m.getHostname(),
-			})
-		// Handle if we have an error
-		if err != nil {
-			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-			return false
-		}
+		//// Inform the active member and make them active
+		//err := m.Connect()
+		//if err != nil {
+		//	log.Error(err)
+		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+		//	return false
+		//}
+		//_, err = m.Send(
+		//	SendPromote,
+		//	&proto.PulsePromote{
+		//		Member: m.getHostname(),
+		//	})
+		//// Handle if we have an error
+		//if err != nil {
+		//	log.Error(err)
+		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+		//	return false
+		//}
 	}
 	return true
 }
@@ -258,6 +299,11 @@ func (m *Member) makePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
 	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberPassive()
+		// Update member variables
+		m.setLastHCResponse(time.Now())
+		m.setStatus(proto.MemberStatus_PASSIVE)
+		// Start the scheduler
+		go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
 	} else {
 		log.Debug("member is not local node making grpc call")
 		_, err := m.Send(
@@ -271,7 +317,6 @@ func (m *Member) makePassive() bool {
 			return false
 		}
 	}
-	m.setStatus(proto.MemberStatus_PASSIVE)
 	return true
 }
 
@@ -307,7 +352,7 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 Monitor the last time we received a health check and or failover
 */
 func (m *Member) monitorReceivedHCs() bool {
-	elapsed := int64(time.Since(m.getLast_HC_Response())) / 1e9
+	elapsed := int64(time.Since(m.getLastHCResponse())) / 1e9
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
@@ -343,10 +388,10 @@ func (m *Member) monitorReceivedHCs() bool {
 			// acknowledge who the next one in line is
 			// wait for a response.. if one is not set
 			log.Info("Waiting on " + member.getHostname() + " to become active")
-			m.setLast_HC_Response(time.Now())
+			m.setLastHCResponse(time.Now())
 			return false
 		} else {
-			m.setLast_HC_Response(time.Now())
+			m.setLastHCResponse(time.Now())
 		}
 	}
 	return false

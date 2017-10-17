@@ -126,7 +126,10 @@ Close the client connection
 */
 func (c *Client) Close() {
 	log.Debug("Client:Close() Connection closed")
-	c.Connection.Close()
+	// Make sure we have a connection before trying to close it
+	if c.Connection != nil {
+		c.Connection.Close()
+	}
 }
 
 /**
@@ -135,7 +138,7 @@ Send a specific GRPC call
 func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
 		ctx, data,

@@ -151,7 +151,7 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
-			localMember.setLast_HC_Response(time.Now())
+			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
 			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
 		}
@@ -259,6 +259,11 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	monitors the connections states for each member
 */
 func (m *Memberlist) monitorClientConns() bool {
+	// make sure we are still the active appliance
+	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("Memberlist:monitorClientConn() We are no longer active... stopping")
+		return true
+	}
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
 			continue
@@ -280,6 +285,11 @@ func (m *Memberlist) monitorClientConns() bool {
 Send health checks to users who have a healthy connection
 */
 func (m *Memberlist) addHealthCheckHandler() bool{
+	// make sure we are still the active appliance
+	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
+		return true
+	}
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
 			continue
@@ -291,7 +301,9 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 					Hostname: member.getHostname(),
 					Status:   member.getStatus(),
 					Latency: member.getLatency(),
-					LastReceived: member.getLast_HC_Response().String(),
+					LastReceived: member.getLastHCResponse().Format(time.RFC1123),
+					FoCount: member.getFOCount(),
+					FoTime: member.getFOTime().Format(time.RFC1123),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -329,11 +341,14 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 	 //do not update the memberlist if we are active
 	for _, member := range memberlist {
 		for _, localMember := range m.Members {
-			if member.GetHostname() == localMember.getHostname(){
+			if member.GetHostname() == localMember.getHostname() {
 				localMember.setStatus(member.Status)
 				localMember.setLatency(member.Latency)
-				time, _ := time.Parse("2006-01-02 15:04:05 -0700 MST", member.LastReceived)
-				localMember.setLast_HC_Response(time)
+				// our local last received has priority
+				if member.GetHostname() != gconf.getLocalNode() {
+					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
+					localMember.setLastHCResponse(tym)
+				}
 				break
 			}
 		}
@@ -355,4 +370,16 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 		}
 	}
 	return &Member{}, errors.New("Memberlist:getNextActiveMember() No new active member found")
+}
+
+/**
+
+*/
+func (m *Memberlist) getLocalMember() (*Member) {
+	for _, member := range m.Members {
+		if member.getHostname() == gconf.getLocalNode() {
+			return member
+		}
+	}
+	panic("unable to get local member with hostname: " + gconf.getLocalNode())
 }
