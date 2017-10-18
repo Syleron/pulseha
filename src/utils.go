@@ -105,25 +105,29 @@ func setLogLevel(level string) {
 
 /**
 Determine who is the correct active node if more than one active is brought online
+TODO: FOTime for any new node that hasnt gone active yet will be set as default. This may cause issues.
  */
 func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 	var winnerMember *proto.MemberlistMember
 	for index, member := range members {
-		foTime, _ := time.Parse(time.RFC1123, member.FoTime)
+		log.Debug("considering " + member.GetHostname() + " as correct active. " + member.GetLastReceived())
 		if index == 0 {
+			log.Info(member.GetHostname() + " is the current winner")
 			winnerMember = member
 			continue
 		}
+		foTime, _ := time.Parse(time.RFC1123, member.FoTime)
+		winFoTime, _ := time.Parse(time.RFC1123, winnerMember.FoTime)
 		// Check to see if the failover count is the same
 		if member.FoCount == winnerMember.FoCount {
-			winFoTime, _ := time.Parse(time.RFC1123, winnerMember.FoTime)
 			if time.Since(foTime) > time.Since(winFoTime) {
+				log.Debug(member.GetHostname() + " is the current winner with a time difference of " + time.Since(winFoTime).String())
 				winnerMember = member
 			}
 		} else if member.FoCount > winnerMember.FoCount {
-				winnerMember = member
+			log.Debug(member.GetHostname() + " is the current winner")
+			winnerMember = member
 		}
 	}
-	log.Debug(winnerMember)
 	return winnerMember.Hostname
 }

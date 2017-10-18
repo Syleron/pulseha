@@ -26,6 +26,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
+	"runtime"
 )
 
 /**
@@ -40,8 +41,8 @@ type Memberlist struct {
 
  */
 func (m *Memberlist) Lock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -49,8 +50,8 @@ func (m *Memberlist) Lock() {
 
  */
 func (m *Memberlist) Unlock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -153,6 +154,7 @@ func (m *Memberlist) Setup() {
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
+			log.Info("memberlist - starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	}
@@ -261,7 +263,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 func (m *Memberlist) monitorClientConns() bool {
 	// make sure we are still the active appliance
 	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("Memberlist:monitorClientConn() We are no longer active... stopping")
+		log.Info("Memberlist:monitorClientConn() We are no longer active... stopping")
 		return true
 	}
 	for _, member := range m.Members {
@@ -287,7 +289,7 @@ Send health checks to users who have a healthy connection
 func (m *Memberlist) addHealthCheckHandler() bool{
 	// make sure we are still the active appliance
 	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
+		log.Info("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
 		return true
 	}
 	for _, member := range m.Members {

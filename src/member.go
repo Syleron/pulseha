@@ -26,6 +26,7 @@ import (
 	"time"
 	"fmt"
 	"github.com/Syleron/PulseHA/src/utils"
+	"runtime"
 )
 
 /**
@@ -55,8 +56,8 @@ type Member struct {
 
  */
 func (m *Member) Lock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -64,8 +65,8 @@ func (m *Member) Lock() {
 
  */
 func (m *Member) Unlock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
+	_, _, no, _ := runtime.Caller(1)
+	log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -265,9 +266,9 @@ func (m *Member) makeActive() bool {
 		m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
-		log.Debug("Memberlist:PromoteMember() Starting client connections monitor")
+		log.Info("Memberlist:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
-		log.Debug("Memberlist:PromoteMember() Starting health check handler")
+		log.Info("Memberlist:PromoteMember() Starting health check handler")
 		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
 	} else {
 		//// Inform the active member and make them active
@@ -298,12 +299,17 @@ Make the node passive (take down its groups)
 func (m *Member) makePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
 	if m.getHostname() == gconf.getLocalNode() {
+		// do this regardless to make sure we dont have any groups up
 		makeMemberPassive()
 		// Update member variables
 		m.setLastHCResponse(time.Now())
-		m.setStatus(proto.MemberStatus_PASSIVE)
-		// Start the scheduler
-		go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
+		// check if we are already passive before starting a new scheduler
+		if m.getStatus() != proto.MemberStatus_PASSIVE {
+			m.setStatus(proto.MemberStatus_PASSIVE)
+			// Start the scheduler
+			log.Info("member make passive - starting the monitor received health checks scheduler " + m.getHostname())
+			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
+		}
 	} else {
 		log.Debug("member is not local node making grpc call")
 		_, err := m.Send(
@@ -352,44 +358,43 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 Monitor the last time we received a health check and or failover
 */
 func (m *Member) monitorReceivedHCs() bool {
+	// calculate elapsed time
 	elapsed := int64(time.Since(m.getLastHCResponse())) / 1e9
+	// determine if we might need to failover
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
-	// If 30 seconds has gone by.. something is wrong.
+	// has our threshold been met? Failover?
 	if int(elapsed) >= 1 {
 		log.Info("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
+			log.Info("Additional health checks have failed.")
 			// Nothing has worked.. assume the master has failed. Fail over.
 			member, err := pulse.getMemberlist().getNextActiveMember()
 			// no new active appliance was found
 			if err != nil {
-				log.Fatal(err.Error())
+				log.Warn("unable to find new active member.. we are now the active")
 				// make ourself active as no new active can be found apparently
 				m.makeActive()
 				return true
 			}
+			// If we are not the new member just return
+			if member.getHostname() != gconf.getLocalNode() {
+				log.Info("Waiting on " + member.getHostname() + " to become active")
+				m.setLastHCResponse(time.Now())
+				return false
+			}
 			// get our current active member
-			activeHostname, _ := pulse.getMemberlist().getActiveMember()
+			_, activeMember := pulse.getMemberlist().getActiveMember()
 			// If we have an active appliance mark it unavailable
-			if activeHostname != "" {
-				activeMember := pulse.getMemberlist().GetMemberByHostname(activeHostname) // YUCK
+			if activeMember != nil {
 				activeMember.setStatus(proto.MemberStatus_UNAVAILABLE)
 			}
 			// lets go active
 			member.makeActive()
-			// set the current active appliance as unavailable
-			// we no longer need to be monitoring health checks as we are no active
-			if member.getHostname() == gconf.getLocalNode() {
-				return true
-			}
-			// acknowledge who the next one in line is
-			// wait for a response.. if one is not set
-			log.Info("Waiting on " + member.getHostname() + " to become active")
-			m.setLastHCResponse(time.Now())
-			return false
+			return true
 		} else {
 			m.setLastHCResponse(time.Now())
 		}
