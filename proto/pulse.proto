@@ -130,14 +130,14 @@ message PulseConfigSync {
 }
 message PulsePromote {
     bool success =1;
-    string message =2;
-    string member =3;
+    string message = 2;
+    string member = 3;
 }
 message PulseBringIP {
-    bool success =1;
-    string message =2;
-    string iface =3;
-    repeated string ips =4;
+    bool success = 1;
+    string message = 2;
+    string iface = 3;
+    repeated string ips = 4;
 }
 
 // Services
@@ -164,6 +164,8 @@ service CLI {
     rpc GroupList (GroupTable) returns (GroupTable);
     // Pulse Status
     rpc Status (PulseStatus) returns (PulseStatus);
+    // Promote a member
+    rpc Promote (PulsePromote) returns (PulsePromote);
 }
 
 service Server {
@@ -172,17 +174,17 @@ service Server {
     // Join Cluster
     rpc Join (PulseJoin) returns (PulseJoin);
     // Sync Config
-    rpc ConfigSync(PulseConfigSync) returns (PulseConfigSync);
+    rpc ConfigSync (PulseConfigSync) returns (PulseConfigSync);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Promote
-    rpc MakeActive (PulsePromote) returns (PulsePromote);
+    rpc Promote (PulsePromote) returns (PulsePromote);
     // demote
-    rpc MakePassive(PulsePromote) returns (PulsePromote);
+    rpc MakePassive (PulsePromote) returns (PulsePromote);
     // Bring up IP
-    rpc BringUpIP(PulseBringIP) returns (PulseBringIP);
+    rpc BringUpIP (PulseBringIP) returns (PulseBringIP);
     // Bring down IP
-    rpc BringDownIP(PulseBringIP) returns (PulseBringIP);
+    rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
 }
 
 

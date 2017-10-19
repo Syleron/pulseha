@@ -49,7 +49,7 @@ type Node struct {
 }
 
 type Logging struct {
-	level     string `json:"level"`
+	Level     string `json:"level"`
 	ToLogFile bool   `json:"to_logfile"`
 	LogFile   string `json:"logfile"`
 }
@@ -154,6 +154,23 @@ func (c *Config) Reload() {
  *
  */
 func (c *Config) Validate() {
+	var success bool = true
+
+	// if we are in a cluster.. does our hostname exist?
+	if c.ClusterCheck() {
+		for name, _ := range c.Nodes {
+			if _, ok := c.Nodes[name]; !ok {
+				log.Error("Hostname mistmatch. Localhost does not exist in cluster config.")
+				success = false
+			}
+		}
+	}
+
+	// Handles if shit hits the roof
+	if success == false {
+		// log why we exited?
+		os.Exit(0)
+	}
 }
 
 /**

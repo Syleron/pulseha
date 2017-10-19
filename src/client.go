@@ -24,6 +24,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"time"
 )
 
 type Client struct {
@@ -38,22 +39,22 @@ const (
 	SendConfigSync protoFunction = 1 + iota
 	SendJoin
 	SendLeave
-	SendMakeActive
 	SendMakePassive
 	SendBringUpIP
 	SendBringDownIP
 	SendHealthCheck
+	SendPromote
 )
 
 var protoFunctions = []string{
 	"ConfigSync",
 	"Join",
 	"Leave",
-	"MakeActive",
 	"MakePassive",
 	"BringUpIP",
 	"BringDownIP",
 	"HealthCheck",
+	"Promote",
 }
 
 func (p protoFunction) String() string {
@@ -76,9 +77,6 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		"Leave": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.Leave(ctx, data.(*p.PulseLeave))
 		},
-		"MakeActive": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.MakeActive(ctx, data.(*p.PulsePromote))
-		},
 		"MakePassive": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.MakePassive(ctx, data.(*p.PulsePromote))
 		},
@@ -90,6 +88,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"HealthCheck": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.HealthCheck(ctx, data.(*p.PulseHealthCheck))
+		},
+		"Promote": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.Promote(ctx, data.(*p.PulsePromote))
 		},
 	}
 	return funcList
@@ -125,7 +126,10 @@ Close the client connection
 */
 func (c *Client) Close() {
 	log.Debug("Client:Close() Connection closed")
-	c.Connection.Close()
+	// Make sure we have a connection before trying to close it
+	if c.Connection != nil {
+		c.Connection.Close()
+	}
 }
 
 /**
@@ -134,7 +138,9 @@ Send a specific GRPC call
 func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
-		context.Background(), data,
+		ctx, data,
 	)
 }

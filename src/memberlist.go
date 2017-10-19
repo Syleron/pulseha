@@ -57,7 +57,7 @@ func (m *Memberlist) Unlock() {
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) MemberAdd(hostname string, client *Client) {
+func (m *Memberlist) AddMember(hostname string, client *Client) {
 	if !m.MemberExists(hostname) {
 		log.Debug("Memberlist:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
@@ -151,8 +151,9 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
-			localMember.setLast_HC_Response(time.Now())
+			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
+			log.Info("memberlist - starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	}
@@ -165,14 +166,14 @@ func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
 		newClient := &Client{}
-		m.MemberAdd(key, newClient)
+		m.AddMember(key, newClient)
 	}
 }
 
 /**
 
  */
-func (m *Memberlist) ReloadMembers() {
+func (m *Memberlist) Reload() {
 	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
 	// Do a config reload
 	gconf.Reload()
@@ -198,13 +199,13 @@ func (m *Memberlist) MemberGetStatus(hostname string) (p.MemberStatus_Status, er
 	Return the hostname of the active member
 	or empty string if non are active
 */
-func (m *Memberlist) getActiveMember() string {
+func (m *Memberlist) getActiveMember() (string, *Member) {
 	for _, member := range m.Members {
 		if member.getStatus() == p.MemberStatus_ACTIVE {
-			return member.getHostname()
+			return member.getHostname(), member
 		}
 	}
-	return ""
+	return "", nil
 }
 
 /**
@@ -219,7 +220,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
 		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
-		return errors.New("unknown hostname")
+		return errors.New("the specified host does not exist in the configured cluster")
 	}
 	// if unavailable check it works or do nothing?
 	switch member.getStatus() {
@@ -227,14 +228,14 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		//If we are the only node and just configured we will be unavailable
 		if gconf.nodeCount() > 1 {
 			log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
-			return errors.New("unable to promote member because it is unavailable")
+			return errors.New("unable to promote member as it is unavailable")
 		}
 	case p.MemberStatus_ACTIVE:
-		log.Errorf("Unable to promote member %s because it is active", member.getHostname())
-		return nil
+		log.Errorf("Unable to promote member %s as it is active", member.getHostname())
+		return errors.New("unable to promote member as it is already active")
 	}
 	// make current active node passive
-	activeMember := m.GetMemberByHostname(m.getActiveMember())
+	_, activeMember := m.getActiveMember()
 	if activeMember != nil {
 		if !activeMember.makePassive() {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
@@ -259,6 +260,11 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	monitors the connections states for each member
 */
 func (m *Memberlist) monitorClientConns() bool {
+	// make sure we are still the active appliance
+	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Info("Memberlist:monitorClientConn() We are no longer active... stopping")
+		return true
+	}
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
 			continue
@@ -280,6 +286,11 @@ func (m *Memberlist) monitorClientConns() bool {
 Send health checks to users who have a healthy connection
 */
 func (m *Memberlist) addHealthCheckHandler() bool{
+	// make sure we are still the active appliance
+	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Info("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
+		return true
+	}
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
 			continue
@@ -291,6 +302,7 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 					Hostname: member.getHostname(),
 					Status:   member.getStatus(),
 					Latency: member.getLatency(),
+					LastReceived: member.getLastHCResponse().Format(time.RFC1123),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -328,9 +340,14 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 	 //do not update the memberlist if we are active
 	for _, member := range memberlist {
 		for _, localMember := range m.Members {
-			if member.GetHostname() == localMember.getHostname(){
+			if member.GetHostname() == localMember.getHostname() {
 				localMember.setStatus(member.Status)
 				localMember.setLatency(member.Latency)
+				// our local last received has priority
+				if member.GetHostname() != gconf.getLocalNode() {
+					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
+					localMember.setLastHCResponse(tym)
+				}
 				break
 			}
 		}
@@ -352,4 +369,16 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 		}
 	}
 	return &Member{}, errors.New("Memberlist:getNextActiveMember() No new active member found")
+}
+
+/**
+
+*/
+func (m *Memberlist) getLocalMember() (*Member) {
+	for _, member := range m.Members {
+		if member.getHostname() == gconf.getLocalNode() {
+			return member
+		}
+	}
+	panic("unable to get local member with hostname: " + gconf.getLocalNode())
 }

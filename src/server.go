@@ -101,12 +101,22 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	log.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
-	if s.Memberlist.getActiveMember() != gconf.getLocalNode() {
+	activeHostname, _ := s.Memberlist.getActiveMember()
+	if activeHostname != gconf.getLocalNode() {
 		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
-		localMember.setLast_HC_Response(time.Now())
+		localMember.setLastHCResponse(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
-		// we are active and received a health check.. act on it
+		log.Warn("Receiving health checks and we are active! Perhaps we have another active on the network the cluster..")
+		hostname := getFailOverCountWinner(in.Memberlist)
+		log.Info("Member " + hostname + " has been determined as the correct active node.")
+		if hostname != gconf.getLocalNode() {
+			member := s.Memberlist.getLocalMember()
+			member.makePassive()
+		} else {
+			localMember := pulse.getMemberlist().getLocalMember()
+			localMember.setLastHCResponse(time.Time{})
+		}
 	}
 	return &proto.PulseHealthCheck{
 		Success: true,
@@ -141,7 +151,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
-		s.Memberlist.ReloadMembers()
+		s.Memberlist.Reload()
 		// Return with our new updated config
 		buf, err := json.Marshal(gconf.GetConfig())
 		// Handle failure to marshal config
@@ -212,7 +222,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Save our config to file
 	gconf.Save()
 	// Update our member list
-	s.Memberlist.ReloadMembers()
+	s.Memberlist.Reload()
 	// Let the logs know
 	log.Info("Successfully r-synced local config")
 	// Return with yay
@@ -224,7 +234,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 /**
 Network action functions
 */
-func (s *Server) MakeActive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
+func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Info("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
