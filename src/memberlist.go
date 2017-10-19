@@ -26,7 +26,6 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
-	"runtime"
 )
 
 /**
@@ -41,8 +40,8 @@ type Memberlist struct {
 
  */
 func (m *Memberlist) Lock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -50,15 +49,15 @@ func (m *Memberlist) Lock() {
 
  */
 func (m *Memberlist) Unlock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) MemberAdd(hostname string, client *Client) {
+func (m *Memberlist) AddMember(hostname string, client *Client) {
 	if !m.MemberExists(hostname) {
 		log.Debug("Memberlist:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
@@ -167,14 +166,14 @@ func (m *Memberlist) LoadMembers() {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
 		newClient := &Client{}
-		m.MemberAdd(key, newClient)
+		m.AddMember(key, newClient)
 	}
 }
 
 /**
 
  */
-func (m *Memberlist) ReloadMembers() {
+func (m *Memberlist) Reload() {
 	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
 	// Do a config reload
 	gconf.Reload()
@@ -304,8 +303,6 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 					Status:   member.getStatus(),
 					Latency: member.getLatency(),
 					LastReceived: member.getLastHCResponse().Format(time.RFC1123),
-					FoCount: member.getFOCount(),
-					FoTime: member.getFOTime().Format(time.RFC1123),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}

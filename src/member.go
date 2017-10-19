@@ -26,7 +26,6 @@ import (
 	"time"
 	"fmt"
 	"github.com/Syleron/PulseHA/src/utils"
-	"runtime"
 )
 
 /**
@@ -41,9 +40,6 @@ type Member struct {
 	LastHCResponse time.Time
 	// The latency between the active and the current passive member
 	Latency             string
-	// The fail over count and time which us used to determine who should be the active member
-	FOCount		int32
-	FOTime     time.Time
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
@@ -56,8 +52,8 @@ type Member struct {
 
  */
 func (m *Member) Lock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -65,8 +61,8 @@ func (m *Member) Lock() {
 
  */
 func (m *Member) Unlock() {
-	_, _, no, _ := runtime.Caller(1)
-	log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
+	//_, _, no, _ := runtime.Caller(1)
+	//log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -74,33 +70,6 @@ func (m *Member) Unlock() {
 	Getters and setters for Member which allow us to make them go routine safe
 */
 
-/**
-Increments the fail over count
- */
-func (m *Member) incFOCount() {
-	m.Lock()
-	defer m.Unlock()
-	m.FOCount++
-	m.FOTime = time.Now()
-}
-
-/**
-Returns the failover count for this member
- */
-func (m *Member) getFOCount() int32 {
-	m.Lock()
-	defer m.Unlock()
-	return m.FOCount
-}
-
-/**
-Returns the failover count for this member
- */
-func (m *Member) getFOTime() time.Time {
-	m.Lock()
-	defer m.Unlock()
-	return m.FOTime
-}
 
 /**
 
@@ -246,7 +215,7 @@ func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 	_, err := m.sendHealthCheck(data)
 	if err != nil {
 		m.Close()
-		m.setStatus(proto.MemberStatus_UNAVAILABLE)
+		m.setStatus(proto.MemberStatus_UNAVAILABLE) // This may not be required
 	}
 	m.setHCBusy(false)
 }
@@ -259,11 +228,9 @@ func (m *Member) makeActive() bool {
 	// Make ourself active if we are refering to ourself
 	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberActive()
-		// increase the FO counter
-		m.incFOCount()
 		// Reset vars
 		m.setLatency("")
-		m.setLastHCResponse(time.Time{})
+		//m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Info("Memberlist:PromoteMember() Starting client connections monitor")
@@ -311,17 +278,17 @@ func (m *Member) makePassive() bool {
 			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
-		log.Debug("member is not local node making grpc call")
-		_, err := m.Send(
-			SendMakePassive,
-			&proto.PulsePromote{
-				Member:  m.getHostname(),
-			})
-		if err != nil {
-			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-			return false
-		}
+		//log.Debug("member is not local node making grpc call")
+		//_, err := m.Send(
+		//	SendMakePassive,
+		//	&proto.PulsePromote{
+		//		Member:  m.getHostname(),
+		//	})
+		//if err != nil {
+		//	log.Error(err)
+		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+		//	return false
+		//}
 	}
 	return true
 }

@@ -113,6 +113,9 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		if hostname != gconf.getLocalNode() {
 			member := s.Memberlist.getLocalMember()
 			member.makePassive()
+		} else {
+			localMember := pulse.getMemberlist().getLocalMember()
+			localMember.setLastHCResponse(time.Time{})
 		}
 	}
 	return &proto.PulseHealthCheck{
@@ -148,7 +151,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
-		s.Memberlist.ReloadMembers()
+		s.Memberlist.Reload()
 		// Return with our new updated config
 		buf, err := json.Marshal(gconf.GetConfig())
 		// Handle failure to marshal config
@@ -219,7 +222,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Save our config to file
 	gconf.Save()
 	// Update our member list
-	s.Memberlist.ReloadMembers()
+	s.Memberlist.Reload()
 	// Let the logs know
 	log.Info("Successfully r-synced local config")
 	// Return with yay

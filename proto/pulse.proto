@@ -29,8 +29,6 @@ message MemberlistMember {
     MemberStatus.Status status = 2;
     string lastReceived = 3;
     string latency = 4;
-    int32  fo_count = 5;
-    string fo_time = 6;
 }
 message MemberStatus {
     enum Status {

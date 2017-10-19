@@ -22,6 +22,8 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"os"
 	"sync"
+	"time"
+	"strings"
 )
 
 type globalConfig struct {
@@ -68,6 +70,23 @@ func (p *Pulse) getMemberlist() (*Memberlist) {
 	return pulse.Server.Memberlist
 }
 
+type PulseLogFormat struct {}
+
+
+func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
+	time := "[" + entry.Time.Format(time.Stamp) + "]"
+	lvlOut := entry.Level.String()
+	switch entry.Level {
+	case log.ErrorLevel:
+	case log.FatalLevel:
+	case log.WarnLevel:
+		lvlOut = strings.ToUpper(lvlOut)
+	}
+	level := "[" + lvlOut + "] "
+	message := time + level + entry.Message
+	return append([]byte(message), '\n'), nil
+}
+
 /**
  * Create a new instance of PulseHA
  */
@@ -106,6 +125,7 @@ func main() {
 \/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
 
 `, Version, Build[0:7])
+	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
 	// Load plugins
 	_, err := LoadPlugins()
