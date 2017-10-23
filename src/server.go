@@ -111,10 +111,10 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		hostname := getFailOverCountWinner(in.Memberlist)
 		log.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != gconf.getLocalNode() {
-			member := s.Memberlist.getLocalMember()
+			member, _ := s.Memberlist.getLocalMember()
 			member.makePassive()
 		} else {
-			localMember := pulse.getMemberlist().getLocalMember()
+			localMember, _ := pulse.getMemberlist().getLocalMember()
 			localMember.setLastHCResponse(time.Time{})
 		}
 	}

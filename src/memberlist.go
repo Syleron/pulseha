@@ -261,8 +261,13 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 */
 func (m *Memberlist) monitorClientConns() bool {
 	// make sure we are still the active appliance
-	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Info("Memberlist:monitorClientConn() We are no longer active... stopping")
+	member, err := m.getLocalMember()
+	if err != nil {
+		log.Warn("Client monitoring has stopped as it seems we are no longer in a cluster")
+		return true
+	}
+	if member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Info("Client monitoring has stopped as we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -287,8 +292,13 @@ Send health checks to users who have a healthy connection
 */
 func (m *Memberlist) addHealthCheckHandler() bool{
 	// make sure we are still the active appliance
-	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Info("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
+	member, err := m.getLocalMember()
+	if err != nil {
+		log.Warn("Health check handler has stopped as it seems we are no longer in a cluster")
+		return true
+	}
+	if member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Warn("Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -374,11 +384,18 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 /**
 
 */
-func (m *Memberlist) getLocalMember() (*Member) {
+func (m *Memberlist) getLocalMember() (*Member, error) {
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
-			return member
+			return member, nil
 		}
 	}
-	panic("unable to get local member with hostname: " + gconf.getLocalNode())
+	return &Member{}, errors.New("cannot get local member. Perhaps we are no longer in a cluster")
+}
+
+/**
+Reset the memberlist when we are no longer in a cluster.
+ */
+func (m *Memberlist) reset() {
+	m.Members = []*Member{}
 }

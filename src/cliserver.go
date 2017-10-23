@@ -146,6 +146,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 		}, nil
 	}
 	// Check to see if we are not the only one in the "cluster"
+	// Let everyone else know that we are leaving the cluster
 	if gconf.ClusterTotal() > 1 {
 		s.Memberlist.Broadcast(
 			SendLeave,
@@ -155,9 +156,9 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
-
 	GroupClearLocal()
 	NodesClearLocal()
+	s.Memberlist.reset()
 	gconf.Save()
 	s.Server.shutdown()
 	if gconf.ClusterTotal() == 1 {
