@@ -233,9 +233,9 @@ func (m *Member) makeActive() bool {
 		//m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
-		log.Info("Memberlist:PromoteMember() Starting client connections monitor")
+		log.Debug("Member:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
-		log.Info("Memberlist:PromoteMember() Starting health check handler")
+		log.Debug("Member:PromoteMember() Starting health check handler")
 		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
 	} else {
 		//// Inform the active member and make them active
@@ -274,7 +274,7 @@ func (m *Member) makePassive() bool {
 		if m.getStatus() != proto.MemberStatus_PASSIVE {
 			m.setStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
-			log.Info("member make passive - starting the monitor received health checks scheduler " + m.getHostname())
+			log.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.getHostname())
 			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
@@ -295,7 +295,7 @@ func (m *Member) makePassive() bool {
 
 /**
 Used to bring up a single IP on member
-We need to know the group to work out what interface to
+Note: We need to know the group to work out what interface to
 bring it up on.
 */
 func (m *Member) bringUpIPs(ips []string, group string) bool {
@@ -333,11 +333,11 @@ func (m *Member) monitorReceivedHCs() bool {
 	}
 	// has our threshold been met? Failover?
 	if int(elapsed) >= 1 {
-		log.Info("Member:monitorReceivedHCs() Performing Failover..")
+		log.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
-			log.Info("Additional health checks have failed.")
+			log.Warn("Additional health checks have failed.")
 			// Nothing has worked.. assume the master has failed. Fail over.
 			member, err := pulse.getMemberlist().getNextActiveMember()
 			// no new active appliance was found
@@ -361,6 +361,9 @@ func (m *Member) monitorReceivedHCs() bool {
 			}
 			// lets go active
 			member.makeActive()
+			// Set the FO priority
+			member.setLastHCResponse(time.Time{})
+			log.Info("Local node is now active")
 			return true
 		} else {
 			m.setLastHCResponse(time.Now())

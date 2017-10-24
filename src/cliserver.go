@@ -119,7 +119,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		go s.Server.Setup()
 		// Close the connection
 		client.Close()
-		// TODO: Broadcast this function
+		log.Info("Successfully joined cluster with " + in.Ip)
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully joined cluster",
@@ -161,6 +161,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	s.Memberlist.reset()
 	gconf.Save()
 	s.Server.shutdown()
+	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
 	if gconf.ClusterTotal() == 1 {
 		return &proto.PulseLeave{
 			Success: true,
@@ -270,6 +271,23 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	}
 	gconf.Save()
 	s.Memberlist.SyncConfig()
+	// bring up the ip on the active appliance
+	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	// Note: Sometimes this action can be called when no active appliance is available.. Handle it.
+	if activeMember == nil {
+		log.Warn("No active node found. IP was not brought up..")
+		return &proto.PulseGroupAdd{
+			Success: true,
+			Message: "IP address(es) successfully added to " + in.Name + ". However, no active node was found so the IP(s) were not brought up.",
+		}, nil
+	}
+	configCopy := gconf.GetConfig()
+	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	activeMember.Send(SendBringUpIP, &proto.PulseBringIP{
+		Iface: iface,
+		Ips: in.Ips,
+	})
+	// respond
 	return &proto.PulseGroupAdd{
 		Success: true,
 		Message: "IP address(es) successfully added to " + in.Name,
@@ -292,6 +310,22 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	}
 	gconf.Save()
 	s.Memberlist.SyncConfig()
+	// bring down the ip on the active appliance
+	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	// Note: Sometimes this action can be called when no active appliance is available.. Handle it.
+	if activeMember == nil {
+		log.Warn("No active node found. IP was not brought down..")
+		return &proto.PulseGroupRemove{
+			Success: true,
+			Message: "IP address(es) successfully removed from " + in.Name + ". However, no active node was found so the IP(s) were not brought down.",
+		}, nil
+	}
+	configCopy := gconf.GetConfig()
+	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	activeMember.Send(SendBringDownIP, &proto.PulseBringIP{
+		Iface: iface,
+		Ips: in.Ips,
+	})
 	return &proto.PulseGroupRemove{
 		Success: true,
 		Message: "IP address(es) successfully removed from " + in.Name,
@@ -411,7 +445,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 Setup pulse cli type
 */
 func (s *CLIServer) Setup() {
-	log.Info("CLI initialised on 127.0.0.1:9443")
+	log.Info("CLI server initialised on 127.0.0.1:9443")
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)

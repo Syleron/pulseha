@@ -76,7 +76,7 @@ func (s *Server) Setup() {
 		}
 		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
-		log.Warning("TLS Disabled! Pulse server connection unsecured.")
+		log.Warning("TLS Disabled! PulseHA server connection unsecured.")
 		s.Server = grpc.NewServer()
 	}
 	proto.RegisterServerServer(s.Server, s)
@@ -104,6 +104,10 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	activeHostname, _ := s.Memberlist.getActiveMember()
 	if activeHostname != gconf.getLocalNode() {
 		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
+		// make passive to reset the networking
+		if _, activeMember := s.Memberlist.getActiveMember(); activeMember == nil {
+			localMember.makePassive()
+		}
 		localMember.setLastHCResponse(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
@@ -162,6 +166,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: err.Error(),
 			}, nil
 		}
+		log.Info(in.Hostname + " has joined the cluster")
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
@@ -235,7 +240,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 Network action functions
 */
 func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Info("Server:MakeActive() Making node active")
+	log.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != gconf.getLocalNode() {
@@ -257,7 +262,7 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 
  */
 func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Info("Server:MakePassive() Making node passive")
+	log.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != gconf.getLocalNode() {
@@ -279,7 +284,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 
  */
 func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Info("Server:BringUpIP() Bringing up IP(s)")
+	log.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	err := bringUpIPs(in.Iface, in.Ips)
@@ -296,8 +301,15 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 
  */
 func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Info("Server:BringDownIP() Bringing down IP(s)")
+	log.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
-	return nil, nil
+	err := bringDownIPs(in.Iface, in.Ips)
+	success := false
+	msg := "success"
+	if err != nil {
+		success = true
+		msg = err.Error()
+	}
+	return &proto.PulseBringIP{Success: success, Message: msg}, nil
 }

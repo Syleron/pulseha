@@ -68,7 +68,7 @@ func (m *Memberlist) AddMember(hostname string, client *Client) {
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
-		log.Warning("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
+		log.Debug("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
 	}
 }
 
@@ -153,7 +153,7 @@ func (m *Memberlist) Setup() {
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
-			log.Info("memberlist - starting the monitor received health checks scheduler")
+			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	}
@@ -263,7 +263,7 @@ func (m *Memberlist) monitorClientConns() bool {
 	// make sure we are still the active appliance
 	member, err := m.getLocalMember()
 	if err != nil {
-		log.Warn("Client monitoring has stopped as it seems we are no longer in a cluster")
+		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
 		return true
 	}
 	if member.getStatus() == p.MemberStatus_PASSIVE {
@@ -294,7 +294,7 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 	// make sure we are still the active appliance
 	member, err := m.getLocalMember()
 	if err != nil {
-		log.Warn("Health check handler has stopped as it seems we are no longer in a cluster")
+		log.Debug("Memberlist:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
 		return true
 	}
 	if member.getStatus() == p.MemberStatus_PASSIVE {
@@ -397,5 +397,7 @@ func (m *Memberlist) getLocalMember() (*Member, error) {
 Reset the memberlist when we are no longer in a cluster.
  */
 func (m *Memberlist) reset() {
+	m.Lock()
+	defer m.Unlock()
 	m.Members = []*Member{}
 }
