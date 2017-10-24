@@ -267,7 +267,7 @@ func (m *Memberlist) monitorClientConns() bool {
 		return true
 	}
 	if member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Info("Client monitoring has stopped as we are no longer active")
+		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {

@@ -342,7 +342,7 @@ func (m *Member) monitorReceivedHCs() bool {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
-	if int(elapsed) >= 1 {
+	if int(elapsed) >= 5 {
 		log.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE

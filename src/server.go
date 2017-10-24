@@ -81,7 +81,7 @@ func (s *Server) Setup() {
 	}
 	proto.RegisterServerServer(s.Server, s)
 	s.Memberlist.Setup()
-	log.Info("Pulse initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
+	log.Info("PulseHA initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }
 
