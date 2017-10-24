@@ -70,11 +70,10 @@ func bringDownIPs(iface string, ips []string) error {
 		log.Infof("Taking down up %s on interface %s", ip, iface)
 		success, err := netUtils.BringIPdown(iface, ip)
 		if err != nil {
-			log.Error(err.Error())
+			log.Debug(err.Error())
 		}
 		if !success {
 			log.Errorf("Failed to take down %s on interface %s", ip, iface)
-			//return errors.New("failed to bring down ip " + ip + " on interface " + iface)
 		}
 	}
 	return nil

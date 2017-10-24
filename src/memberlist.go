@@ -298,7 +298,7 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 		return true
 	}
 	if member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Warn("Health check handler has stopped as it seems we are no longer active")
+		log.Debug("Memberlist:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {

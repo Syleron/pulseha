@@ -325,6 +325,16 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 Monitor the last time we received a health check and or failover
 */
 func (m *Member) monitorReceivedHCs() bool {
+	// make sure we are still the active appliance
+	member, err := pulse.getMemberlist().getLocalMember()
+	if err != nil {
+		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are no longer in a cluster")
+		return true
+	}
+	if member.getStatus() == proto.MemberStatus_ACTIVE {
+		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are now active.")
+		return true
+	}
 	// calculate elapsed time
 	elapsed := int64(time.Since(m.getLastHCResponse())) / 1e9
 	// determine if we might need to failover

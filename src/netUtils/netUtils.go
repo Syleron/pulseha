@@ -84,9 +84,9 @@ func BringIPup(iface, ip string) (bool, error) {
 		return false, errors.New("Unable to bring IP up as the network interface does not exist! Closing..")
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
-
+	// guessing
 	if err != nil {
-		return true, errors.New("unable to bring up ip " + ip + " on interface " + iface)
+		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already is up?")
 	}
 
 	if output == "" {
@@ -104,9 +104,9 @@ func BringIPdown(iface, ip string) (bool, error) {
 		return false, errors.New("Unable to bring IP down as the network interface does not exist! Closing..")
 	}
 	_, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
-
+	// guessing
 	if err != nil {
-		return false, err
+		return true, errors.New("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
 	}
 	// TODO: Note: This will return a warning message so the output check is disabled.
 	//if output == "" {

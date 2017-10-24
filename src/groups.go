@@ -219,7 +219,7 @@ func getGroupNodes(group string) ([]string, []string) {
  * Make a group of IPs active
  */
 func makeGroupActive(iface string, groupName string) {
-	log.Infof("Make group active. Interface: %s, group: %s", iface, groupName)
+	log.Infof("Make group active. Interface: %s, Group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringUpIPs(iface, configCopy.Groups[groupName])
@@ -227,7 +227,7 @@ func makeGroupActive(iface string, groupName string) {
 }
 
 func makeGroupPassive(iface string, groupName string) {
-	log.Infof("Make group passive. Interface: %s, group: %s", iface, groupName)
+	log.Infof("Make group passive. Interface: %s, Group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringDownIPs(iface, configCopy.Groups[groupName])

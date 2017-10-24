@@ -117,6 +117,9 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		gconf.Reload()
 		// Setup our daemon server
 		go s.Server.Setup()
+		// reset our HC last received time
+		localMember, _ := s.Memberlist.getLocalMember()
+		localMember.setLastHCResponse(time.Now())
 		// Close the connection
 		client.Close()
 		log.Info("Successfully joined cluster with " + in.Ip)
