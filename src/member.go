@@ -26,6 +26,7 @@ import (
 	"time"
 	"fmt"
 	"github.com/Syleron/PulseHA/src/utils"
+	"math"
 )
 
 /**
@@ -193,7 +194,7 @@ func (m *Member) Close() {
 }
 
 /**
-Send GRPC health check to current member
+Active function - Send GRPC health check to current member
 */
 func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
 	if m.Connection == nil {
@@ -201,6 +202,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 	}
 	startTime := time.Now()
 	r, err := m.Send(SendHealthCheck, data)
+	// This is a record for the active appliance to know when it was last sent/received!
 	m.setLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
 	m.setLatency(elapsed)
@@ -230,7 +232,7 @@ func (m *Member) makeActive() bool {
 		makeMemberActive()
 		// Reset vars
 		m.setLatency("")
-		//m.setLastHCResponse(time.Time{})
+		m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
@@ -238,24 +240,19 @@ func (m *Member) makeActive() bool {
 		log.Debug("Member:PromoteMember() Starting health check handler")
 		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
 	} else {
-		//// Inform the active member and make them active
-		//err := m.Connect()
-		//if err != nil {
-		//	log.Error(err)
-		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-		//	return false
-		//}
-		//_, err = m.Send(
-		//	SendPromote,
-		//	&proto.PulsePromote{
-		//		Member: m.getHostname(),
-		//	})
-		//// Handle if we have an error
-		//if err != nil {
-		//	log.Error(err)
-		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-		//	return false
-		//}
+		// TODO: Handle the closing of this connection
+		m.Connect()
+		_, err := m.Send(
+			SendPromote,
+			&proto.PulsePromote{
+				Member: m.getHostname(),
+			})
+		// Handle if we have an error
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
 	}
 	return true
 }
@@ -278,17 +275,18 @@ func (m *Member) makePassive() bool {
 			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
-		//log.Debug("member is not local node making grpc call")
-		//_, err := m.Send(
-		//	SendMakePassive,
-		//	&proto.PulsePromote{
-		//		Member:  m.getHostname(),
-		//	})
-		//if err != nil {
-		//	log.Error(err)
-		//	log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
-		//	return false
-		//}
+		// TODO: Handle the closing of this connection
+		m.Connect()
+		_, err := m.Send(
+			SendMakePassive,
+			&proto.PulsePromote{
+				Member:  m.getHostname(),
+			})
+		if err != nil {
+			log.Error(err)
+			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			return false
+		}
 	}
 	return true
 }
@@ -336,13 +334,14 @@ func (m *Member) monitorReceivedHCs() bool {
 		return true
 	}
 	// calculate elapsed time
-	elapsed := int64(time.Since(m.getLastHCResponse())) / 1e9
+	elapsed := math.Floor(float64(time.Since(m.getLastHCResponse()).Seconds()))
 	// determine if we might need to failover
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
-	if int(elapsed) >= 5 {
+	//log.Info(elapsed)
+	if int(elapsed) >= 10 {
 		log.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE

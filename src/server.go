@@ -106,12 +106,13 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
 		// make passive to reset the networking
 		if _, activeMember := s.Memberlist.getActiveMember(); activeMember == nil {
+			log.Info("Local node is passive")
 			localMember.makePassive()
 		}
 		localMember.setLastHCResponse(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
-		log.Warn("Receiving health checks and we are active! Perhaps we have another active on the network the cluster..")
+		log.Warn("Active node mismatch")
 		hostname := getFailOverCountWinner(in.Memberlist)
 		log.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != gconf.getLocalNode() {
@@ -246,38 +247,44 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 	if in.Member != gconf.getLocalNode() {
 		return &proto.PulsePromote{
 			Success: false,
-			Message: "cannot promote a node other than ourself by MakeActive",
-			Member:  "",
 		}, nil
 	}
-	err := makeMemberActive()
-	success := false
-	if err != nil {
-		success = true
+	member := s.Memberlist.GetMemberByHostname(in.Member)
+	if member == nil {
+		return &proto.PulsePromote{
+			Success: false,
+		}, nil
 	}
-	return &proto.PulsePromote{Success: success, Message: err.Error(), Member: ""}, nil
+	success := member.makeActive()
+	log.Info(in.Member + " has been promoted to active")
+	return &proto.PulsePromote{
+		Success: success,
+	}, nil
 }
 
 /**
-
+Make a member passive
  */
 func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != gconf.getLocalNode() {
-		return &proto.PulsePromote{Success: false,
-			Message: "cannot demote a node other than ourself by rpcMakeActive",
-			Member:  ""}, nil
+		return &proto.PulsePromote{
+			Success: false,
+		}, nil
 	}
-	err := makeMemberPassive()
-	success := false
-	msg := "success"
-	if err != nil {
-		success = true
-		msg = err.Error()
+	member := s.Memberlist.GetMemberByHostname(in.Member)
+	if member == nil {
+		return &proto.PulsePromote{
+			Success: false,
+		}, nil
 	}
-	return &proto.PulsePromote{Success: success, Message: msg, Member: ""}, nil
+	success := member.makePassive()
+	log.Info(in.Member + " has been demoted to passive")
+	return &proto.PulsePromote{
+		Success: success,
+	}, nil
 }
 
 /**

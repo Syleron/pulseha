@@ -81,12 +81,12 @@ func ifaceExist(iface string) bool {
  */
 func BringIPup(iface, ip string) (bool, error) {
 	if !ifaceExist(iface) {
-		return false, errors.New("Unable to bring IP up as the network interface does not exist! Closing..")
+		return false, errors.New("Unable to bring IP up as the network interface does not exist")
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
 	// guessing
 	if err != nil {
-		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already is up?")
+		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
 	}
 
 	if output == "" {
@@ -101,7 +101,7 @@ func BringIPup(iface, ip string) (bool, error) {
  */
 func BringIPdown(iface, ip string) (bool, error) {
 	if !ifaceExist(iface) {
-		return false, errors.New("Unable to bring IP down as the network interface does not exist! Closing..")
+		return false, errors.New("Unable to bring IP down as the network interface does not exist")
 	}
 	_, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
 	// guessing

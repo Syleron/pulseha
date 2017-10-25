@@ -151,10 +151,11 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
+			//localMember.setLastHCResponse(time.Now().Add(time.Duration(10) * time.Second))
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
 			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
-			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
+			go utils.Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
 }
@@ -217,6 +218,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 	// get host is it active?
+	// Make sure the hostname member exists
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
 		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
@@ -234,21 +236,30 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		log.Errorf("Unable to promote member %s as it is active", member.getHostname())
 		return errors.New("unable to promote member as it is already active")
 	}
-	// make current active node passive
+	// get the current active member
 	_, activeMember := m.getActiveMember()
+	// handle if we do not have an active member
 	if activeMember != nil {
-		if !activeMember.makePassive() {
+		// Make the current Active appliance passive
+		success := activeMember.makePassive()
+		if !success {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
+		// TODO: Note: Do we need this?
+		// Update our local value for the active member
 		activeMember.setStatus(p.MemberStatus_PASSIVE)
 	}
+	// make the hostname the new active
+	success := member.makeActive()
 	// make new node active
-	if !member.makeActive() {
+	if !success {
 		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
-
-		if !activeMember.makeActive() {
+		// Somethings gone wrong.. attempt to make the previous active - active again.
+		success := activeMember.makeActive()
+		if !success {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
+		// Note: we don't need to update the active status as we should recieve an updated memberlist from the active
 	}
 	return nil
 }

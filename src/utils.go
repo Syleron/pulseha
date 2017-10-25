@@ -9,7 +9,7 @@ import (
 )
 
 /**
-Bring up the groups on the current node
+Networking - Bring up the groups on the current node
 */
 func makeMemberActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now passive")
@@ -27,7 +27,7 @@ func makeMemberActive() error {
 }
 
 /**
-
+Networking - Bring down the ip groups on the current node
  */
 func makeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
@@ -49,7 +49,7 @@ Bring up an []ips for a specific interface
  */
 func bringUpIPs(iface string, ips []string) error {
 	for _, ip := range ips {
-		log.Infof("Bringing up IP %s on interface %s", ip, iface)
+		//log.Infof("Bringing up IP %s on interface %s", ip, iface)
 		success, err := netUtils.BringIPup(iface, ip)
 		if !success && err != nil {
 			log.Error(err.Error())
@@ -67,7 +67,7 @@ Bring down an []ips for a specific interface
  */
 func bringDownIPs(iface string, ips []string) error {
 	for _, ip := range ips {
-		log.Infof("Taking down up %s on interface %s", ip, iface)
+		//log.Infof("Taking down %s on interface %s", ip, iface)
 		success, err := netUtils.BringIPdown(iface, ip)
 		if err != nil {
 			log.Debug(err.Error())
