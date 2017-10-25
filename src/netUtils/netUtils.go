@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"strings"
 	log "github.com/Sirupsen/logrus"
+	"errors"
 )
 
 /**
@@ -33,16 +34,14 @@ import (
  */
 func SendGARP(iface, ip string) bool {
 	if !ifaceExist(iface) {
-		//log.Warn("Network interface does not exist!");
+		log.Error("Unable to GARP as the network interface does not exist! Closing..")
 		os.Exit(1)
 	}
-
+	log.Debug("Sending gratuitous arp for " + ip + " on interface " + iface)
 	output, err := utils.Execute("arping", "-U", "-c", "5", "-I", iface, ip)
-
 	if err != nil {
 		return false
 	}
-
 	if output == "" {
 		return true
 	} else {
@@ -56,14 +55,11 @@ func SendGARP(iface, ip string) bool {
  */
 func netInterfaceStatus(iface string) bool {
 	_, err := utils.Execute("cat", "/sys/class/net/"+iface+"/operstate")
-
 	if err != nil {
 		//return err.Error();
 		return false
 	}
-
 	return true
-
 }
 
 /**
@@ -71,60 +67,53 @@ func netInterfaceStatus(iface string) bool {
  */
 func ifaceExist(iface string) bool {
 	ifaces, _ := net.Interfaces()
-
 	// TODO: handle err
-
 	for _, i := range ifaces {
 		if i.Name == iface {
 			return true
 		}
 	}
-
 	return false
 }
 
 /**
  * This function is to bring up a network interface
  */
-func BringIPup(iface, ip string) bool {
+func BringIPup(iface, ip string) (bool, error) {
 	if !ifaceExist(iface) {
-		//log.Warn("Network interface does not exist!");
-		os.Exit(1)
+		return false, errors.New("Unable to bring IP up as the network interface does not exist")
 	}
-
-	output, err := utils.Execute("ifconfig", iface+":0", ip, "up")
-
+	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
+	// guessing
 	if err != nil {
-		return false
+		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
 	}
 
 	if output == "" {
-		return true
+		return true, nil
 	} else {
-		return false
+		return false, errors.New(output)
 	}
 }
 
 /**
  * This function is to bring down a network interface
  */
-func BringIPdown(iface, ip string) bool {
+func BringIPdown(iface, ip string) (bool, error) {
 	if !ifaceExist(iface) {
-		//log.Warn("Network interfaces does not exist!");
-		return false
+		return false, errors.New("Unable to bring IP down as the network interface does not exist")
 	}
-
-	output, err := utils.Execute("ifconfig", iface+":0", ip, "down")
-
+	_, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
+	// guessing
 	if err != nil {
-		return false
+		return true, errors.New("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
 	}
-
-	if output == "" {
-		return true
-	} else {
-		return false
-	}
+	// TODO: Note: This will return a warning message so the output check is disabled.
+	//if output == "" {
+		return true, nil
+	//} else {
+	//	return false
+	//}
 }
 
 /**
@@ -133,12 +122,10 @@ func BringIPdown(iface, ip string) bool {
  */
 func Curl(httpRequestURL string) bool {
 	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
-
 	if err != nil {
 		//log.Error("Http Curl request failed.")
 		return false
 	}
-
 	if output == "\"200\"" {
 		return true
 	} else {
@@ -155,19 +142,16 @@ func ICMPIPv4(Ipv4Addr string) bool {
 		//log.Error("Invalid IPv4 address for ICMP check..")
 		return false
 	}
-
 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
 	cmd := exec.Command("bash", "-c", cmds)
 	cmd.Stdin = strings.NewReader("some input")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
-
 	if err != nil {
 		//log.Error("ICMP request failed.")
 		return false
 	}
-
 	if strings.Contains(out.String(), "0") {
 		return true
 	} else {
@@ -180,11 +164,9 @@ func ICMPIPv4(Ipv4Addr string) bool {
  */
 func ArpScan(addrWSubnet string) string {
 	output, err := utils.Execute("arp-scan", "arp-scan", addrWSubnet)
-
 	if err != nil {
 		return err.Error()
 	}
-
 	return output
 }
 

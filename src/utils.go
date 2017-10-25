@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	log "github.com/Sirupsen/logrus"
 	"runtime"
@@ -10,10 +9,10 @@ import (
 )
 
 /**
-Bring up the groups on the current node
+Networking - Bring up the groups on the current node
 */
 func makeMemberActive() error {
-	log.Debug("Utils:makeMemberActive() Local node now active")
+	log.Debug("Utils:MakeMemberActive() Local node now passive")
 	configCopy := gconf.GetConfig()
 	for name, node := range configCopy.Nodes {
 		if name == gconf.getLocalNode() {
@@ -28,7 +27,7 @@ func makeMemberActive() error {
 }
 
 /**
-
+Networking - Bring down the ip groups on the current node
  */
 func makeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
@@ -46,31 +45,38 @@ func makeMemberPassive() error {
 }
 
 /**
- * Bring up a group of ip addresses
+Bring up an []ips for a specific interface
  */
 func bringUpIPs(iface string, ips []string) error {
 	for _, ip := range ips {
-		log.Debugf("Bringing up IP %s on interface %s", ip, iface)
-		success := netUtils.BringIPup(iface, ip)
-		if !success {
-			log.Errorf("Failed to bring up %s on interface %s", ip, iface)
-			return errors.New("failed to bring up ip " + ip + " on interface " + iface)
+		//log.Infof("Bringing up IP %s on interface %s", ip, iface)
+		success, err := netUtils.BringIPup(iface, ip)
+		if !success && err != nil {
+			log.Error(err.Error())
+		} else if success && err != nil {
+			log.Warn(err.Error())
 		}
+		// Send GARP
+		go netUtils.SendGARP(iface, ip)
 	}
 	return nil
 }
 
 /**
-
+Bring down an []ips for a specific interface
  */
-func bringDownIPs(iface string, ips []string) {
+func bringDownIPs(iface string, ips []string) error {
 	for _, ip := range ips {
-		log.Debugf("Taking down up %s on interface %s", ip, iface)
-		success := netUtils.BringIPdown(iface, ip)
+		//log.Infof("Taking down %s on interface %s", ip, iface)
+		success, err := netUtils.BringIPdown(iface, ip)
+		if err != nil {
+			log.Debug(err.Error())
+		}
 		if !success {
 			log.Errorf("Failed to take down %s on interface %s", ip, iface)
 		}
 	}
+	return nil
 }
 
 /**

@@ -75,13 +75,11 @@ func GroupIpAdd(groupName string, ips []string) error {
 				}
 			} else {
 				gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
-				//todo I think we need to make a call to bring up the new ip here?
 			}
 		} else {
 			log.Warning(ip + " is not a valid IP address")
 		}
 	}
-
 	return nil
 }
 
@@ -221,7 +219,7 @@ func getGroupNodes(group string) ([]string, []string) {
  * Make a group of IPs active
  */
 func makeGroupActive(iface string, groupName string) {
-	log.Debugf("Make group active. Interface: %s, group: %s", iface, groupName)
+	//log.Infof("Bringing up IPs on Interface: %s, Group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringUpIPs(iface, configCopy.Groups[groupName])
@@ -229,7 +227,7 @@ func makeGroupActive(iface string, groupName string) {
 }
 
 func makeGroupPassive(iface string, groupName string) {
-	log.Debugf("Make group passive. Interface: %s, group: %s", iface, groupName)
+	//log.Infof("Bringing down IPs on Interface: %s, Group: %s", iface, groupName)
 	// gconf.Reload()
 	configCopy := gconf.GetConfig()
 	bringDownIPs(iface, configCopy.Groups[groupName])

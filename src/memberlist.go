@@ -68,7 +68,7 @@ func (m *Memberlist) AddMember(hostname string, client *Client) {
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
-		log.Warning("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
+		log.Debug("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
 	}
 }
 
@@ -151,10 +151,11 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
+			//localMember.setLastHCResponse(time.Now().Add(time.Duration(10) * time.Second))
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
-			log.Info("memberlist - starting the monitor received health checks scheduler")
-			go utils.Scheduler(localMember.monitorReceivedHCs, 10000*time.Millisecond)
+			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
+			go utils.Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
 }
@@ -217,6 +218,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 	// get host is it active?
+	// Make sure the hostname member exists
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
 		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
@@ -234,21 +236,30 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		log.Errorf("Unable to promote member %s as it is active", member.getHostname())
 		return errors.New("unable to promote member as it is already active")
 	}
-	// make current active node passive
+	// get the current active member
 	_, activeMember := m.getActiveMember()
+	// handle if we do not have an active member
 	if activeMember != nil {
-		if !activeMember.makePassive() {
+		// Make the current Active appliance passive
+		success := activeMember.makePassive()
+		if !success {
 			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
+		// TODO: Note: Do we need this?
+		// Update our local value for the active member
 		activeMember.setStatus(p.MemberStatus_PASSIVE)
 	}
+	// make the hostname the new active
+	success := member.makeActive()
 	// make new node active
-	if !member.makeActive() {
+	if !success {
 		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
-
-		if !activeMember.makeActive() {
+		// Somethings gone wrong.. attempt to make the previous active - active again.
+		success := activeMember.makeActive()
+		if !success {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
+		// Note: we don't need to update the active status as we should recieve an updated memberlist from the active
 	}
 	return nil
 }
@@ -261,8 +272,13 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 */
 func (m *Memberlist) monitorClientConns() bool {
 	// make sure we are still the active appliance
-	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Info("Memberlist:monitorClientConn() We are no longer active... stopping")
+	member, err := m.getLocalMember()
+	if err != nil {
+		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
+		return true
+	}
+	if member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -287,8 +303,13 @@ Send health checks to users who have a healthy connection
 */
 func (m *Memberlist) addHealthCheckHandler() bool{
 	// make sure we are still the active appliance
-	if member := m.getLocalMember(); member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Info("Memberlist:addHealthCheckHandler() We are no longer active... stopping")
+	member, err := m.getLocalMember()
+	if err != nil {
+		log.Debug("Memberlist:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
+		return true
+	}
+	if member.getStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("Memberlist:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -374,11 +395,20 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 /**
 
 */
-func (m *Memberlist) getLocalMember() (*Member) {
+func (m *Memberlist) getLocalMember() (*Member, error) {
 	for _, member := range m.Members {
 		if member.getHostname() == gconf.getLocalNode() {
-			return member
+			return member, nil
 		}
 	}
-	panic("unable to get local member with hostname: " + gconf.getLocalNode())
+	return &Member{}, errors.New("cannot get local member. Perhaps we are no longer in a cluster")
+}
+
+/**
+Reset the memberlist when we are no longer in a cluster.
+ */
+func (m *Memberlist) reset() {
+	m.Lock()
+	defer m.Unlock()
+	m.Members = []*Member{}
 }

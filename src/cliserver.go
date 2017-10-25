@@ -117,9 +117,12 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		gconf.Reload()
 		// Setup our daemon server
 		go s.Server.Setup()
+		// reset our HC last received time
+		localMember, _ := s.Memberlist.getLocalMember()
+		localMember.setLastHCResponse(time.Now())
 		// Close the connection
 		client.Close()
-		// TODO: Broadcast this function
+		log.Info("Successfully joined cluster with " + in.Ip)
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully joined cluster",
@@ -146,6 +149,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 		}, nil
 	}
 	// Check to see if we are not the only one in the "cluster"
+	// Let everyone else know that we are leaving the cluster
 	if gconf.ClusterTotal() > 1 {
 		s.Memberlist.Broadcast(
 			SendLeave,
@@ -155,11 +159,14 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
-
+	makeMemberPassive()
 	GroupClearLocal()
 	NodesClearLocal()
+	s.Memberlist.reset()
 	gconf.Save()
 	s.Server.shutdown()
+	// bring down the ips
+	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
 	if gconf.ClusterTotal() == 1 {
 		return &proto.PulseLeave{
 			Success: true,
@@ -260,6 +267,13 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	log.Debug("CLIServer:GroupIPAdd() - Add IP addresses to group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
+	_, activeMember := s.Memberlist.getActiveMember()
+	if activeMember == nil {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: "Unable to add IP(s) to group as there no active node in the cluster.",
+		}, nil
+	}
 	err := GroupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupAdd{
@@ -269,6 +283,15 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	}
 	gconf.Save()
 	s.Memberlist.SyncConfig()
+	// bring up the ip on the active appliance
+	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	configCopy := gconf.GetConfig()
+	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	activeMember.Send(SendBringUpIP, &proto.PulseBringIP{
+		Iface: iface,
+		Ips: in.Ips,
+	})
+	// respond
 	return &proto.PulseGroupAdd{
 		Success: true,
 		Message: "IP address(es) successfully added to " + in.Name,
@@ -282,6 +305,13 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	log.Debug("CLIServer:GroupIPRemove() - Removing IPs from group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
+	_, activeMember := s.Memberlist.getActiveMember()
+	if activeMember == nil {
+		return &proto.PulseGroupRemove{
+			Success: false,
+			Message: "Unable to remove IP(s) to group as there no active node in the cluster.",
+		}, nil
+	}
 	err := GroupIpRemove(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupRemove{
@@ -291,6 +321,14 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	}
 	gconf.Save()
 	s.Memberlist.SyncConfig()
+	// bring down the ip on the active appliance
+	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	configCopy := gconf.GetConfig()
+	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	activeMember.Send(SendBringDownIP, &proto.PulseBringIP{
+		Iface: iface,
+		Ips: in.Ips,
+	})
 	return &proto.PulseGroupRemove{
 		Success: true,
 		Message: "IP address(es) successfully removed from " + in.Name,
@@ -403,6 +441,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 	}
 	return &proto.PulsePromote{
 		Success: true,
+		Message: "Successfully promoted member " + in.Member,
 	}, nil
 }
 
@@ -410,7 +449,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 Setup pulse cli type
 */
 func (s *CLIServer) Setup() {
-	log.Info("CLI initialised on 127.0.0.1:9443")
+	log.Info("CLI server initialised on 127.0.0.1:9443")
 	lis, err := net.Listen("tcp", "127.0.0.1:9443")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
