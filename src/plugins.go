@@ -28,7 +28,7 @@ import (
 )
 
 /**
- * Health Check plugin type
+Health Check plugin type
  */
 type PluginHC interface {
 	Name() string
@@ -36,22 +36,47 @@ type PluginHC interface {
 	Send() (bool, bool)
 }
 
-func LoadPlugins() ([]PluginHC, error) {
-	var modules []PluginHC
+/**
+Networking plugin type
+ */
+type PluginNet interface {
+	Name() string
+	Version() float64
+	BringUpIPs() error
+	BringDownIPs() error
+}
 
+/**
+Plugins struct
+ */
+type Plugins struct {
+	modules []Plugin
+}
+
+/**
+Struct for a specific plugin
+ */
+type Plugin struct {
+	Name string
+	Type interface{}
+}
+
+/**
+TODO: Note: Make sure that the modules slice is empty before adding.
+ */
+func (p *Plugins) Load() error {
 	// Get project directory location
 	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
 	if err != nil {
 		log.Fatal(err)
 	}
-
+	// Create plugin folder
 	utils.CreateFolder(dir + "/plugins")
-
 	evtGlob := path.Join(dir+"/plugins", "/*.so")
 	evt, err := filepath.Glob(evtGlob)
 
 	if err != nil {
-		return modules, err
+		panic(err.Error())
 	}
 
 	var plugins []*plugin.Plugin
@@ -61,38 +86,51 @@ func LoadPlugins() ([]PluginHC, error) {
 			plugins = append(plugins, plug)
 		}
 	}
-
+	// Load all of the plugins
 	for _, p := range plugins {
 		symEvt, err := p.Lookup("PluginHC")
-
+		// make sure we have loaded a plugin type
 		if err != nil {
-			log.Errorf("Plugin has no pluginType symbol: %v", err)
+			log.Debugf("Plugin has no pluginType symbol: %v", err)
 			continue
 		}
-
+		// check if the loaded plugin is of type PluginHC
 		e, ok := symEvt.(PluginHC)
-
+		// the plugin we are attempting to load is not a valid health check plugin
 		if !ok {
-			log.Error("Plugin is not of an PluginHC interface type")
 			continue
 		}
-
+		// add the plugin to the slice
 		modules = append(modules, e)
 	}
 
 	if len(modules) > 0 {
 		var pluginNames string = ""
-
 		for _, plgn := range modules {
 			pluginNames += plgn.Name() + "(v" + strconv.FormatFloat(plgn.Version(), 'f', -1, 32) + ") "
 		}
-
 		log.Infof("Plugins loaded (%v): %v", len(modules), pluginNames)
 	}
 
 	return modules, nil
 }
 
-func loadNetPlugin() {
+/**
+Perform any plugins validation here
+ */
+func (p *Plugins) validate() {
+}
 
+/**
+Returns a slice of health check plugins
+ */
+func (p *Plugins) getHealthCheckPlugins() []*Plugin {
+	return nil
+}
+
+/**
+Returns a single networking plugin (as you should only ever have one loaded)
+ */
+func (p *Plugins) getNetworkingPlugin() *Plugin {
+	return &Plugin{}
 }
