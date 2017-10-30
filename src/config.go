@@ -166,6 +166,10 @@ func (c *Config) Validate() {
 		}
 	}
 
+	// TODO: Check if our hostname exists inthe cluster config
+	// TODO: Check if we have valid network interface names
+
+
 	// Handles if shit hits the roof
 	if success == false {
 		// log why we exited?

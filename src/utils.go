@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/Syleron/PulseHA/src/netUtils"
 	log "github.com/Sirupsen/logrus"
 	"runtime"
 	"github.com/Syleron/PulseHA/proto"
@@ -48,35 +47,24 @@ func makeMemberPassive() error {
 Bring up an []ips for a specific interface
  */
 func bringUpIPs(iface string, ips []string) error {
-	for _, ip := range ips {
-		//log.Infof("Bringing up IP %s on interface %s", ip, iface)
-		success, err := netUtils.BringIPup(iface, ip)
-		if !success && err != nil {
-			log.Error(err.Error())
-		} else if success && err != nil {
-			log.Warn(err.Error())
-		}
-		// Send GARP
-		go netUtils.SendGARP(iface, ip)
+	plugin := pulse.Plugins.getNetworkingPlugin()
+	if plugin == nil {
+		log.Fatal("Missing network plugin")
 	}
-	return nil
+	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
+	return err
 }
 
 /**
 Bring down an []ips for a specific interface
  */
 func bringDownIPs(iface string, ips []string) error {
-	for _, ip := range ips {
-		//log.Infof("Taking down %s on interface %s", ip, iface)
-		success, err := netUtils.BringIPdown(iface, ip)
-		if err != nil {
-			log.Debug(err.Error())
-		}
-		if !success {
-			log.Errorf("Failed to take down %s on interface %s", ip, iface)
-		}
+	plugin := pulse.Plugins.getNetworkingPlugin()
+	if plugin == nil {
+		log.Fatal("Missing network plugin")
 	}
-	return nil
+	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)
+	return err
 }
 
 /**
