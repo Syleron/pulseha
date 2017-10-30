@@ -20,7 +20,6 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"os"
 	"sync"
 	"time"
 	"strings"
@@ -64,6 +63,7 @@ var pulse *Pulse
 type Pulse struct {
 	Server *Server
 	CLI    *CLIServer
+	Plugins *Plugins
 }
 
 func (p *Pulse) getMemberlist() (*Memberlist) {
@@ -107,6 +107,7 @@ func createPulse() *Pulse {
 		CLI: &CLIServer{
 			Memberlist: memberList,
 		},
+		Plugins: &Plugins{},
 	}
 	pulse.CLI.Server = pulse.Server
 	return pulse
@@ -128,11 +129,8 @@ func main() {
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
 	// Load plugins
-	_, err := LoadPlugins()
-	if err != nil {
-		log.Errorf("Failed to load plugins: %s", err)
-		os.Exit(1)
-	}
+	pulse.Plugins.Setup()
+	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
