@@ -66,18 +66,18 @@ func GroupIpAdd(groupName string, ips []string) error {
 		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
-		if utils.ValidIPAddress(ip) {
+		if err := utils.ValidIPAddress(ip); err == nil {
 			if len(gconf.Groups[groupName]) > 0 {
 				if exists, _ := GroupIPExist(groupName, ip); !exists {
 					gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
 				} else {
-					log.Warning(ip + " already exists in group " + groupName + ".. skipping.")
+					return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
 				}
 			} else {
 				gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
 			}
 		} else {
-			log.Warning(ip + " is not a valid IP address")
+			return err
 		}
 	}
 	return nil

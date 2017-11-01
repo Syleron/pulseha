@@ -285,6 +285,8 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	s.Memberlist.SyncConfig()
 	// bring up the ip on the active appliance
 	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	// Connect first just in case.. otherwise we could seg fault
+	activeMember.Connect()
 	configCopy := gconf.GetConfig()
 	iface := configCopy.GetGroupIface(activeHostname, in.Name)
 	activeMember.Send(SendBringUpIP, &proto.PulseBringIP{
@@ -305,6 +307,13 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	log.Debug("CLIServer:GroupIPRemove() - Removing IPs from group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
+	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
+	if in.Ips == nil || in.Name == "" {
+		return &proto.PulseGroupRemove{
+			Success: false,
+			Message: "Unable to process RPC call. Required parameters: Ips, Name",
+		}, nil
+	}
 	_, activeMember := s.Memberlist.getActiveMember()
 	if activeMember == nil {
 		return &proto.PulseGroupRemove{
@@ -323,6 +332,8 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	s.Memberlist.SyncConfig()
 	// bring down the ip on the active appliance
 	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	// Connect first just in case.. otherwise we could seg fault
+	activeMember.Connect()
 	configCopy := gconf.GetConfig()
 	iface := configCopy.GetGroupIface(activeHostname, in.Name)
 	activeMember.Send(SendBringDownIP, &proto.PulseBringIP{

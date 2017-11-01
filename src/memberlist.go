@@ -221,7 +221,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	// Make sure the hostname member exists
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
-		log.Errorf("Unknown hostname %s give in call to promoteMember", hostname)
+		log.Warningf("Unknown hostname %s give in call to promoteMember", hostname)
 		return errors.New("the specified host does not exist in the configured cluster")
 	}
 	// if unavailable check it works or do nothing?
@@ -229,11 +229,11 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	case p.MemberStatus_UNAVAILABLE:
 		//If we are the only node and just configured we will be unavailable
 		if gconf.nodeCount() > 1 {
-			log.Errorf("Unable to promote member %s because it is unavailable", member.getHostname())
+			log.Warningf("Unable to promote member %s because it is unavailable", member.getHostname())
 			return errors.New("unable to promote member as it is unavailable")
 		}
 	case p.MemberStatus_ACTIVE:
-		log.Errorf("Unable to promote member %s as it is active", member.getHostname())
+		log.Warningf("Unable to promote member %s as it is active", member.getHostname())
 		return errors.New("unable to promote member as it is already active")
 	}
 	// get the current active member
@@ -243,7 +243,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		// Make the current Active appliance passive
 		success := activeMember.makePassive()
 		if !success {
-			log.Errorf("Failed to make %s passive, continuing", activeMember.getHostname())
+			log.Warningf("Failed to make %s passive, continuing", activeMember.getHostname())
 		}
 		// TODO: Note: Do we need this?
 		// Update our local value for the active member
@@ -253,7 +253,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	success := member.makeActive()
 	// make new node active
 	if !success {
-		log.Errorf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
+		log.Warningf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
 		// Somethings gone wrong.. attempt to make the previous active - active again.
 		success := activeMember.makeActive()
 		if !success {
