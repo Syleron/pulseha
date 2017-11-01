@@ -66,12 +66,16 @@ func Execute(cmd string, args ...string) (string, error) {
  *
  * @return bool
  */
-func ValidIPAddress(ipAddress string) bool {
-	testInput := net.ParseIP(ipAddress)
-	if testInput.To4() == nil {
-		return false
+func ValidIPAddress(ipAddress string) error {
+	ip, _, err := net.ParseCIDR(ipAddress)
+	if err != nil {
+		return errors.New("invalid CDIR address specified")
 	}
-	return true
+	testInput := net.ParseIP(ip.String())
+	if testInput.To4() == nil {
+		return errors.New("invalid IP address")
+	}
+	return nil
 }
 
 /**

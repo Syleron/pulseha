@@ -106,6 +106,7 @@ func (p *Plugins) Setup() {
 		if plug, err := plugin.Open(pFile); err == nil {
 			plugins = append(plugins, plug)
 		} else {
+			log.Warning("Unable to load plugin " + pFile + ". Perhaps it is out of date?")
 			log.Debug(pFile + " - " + err.Error())
 		}
 	}

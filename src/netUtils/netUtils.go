@@ -103,17 +103,16 @@ func BringIPdown(iface, ip string) (bool, error) {
 	if !ifaceExist(iface) {
 		return false, errors.New("Unable to bring IP down as the network interface does not exist")
 	}
-	_, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
+	output, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
 	// guessing
 	if err != nil {
 		return true, errors.New("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
 	}
-	// TODO: Note: This will return a warning message so the output check is disabled.
-	//if output == "" {
+	if output == "" {
 		return true, nil
-	//} else {
-	//	return false
-	//}
+	} else {
+		return false, err
+	}
 }
 
 /**
@@ -138,7 +137,7 @@ func Curl(httpRequestURL string) bool {
  */
 func ICMPIPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if !utils.ValidIPAddress(Ipv4Addr) {
+	if err := utils.ValidIPAddress(Ipv4Addr); err != nil {
 		//log.Error("Invalid IPv4 address for ICMP check..")
 		return false
 	}
