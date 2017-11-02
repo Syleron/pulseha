@@ -161,7 +161,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {
-				log.Debugf("Plugin does not match pluginType symbol: %v", err)
+				//log.Debugf("Plugin does not match pluginType symbol: %v", err)
 				continue
 			}
 			e, ok := symEvt.(PluginNet)

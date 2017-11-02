@@ -24,6 +24,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"github.com/Syleron/PulseHA/src/netUtils"
 )
 
 type Config struct {
@@ -36,6 +37,9 @@ type Config struct {
 
 type Local struct {
 	TLS bool `json:"tls"`
+	HCSInterval int `json:"hcs_interval"`
+	FOSInterval int `json:"fos_interval"`
+	FOLimit int `json:"fo_limit"`
 }
 
 type Nodes struct {
@@ -154,27 +158,43 @@ func (c *Config) Reload() {
  *
  */
 func (c *Config) Validate() {
-	var success bool = true
-
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
-				log.Error("Hostname mistmatch. Localhost does not exist in cluster config.")
-				success = false
+				log.Fatal("Hostname mistmatch. Localhost does not exist in cluster config.")
 			}
 		}
 	}
-
+	if c.Pulse.HCSInterval <= 0 {
+		log.Fatal("hcs_interval must have a value greater than 0")
+	}
+	if c.Pulse.FOSInterval <= 0 {
+		log.Fatal("fos_interval must have a value greater than 0")
+	}
+	if c.Pulse.FOLimit <= 0 {
+		log.Fatal("fos_interval must have a value greater than 0")
+	}
+	if c.Pulse.FOSInterval > c.Pulse.FOLimit {
+		log.Fatal("fos_interval must be less than your fo_limit")
+	}
+	if !c.ValidateLocalInterfaces() {
+		log.Fatal("Local node network interface(s) name mismatch")
+	}
 	// TODO: Check if our hostname exists inthe cluster config
 	// TODO: Check if we have valid network interface names
+}
 
-
-	// Handles if shit hits the roof
-	if success == false {
-		// log why we exited?
-		os.Exit(0)
+/**
+Itterate through local defined interfaces to ensure they actually exist!
+ */
+func (c *Config) ValidateLocalInterfaces() bool {
+	for name, _ := range c.Nodes[c.localNode].IPGroups {
+		if !netUtils.InterfaceExist(name) {
+			return false
+		}
 	}
+	return true
 }
 
 /**
@@ -219,17 +239,4 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 		}
 	}
 	return ""
-}
-
-/**
- *
- */
-func DefaultLocalConfig() *Config {
-	return &Config{
-	//Cluster: {
-	//	//ClusterName: GetHostname(),
-	//	//BindIP: "0.0.0.0",
-	//	//BindPort: "8443",
-	//},
-	}
 }

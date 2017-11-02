@@ -227,6 +227,7 @@ func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 */
 func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
+	configCopy := gconf.GetConfig()
 	// Make ourself active if we are refering to ourself
 	if m.getHostname() == gconf.getLocalNode() {
 		makeMemberActive()
@@ -236,9 +237,9 @@ func (m *Member) makeActive() bool {
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
+		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second) // Shall we make this configurable
 		log.Debug("Member:PromoteMember() Starting health check handler")
-		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
+		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, time.Duration(configCopy.Pulse.HCSInterval))
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
@@ -323,6 +324,7 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 Monitor the last time we received a health check and or failover
 */
 func (m *Member) monitorReceivedHCs() bool {
+	configCopy := gconf.GetConfig()
 	// make sure we are still the active appliance
 	member, err := pulse.getMemberlist().getLocalMember()
 	if err != nil {
@@ -334,14 +336,14 @@ func (m *Member) monitorReceivedHCs() bool {
 		return true
 	}
 	// calculate elapsed time
-	elapsed := math.Floor(float64(time.Since(m.getLastHCResponse()).Seconds()))
+	elapsed := math.Floor(float64(time.Since(m.getLastHCResponse()).Seconds() * 1000))
 	// determine if we might need to failover
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
 	//log.Info(elapsed)
-	if int(elapsed) >= 10 {
+	if int(elapsed) >= configCopy.Pulse.FOLimit {
 		log.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE

@@ -72,7 +72,7 @@ func ValidIPAddress(ipAddress string) error {
 		return errors.New("invalid CDIR address specified")
 	}
 	testInput := net.ParseIP(ip.String())
-	if testInput.To4() == nil {
+	if testInput == nil {
 		return errors.New("invalid IP address")
 	}
 	return nil
