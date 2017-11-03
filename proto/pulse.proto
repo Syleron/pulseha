@@ -1,0 +1,190 @@
+/*
+    PulseHA - HA Cluster Daemon
+    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU Affero General Public License as published
+    by the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU Affero General Public License for more details.
+
+    You should have received a copy of the GNU Affero General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+syntax = "proto3";
+
+package proto;
+
+// Pulse Cluster Messages
+message PulseHealthCheck {
+    bool success = 1;
+    repeated MemberlistMember memberlist = 2;
+}
+message MemberlistMember {
+    string hostname = 1;
+    MemberStatus.Status status = 2;
+    string lastReceived = 3;
+    string latency = 4;
+}
+message MemberStatus {
+    enum Status {
+        ACTIVE = 0; // everyhting is okay
+        LEAVING = 1; // ??
+        PASSIVE = 2; // okay and waiting to become active
+        UNAVAILABLE = 3; // dead
+        SUSPICIOUS = 4; // potentially dead but given the benefit of the doubt.
+    }
+    Status status = 1;
+}
+message PulseJoin {
+    bool success = 1;
+    string message = 2;
+    string bind_ip = 3;
+    string bind_port = 4;
+    string ip = 5;
+    string port = 6;
+    string hostname = 7;
+    bool replicated = 8;
+    bytes config = 9;
+}
+message PulseLeave {
+    bool success = 1;
+    string message = 2;
+    string hostname = 3;
+    bool replicated = 4;
+}
+message PulseCreate {
+    bool success = 1;
+    string message = 2;
+    string bind_ip = 3;
+    string bind_port = 4;
+}
+// Pulse Group Messages
+message PulseGroupNew {
+    bool success = 1;
+    string message = 2;
+}
+message PulseGroupDelete {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+}
+message PulseGroupAdd {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+    repeated string ips = 4;
+}
+message PulseGroupRemove {
+    bool success = 1;
+    string message = 2;
+    string name = 3;
+    repeated string ips = 4;
+}
+message PulseGroupAssign {
+    bool success = 1;
+    string message = 2;
+    string group = 3;
+    string interface = 4;
+    string node = 5;
+}
+message PulseGroupUnassign {
+    bool success = 1;
+    string message = 2;
+    string group = 3;
+    string interface = 4;
+    string node = 5;
+}
+message PulseStatus {
+    bool success = 1;
+    string message = 2;
+    repeated StatusRow row = 3;
+}
+message StatusRow {
+    string hostname = 1;
+    string ip = 2;
+    string latency = 3;
+    MemberStatus.Status status = 4;
+    string lastReceived = 5;
+}
+message GroupTable {
+    bool success = 1;
+    string message = 2;
+    repeated GroupRow row = 3;
+}
+message GroupRow {
+    string name = 1;
+    repeated string ip = 2;
+    repeated string nodes = 3;
+    repeated string interfaces = 4;
+}
+message PulseConfigSync {
+    bool success = 1;
+    string message = 2;
+    bytes config = 3;
+    bool replicated = 4;
+}
+message PulsePromote {
+    bool success =1;
+    string message = 2;
+    string member = 3;
+}
+message PulseBringIP {
+    bool success = 1;
+    string message = 2;
+    string iface = 3;
+    repeated string ips = 4;
+}
+
+// Services
+service CLI {
+    // Join Cluster
+    rpc Join (PulseJoin) returns (PulseJoin);
+    // Leave Cluster
+    rpc Leave (PulseLeave) returns (PulseLeave);
+    // Create Cluster
+    rpc Create (PulseCreate) returns (PulseCreate);
+    // Create floating ip group
+    rpc NewGroup (PulseGroupNew) returns (PulseGroupNew);
+    // Delete floating ip group
+    rpc DeleteGroup (PulseGroupDelete) returns (PulseGroupDelete);
+    // Add floating IP
+    rpc GroupIPAdd (PulseGroupAdd) returns (PulseGroupAdd);
+    // Remove floating IP
+    rpc GroupIPRemove (PulseGroupRemove) returns (PulseGroupRemove);
+    // Assign a group
+    rpc GroupAssign (PulseGroupAssign) returns (PulseGroupAssign);
+    // Unassign a group
+    rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
+    // Get group list
+    rpc GroupList (GroupTable) returns (GroupTable);
+    // Pulse Status
+    rpc Status (PulseStatus) returns (PulseStatus);
+    // Promote a member
+    rpc Promote (PulsePromote) returns (PulsePromote);
+}
+
+service Server {
+    // Perform GRPC Health Check
+    rpc HealthCheck (PulseHealthCheck) returns (PulseHealthCheck);
+    // Join Cluster
+    rpc Join (PulseJoin) returns (PulseJoin);
+    // Sync Config
+    rpc ConfigSync (PulseConfigSync) returns (PulseConfigSync);
+    // Leave Cluster
+    rpc Leave (PulseLeave) returns (PulseLeave);
+    // Promote
+    rpc Promote (PulsePromote) returns (PulsePromote);
+    // demote
+    rpc MakePassive (PulsePromote) returns (PulsePromote);
+    // Bring up IP
+    rpc BringUpIP (PulseBringIP) returns (PulseBringIP);
+    // Bring down IP
+    rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
+}
+
+

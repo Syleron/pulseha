@@ -1,15 +1,38 @@
 <p align="center">
 <img src="pulse-logo.png" width="250">
 <br><br>
-<a href="https://travis-ci.org/Syleron/Pulse"><img src="https://travis-ci.org/Syleron/Pulse.svg?branch=master"><a/>
-<a href="https://godoc.org/github.com/Syleron/Pulse"><img src="https://godoc.org/github.com/Syleron/Pulse?status.svg"><a/>
+<a href="https://semaphoreci.com/syleron/pulseha"><img src="https://semaphoreci.com/api/v1/syleron/pulseha/branches/dev/shields_badge.svg"><a/>
+<a href="https://godoc.org/github.com/Syleron/PulseHA"><img src="https://godoc.org/github.com/Syleron/PulseHA?status.svg"><a/>
 <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg"><a/>
 </p>
   
-## About
-HA Cluster Daemon
+## Overview
+PulseHA is an active-passive cluster communications manager (CCM) daemon written in GO that provides a means of communication and membership monitoring within a network cluster. By utilising Remote Procedure Calls (RPC) using Google's GRPC, PulseHA provides a reliable method of communication to ensure network high availability.
 
+## Prerequisites
+
+* Go v9 or later
+* Protoc v3.4 or later
+
+## Build & Install
+
+First you will need to clone this repository into `$GOPATH/src/github.com/Syleron/PulseHA` and execute the following command(s):
+
+
+```
+$ sudo make
+...
+```
+
+Lastly, you can install PulseHA by executing the following:
+
+```
+$ sudo make install
+...
+```
+
+Uses Dep for package managment (https://github.com/golang/dep)
 ## License
-Pulse source code is available under the AGPL License which can be found in the LICENSE file.
+PulseHA source code is available under the AGPL License which can be found in the LICENSE file.
 
 Copyright (c) 2017 Andrew Zak <<andrew@pulseha.com>>
