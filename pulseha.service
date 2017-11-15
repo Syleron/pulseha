@@ -4,7 +4,7 @@ Description=PulseHA Daemon
 [Service]
 User=root
 Group=root
-ExecStart=/etc/pulseha/pulse
+ExecStart=/usr/local/sbin/pulse
 
 [Install]
 WantedBy=multi-user.target

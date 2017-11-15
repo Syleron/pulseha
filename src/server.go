@@ -27,7 +27,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	"net"
 	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -61,15 +60,11 @@ func (s *Server) Setup() {
 	}
 	if config.Pulse.TLS {
 		// Get project directory location
-		dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-		if err != nil {
-			log.Fatal(err)
-		}
-		if utils.CreateFolder(dir + "/certs") {
+		if utils.CreateFolder("/etc/pulseha/certs") {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}
-		creds, err := credentials.NewServerTLSFromFile(dir+"/certs/server.crt", dir+"/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/server.crt", "/etc/pulseha/certs/server.key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")
 			os.Exit(1)

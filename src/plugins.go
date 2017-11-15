@@ -18,9 +18,7 @@
 package main
 
 import (
-	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
-	"os"
 	"path"
 	"path/filepath"
 	"plugin"
@@ -83,16 +81,8 @@ func (p pluginType) String() string {
 Define each type of plugin to load
  */
 func (p *Plugins) Setup() {
-	// Get the project directory absolute path
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	// Handle the error
-	if err != nil {
-		panic(err)
-	}
-	// Create plugin folder
-	utils.CreateFolder(dir + "/plugins")
 	// Join any number of file paths into a single path
-	evtGlob := path.Join(dir + "/plugins", "/*.so")
+	evtGlob := path.Join("/usr/local/lib/pulseha/", "/*.so")
 	// Return all the files that match the file name pattern
 	evt, err := filepath.Glob(evtGlob)
 	// handle errors
