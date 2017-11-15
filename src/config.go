@@ -23,7 +23,6 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"os"
-	"path/filepath"
 )
 
 type Config struct {
@@ -90,11 +89,7 @@ func (c *Config) getLocalNode() string {
  */
 func (c *Config) Load() {
 	log.Info("Loading configuration file")
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		log.Fatal(err)
-	}
-	b, err := ioutil.ReadFile(dir + "/config.json")
+	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
 	if err != nil {
 		log.Errorf("Error reading config file: %s", err)
 		os.Exit(1)
@@ -126,13 +121,8 @@ func (c *Config) Save() {
 	c.Validate()
 	// Convert struct back to JSON format
 	configJSON, _ := json.MarshalIndent(c, "", "    ")
-	// Get project directory location
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		log.Fatal(err)
-	}
 	// Save back to file
-	err = ioutil.WriteFile(dir+"/config.json", configJSON, 0644)
+	err := ioutil.WriteFile("/etc/pulseha/config.json", configJSON, 0644)
 	// Check for errors
 	if err != nil {
 		log.Error("Unable to save config.json. Does it exist?")

@@ -21,19 +21,14 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
 	"os"
-	"path/filepath"
 )
 
 /**
  * Generate new Cert/Key pair. No Cert Authority.
  */
 func GenOpenSSL() {
-	// Get project directory location
-	dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
-	if err != nil {
-		log.Fatal(err)
-	}
-	_, err = utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/server.crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
+	dir := "/etc/pulseha/"
+	_, err := utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/server.crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
 
 	if err != nil {
 		log.Fatal("Failed to create private server key.")
