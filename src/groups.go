@@ -119,7 +119,10 @@ func GroupAssign(groupName, node, iface string) error {
 	}
 	if netUtils.InterfaceExist(iface) {
 		if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
+			// Add the group
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
+			// make the group active
+			makeGroupActive(iface, groupName)
 		} else {
 			log.Warning(groupName + " already exists in node " + node + ".. skipping.")
 		}
@@ -141,6 +144,9 @@ func GroupUnassign(groupName, node, iface string) error {
 	}
 	if netUtils.InterfaceExist(iface) {
 		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
+			// make the group passive before removing it
+			makeGroupPassive(iface, groupName)
+			// Remove it
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
 		} else {
 			log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
