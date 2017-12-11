@@ -33,7 +33,7 @@ import (
  * NOTE: This function assumes the OS is LINUX and has "arping" installed.
  */
 func SendGARP(iface, ip string) bool {
-	if !ifaceExist(iface) {
+	if !InterfaceExist(iface) {
 		log.Error("Unable to GARP as the network interface does not exist! Closing..")
 		os.Exit(1)
 	}
@@ -63,24 +63,10 @@ func netInterfaceStatus(iface string) bool {
 }
 
 /**
- * Local function to see if an interface with name iface exists
- */
-func ifaceExist(iface string) bool {
-	ifaces, _ := net.Interfaces()
-	// TODO: handle err
-	for _, i := range ifaces {
-		if i.Name == iface {
-			return true
-		}
-	}
-	return false
-}
-
-/**
  * This function is to bring up a network interface
  */
 func BringIPup(iface, ip string) (bool, error) {
-	if !ifaceExist(iface) {
+	if !InterfaceExist(iface) {
 		return false, errors.New("Unable to bring IP up as the network interface does not exist")
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
@@ -88,7 +74,6 @@ func BringIPup(iface, ip string) (bool, error) {
 	if err != nil {
 		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
 	}
-
 	if output == "" {
 		return true, nil
 	} else {
@@ -100,7 +85,7 @@ func BringIPup(iface, ip string) (bool, error) {
  * This function is to bring down a network interface
  */
 func BringIPdown(iface, ip string) (bool, error) {
-	if !ifaceExist(iface) {
+	if !InterfaceExist(iface) {
 		return false, errors.New("Unable to bring IP down as the network interface does not exist")
 	}
 	output, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
@@ -176,6 +161,7 @@ func GetInterfaceNames() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		log.Errorf("Error retrieving network interfaces: ", err)
+		return nil
 	}
 	var interfaceNames []string
 	for _, iface := range ifaces {
@@ -191,6 +177,7 @@ func InterfaceExist(name string) bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
 		log.Errorf("Error retrieving network interfaces: ", err)
+		return false
 	}
 	for _, iface := range ifaces {
 		if iface.Name == name {

@@ -52,7 +52,7 @@ func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
-	bindAddr := cmdFlags.String("bind-addr", "127.0.0.1:9443", "Bind address for local Pulse daemon")
+	bindAddr := cmdFlags.String("bind-addr", "127.0.0.1:49152", "Bind address for local Pulse daemon")
 
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1

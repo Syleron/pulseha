@@ -50,7 +50,7 @@ func (c *StatusCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("status", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
-	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
+	connection, err := grpc.Dial("127.0.0.1:49152", grpc.WithInsecure())
 	if err != nil {
 		c.Ui.Error("GRPC client connection error")
 		c.Ui.Error(err.Error())

@@ -5,7 +5,7 @@
     "floating_ip_groups": {},
     "nodes": {},
     "logging": {
-        "level": "debug",
+        "level": "info",
         "to_logfile": false,
         "logfile": "/var/log/pulseha.log"
     }

@@ -78,7 +78,7 @@ func (c *CreateCommand) Run(args []string) int {
 		return 1
 	}
 
-	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
+	connection, err := grpc.Dial("127.0.0.1:49152", grpc.WithInsecure())
 
 	if err != nil {
 		c.Ui.Error("GRPC client connection error")
