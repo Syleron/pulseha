@@ -139,7 +139,7 @@ func GroupUnassign(groupName, node, iface string) error {
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
-	if !netUtils.InterfaceExist(iface) {
+	if netUtils.InterfaceExist(iface) {
 		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
 		} else {

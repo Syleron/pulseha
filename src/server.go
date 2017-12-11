@@ -56,7 +56,7 @@ func (s *Server) Setup() {
 	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
-		os.Exit(1)
+		os.Exit(0)
 	}
 	if config.Pulse.TLS {
 		// Get project directory location
