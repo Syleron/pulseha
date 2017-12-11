@@ -460,8 +460,8 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 Setup pulse cli type
 */
 func (s *CLIServer) Setup() {
-	log.Info("CLI server initialised on 127.0.0.1:9443")
-	lis, err := net.Listen("tcp", "127.0.0.1:9443")
+	log.Info("CLI server initialised on 127.0.0.1:49152")
+	lis, err := net.Listen("tcp", "127.0.0.1:49152")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
 	}
