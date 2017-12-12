@@ -86,7 +86,7 @@ func (c *GroupsCommand) Run(args []string) int {
 
 	switch cmds[0] {
 	case "new":
-		return c.New(client)
+		return c.New(groupName, client)
 	case "delete":
 		return c.Delete(groupName, client)
 	case "add":
@@ -152,8 +152,10 @@ func (c *GroupsCommand) drawGroupsTable(client proto.CLIClient) {
 /**
  *
  */
-func (c *GroupsCommand) New(client proto.CLIClient) int {
-	r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{})
+func (c *GroupsCommand) New(groupName *string, client proto.CLIClient) int {
+	r, err := client.NewGroup(context.Background(), &proto.PulseGroupNew{
+		Name: *groupName,
+	})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
 		c.Ui.Output(err.Error())

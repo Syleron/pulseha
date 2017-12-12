@@ -67,6 +67,7 @@ message PulseCreate {
 message PulseGroupNew {
     bool success = 1;
     string message = 2;
+    string name = 3;
 }
 message PulseGroupDelete {
     bool success = 1;

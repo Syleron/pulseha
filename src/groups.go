@@ -14,13 +14,18 @@ import (
  * @return string - group name
  * @return error
  */
-func GroupNew() (string, error) {
+func GroupNew(groupName string) (string, error) {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if gconf.ClusterCheck() {
-		groupName := GenGroupName()
-		gconf.Groups[groupName] = []string{}
-		return groupName, nil
+		var name string
+		if groupName != "" {
+			name = groupName
+		} else {
+			name = GenGroupName()
+		}
+		gconf.Groups[name] = []string{}
+		return name, nil
 	} else {
 		return "", errors.New("groups can only be created in a configured cluster")
 	}
