@@ -223,7 +223,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 	log.Debug("CLIServer:NewGroup() - Create floating IP group")
 	s.Lock()
 	defer s.Unlock()
-	groupName, err := GroupNew()
+	groupName, err := GroupNew(in.Name)
 	if err != nil {
 		return &proto.PulseGroupNew{
 			Success: false,

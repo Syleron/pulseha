@@ -14,13 +14,18 @@ import (
  * @return string - group name
  * @return error
  */
-func GroupNew() (string, error) {
+func GroupNew(groupName string) (string, error) {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if gconf.ClusterCheck() {
-		groupName := GenGroupName()
-		gconf.Groups[groupName] = []string{}
-		return groupName, nil
+		var name string
+		if groupName != "" {
+			name = groupName
+		} else {
+			name = GenGroupName()
+		}
+		gconf.Groups[name] = []string{}
+		return name, nil
 	} else {
 		return "", errors.New("groups can only be created in a configured cluster")
 	}
@@ -119,7 +124,10 @@ func GroupAssign(groupName, node, iface string) error {
 	}
 	if netUtils.InterfaceExist(iface) {
 		if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
+			// Add the group
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
+			// make the group active
+			makeGroupActive(iface, groupName)
 		} else {
 			log.Warning(groupName + " already exists in node " + node + ".. skipping.")
 		}
@@ -141,6 +149,9 @@ func GroupUnassign(groupName, node, iface string) error {
 	}
 	if netUtils.InterfaceExist(iface) {
 		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
+			// make the group passive before removing it
+			makeGroupPassive(iface, groupName)
+			// Remove it
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
 		} else {
 			log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
