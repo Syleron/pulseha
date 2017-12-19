@@ -28,6 +28,7 @@ import (
 	"net"
 	"sync"
 	"time"
+	"os"
 )
 
 /**
@@ -464,6 +465,8 @@ func (s *CLIServer) Setup() {
 	lis, err := net.Listen("tcp", "127.0.0.1:49152")
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
+		// TODO: Note: We exit because the service is useless without the CLI server running
+		os.Exit(0)
 	}
 	grpcServer := grpc.NewServer()
 	proto.RegisterCLIServer(grpcServer, s)

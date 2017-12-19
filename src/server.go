@@ -53,10 +53,12 @@ func (s *Server) Setup() {
 		return
 	}
 	var err error
+	// Listen
 	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
 	if err != nil {
 		log.Errorf("Failed to listen: %s", err)
-		os.Exit(0)
+		// TODO: Note: Should we exit here?
+		return
 	}
 	if config.Pulse.TLS {
 		// Get project directory location
@@ -85,8 +87,12 @@ func (s *Server) Setup() {
  */
 func (s *Server) shutdown() {
 	log.Debug("Shutting down server")
-	s.Server.GracefulStop()
-	s.Listener.Close()
+	if s.Server != nil {
+		s.Server.GracefulStop()
+	}
+	if s.Listener != nil {
+		s.Listener.Close()
+	}
 }
 
 /**
