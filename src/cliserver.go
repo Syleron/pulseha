@@ -181,7 +181,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 }
 
 /**
-Note: This will probably need to be replicated..
+Create new PulseHA cluster
 */
 func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
 	log.Debug("CLIServer:Create() - Create Pulse cluster")
@@ -218,7 +218,6 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 
 /**
 Add a new floating IP group
-Note: This will probably need to be replicated..
 */
 func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
 	log.Debug("CLIServer:NewGroup() - Create floating IP group")
@@ -262,19 +261,13 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 }
 
 /**
-Note: This will probably need to be replicated..
+Add IP to group
 */
 func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
 	log.Debug("CLIServer:GroupIPAdd() - Add IP addresses to group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
-	_, activeMember := s.Memberlist.getActiveMember()
-	if activeMember == nil {
-		return &proto.PulseGroupAdd{
-			Success: false,
-			Message: "Unable to add IP(s) to group as there no active node in the cluster.",
-		}, nil
-	}
+	log.Info("test")
 	err := GroupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupAdd{
@@ -302,7 +295,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 }
 
 /**
-Note: This will probably need to be replicated..
+Remove IP from group
 */
 func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
 	log.Debug("CLIServer:GroupIPRemove() - Removing IPs from group " + in.Name)
@@ -348,7 +341,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 }
 
 /**
-Note: This will probably need to be replicated..
+Assign group to interface
 */
 func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
 	log.Debug("CLIServer:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
@@ -370,7 +363,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 }
 
 /**
-Note: This will probably need to be replicated..
+Unassign group from interface
 */
 func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
 	log.Debug("CLIServer:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
@@ -392,7 +385,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 }
 
 /**
-
+Show all groups
  */
 func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto.GroupTable, error) {
 	log.Debug("CLIServer:GroupList() - Getting groups and their IPs")

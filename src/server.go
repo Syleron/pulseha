@@ -30,6 +30,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"runtime"
+	"runtime/debug"
 )
 
 /**
@@ -56,7 +58,9 @@ func (s *Server) Setup() {
 	// Listen
 	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
 	if err != nil {
-		log.Errorf("Failed to listen: %s", err)
+		debug.PrintStack()
+		panic(err)
+		//log.Errorf("Failed to listen: %s", err)
 		// TODO: Note: Should we exit here?
 		return
 	}
