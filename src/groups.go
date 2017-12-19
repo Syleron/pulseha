@@ -65,12 +65,12 @@ func GroupIpAdd(groupName string, ips []string) error {
 	if !gconf.ClusterCheck() {
 		return errors.New("action can only be completed in a configured cluster")
 	}
-	if !GroupExist(groupName) {
-		return errors.New("group does not exist")
-	}
 	_, activeMember := pulse.Server.Memberlist.getActiveMember()
 	if activeMember == nil {
 		return errors.New("unable to add IP(s) to group as there no active node in the cluster")
+	}
+	if !GroupExist(groupName) {
+		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
 		if err := utils.ValidIPAddress(ip); err == nil {

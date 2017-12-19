@@ -30,7 +30,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	"runtime"
 	"runtime/debug"
 )
 
