@@ -24,6 +24,7 @@ import (
 	"github.com/mitchellh/cli"
 	"google.golang.org/grpc"
 	"strings"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type CreateCommand struct {
@@ -43,7 +44,7 @@ Options:
 }
 
 /**
- *
+Run the CLI command
  */
 func (c *CreateCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
@@ -54,26 +55,31 @@ func (c *CreateCommand) Run(args []string) int {
 		return 1
 	}
 
-	addr := cmdFlags.Args()
+	cmds := cmdFlags.Args()
 
 	// If no action is provided then just list our current config
-	if len(addr) == 0 {
-		c.Ui.Error("Please specify an action\n")
+	if len(cmds) < 2 {
+		c.Ui.Error("Please specify an address and port for PulseHA to listen on\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
-	// If we have the default.. which we don't want.. error out.
-	if addr[0] == "127.0.0.1" {
-		c.Ui.Error("Please specify a bind address.\n")
+	// Define variables
+	bindIP := cmds[0]
+	bindPort := cmds[1]
+
+	// IP validation
+	if utils.IsIPv6(bindIP) {
+		bindIP = utils.SanitizeIPv6(bindIP)
+	} else if !utils.IsIPv4(bindIP) {
+		c.Ui.Error("Please specify a valid join address.\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
-	bindAddrString := strings.Split(addr[0], ":")
-
-	if len(bindAddrString) < 2 {
-		c.Ui.Error("Please provide an IP and Port for PulseHA to bind on")
+	// Port validation
+	if !utils.IsPort(bindPort) {
+		c.Ui.Error("Please specify a valid port 0-65536.\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
@@ -91,8 +97,8 @@ func (c *CreateCommand) Run(args []string) int {
 	client := proto.NewCLIClient(connection)
 
 	r, err := client.Create(context.Background(), &proto.PulseCreate{
-		BindIp:   bindAddrString[0],
-		BindPort: bindAddrString[1],
+		BindIp:   bindIP,
+		BindPort: bindPort,
 	})
 
 	if err != nil {
@@ -113,5 +119,5 @@ func (c *CreateCommand) Run(args []string) int {
  *
  */
 func (c *CreateCommand) Synopsis() string {
-	return "Tell Pulse to create new HA cluster"
+	return "Tell PulseHA to create new HA cluster"
 }

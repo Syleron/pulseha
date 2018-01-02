@@ -40,7 +40,8 @@ Usage: pulseha join [options] address ...
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
-  -bind-addr Pulse daemon bind address and port
+  -bind-ip pulse daemon bind address
+  -bind-port pulse daemon bind  port
 `
 	return strings.TrimSpace(helpText)
 }
@@ -52,54 +53,96 @@ func (c *JoinCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("join", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
-	bindAddr := cmdFlags.String("bind-addr", "127.0.0.1:49152", "Bind address for local Pulse daemon")
+	// Set the acceptable cmd flags
+	bindIP := cmdFlags.String("bind-ip", "127.0.0.1", "Bind IP address for local Pulse daemon")
+	bindPort := cmdFlags.String("bind-port", "1234", "Bind port for local Pulse daemon")
 
+	// Parse and handle error
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
-	addr := cmdFlags.Args()
+	// Get the command params
+	cmds := cmdFlags.Args()
 
-	if len(addr) == 0 {
-		c.Ui.Error("Please specify an address to join.")
+	// Make sure that the join address and port is set
+	if len(cmds) < 2 {
+		c.Ui.Error("Please specify an address and port to join.")
 		c.Ui.Error("")
 		c.Ui.Error(c.Help())
 		return 1
 	}
 
 	// If we have the default.. which we don't want.. error out.
-	if *bindAddr == "127.0.0.1:9443" {
-		c.Ui.Error("Please specify a bind address.\n")
+	if *bindIP == "127.0.0.1" {
+		c.Ui.Error("Please specify a bind IP address.\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
-	bindIP, bindPort, _ := utils.SplitIpPort(*bindAddr)
+	// If we have the default.. which we don't want.. error out.
+	if *bindPort == "1234" {
+		c.Ui.Error("Please specify a bind port.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
 
-	connection, err := grpc.Dial("127.0.0.1:9443", grpc.WithInsecure())
+	// IP validation
+	if utils.IsIPv6(*bindIP) {
+		cleanIP := utils.SanitizeIPv6(*bindIP)
+		bindIP = &cleanIP
+	} else if !utils.IsIPv4(*bindIP) {
+		c.Ui.Error("Please specify a valid join address.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
 
+	// Port validation
+	if !utils.IsPort(*bindPort) {
+		c.Ui.Error("Please specify a valid port 0-65536.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
+	// validate the join address
+	joinIP := cmds[0]
+	joinPort := cmds[1]
+
+	if utils.IsIPv6(joinIP) {
+		joinIP = utils.SanitizeIPv6(joinIP)
+	} else if !utils.IsIPv4(joinIP) {
+		c.Ui.Error("Please specify a valid join address.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
+	// Validate join Port
+	if !utils.IsPort(joinPort) {
+		c.Ui.Error("Please specify a valid join port 0-65536.\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
+	// setup a connection
+	connection, err := grpc.Dial("127.0.0.1:49152", grpc.WithInsecure())
+
+	// handle the error
 	if err != nil {
 		c.Ui.Error("GRPC client connection error. Is the PulseHA service running?")
 		c.Ui.Error(err.Error())
 	}
 
+	// defer the close
 	defer connection.Close()
 
+	// setup new RPC client
 	client := proto.NewCLIClient(connection)
 
-	bindAddrString := strings.Split(addr[0], ":")
-
-	if len(bindAddrString) < 2 {
-		c.Ui.Error("Please provide an IP:Port")
-		c.Ui.Output(c.Help())
-		return 1
-	}
-
 	r, err := client.Join(context.Background(), &proto.PulseJoin{
-		Ip:       bindAddrString[0],
-		Port:     bindAddrString[1],
-		BindIp:   bindIP,
-		BindPort: bindPort,
+		Ip:       joinIP,
+		Port:     joinPort,
+		BindIp:   *bindIP,
+		BindPort: *bindPort,
 	})
 
 	if err != nil {
@@ -120,5 +163,5 @@ func (c *JoinCommand) Run(args []string) int {
  *
  */
 func (c *JoinCommand) Synopsis() string {
-	return "Tell Pulse to join a cluster"
+	return "Tell PulseHA to join a cluster"
 }

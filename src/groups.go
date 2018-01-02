@@ -9,36 +9,33 @@ import (
 )
 
 /**
- * Generate a new group in memory.
- *
- * @return string - group name
- * @return error
+Generate a new group in memory.
  */
 func GroupNew(groupName string) (string, error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if gconf.ClusterCheck() {
-		var name string
-		if groupName != "" {
-			name = groupName
-		} else {
-			name = GenGroupName()
-		}
-		gconf.Groups[name] = []string{}
-		return name, nil
-	} else {
-		return "", errors.New("groups can only be created in a configured cluster")
+	if !gconf.ClusterCheck() {
+		return "", errors.New("action can only be completed in a configured cluster")
 	}
+	var name string
+	if groupName != "" {
+		name = groupName
+	} else {
+		name = GenGroupName()
+	}
+	gconf.Groups[name] = []string{}
+	return name, nil
 }
 
 /**
- * Remove group from memory
- *
- * @return error
+Remove group from memory
  */
 func GroupDelete(groupName string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
+	if !gconf.ClusterCheck() {
+		return errors.New("action can only be completed in a configured cluster")
+	}
 	if GroupExist(groupName) {
 		if !NodeAssignedToInterface(groupName) {
 			delete(gconf.Groups, groupName)
@@ -51,7 +48,7 @@ func GroupDelete(groupName string) error {
 }
 
 /**
- * Clear out all local Groups
+Clear out all local Groups
  */
 func GroupClearLocal() {
 	gconf.Lock()
@@ -60,26 +57,28 @@ func GroupClearLocal() {
 }
 
 /**
- * Add floating IP to group
- *
- * @return error
+Add floating IP to group
  */
 func GroupIpAdd(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
+	if !gconf.ClusterCheck() {
+		return errors.New("action can only be completed in a configured cluster")
+	}
+	_, activeMember := pulse.Server.Memberlist.getActiveMember()
+	if activeMember == nil {
+		return errors.New("unable to add IP(s) to group as there no active node in the cluster")
+	}
 	if !GroupExist(groupName) {
 		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
 		if err := utils.ValidIPAddress(ip); err == nil {
-			if len(gconf.Groups[groupName]) > 0 {
-				if exists, _ := GroupIPExist(groupName, ip); !exists {
-					gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
-				} else {
-					return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
-				}
-			} else {
+			// Check to see if the IP exists in any of the groups
+			if !GroupIpExistAll(ip) {
 				gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
+			} else {
+				return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
 			}
 		} else {
 			return err
@@ -89,13 +88,14 @@ func GroupIpAdd(groupName string, ips []string) error {
 }
 
 /**
- * Remove floating IP from group
- *
- * @return error
+Remove floating IP from group
  */
 func GroupIpRemove(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
+	if !gconf.ClusterCheck() {
+		return errors.New("action can only be completed in a configured cluster")
+	}
 	if !GroupExist(groupName) {
 		return errors.New("group does not exist")
 	}
@@ -112,13 +112,14 @@ func GroupIpRemove(groupName string, ips []string) error {
 }
 
 /**
- * Assign a group to a node's interface
- *
- * @return error
+Assign a group to a node's interface
  */
 func GroupAssign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
+	if !gconf.ClusterCheck() {
+		return errors.New("action can only be completed in a configured cluster")
+	}
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
@@ -137,13 +138,14 @@ func GroupAssign(groupName, node, iface string) error {
 }
 
 /**
- * Unassign a group from a node's interface
- *
- * @return error
+Unassign a group from a node's interface
  */
 func GroupUnassign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
+	if !gconf.ClusterCheck() {
+		return errors.New("action can only be completed in a configured cluster")
+	}
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
@@ -162,7 +164,7 @@ func GroupUnassign(groupName, node, iface string) error {
 }
 
 /**
- * Generates an available IP floating group name.
+Generates an available IP floating group name.
  */
 func GenGroupName() string {
 	config := gconf.GetConfig()
@@ -177,7 +179,7 @@ func GenGroupName() string {
 }
 
 /**
- * Checks to see if a floating IP group already exists
+Checks to see if a floating IP group already exists
  */
 func GroupExist(name string) bool {
 	config := gconf.GetConfig()
@@ -188,8 +190,7 @@ func GroupExist(name string) bool {
 }
 
 /**
- * Checks to see if a floating IP already exists inside of a floating ip group
- * Returns bool - exists/not & int - slice index
+Checks to see if a floating IP already exists inside of a floating ip group
  */
 func GroupIPExist(name string, ip string) (bool, int) {
 	config := gconf.GetConfig()
@@ -202,7 +203,19 @@ func GroupIPExist(name string, ip string) (bool, int) {
 }
 
 /**
- * function to get the nodes and interfaces that relate to the specified node
+Checks to see if a floating IP already exists in any of the floating IP groups
+ */
+func GroupIpExistAll(ip string) (bool) {
+	config := gconf.GetConfig()
+	for index, cip := range config.Groups {
+		log.Info(cip)
+		log.Info(index)
+	}
+	return true
+}
+
+/**
+function to get the nodes and interfaces that relate to the specified node
  */
 func getGroupNodes(group string) ([]string, []string) {
 	var hosts []string
@@ -227,7 +240,7 @@ func getGroupNodes(group string) ([]string, []string) {
 }
 
 /**
- * Make a group of IPs active
+Make a group of IPs active
  */
 func makeGroupActive(iface string, groupName string) {
 	//log.Infof("Bringing up IPs on Interface: %s, Group: %s", iface, groupName)

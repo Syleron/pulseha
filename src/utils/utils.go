@@ -27,10 +27,11 @@ import (
 	"reflect"
 	"strings"
 	"time"
+	"strconv"
 )
 
 /**
- * Load a specific file and return byte code
+Load a specific file and return byte code
  **/
 func LoadFile(file string) []byte {
 	c, err := ioutil.ReadFile(file)
@@ -45,7 +46,7 @@ func LoadFile(file string) []byte {
 }
 
 /**
- * Execute system command.
+Execute system command.
  */
 func Execute(cmd string, args ...string) (string, error) {
 	command := exec.Command(cmd, args...)
@@ -62,9 +63,8 @@ func Execute(cmd string, args ...string) (string, error) {
 }
 
 /**
- * Function that validates an IPv4 and IPv6 address.
- *
- * @return bool
+Function that validates an IPv4 and IPv6 address.
+TODO:NOTE: THIS WILL NOTE WORK WITH IPv6
  */
 func ValidIPAddress(ipAddress string) error {
 	ip, _, err := net.ParseCIDR(ipAddress)
@@ -79,7 +79,7 @@ func ValidIPAddress(ipAddress string) error {
 }
 
 /**
- * Function to schedule the execution every x time as time.Duration.
+Function to schedule the execution every x time as time.Duration.
  */
 func Scheduler(method func() bool, delay time.Duration) {
 	for _ = range time.Tick(delay) {
@@ -91,8 +91,8 @@ func Scheduler(method func() bool, delay time.Duration) {
 }
 
 /**
- * Create folder if it doesn't already exist!
- * Returns true or false depending on whether the folder was created or not.
+Create folder if it doesn't already exist!
+Returns true or false depending on whether the folder was created or not.
  */
 func CreateFolder(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -103,7 +103,7 @@ func CreateFolder(path string) bool {
 }
 
 /**
- * Check if a folder exists.
+Check if a folder exists.
  */
 func CheckFolderExist(path string) bool {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
@@ -113,8 +113,8 @@ func CheckFolderExist(path string) bool {
 }
 
 /**
- * Get local hostname
- * Note: This may break with FQDs
+Get local hostname
+TODO: Note: This may break with FQDs
  */
 func GetHostname() string {
 	output, err := Execute("hostname")
@@ -127,15 +127,14 @@ func GetHostname() string {
 }
 
 /**
- * Function to return an IP and Port from a single ip:port string
+Function to return an IP and Port from a single ip:port string
+TODO:Note: Works only with IPv4
  */
 func SplitIpPort(ipPort string) (string, string, error) {
 	IPslice := strings.Split(ipPort, ":")
-
 	if len(IPslice) < 2 {
 		return "", "", errors.New("Invalid IP:Port string. Unable to split.")
 	}
-
 	return IPslice[0], IPslice[1], nil
 }
 
@@ -157,4 +156,74 @@ func in_array(val interface{}, array interface{}) (exists bool, index int) {
 		}
 	}
 	return
+}
+
+/**
+Checks to see if the address contains a colon.
+TODO: Note: This will not work with ip:port combinations
+ */
+func IsIPv6(address string) bool {
+	leftBrace := strings.Replace(address, "[", "", -1)
+	cleanIP := strings.Replace(leftBrace, "]", "", -1)
+	ip := net.ParseIP(cleanIP)
+	return ip != nil && strings.Contains(cleanIP, ":")
+}
+
+/**
+Checks to see if the address is an IPv4 address
+ */
+func IsIPv4(address string) bool {
+	ip := net.ParseIP(address)
+	return ip != nil && ip.To4() != nil
+}
+
+/**
+Makes sure an IPv6 address is properly structured
+ */
+func SanitizeIPv6(address string) string {
+	leftBrace := strings.Replace(address, "[", "", -1)
+	cleanIP := strings.Replace(leftBrace, "]", "", -1)
+	cleanIP = "[" + cleanIP + "]"
+	return cleanIP
+}
+
+/**
+Checks to see if a port is valid
+ */
+func IsPort(port string) bool {
+	if i, err := strconv.Atoi(port); err == nil && i > 0 && i < 65536 {
+		return true
+	}
+	return false
+}
+
+/**
+Validates whether an address is a CIDR address or not
+TODO: Note: Should work with both IPv4 and IPv6
+ */
+func IsCIDR(cidr string) bool {
+	_, _, err := net.ParseCIDR(cidr)
+	return err == nil
+}
+
+/**
+
+ */
+func GetCIDR(cidr string) (net.IP, *net.IPNet) {
+	ip, mask, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, nil
+	}
+	return ip, mask
+}
+
+/**
+hasPort is given a string of the form "host", "host:port", "ipv6::address",
+or "[ipv6::address]:port", and returns true if the string includes a port.
+ */
+func hasPort(s string) bool {
+	if strings.LastIndex(s, "[") == 0 {
+		return strings.LastIndex(s, ":") > strings.LastIndex(s, "]")
+	}
+	return strings.Count(s, ":") == 1
 }
