@@ -64,16 +64,16 @@ func Execute(cmd string, args ...string) (string, error) {
 
 /**
 Function that validates an IPv4 and IPv6 address.
-TODO:NOTE: THIS WILL NOTE WORK WITH IPv6
  */
 func ValidIPAddress(ipAddress string) error {
 	ip, _, err := net.ParseCIDR(ipAddress)
 	if err != nil {
 		return errors.New("invalid CDIR address specified")
 	}
-	testInput := net.ParseIP(ip.String())
-	if testInput.To4() == nil {
-		return errors.New("invalid IP address")
+	if !IsIPv6(ip.String()) {
+		if !IsIPv4(ip.String()) {
+			return errors.New("invalid IP address")
+		}
 	}
 	return nil
 }
