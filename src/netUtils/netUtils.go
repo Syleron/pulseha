@@ -26,11 +26,6 @@ import (
 	"strings"
 	log "github.com/Sirupsen/logrus"
 	"errors"
-	"golang.org/x/net/ipv6"
-	"golang.org/x/net/icmp"
-	"flag"
-	"fmt"
-	"syscall"
 )
 
 type ICMPv6MessageHeader struct {
