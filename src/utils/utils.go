@@ -216,3 +216,14 @@ func GetCIDR(cidr string) (net.IP, *net.IPNet) {
 	}
 	return ip, mask
 }
+
+/**
+hasPort is given a string of the form "host", "host:port", "ipv6::address",
+or "[ipv6::address]:port", and returns true if the string includes a port.
+ */
+func hasPort(s string) bool {
+	if strings.LastIndex(s, "[") == 0 {
+		return strings.LastIndex(s, ":") > strings.LastIndex(s, "]")
+	}
+	return strings.Count(s, ":") == 1
+}

@@ -26,11 +26,31 @@ import (
 	"strings"
 	log "github.com/Sirupsen/logrus"
 	"errors"
+	"golang.org/x/net/ipv6"
+	"golang.org/x/net/icmp"
+	"flag"
+	"fmt"
+	"syscall"
 )
 
+type ICMPv6MessageHeader struct {
+	Type     byte
+	Code     byte
+	Checksum uint16
+}
+
+type ICMPv6NeighborSolicitation struct {
+	Header            ICMPv6MessageHeader
+	Reserved          uint32
+	TargetAddress     [16]byte
+	OptionType        byte
+	OptionLength      byte
+	SourceLinkAddress [6]byte
+}
+
 /**
- * Send Gratuitous ARP to automagically tell the router who has the new floating IP
- * NOTE: This function assumes the OS is LINUX and has "arping" installed.
+Send Gratuitous ARP to automagically tell the router who has the new floating IP
+NOTE: This function assumes the OS is LINUX and has "arping" installed.
  */
 func SendGARP(iface, ip string) bool {
 	if !InterfaceExist(iface) {
@@ -50,8 +70,8 @@ func SendGARP(iface, ip string) bool {
 }
 
 /**
- * Checks to see what status a network interface is currently.
- * Possible responses are either up or down.
+Checks to see what status a network interface is currently.
+Possible responses are either up or down.
  */
 func netInterfaceStatus(iface string) bool {
 	_, err := utils.Execute("cat", "/sys/class/net/"+iface+"/operstate")
@@ -63,7 +83,7 @@ func netInterfaceStatus(iface string) bool {
 }
 
 /**
- * This function is to bring up a network interface
+This function is to bring up a network interface
  */
 func BringIPup(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
@@ -82,7 +102,7 @@ func BringIPup(iface, ip string) (bool, error) {
 }
 
 /**
- * This function is to bring down a network interface
+This function is to bring down a network interface
  */
 func BringIPdown(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
@@ -101,8 +121,8 @@ func BringIPdown(iface, ip string) (bool, error) {
 }
 
 /**
- * Perform a curl request to a web host.
- * This only returns a boolean based off the http status code received by the request.
+Perform a curl request to a web host.
+This only returns a boolean based off the http status code received by the request.
  */
 func Curl(httpRequestURL string) bool {
 	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
@@ -118,9 +138,9 @@ func Curl(httpRequestURL string) bool {
 }
 
 /**
- *
+
  */
-func ICMPIPv4(Ipv4Addr string) bool {
+func ICMPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
 	if err := utils.ValidIPAddress(Ipv4Addr); err != nil {
 		//log.Error("Invalid IPv4 address for ICMP check..")
@@ -144,7 +164,7 @@ func ICMPIPv4(Ipv4Addr string) bool {
 }
 
 /**
- * Function to perform an arp scan on the network. This will allow us to see which IP's are available.
+Function to perform an arp scan on the network. This will allow us to see which IP's are available.
  */
 func ArpScan(addrWSubnet string) string {
 	output, err := utils.Execute("arp-scan", "arp-scan", addrWSubnet)
@@ -155,7 +175,18 @@ func ArpScan(addrWSubnet string) string {
 }
 
 /**
- * Return network interface names
+Send the eq. of IPv4 arping with IPv6
+ */
+func IPv6NDP(ipv6Iface string) string {
+	output, err := utils.Execute("ndptool", "-t", "na", "-U", "-i", ipv6Iface)
+	if err != nil {
+		return err.Error()
+	}
+	return output
+}
+
+/**
+Return network interface names
  */
 func GetInterfaceNames() []string {
 	ifaces, err := net.Interfaces()
@@ -171,7 +202,7 @@ func GetInterfaceNames() []string {
 }
 
 /**
- * Check if an interface exists on the local node
+Check if an interface exists on the local node
  */
 func InterfaceExist(name string) bool {
 	ifaces, err := net.Interfaces()
