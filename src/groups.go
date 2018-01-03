@@ -207,11 +207,14 @@ Checks to see if a floating IP already exists in any of the floating IP groups
  */
 func GroupIpExistAll(ip string) (bool) {
 	config := gconf.GetConfig()
-	for index, cip := range config.Groups {
-		log.Info(cip)
-		log.Info(index)
+	for _, cip := range config.Groups {
+		for _, dip := range cip {
+			if ip == dip {
+				return true
+			}
+		}
 	}
-	return true
+	return false
 }
 
 /**
