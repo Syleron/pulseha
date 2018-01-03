@@ -104,7 +104,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 	var err error
 	config := gconf.GetConfig()
 	if config.Pulse.TLS {
-		creds, err := credentials.NewClientTLSFromFile("./certs/"+hostname+".crt", "")
+		creds, err := credentials.NewClientTLSFromFile("/etc/pulseha/certs/"+hostname+".crt", "")
 		if err != nil {
 			log.Errorf("Could not load TLS cert: %s", err.Error())
 			return errors.New("could not load node TLS cert: " + hostname + ".crt")

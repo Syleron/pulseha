@@ -69,7 +69,7 @@ func (s *Server) Setup() {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}
-		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/server.crt", "/etc/pulseha/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/server.key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")
 			os.Exit(1)

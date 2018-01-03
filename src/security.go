@@ -28,7 +28,7 @@ import (
  */
 func GenOpenSSL() {
 	dir := "/etc/pulseha/"
-	_, err := utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/server.crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
+	_, err := utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/server.key", "-out", dir+"/certs/" + utils.GetHostname() + ".crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
 
 	if err != nil {
 		log.Fatal("Failed to create private server key.")
