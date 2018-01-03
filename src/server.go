@@ -54,8 +54,11 @@ func (s *Server) Setup() {
 		return
 	}
 	var err error
+	var bindIP string
+	bindIP = utils.FormatIPv6(config.LocalNode().IP)
 	// Listen
-	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
+	log.Info(bindIP)
+	s.Listener, err = net.Listen("tcp", bindIP +":" + config.LocalNode().Port)
 	if err != nil {
 		debug.PrintStack()
 		panic(err)
