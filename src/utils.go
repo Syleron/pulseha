@@ -12,7 +12,7 @@ import (
 Networking - Bring up the groups on the current node
 */
 func makeMemberActive() error {
-	log.Debug("Utils:MakeMemberActive() Local node now passive")
+	log.Debug("Utils:MakeMemberActive() Local node now active")
 	configCopy := gconf.GetConfig()
 	for name, node := range configCopy.Nodes {
 		if name == gconf.getLocalNode() {
