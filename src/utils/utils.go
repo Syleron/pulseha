@@ -183,7 +183,25 @@ Makes sure an IPv6 address is properly structured
 func SanitizeIPv6(address string) string {
 	leftBrace := strings.Replace(address, "[", "", -1)
 	cleanIP := strings.Replace(leftBrace, "]", "", -1)
-	cleanIP = "[" + cleanIP + "]"
+	//cleanIP = "[" + cleanIP + "]"
+	return cleanIP
+}
+
+/**
+Format IPv6 address with brackets
+ */
+func FormatIPv6(address string) string {
+	var found int
+	var cleanIP string
+	if strings.Contains("[", address) {
+		found++
+	} else if strings.Contains("]", address) {
+		found++
+	}
+	if found > 0 {
+		cleanIP = SanitizeIPv6(address)
+	}
+	cleanIP = "[" + address + "]"
 	return cleanIP
 }
 

@@ -54,8 +54,11 @@ func (s *Server) Setup() {
 		return
 	}
 	var err error
+	var bindIP string
+	bindIP = utils.FormatIPv6(config.LocalNode().IP)
 	// Listen
-	s.Listener, err = net.Listen("tcp", config.LocalNode().IP+":"+config.LocalNode().Port)
+	log.Info(bindIP)
+	s.Listener, err = net.Listen("tcp", bindIP +":" + config.LocalNode().Port)
 	if err != nil {
 		debug.PrintStack()
 		panic(err)
@@ -69,7 +72,7 @@ func (s *Server) Setup() {
 			log.Warning("TLS keys are missing! Generating..")
 			GenOpenSSL()
 		}
-		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/server.crt", "/etc/pulseha/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/server.key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")
 			os.Exit(1)
