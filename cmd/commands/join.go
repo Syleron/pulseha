@@ -143,6 +143,7 @@ func (c *JoinCommand) Run(args []string) int {
 		Port:     joinPort,
 		BindIp:   *bindIP,
 		BindPort: *bindPort,
+		Hostname: utils.GetHostname(),
 	})
 
 	if err != nil {
