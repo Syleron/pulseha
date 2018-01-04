@@ -67,11 +67,7 @@ func (s *Server) Setup() {
 		return
 	}
 	if config.Pulse.TLS {
-		// Get project directory location
-		if utils.CreateFolder("/etc/pulseha/certs") {
-			log.Warning("TLS keys are missing! Generating..")
-			GenOpenSSL()
-		}
+		genRSAKeys()
 		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/server.key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")

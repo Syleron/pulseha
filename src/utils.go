@@ -5,6 +5,7 @@ import (
 	"runtime"
 	"github.com/Syleron/PulseHA/proto"
 	"time"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -110,4 +111,15 @@ func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 		}
 	}
 	return ""
+}
+
+/**
+Generate RSA keys if they don't already exist
+ */
+func genRSAKeys() {
+	// Get project directory location
+	if utils.CreateFolder("/etc/pulseha/certs") {
+		log.Warning("TLS keys are missing! Generating..")
+		GenOpenSSL()
+	}
 }
