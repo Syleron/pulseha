@@ -29,7 +29,6 @@ import (
 	"sync"
 	"time"
 	"os"
-	"github.com/mephux/komanda-cli/komanda/config"
 )
 
 /**
