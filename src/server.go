@@ -68,7 +68,7 @@ func (s *Server) Setup() {
 	}
 	if config.Pulse.TLS {
 		genRSAKeys()
-		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/server.key")
+		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/" + utils.GetHostname() + ".key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")
 			os.Exit(1)
