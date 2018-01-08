@@ -5,13 +5,14 @@ import (
 	"runtime"
 	"github.com/Syleron/PulseHA/proto"
 	"time"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
 Networking - Bring up the groups on the current node
 */
 func makeMemberActive() error {
-	log.Debug("Utils:MakeMemberActive() Local node now passive")
+	log.Debug("Utils:MakeMemberActive() Local node now active")
 	configCopy := gconf.GetConfig()
 	for name, node := range configCopy.Nodes {
 		if name == gconf.getLocalNode() {
@@ -110,4 +111,15 @@ func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 		}
 	}
 	return ""
+}
+
+/**
+Generate RSA keys if they don't already exist
+ */
+func genRSAKeys() {
+	// Get project directory location
+	if utils.CreateFolder("/etc/pulseha/certs") {
+		log.Warning("TLS keys are missing! Generating..")
+		GenOpenSSL()
+	}
 }

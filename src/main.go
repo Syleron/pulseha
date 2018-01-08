@@ -130,6 +130,10 @@ func main() {
 	pulse = createPulse()
 	// Load plugins
 	pulse.Plugins.Setup()
+	// Gen keys if we don't have any
+	if gconf.Pulse.TLS {
+		genRSAKeys()
+	}
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)

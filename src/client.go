@@ -107,7 +107,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 		creds, err := credentials.NewClientTLSFromFile("/etc/pulseha/certs/"+hostname+".crt", "")
 		if err != nil {
 			log.Errorf("Could not load TLS cert: %s", err.Error())
-			return errors.New("could not load node TLS cert: " + hostname + ".crt")
+			return errors.New("Could not load node TLS cert: " + hostname + ".crt")
 		}
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
@@ -115,7 +115,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 	}
 	if err != nil {
 		log.Errorf("GRPC client connection error: %s", err.Error())
-		return err
+		return errors.New("Could not connect to host: " + err.Error())
 	}
 	c.Requester = p.NewServerClient(c.Connection)
 	return nil

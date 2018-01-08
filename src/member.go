@@ -148,7 +148,7 @@ func (m *Member) setHostname(hostname string) {
 Get member status
 */
 func (m *Member) getStatus() proto.MemberStatus_Status {
-	log.Debug("Member:getStatus() called by " + MyCaller())
+	//log.Debug("Member:getStatus() called by " + MyCaller())
 	m.Lock()
 	defer m.Unlock()
 	return m.Status
