@@ -66,6 +66,8 @@ func (s *Server) Setup() {
 		return
 	}
 	if config.Pulse.TLS {
+		// Gen keys if we don't have any
+		genTLSKeys(bindIP)
 		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/" + utils.GetHostname() + ".key")
 		if err != nil {
 			log.Error("Could not load TLS keys.")

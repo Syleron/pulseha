@@ -193,16 +193,19 @@ Format IPv6 address with brackets
 func FormatIPv6(address string) string {
 	var found int
 	var cleanIP string
-	if strings.Contains("[", address) {
-		found++
-	} else if strings.Contains("]", address) {
-		found++
+	if IsIPv6(address) {
+		if strings.Contains("[", address) {
+			found++
+		} else if strings.Contains("]", address) {
+			found++
+		}
+		if found > 0 {
+			cleanIP = SanitizeIPv6(address)
+		}
+		cleanIP = "[" + address + "]"
+		return cleanIP
 	}
-	if found > 0 {
-		cleanIP = SanitizeIPv6(address)
-	}
-	cleanIP = "[" + address + "]"
-	return cleanIP
+	return address
 }
 
 /**
@@ -244,4 +247,15 @@ func hasPort(s string) bool {
 		return strings.LastIndex(s, ":") > strings.LastIndex(s, "]")
 	}
 	return strings.Count(s, ":") == 1
+}
+
+/**
+Write text to a file
+ */
+func WriteTextFile(contents string, file string) {
+	err := ioutil.WriteFile(file, []byte(contents), 0644)
+	if err != nil {
+		log.Fatal("Failed to write tls config")
+		os.Exit(1)
+	}
 }

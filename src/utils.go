@@ -114,12 +114,13 @@ func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 }
 
 /**
-Generate RSA keys if they don't already exist
+Generate TLS keys if they don't already exist
  */
-func genRSAKeys() {
+func genTLSKeys(IP string) {
 	// Get project directory location
 	if utils.CreateFolder("/etc/pulseha/certs") {
 		log.Warning("TLS keys are missing! Generating..")
+		GenTLSConf(IP)
 		GenOpenSSL()
 	}
 }

@@ -51,6 +51,10 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	if !gconf.ClusterCheck() {
+		// Gen keys if we don't have any
+		if gconf.Pulse.TLS {
+			genTLSKeys(in.BindIp)
+		}
 		// Create a new client
 		client := &Client{}
 		// Attempt to connect
