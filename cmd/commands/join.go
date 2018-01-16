@@ -36,7 +36,7 @@ type JoinCommand struct {
  */
 func (c *JoinCommand) Help() string {
 	helpText := `
-Usage: pulseha join [options] address ...
+Usage: pulseha join [bind-ip] [bind-port] <destination IP> <destination port> <destination hostname>
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:

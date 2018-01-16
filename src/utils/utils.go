@@ -252,10 +252,11 @@ func hasPort(s string) bool {
 /**
 Write text to a file
  */
-func WriteTextFile(contents string, file string) {
+func WriteTextFile(contents string, file string) error {
 	err := ioutil.WriteFile(file, []byte(contents), 0644)
 	if err != nil {
 		log.Fatal("Failed to write tls config")
-		os.Exit(1)
+		return err
 	}
+	return nil
 }

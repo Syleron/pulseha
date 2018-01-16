@@ -27,17 +27,17 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 )
 
-type CreateCommand struct {
+type CertCommand struct {
 	Ui cli.Ui
 }
 
 /**
  *
  */
-func (c *CreateCommand) Help() string {
+func (c *CertCommand) Help() string {
 	helpText := `
-Usage: pulseha create <bind IP> <bind port>
-  Tells the PulseHA daemon to configure a new cluster.
+Usage: pulseha cert <Bind IP>
+  Generate new TLS certificates for PulseHA.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -45,8 +45,8 @@ Usage: pulseha create <bind IP> <bind port>
 /**
 Run the CLI command
  */
-func (c *CreateCommand) Run(args []string) int {
-	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
+func (c *CertCommand) Run(args []string) int {
+	cmdFlags := flag.NewFlagSet("cert", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
 	// Make sure we have cmd args
@@ -57,28 +57,20 @@ func (c *CreateCommand) Run(args []string) int {
 	cmds := cmdFlags.Args()
 
 	// If no action is provided then just list our current config
-	if len(cmds) < 2 {
-		c.Ui.Error("Please specify an address and port for PulseHA to listen on\n")
+	if len(cmds) < 1 {
+		c.Ui.Error("Please specify the PulseHA bind IP address\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
 	// Define variables
 	bindIP := cmds[0]
-	bindPort := cmds[1]
 
 	// IP validation
 	if utils.IsIPv6(bindIP) {
 		bindIP = utils.SanitizeIPv6(bindIP)
 	} else if !utils.IsIPv4(bindIP) {
-		c.Ui.Error("Please specify a valid join address.\n")
-		c.Ui.Output(c.Help())
-		return 1
-	}
-
-	// Port validation
-	if !utils.IsPort(bindPort) {
-		c.Ui.Error("Please specify a valid port 0-65536.\n")
+		c.Ui.Error("Please specify a valid join IP address.\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
@@ -95,9 +87,8 @@ func (c *CreateCommand) Run(args []string) int {
 
 	client := proto.NewCLIClient(connection)
 
-	r, err := client.Create(context.Background(), &proto.PulseCreate{
+	r, err := client.TLS(context.Background(), &proto.PulseCert{
 		BindIp:   bindIP,
-		BindPort: bindPort,
 	})
 
 	if err != nil {
@@ -117,6 +108,6 @@ func (c *CreateCommand) Run(args []string) int {
 /**
  *
  */
-func (c *CreateCommand) Synopsis() string {
-	return "Tell PulseHA to create new HA cluster"
+func (c *CertCommand) Synopsis() string {
+	return "Generate new TLS certificates for PulseHA"
 }

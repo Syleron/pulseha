@@ -51,10 +51,6 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	if !gconf.ClusterCheck() {
-		// Gen keys if we don't have any
-		if gconf.Pulse.TLS {
-			genTLSKeys(in.BindIp)
-		}
 		// Create a new client
 		client := &Client{}
 		// Attempt to connect
@@ -451,6 +447,26 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 	return &proto.PulsePromote{
 		Success: true,
 		Message: "Successfully promoted member " + in.Member,
+	}, nil
+}
+
+/**
+Handle CLI promote request
+ */
+func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseCert, error) {
+	log.Debug("CLIServer:Promote() - Promote a new member")
+	s.Lock()
+	defer s.Unlock()
+	err := genTLSKeys(in.BindIp)
+	if err != nil {
+		return &proto.PulseCert{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	return &proto.PulseCert{
+		Success: true,
+		Message: "Successfully generated new TLs certificate",
 	}, nil
 }
 

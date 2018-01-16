@@ -63,6 +63,11 @@ message PulseCreate {
     string bind_ip = 3;
     string bind_port = 4;
 }
+message PulseCert {
+    bool success = 1;
+    string message = 2;
+    string bind_ip = 3;
+}
 // Pulse Group Messages
 message PulseGroupNew {
     bool success = 1;
@@ -149,6 +154,8 @@ service CLI {
     rpc Leave (PulseLeave) returns (PulseLeave);
     // Create Cluster
     rpc Create (PulseCreate) returns (PulseCreate);
+    // Create Certs
+    rpc TLS (PulseCert) returns (PulseCert);
     // Create floating ip group
     rpc NewGroup (PulseGroupNew) returns (PulseGroupNew);
     // Delete floating ip group
