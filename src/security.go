@@ -20,18 +20,43 @@ package main
 import (
 	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
-	"os"
+	"github.com/murlokswarm/errors"
 )
 
 /**
  * Generate new Cert/Key pair. No Cert Authority.
  */
-func GenOpenSSL() {
-	dir := "/etc/pulseha/"
-	_, err := utils.Execute("openssl", "req", "-x509", "-newkey", "rsa:2048", "-keyout", dir+"/certs/" + utils.GetHostname() + ".key", "-out", dir+"/certs/" + utils.GetHostname() + ".crt", "-days", "365", "-subj", "/CN="+utils.GetHostname(), "-sha256", "-nodes")
-
+func GenOpenSSL() error {
+	// Make sure we have our TLS conf generated
+	dir := "/etc/pulseha/certs/"
+	_, err := utils.Execute("openssl", "req", "-x509", "-nodes", "-days", "365", "-newkey", "rsa:2048", "-keyout", dir+utils.GetHostname()+".key", "-out", dir+utils.GetHostname()+".crt", "-config", dir+"tls.conf")
 	if err != nil {
 		log.Fatal("Failed to create private server key.")
-		os.Exit(1)
+		return err
 	}
+	return nil
+}
+
+/**
+Generate the ssl conf file to generate the certs
+ */
+func GenTLSConf(IP string) error {
+	dir := "/etc/pulseha/certs/"
+	contents := `[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+[req_distinguished_name]
+CN = fred
+[v3_req]
+keyUsage = keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+IP.1 = ` + IP
+	err := utils.WriteTextFile(contents, dir+"tls.conf")
+	if err != nil {
+		return errors.New("Cert generation failed. Unable to write TLS config.")
+	}
+	return nil
 }

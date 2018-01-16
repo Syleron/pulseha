@@ -451,6 +451,26 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 }
 
 /**
+Handle CLI promote request
+ */
+func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseCert, error) {
+	log.Debug("CLIServer:Promote() - Promote a new member")
+	s.Lock()
+	defer s.Unlock()
+	err := genTLSKeys(in.BindIp)
+	if err != nil {
+		return &proto.PulseCert{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	return &proto.PulseCert{
+		Success: true,
+		Message: "Successfully generated new TLs certificate",
+	}, nil
+}
+
+/**
 Setup pulse cli type
 */
 func (s *CLIServer) Setup() {

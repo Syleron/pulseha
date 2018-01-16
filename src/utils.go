@@ -6,6 +6,7 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"time"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/murlokswarm/errors"
 )
 
 /**
@@ -114,12 +115,17 @@ func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 }
 
 /**
-Generate RSA keys if they don't already exist
+Generate TLS keys if they don't already exist
  */
-func genRSAKeys() {
+func genTLSKeys(IP string) error {
 	// Get project directory location
 	if utils.CreateFolder("/etc/pulseha/certs") {
 		log.Warning("TLS keys are missing! Generating..")
-		GenOpenSSL()
+		confError := GenTLSConf(IP)
+		genError := GenOpenSSL()
+		if confError != nil || genError != nil {
+			return errors.New("Failed to generate TLS certificate")
+		}
 	}
+	return nil
 }

@@ -21,7 +21,6 @@ import (
 	"github.com/Syleron/PulseHA/cmd/commands"
 	"github.com/mitchellh/cli"
 	"os"
-	"os/signal"
 )
 
 var Commands map[string]cli.CommandFactory
@@ -63,31 +62,17 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"cert": func() (cli.Command, error) {
+			return &commands.CertCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version:        Version,
 				Build:          Build,
-				VersionRelease: VersionRelease,
 				Ui:             ui,
 			}, nil
 		},
 	}
-}
-
-/**
- *
- */
-func makeShutdownCh() <-chan struct{} {
-	resultCh := make(chan struct{})
-
-	signalCh := make(chan os.Signal, 4)
-	signal.Notify(signalCh, os.Interrupt)
-	go func() {
-		for {
-			<-signalCh
-			resultCh <- struct{}{}
-		}
-	}()
-
-	return resultCh
 }
