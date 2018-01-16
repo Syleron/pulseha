@@ -81,13 +81,14 @@ func MyCaller() string {
 		return "n/a" // proper error her would be better
 	}
 	// get the info of the actual function that's in the pointer
-	fun := runtime.FuncForPC(fpcs[0]-1)
+	fun := runtime.FuncForPC(fpcs[0] - 1)
 	if fun == nil {
 		return "n/a"
 	}
 	// return its name
 	return fun.Name()
 }
+
 /**
 
  */
@@ -118,14 +119,12 @@ func getFailOverCountWinner(members []*proto.MemberlistMember) string {
 Generate TLS keys if they don't already exist
  */
 func genTLSKeys(IP string) error {
-	// Get project directory location
-	if utils.CreateFolder("/etc/pulseha/certs") {
-		log.Warning("TLS keys are missing! Generating..")
-		confError := GenTLSConf(IP)
-		genError := GenOpenSSL()
-		if confError != nil || genError != nil {
-			return errors.New("Failed to generate TLS certificate")
-		}
+	utils.CreateFolder("/etc/pulseha/certs")
+	log.Warning("TLS keys are missing! Generating..")
+	confError := GenTLSConf(IP)
+	genError := GenOpenSSL()
+	if confError != nil || genError != nil {
+		return errors.New("Failed to generate TLS certificate")
 	}
 	return nil
 }
