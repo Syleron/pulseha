@@ -25,6 +25,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"time"
+	"crypto/tls"
+	"io/ioutil"
+	"crypto/x509"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type Client struct {
@@ -104,11 +108,22 @@ func (c *Client) Connect(ip, port, hostname string) error {
 	var err error
 	config := gconf.GetConfig()
 	if config.Pulse.TLS {
-		creds, err := credentials.NewClientTLSFromFile("/etc/pulseha/certs/"+hostname+".crt", "")
+		// Load member cert/key
+		peerCert, err := tls.LoadX509KeyPair(certDir + utils.GetHostname() + ".client.crt", certDir + utils.GetHostname() + ".client.key")
 		if err != nil {
-			log.Errorf("Could not load TLS cert: %s", err.Error())
-			return errors.New("Could not load node TLS cert: " + hostname + ".crt")
+			return errors.New("Could not connect to host: " + err.Error())
 		}
+		// Load CA
+		caCert, err := ioutil.ReadFile("ca.crt")
+		if err != nil {
+			return errors.New("Could not connect to host: " + err.Error())
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		creds := credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{peerCert},
+			RootCAs:      caCertPool,
+		})
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())

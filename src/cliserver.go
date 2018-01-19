@@ -51,6 +51,10 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	if !gconf.ClusterCheck() {
+		// Generate client server keys if tls is enabled
+		if gconf.Pulse.TLS {
+			genTLSKeys(in.BindIp)
+		}
 		// Create a new client
 		client := &Client{}
 		// Attempt to connect
@@ -203,6 +207,12 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 			}
 		}
 		gconf.Save()
+		// Cert stuff
+		GenerateCACert(in.BindIp)
+		// Generate client server keys if tls is enabled
+		if gconf.Pulse.TLS {
+			genTLSKeys(in.BindIp)
+		}
 		go s.Server.Setup()
 		return &proto.PulseCreate{
 			Success: true,
@@ -466,7 +476,7 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 	}
 	return &proto.PulseCert{
 		Success: true,
-		Message: "Successfully generated new TLs certificate",
+		Message: "Successfully generated new TLS certificates",
 	}, nil
 }
 

@@ -26,11 +26,13 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"net"
-	"os"
 	"strconv"
 	"sync"
 	"time"
 	"runtime/debug"
+	"crypto/tls"
+	"io/ioutil"
+	"crypto/x509"
 )
 
 /**
@@ -66,11 +68,26 @@ func (s *Server) Setup() {
 		return
 	}
 	if config.Pulse.TLS {
-		creds, err := credentials.NewServerTLSFromFile("/etc/pulseha/certs/" + utils.GetHostname() + ".crt", "/etc/pulseha/certs/" + utils.GetHostname() + ".key")
+		// load member cert/key
+		peerCert, err := tls.LoadX509KeyPair(certDir+ utils.GetHostname() + ".server.crt", certDir + utils.GetHostname() + ".server.key")
 		if err != nil {
-			log.Error("Could not load TLS keys.")
-			os.Exit(1)
+			log.Error("load peer cert/key error:%v", err)
+			return
 		}
+		// Load CA cert
+		caCert, err := ioutil.ReadFile("ca.crt")
+		if err != nil {
+			log.Error("read ca cert file error:%v", err)
+			return
+		}
+		// Define cert pool
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		creds := credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{peerCert},
+			ClientCAs:    caCertPool,
+			ClientAuth:   tls.RequireAndVerifyClientCert,
+		})
 		s.Server = grpc.NewServer(grpc.Creds(creds))
 	} else {
 		log.Warning("TLS Disabled! PulseHA server connection unsecured.")

@@ -113,6 +113,16 @@ func CheckFolderExist(path string) bool {
 }
 
 /**
+Check if a file exists
+ */
+func CheckFileExists(path string) bool {
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return false
+	}
+	return true
+}
+
+/**
 Get local hostname
 TODO: Note: This may break with FQDs
  */
