@@ -69,13 +69,13 @@ func (s *Server) Setup() {
 	}
 	if config.Pulse.TLS {
 		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(certDir+ utils.GetHostname() + ".server.crt", certDir + utils.GetHostname() + ".server.key")
+		peerCert, err := tls.LoadX509KeyPair(certDir + utils.GetHostname() + ".server.crt", certDir + utils.GetHostname() + ".server.key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
 			return
 		}
 		// Load CA cert
-		caCert, err := ioutil.ReadFile("ca.crt")
+		caCert, err := ioutil.ReadFile(certDir + "ca.crt")
 		if err != nil {
 			log.Error("read ca cert file error:%v", err)
 			return
