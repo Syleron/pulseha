@@ -114,7 +114,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 			return errors.New("Could not connect to host: " + err.Error())
 		}
 		// Load CA
-		caCert, err := ioutil.ReadFile("ca.crt")
+		caCert, err := ioutil.ReadFile(certDir + "ca.crt")
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
 		}
