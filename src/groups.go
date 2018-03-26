@@ -14,9 +14,6 @@ Generate a new group in memory.
 func GroupNew(groupName string) (string, error) {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return "", errors.New("action can only be completed in a configured cluster")
-	}
 	var name string
 	if groupName != "" {
 		name = groupName
@@ -33,9 +30,6 @@ Remove group from memory
 func GroupDelete(groupName string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
 	if GroupExist(groupName) {
 		if !NodeAssignedToInterface(groupName) {
 			delete(gconf.Groups, groupName)
@@ -62,9 +56,6 @@ Add floating IP to group
 func GroupIpAdd(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
 	_, activeMember := pulse.Server.Memberlist.getActiveMember()
 	if activeMember == nil {
 		return errors.New("unable to add IP(s) to group as there no active node in the cluster")
@@ -93,9 +84,6 @@ Remove floating IP from group
 func GroupIpRemove(groupName string, ips []string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
 	if !GroupExist(groupName) {
 		return errors.New("group does not exist")
 	}
@@ -143,9 +131,6 @@ Unassign a group from a node's interface
 func GroupUnassign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
