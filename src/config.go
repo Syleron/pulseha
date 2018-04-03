@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -26,15 +26,17 @@ import (
 )
 
 type Config struct {
-	Pulse     Local               `json:"pulse"`
+	Pulse     Local               `json:"pulseha"`
 	Groups    map[string][]string `json:"floating_ip_groups"`
 	Nodes     map[string]Node     `json:"nodes"`
 	Logging   Logging             `json:"logging"`
-	localNode string
 }
 
 type Local struct {
 	TLS bool `json:"tls"`
+	HealthCheckInterval   int             `json:"hcs_interval"`
+	FailOverInterval      int             `json:"fos_interval"`
+	FailOverLimit         int             `json:"fo_limit"`
 }
 
 type Nodes struct {
