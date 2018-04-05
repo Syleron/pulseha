@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 	"os"
+	"github.com/murlokswarm/errors"
 )
 
 /**
@@ -83,9 +84,13 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Send our join request
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			return nil, errors.New("cannot to join because unable to get hostname")
+		}
 		r, err := client.Send(SendJoin, &proto.PulseJoin{
 			Config:   buf,
-			Hostname: utils.GetHostname(),
+			Hostname: hostname,
 		})
 		// Handle a failed request
 		if err != nil {
@@ -156,11 +161,15 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
 	if gconf.ClusterTotal() > 1 {
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			return nil, errors.New("cannot to leave because unable to get hostname")
+		}
 		s.Memberlist.Broadcast(
 			SendLeave,
 			&proto.PulseLeave{
 				Replicated: true,
-				Hostname:   utils.GetHostname(),
+				Hostname:   hostname,
 			},
 		)
 	}
@@ -197,13 +206,17 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
 		}
-		NodeAdd(utils.GetHostname(), newNode)
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			return nil, errors.New("cannot create cluster because unable to get hostname")
+		}
+		NodeAdd(hostname, newNode)
 		for _, ifaceName := range netUtils.GetInterfaceNames() {
 			if ifaceName != "lo" {
 				newNode.IPGroups[ifaceName] = make([]string, 0)
 				groupName := GenGroupName()
 				gconf.Groups[groupName] = []string{}
-				GroupAssign(groupName, utils.GetHostname(), ifaceName)
+				GroupAssign(groupName, hostname, ifaceName)
 			}
 		}
 		gconf.Save()

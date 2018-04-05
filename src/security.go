@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -46,8 +46,12 @@ func genTLSKeys(ip string) error {
 		return errors.New("Unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
-	caCert := utils.LoadFile(certDir + "ca.crt")
-	caKey := utils.LoadFile(certDir + "ca.key")
+	caCert, err := utils.LoadFile(certDir + "ca.crt")
+	caKey, err := utils.LoadFile(certDir + "ca.key")
+	if err != nil {
+		log.Error(err.Error())
+		return errors.New(err.Error())
+	}
 	// Decode the cert and key
 	cpb, _ := pem.Decode(caCert)
 	kpb, _ := pem.Decode(caKey)
@@ -125,8 +129,13 @@ func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateK
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	writeCertFile(utils.GetHostname() + ".server", servCertPEM)
-	writeKeyFile(utils.GetHostname() + ".server", servKey)
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		log.Error("unable to generate cert because unable to get hostname")
+		return
+	}
+	writeCertFile(hostname + ".server", servCertPEM)
+	writeKeyFile(hostname + ".server", servKey)
 }
 
 /**
@@ -153,8 +162,13 @@ func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	writeCertFile(utils.GetHostname() + ".client", clientCertPEM)
-	writeKeyFile(utils.GetHostname() + ".client", clientKey)
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		log.Error("unable to generate cert because unable to get hostname")
+		return
+	}
+	writeCertFile(hostname + ".client", clientCertPEM)
+	writeKeyFile(hostname + ".client", clientKey)
 }
 
 /**
@@ -167,11 +181,15 @@ func certTemplate() (*x509.Certificate, error) {
 	if err != nil {
 		return nil, errors.New("failed to generate serial number: " + err.Error())
 	}
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return nil, errors.New("unable to generate cert template because unable to get hostname")
+	}
 	tmpl := x509.Certificate{
 		SerialNumber:          serialNumber,
 		Subject:               pkix.Name{
 			Organization: []string{"PulseHA"},
-			CommonName: utils.GetHostname(),
+			CommonName: hostname,
 		},
 		NotBefore:             time.Now(),
 		NotAfter: 			   time.Now().Add(time.Duration(730) * time.Hour * 24),
@@ -200,13 +218,14 @@ func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv 
 }
 
 /**
-
+TODO: Use Utils functions
  */
 func writeCertFile(fileName string, cert []byte) {
 	// Write the cert to file
 	certOut, err := os.Create(certDir + fileName + ".crt")
 	if err != nil {
-		fmt.Println("Failed to open " + utils.GetHostname() + " for writing:", err)
+		hostname, _ := utils.GetHostname()
+		fmt.Println("Failed to open " + hostname + " for writing:", err)
 		os.Exit(1)
 	}
 	certOut.Write(cert)
@@ -214,13 +233,14 @@ func writeCertFile(fileName string, cert []byte) {
 }
 
 /**
-
+TODO: Use Utils functions
  */
 func writeKeyFile(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(certDir + filename + ".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		fmt.Println("Failed to open key " + utils.GetHostname() + " for writing:", err)
+		hostname, _ := utils.GetHostname()
+		fmt.Println("Failed to open key " + hostname + " for writing:", err)
 		os.Exit(1)
 	}
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})

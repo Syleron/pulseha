@@ -109,7 +109,11 @@ func (c *Client) Connect(ip, port, hostname string) error {
 	config := gconf.GetConfig()
 	if config.Pulse.TLS {
 		// Load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(certDir + utils.GetHostname() + ".client.crt", certDir + utils.GetHostname() + ".client.key")
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			return errors.New("unable to connect because cannot get hostname")
+		}
+		peerCert, err := tls.LoadX509KeyPair(certDir + hostname + ".client.crt", certDir + hostname + ".client.key")
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
 		}

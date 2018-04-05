@@ -126,7 +126,12 @@ func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
 	defer m.Unlock()
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
-		if member.getHostname() == utils.GetHostname() {
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			log.Error("cannot broadcast as unable to get local hostname")
+			return
+		}
+		if member.getHostname() == hostname {
 			continue
 		}
 		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.getHostname())

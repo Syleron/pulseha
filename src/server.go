@@ -69,7 +69,12 @@ func (s *Server) Setup() {
 	}
 	if config.Pulse.TLS {
 		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(certDir + utils.GetHostname() + ".server.crt", certDir + utils.GetHostname() + ".server.key")
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			log.Error("cannot setup server because unable to get local hostname")
+			return
+		}
+		peerCert, err := tls.LoadX509KeyPair(certDir + hostname + ".server.crt", certDir + hostname + ".server.key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
 			return

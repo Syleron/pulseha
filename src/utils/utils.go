@@ -24,7 +24,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"reflect"
 	"strings"
 	"time"
 	"strconv"
@@ -33,16 +32,14 @@ import (
 /**
 Load a specific file and return byte code
  **/
-func LoadFile(file string) []byte {
+func LoadFile(file string) ([]byte, error) {
 	c, err := ioutil.ReadFile(file)
 
-	// We had an error attempting to decode the json into our struct! oops!
 	if err != nil {
-		//log.Error("Unable to load file. Does it exist?")
-		os.Exit(1)
+		return nil, errors.New("unable to load file: " + file)
 	}
 
-	return []byte(c)
+	return []byte(c), nil
 }
 
 /**
@@ -126,14 +123,13 @@ func CheckFileExists(path string) bool {
 Get local hostname
 TODO: Note: This may break with FQDs
  */
-func GetHostname() string {
+func GetHostname() (string, error) {
 	output, err := Execute("hostname")
 	if err != nil {
-		log.Error("Failed to obtain hostname.")
-		os.Exit(1)
+		return "", err
 	}
 	// Remove new line characters
-	return strings.TrimSuffix(output, "\n")
+	return strings.TrimSuffix(output, "\n"), nil
 }
 
 /**
@@ -146,26 +142,6 @@ func SplitIpPort(ipPort string) (string, string, error) {
 		return "", "", errors.New("Invalid IP:Port string. Unable to split.")
 	}
 	return IPslice[0], IPslice[1], nil
-}
-
-/**
-Checks if a value exists inside of a slice
-*/
-func in_array(val interface{}, array interface{}) (exists bool, index int) {
-	exists = false
-	index = -1
-	switch reflect.TypeOf(array).Kind() {
-	case reflect.Slice:
-		s := reflect.ValueOf(array)
-		for i := 0; i < s.Len(); i++ {
-			if reflect.DeepEqual(val, s.Index(i).Interface()) == true {
-				index = i
-				exists = true
-				return
-			}
-		}
-	}
-	return
 }
 
 /**
@@ -252,7 +228,7 @@ func GetCIDR(cidr string) (net.IP, *net.IPNet) {
 hasPort is given a string of the form "host", "host:port", "ipv6::address",
 or "[ipv6::address]:port", and returns true if the string includes a port.
  */
-func hasPort(s string) bool {
+func HasPort(s string) bool {
 	if strings.LastIndex(s, "[") == 0 {
 		return strings.LastIndex(s, ":") > strings.LastIndex(s, "]")
 	}

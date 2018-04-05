@@ -16,3 +16,32 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 package main
+
+import "testing"
+
+/**
+
+ */
+func TestMakeMemberActive(t *testing.T) {
+}
+
+/**
+
+ */
+func TestMakeMemberPassive(t *testing.T) {
+
+}
+
+/**
+
+ */
+func TestBringUpIPs(t *testing.T) {
+
+}
+
+/**
+
+ */
+func TestBringDownIPs(t *testing.T) {
+
+}

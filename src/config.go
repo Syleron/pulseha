@@ -23,6 +23,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"os"
+	"github.com/murlokswarm/errors"
 )
 
 type Config struct {
@@ -67,7 +68,10 @@ func (c *Config) GetConfig() Config {
  * Sets the local node name
  */
 func (c *Config) setLocalNode() error {
-	hostname := utils.GetHostname()
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return errors.New("cannot set local node because unable to get local hostname")
+	}
 	log.Debugf("Config:setLocalNode Hostname is: %s", hostname)
 	c.localNode = hostname
 	return nil
@@ -174,7 +178,11 @@ func (c *Config) Validate() {
  *
  */
 func (c *Config) LocalNode() Node {
-	return c.Nodes[utils.GetHostname()]
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return Node{}
+	}
+	return c.Nodes[hostname]
 }
 
 /**
