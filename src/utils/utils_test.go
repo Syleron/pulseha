@@ -21,22 +21,6 @@ import (
 	"testing"
 )
 
-func TestLoadFile(t *testing.T) {
-	_, err := LoadFile("/etc/hosts")
-
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-}
-
-func TestExecute(t *testing.T) {
-	_, err := Execute("ip", "ad", "ls")
-
-	if err != nil {
-		t.Errorf(err.Error())
-	}
-}
-
 func TestValidIPAddress(t *testing.T) {
 	err := ValidIPAddress("192.168.63.200/24")
 
@@ -58,22 +42,6 @@ func TestScheduler(t *testing.T) {
 	}, 1)
 
 	if counter != 3 {
-		t.Fail()
-	}
-}
-
-func TestCheckFolderExist(t *testing.T) {
-	exists := CheckFolderExist("/home")
-
-	if !exists {
-		t.Fail()
-	}
-}
-
-func TestCheckFileExists(t *testing.T) {
-	exists := CheckFileExists("/etc/hosts")
-
-	if !exists {
 		t.Fail()
 	}
 }
