@@ -30,6 +30,7 @@ type Config struct {
 	Groups    map[string][]string `json:"floating_ip_groups"`
 	Nodes     map[string]Node     `json:"nodes"`
 	Logging   Logging             `json:"logging"`
+	localNode string
 }
 
 type Local struct {
