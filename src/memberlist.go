@@ -40,8 +40,6 @@ type Memberlist struct {
 
  */
 func (m *Memberlist) Lock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Memberlist:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -49,8 +47,6 @@ func (m *Memberlist) Lock() {
 
  */
 func (m *Memberlist) Unlock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Memberlist:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -156,7 +152,6 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(gconf.getLocalNode())
-			//localMember.setLastHCResponse(time.Now().Add(time.Duration(10) * time.Second))
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
 			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
@@ -264,7 +259,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		if !success {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
-		// Note: we don't need to update the active status as we should recieve an updated memberlist from the active
+		// Note: we don't need to update the active status as we should receive an updated memberlist from the active
 	}
 	return nil
 }
