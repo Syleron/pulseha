@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -44,6 +44,12 @@ type PluginNet interface {
 	BringDownIPs(iface string, ips []string) error
 }
 
+type PluginGen interface {
+	Name() string
+	Version() float64
+	setup()
+}
+
 /**
 Plugins struct
  */
@@ -66,11 +72,13 @@ type pluginType int
 const (
 	PluginHealthCheck pluginType = 1 + iota
 	PluginNetworking
+	PluginGeneral
 )
 
 var pluginTypeNames = []string{
 	"PluginHC",
 	"PluginNet",
+	"PluginGeneral",
 }
 
 func (p pluginType) String() string {
@@ -102,6 +110,7 @@ func (p *Plugins) Setup() {
 	}
 	p.Load(PluginHealthCheck, plugins)
 	p.Load(PluginNetworking, plugins)
+	p.Load(PluginGeneral, plugins)
 	p.validate()
 	if len(p.modules) > 0 {
 		var pluginNames string = ""
@@ -113,7 +122,7 @@ func (p *Plugins) Setup() {
 }
 
 /**
-
+Validate that we have the required plugins
  */
 func (p *Plugins) validate() {
 	// make sure we have a networking plugin
@@ -122,10 +131,33 @@ func (p *Plugins) validate() {
 	}
 }
 
+/**
+Load plugins of a specific type
+TODO: This needs to be cleaned up so code can be reused instead of repeated so much
+ */
 func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 	// TODO: Note: Unfortunately a switch statement must be used as you cannot dynamically typecast a variable.
 	for _, plugin := range pluginList	 {
 		switch pluginType {
+		case PluginGeneral:
+			symEvt, err := plugin.Lookup(pluginType.String())
+			if err != nil {
+				log.Debugf("Plugin does not match pluginType symbol: %v", err)
+				continue
+			}
+			e, ok := symEvt.(PluginGen)
+			if !ok {
+				continue
+			}
+			// Create a new instance of plugins
+			newPlugin := &Plugin{
+				Name: e.Name(),
+				Version: e.Version(),
+				Type: pluginType,
+				Plugin: e,
+			}
+			// Add to the list of plugins
+			p.modules = append(p.modules, newPlugin)
 		case PluginHealthCheck:
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {
@@ -139,7 +171,9 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			// Create a new instance of plugins
 			newPlugin := &Plugin{
 				Name: e.Name(),
+				Version: e.Version(),
 				Type: pluginType,
+				Plugin: e,
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
@@ -194,4 +228,17 @@ func (p *Plugins) getNetworkingPlugin() *Plugin {
 		}
 	}
 	return nil
+}
+
+/**
+Returns a slice of general plugins
+ */
+func (p *Plugins) getGeneralPlugin() []*Plugin {
+	modules := []*Plugin{}
+	for _, plgin := range p.modules {
+		if plgin.Type == PluginGeneral {
+			modules = append(modules, plgin)
+		}
+	}
+	return modules
 }
