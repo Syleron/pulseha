@@ -159,11 +159,8 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
+	hostname := gconf.getLocalNode()
 	if gconf.clusterTotal() > 1 {
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			return nil, errors.New("cannot to leave because unable to get hostname")
-		}
 		s.Memberlist.Broadcast(
 			SendLeave,
 			&proto.PulseLeave{
@@ -173,8 +170,17 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 		)
 	}
 	makeMemberPassive()
-	GroupClearLocal()
+
+	// TODO: horrible way to do this but it will do for now.
+	oldNode := gconf.Nodes[hostname]
+	newNode := &Node{
+		IPGroups: oldNode.IPGroups,
+	}
+	// ---
 	nodesClearLocal()
+	// ewww
+	nodeAdd(hostname, newNode)
+	// ---
 	s.Memberlist.reset()
 	gconf.save()
 	s.Server.shutdown()
@@ -201,19 +207,16 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
 	if !gconf.clusterCheck() {
-		// Get our local hostname
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			return nil, errors.New("cannot create cluster because unable to get hostname")
+		hostname := gconf.getLocalNode()
+		//TODO: horrible way to do this but it will do for now.
+		oldNode := gconf.Nodes[hostname]
+		newNode := &Node{
+			IP: in.BindIp,
+			Port: in.BindPort,
+			IPGroups: oldNode.IPGroups,
 		}
-		// Get local node definition
-		node, err := nodeGetByName(hostname)
-		if err != nil {
-			return nil, errors.New("cannot create cluster because localhost node definition doesn't exist.")
-		}
-		// Set our bind data
-		node.IP = in.BindIp
-		node.Port = in.BindPort
+		nodeDelete(hostname)
+		nodeAdd(hostname, newNode)
 		// Save back to our config
 		gconf.save()
 		// Cert stuff

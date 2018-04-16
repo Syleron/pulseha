@@ -105,9 +105,6 @@ Assign a group to a node's interface
 func GroupAssign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.clusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
@@ -131,9 +128,6 @@ Unassign a group from a node's interface
 func GroupUnassign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !GroupExist(groupName) {
-		return errors.New("IP group does not exist")
-	}
 	if netUtils.InterfaceExist(iface) {
 		if exists, i := nodeInterfaceGroupExists(node, iface, groupName); exists {
 			// make the group passive before removing it
