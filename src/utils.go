@@ -49,7 +49,8 @@ Bring up an []ips for a specific interface
 func bringUpIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
-		log.Fatal("Missing network plugin")
+		log.Debug("No networking plugin.. skipping network action")
+		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
 	return err
@@ -61,7 +62,8 @@ Bring down an []ips for a specific interface
 func bringDownIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
-		log.Fatal("Missing network plugin")
+		log.Debug("No networking plugin.. skipping network action")
+		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)
 	return err

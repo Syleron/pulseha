@@ -31,7 +31,7 @@ func GroupDelete(groupName string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
 	if GroupExist(groupName) {
-		if !NodeAssignedToInterface(groupName) {
+		if !nodeAssignedToInterface(groupName) {
 			delete(gconf.Groups, groupName)
 			return nil
 		}
@@ -105,14 +105,14 @@ Assign a group to a node's interface
 func GroupAssign(groupName, node, iface string) error {
 	gconf.Lock()
 	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
+	if !gconf.clusterCheck() {
 		return errors.New("action can only be completed in a configured cluster")
 	}
 	if !GroupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
 	if netUtils.InterfaceExist(iface) {
-		if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
+		if exists, _ := nodeInterfaceGroupExists(node, iface, groupName); !exists {
 			// Add the group
 			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
 			// make the group active
@@ -135,7 +135,7 @@ func GroupUnassign(groupName, node, iface string) error {
 		return errors.New("IP group does not exist")
 	}
 	if netUtils.InterfaceExist(iface) {
-		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
+		if exists, i := nodeInterfaceGroupExists(node, iface, groupName); exists {
 			// make the group passive before removing it
 			makeGroupPassive(iface, groupName)
 			// Remove it

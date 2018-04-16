@@ -176,7 +176,7 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 */
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
-		nodeDetails, _ := NodeGetByName(m.Hostname)
+		nodeDetails, _ := nodeGetByName(m.Hostname)
 		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname)
 		if err != nil {
 			return err
@@ -298,7 +298,7 @@ bring it up on.
 */
 func (m *Member) bringUpIPs(ips []string, group string) bool {
 	configCopy := gconf.GetConfig()
-	iface := configCopy.GetGroupIface(m.Hostname, group)
+	iface := configCopy.getGroupIface(m.Hostname, group)
 	if m.Hostname == gconf.getLocalNode() {
 		log.Debug("member is local node bringing up IP's")
 		bringUpIPs(iface, ips)

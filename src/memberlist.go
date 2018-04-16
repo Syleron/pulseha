@@ -143,9 +143,9 @@ func (m *Memberlist) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	if gconf.ClusterCheck() {
+	if gconf.clusterCheck() {
 		// Are we the only member in the cluster?
-		if gconf.ClusterTotal() == 1 {
+		if gconf.clusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
 			m.PromoteMember(gconf.getLocalNode())
@@ -177,7 +177,7 @@ func (m *Memberlist) LoadMembers() {
 func (m *Memberlist) Reload() {
 	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
 	// Do a config reload
-	gconf.Reload()
+	gconf.reload()
 	// clear local members
 	m.LoadMembers()
 }

@@ -47,7 +47,7 @@ type PluginNet interface {
 type PluginGen interface {
 	Name() string
 	Version() float64
-	setup()
+	Run() error
 }
 
 /**
@@ -127,7 +127,7 @@ Validate that we have the required plugins
 func (p *Plugins) validate() {
 	// make sure we have a networking plugin
 	if p.getNetworkingPlugin() == nil {
-		log.Fatal("No networking plugin loaded. Please install a networking plugin in order to use PulseHA")
+		log.Warning("No networking plugin loaded. PulseHA now in monitoring mode..")
 	}
 }
 
@@ -158,6 +158,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
+			go e.Run()
 		case PluginHealthCheck:
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {

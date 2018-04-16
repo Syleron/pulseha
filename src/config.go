@@ -31,7 +31,6 @@ type Config struct {
 	Groups    map[string][]string `json:"floating_ip_groups"`
 	Nodes     map[string]Node     `json:"nodes"`
 	Logging   Logging             `json:"logging"`
-	localNode string
 }
 
 type Local struct {
@@ -39,6 +38,7 @@ type Local struct {
 	HealthCheckInterval   int             `json:"hcs_interval"`
 	FailOverInterval      int             `json:"fos_interval"`
 	FailOverLimit         int             `json:"fo_limit"`
+	LocalNode             string          `json:"local_node"`
 }
 
 type Nodes struct {
@@ -60,7 +60,7 @@ type Logging struct {
 /**
  * Returns a copy of the config
  */
-func (c *Config) GetConfig() Config {
+func (c *Config) getConfig() Config {
 	return *c
 }
 
@@ -73,7 +73,7 @@ func (c *Config) setLocalNode() error {
 		return errors.New("cannot set local node because unable to get local hostname")
 	}
 	log.Debugf("Config:setLocalNode Hostname is: %s", hostname)
-	c.localNode = hostname
+	c.Pulse.LocalNode = hostname
 	return nil
 }
 
@@ -88,13 +88,13 @@ func (c *Config) nodeCount() int {
  * Return the local node name
  */
 func (c *Config) getLocalNode() string {
-	return c.localNode
+	return c.Pulse.LocalNode
 }
 
 /**
  * Function used to load the config
  */
-func (c *Config) Load() {
+func (c *Config) load() {
 	log.Info("Loading configuration file")
 	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
 	if err != nil {
@@ -108,7 +108,7 @@ func (c *Config) Load() {
 		os.Exit(1)
 	}
 	if err != nil {
-		log.Error("Unable to load config.json. Does it exist?")
+		log.Error("Unable to load config.json. Either it doesn't exist or there may be a permissions issue")
 		os.Exit(1)
 	}
 	err = c.setLocalNode()
@@ -120,19 +120,19 @@ func (c *Config) Load() {
 /**
  * Function used to save the config
  */
-func (c *Config) Save() {
+func (c *Config) save() {
 	log.Debug("Saving config..")
 	gconf.Lock()
 	defer gconf.Unlock()
 	// Validate before we save
-	c.Validate()
+	c.validate()
 	// Convert struct back to JSON format
 	configJSON, _ := json.MarshalIndent(c, "", "    ")
 	// Save back to file
 	err := ioutil.WriteFile("/etc/pulseha/config.json", configJSON, 0644)
 	// Check for errors
 	if err != nil {
-		log.Error("Unable to save config.json. Does it exist?")
+		log.Error("Unable to save config.json. Either it doesn't exist or there may be a permissions issue")
 		os.Exit(1)
 	}
 }
@@ -141,20 +141,20 @@ func (c *Config) Save() {
  * Reload the config file into memory.
  * Note: Need to clear memory value before calling Load()
  */
-func (c *Config) Reload() {
+func (c *Config) reload() {
 	log.Debug("Reloading PulseHA config")
 	// Reload the config file
-	c.Load()
+	c.load()
 }
 
 /**
  *
  */
-func (c *Config) Validate() {
+func (c *Config) validate() {
 	var success bool = true
 
 	// if we are in a cluster.. does our hostname exist?
-	if c.ClusterCheck() {
+	if c.clusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
 				log.Error("Hostname mistmatch. Localhost does not exist in cluster config.")
@@ -177,7 +177,7 @@ func (c *Config) Validate() {
 /**
  *
  */
-func (c *Config) LocalNode() Node {
+func (c *Config) localNode() Node {
 	hostname, err := utils.GetHostname()
 	if err != nil {
 		return Node{}
@@ -188,9 +188,26 @@ func (c *Config) LocalNode() Node {
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
-func (c *Config) ClusterCheck() bool {
+func (c *Config) clusterCheck() bool {
 	config := gconf.GetConfig()
-	if len(config.Nodes) > 0 {
+	total := len(config.Nodes)
+	if total > 0 {
+		// if there is only one node we can assume it's ours
+		if total == 1 {
+			// make sure we have a bind IP/Port or we are not in a cluster
+			hostname, err := utils.GetHostname()
+			if err != nil {
+				return false
+			}
+			node, err := nodeGetByName(hostname)
+			if err != nil {
+				log.Error("There is a single node definition but it doesn't appear to be localhost...")
+				return false
+			}
+			if node.IP == "" && node.Port == "" {
+				return false
+			}
+		}
 		return true
 	}
 	return false
@@ -199,7 +216,7 @@ func (c *Config) ClusterCheck() bool {
 /**
  * Return the total number of configured nodes we have in our config.
  */
-func (c *Config) ClusterTotal() int {
+func (c *Config) clusterTotal() int {
 	config := gconf.GetConfig()
 	return len(config.Nodes)
 }
@@ -207,7 +224,7 @@ func (c *Config) ClusterTotal() int {
 /**
 Returns the interface the group is assigned to
 */
-func (c *Config) GetGroupIface(node string, groupName string) string {
+func (c *Config) getGroupIface(node string, groupName string) string {
 	for nodeName, n := range c.Nodes {
 		if nodeName == node {
 			for iface, groups := range n.IPGroups {

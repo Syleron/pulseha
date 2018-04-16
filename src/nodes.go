@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -20,14 +20,46 @@ package main
 import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/Syleron/PulseHA/src/netUtils"
 )
+
+/**
+Create new local config node definition
+ */
+func nodecreateLocal() (error) {
+	log.Debug("create localhost node config definition")
+	newNode := &Node{
+		IPGroups: make(map[string][]string, 0),
+	}
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return errors.New("cannot create cluster because unable to get hostname")
+	}
+	// Add the new node
+	nodeAdd(hostname, newNode)
+	// Create interface definitions each with their own group
+	// TODO: Probably move this to another function?
+	for _, ifaceName := range netUtils.GetInterfaceNames() {
+		if ifaceName != "lo" {
+			newNode.IPGroups[ifaceName] = make([]string, 0)
+			groupName := GenGroupName()
+			gconf.Groups[groupName] = []string{}
+			GroupAssign(groupName, hostname, ifaceName)
+		}
+	}
+	// Save to our config
+	gconf.save()
+	// return our results
+	return nil
+}
 
 /**
  * Add a node type Node to our config.
  */
-func NodeAdd(hostname string, node *Node) error {
+func nodeAdd(hostname string, node *Node) error {
 	log.Debug(hostname + " added to local cluster config")
-	if !NodeExists(hostname) {
+	if !nodeExists(hostname) {
 		gconf.Lock()
 		gconf.Nodes[hostname] = *node
 		gconf.Unlock()
@@ -39,9 +71,9 @@ func NodeAdd(hostname string, node *Node) error {
 /**
  * Remove a node from our config by hostname.
  */
-func NodeDelete(hostname string) error {
+func nodeDelete(hostname string) error {
 	log.Debug(hostname + " remove from the local node")
-	if NodeExists(hostname) {
+	if nodeExists(hostname) {
 		gconf.Lock()
 		delete(gconf.Nodes, hostname)
 		gconf.Unlock()
@@ -53,7 +85,7 @@ func NodeDelete(hostname string) error {
 /**
  * Clear out local Nodes section of config.
  */
-func NodesClearLocal() {
+func nodesClearLocal() {
 	log.Debug("All nodes cleared from local config")
 	gconf.Lock()
 	gconf.Nodes = map[string]Node{}
@@ -64,7 +96,7 @@ func NodesClearLocal() {
 * Determines whether a Node already exists in a config based
   off the nodes hostname.
 */
-func NodeExists(hostname string) bool {
+func nodeExists(hostname string) bool {
 	config := gconf.GetConfig()
 	for key := range config.Nodes {
 		if key == hostname {
@@ -77,7 +109,7 @@ func NodeExists(hostname string) bool {
 /**
 Get node by its hostname
 */
-func NodeGetByName(hostname string) (Node, error) {
+func nodeGetByName(hostname string) (Node, error) {
 	config := gconf.GetConfig()
 	for key, node := range config.Nodes {
 		if key == hostname {
@@ -91,7 +123,7 @@ func NodeGetByName(hostname string) (Node, error) {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func NodeAssignedToInterface(group string) bool {
+func nodeAssignedToInterface(group string) bool {
 	config := gconf.GetConfig()         // :-)
 	for _, node := range config.Nodes { // :-|
 		for _, groups := range node.IPGroups { // :-s
@@ -109,7 +141,7 @@ func NodeAssignedToInterface(group string) bool {
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */
-func NodeInterfaceGroupExists(node, iface, group string) (bool, int) {
+func nodeInterfaceGroupExists(node, iface, group string) (bool, int) {
 	config := gconf.GetConfig()
 	for index, existingGroup := range config.Nodes[node].IPGroups[iface] {
 		if existingGroup == group {

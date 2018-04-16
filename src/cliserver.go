@@ -21,7 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
@@ -51,7 +50,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !gconf.ClusterCheck() {
+	if !gconf.clusterCheck() {
 		// Generate client server keys if tls is enabled
 		if gconf.Pulse.TLS {
 			genTLSKeys(in.BindIp)
@@ -122,9 +121,9 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		// Set the config
 		gconf.SetConfig(*peerConfig)
 		// Save the config
-		gconf.Save()
+		gconf.save()
 		// Reload config in memory
-		gconf.Reload()
+		gconf.reload()
 		// Setup our daemon server
 		go s.Server.Setup()
 		// reset our HC last received time
@@ -152,7 +151,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !gconf.ClusterCheck() {
+	if !gconf.clusterCheck() {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
@@ -160,7 +159,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
-	if gconf.ClusterTotal() > 1 {
+	if gconf.clusterTotal() > 1 {
 		hostname, err := utils.GetHostname()
 		if err != nil {
 			return nil, errors.New("cannot to leave because unable to get hostname")
@@ -175,13 +174,13 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	makeMemberPassive()
 	GroupClearLocal()
-	NodesClearLocal()
+	nodesClearLocal()
 	s.Memberlist.reset()
-	gconf.Save()
+	gconf.save()
 	s.Server.shutdown()
 	// bring down the ips
 	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
-	if gconf.ClusterTotal() == 1 {
+	if gconf.clusterTotal() == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
@@ -200,26 +199,23 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	log.Debug("CLIServer:Create() - Create Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !gconf.ClusterCheck() {
-		newNode := &Node{
-			IP:       in.BindIp,
-			Port:     in.BindPort,
-			IPGroups: make(map[string][]string, 0),
-		}
+	// Make sure we are not in a cluster before creating one.
+	if !gconf.clusterCheck() {
+		// Get our local hostname
 		hostname, err := utils.GetHostname()
 		if err != nil {
 			return nil, errors.New("cannot create cluster because unable to get hostname")
 		}
-		NodeAdd(hostname, newNode)
-		for _, ifaceName := range netUtils.GetInterfaceNames() {
-			if ifaceName != "lo" {
-				newNode.IPGroups[ifaceName] = make([]string, 0)
-				groupName := GenGroupName()
-				gconf.Groups[groupName] = []string{}
-				GroupAssign(groupName, hostname, ifaceName)
-			}
+		// Get local node definition
+		node, err := nodeGetByName(hostname)
+		if err != nil {
+			return nil, errors.New("cannot create cluster because localhost node definition doesn't exist.")
 		}
-		gconf.Save()
+		// Set our bind data
+		node.IP = in.BindIp
+		node.Port = in.BindPort
+		// Save back to our config
+		gconf.save()
 		// Cert stuff
 		GenerateCACert(in.BindIp)
 		// Generate client server keys if tls is enabled
@@ -253,7 +249,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupNew{
 		Success: true,
@@ -275,7 +271,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupDelete{
 		Success: true,
@@ -298,14 +294,14 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	// bring up the ip on the active appliance
 	activeHostname, activeMember := s.Memberlist.getActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
 	configCopy := gconf.GetConfig()
-	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	iface := configCopy.getGroupIface(activeHostname, in.Name)
 	activeMember.Send(SendBringUpIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips: in.Ips,
@@ -345,14 +341,14 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	// bring down the ip on the active appliance
 	activeHostname, activeMember := s.Memberlist.getActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
 	configCopy := gconf.GetConfig()
-	iface := configCopy.GetGroupIface(activeHostname, in.Name)
+	iface := configCopy.getGroupIface(activeHostname, in.Name)
 	activeMember.Send(SendBringDownIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips: in.Ips,
@@ -377,7 +373,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupAssign{
 		Success: true,
@@ -399,7 +395,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupUnassign{
 		Success: true,
@@ -433,7 +429,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
 	for _, member := range s.Memberlist.Members {
-		details, _ := NodeGetByName(member.Hostname)
+		details, _ := nodeGetByName(member.Hostname)
 		tym := member.getLastHCResponse()
 		var tymFormat string
 		if tym == (time.Time{}) {

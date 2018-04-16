@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -50,30 +50,33 @@ type Server struct {
  * Setup pulse server type
  */
 func (s *Server) Setup() {
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		log.Error("cannot setup server because unable to get local hostname")
+		return
+	}
+	// Make sure our local node is setup and available
+	if exists := nodeExists(hostname); !exists  {
+		// Create local node in config
+		nodecreateLocal()
+	}
 	config := gconf.GetConfig()
-	if !gconf.ClusterCheck() {
+	if !gconf.clusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
-	var err error
 	var bindIP string
-	bindIP = utils.FormatIPv6(config.LocalNode().IP)
+	bindIP = utils.FormatIPv6(config.localNode().IP)
 	// Listen
-	s.Listener, err = net.Listen("tcp", bindIP +":" + config.LocalNode().Port)
+	s.Listener, err = net.Listen("tcp", bindIP +":" + config.localNode().Port)
 	if err != nil {
 		debug.PrintStack()
 		panic(err)
-		//log.Errorf("Failed to listen: %s", err)
 		// TODO: Note: Should we exit here?
 		return
 	}
 	if config.Pulse.TLS {
 		// load member cert/key
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			log.Error("cannot setup server because unable to get local hostname")
-			return
-		}
 		peerCert, err := tls.LoadX509KeyPair(certDir + hostname + ".server.crt", certDir + hostname + ".server.key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
@@ -100,7 +103,7 @@ func (s *Server) Setup() {
 	}
 	proto.RegisterServerServer(s.Server, s)
 	s.Memberlist.Setup()
-	log.Info("PulseHA initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
+	log.Info("PulseHA initialised on " + config.localNode().IP + ":" + config.localNode().Port)
 	s.Server.Serve(s.Listener)
 }
 
@@ -158,7 +161,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if gconf.ClusterCheck() {
+	if gconf.clusterCheck() {
 		// Define new node
 		originNode := &Node{}
 		// unmarshal byte data to new node
@@ -173,9 +176,9 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 		// TODO: Node validation?
 		// Add node to config
-		NodeAdd(in.Hostname, originNode)
+		nodeAdd(in.Hostname, originNode)
 		// Save our new config to file
-		gconf.Save()
+		gconf.save()
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
@@ -213,14 +216,14 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	// Remove from our memberlist
 	s.Memberlist.MemberRemoveByName(in.Hostname)
 	// Remove from our config
-	err := NodeDelete(in.Hostname)
+	err := nodeDelete(in.Hostname)
 	if err != nil {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.Save()
+	gconf.save()
 	return &proto.PulseLeave{
 		Success: true,
 		Message: "Successfully removed node from local config",
@@ -249,7 +252,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Set our new config in memory
 	gconf.SetConfig(*newConfig)
 	// Save our config to file
-	gconf.Save()
+	gconf.save()
 	// Update our member list
 	s.Memberlist.Reload()
 	// Let the logs know

@@ -55,8 +55,10 @@ func realMain() int {
 	}
 
 	cli := &cli.CLI{
+		Name: "pulseha",
 		Args:     args,
 		Commands: Commands,
+		Autocomplete: true,
 		HelpFunc: cli.BasicHelpFunc("pulseha"),
 	}
 

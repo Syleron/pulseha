@@ -92,9 +92,9 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
  */
 func createPulse() *Pulse {
 	// Load the config
-	gconf.Load()
+	gconf.load()
 	// Validate the config
-	gconf.Validate()
+	gconf.validate()
 	// Set the logging level
 	setLogLevel(gconf.Logging.Level)
 	// Define new Memberlist
