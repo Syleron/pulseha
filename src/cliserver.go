@@ -28,7 +28,7 @@ import (
 	"sync"
 	"time"
 	"os"
-	"github.com/murlokswarm/errors"
+	"errors"
 )
 
 /**

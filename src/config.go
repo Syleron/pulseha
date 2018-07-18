@@ -23,7 +23,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"os"
-	"github.com/murlokswarm/errors"
+	"errors"
 )
 
 type Config struct {
