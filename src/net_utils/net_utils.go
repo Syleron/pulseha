@@ -15,17 +15,17 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package agent
+package net_utils
 
 import (
 	"bytes"
-	"github.com/Syleron/PulseHA/src/utils"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
 	log "github.com/Sirupsen/logrus"
 	"errors"
+	"github.com/Syleron/PulseHA/src/agent"
 )
 
 type ICMPv6MessageHeader struct {
@@ -53,7 +53,7 @@ func SendGARP(iface, ip string) bool {
 		os.Exit(1)
 	}
 	log.Debug("Sending gratuitous arp for " + ip + " on interface " + iface)
-	output, err := Execute("arping", "-U", "-c", "5", "-I", iface, ip)
+	output, err := agent.Execute("arping", "-U", "-c", "5", "-I", iface, ip)
 	if err != nil {
 		return false
 	}
@@ -69,7 +69,7 @@ Checks to see what status a network interface is currently.
 Possible responses are either up or down.
  */
 func netInterfaceStatus(iface string) bool {
-	_, err := Execute("cat", "/sys/class/net/"+iface+"/operstate")
+	_, err := agent.Execute("cat", "/sys/class/net/"+iface+"/operstate")
 	if err != nil {
 		//return err.Error();
 		return false
@@ -84,7 +84,7 @@ func BringIPup(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
 		return false, errors.New("Unable to bring IP up as the network interface does not exist")
 	}
-	output, err := Execute("ip", "ad", "ad", ip, "dev", iface)
+	output, err := agent.Execute("ip", "ad", "ad", ip, "dev", iface)
 	// guessing
 	if err != nil {
 		return true, errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
@@ -103,7 +103,7 @@ func BringIPdown(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
 		return false, errors.New("Unable to bring IP down as the network interface does not exist")
 	}
-	output, err := Execute("ip", "ad", "del", ip, "dev", iface)
+	output, err := agent.Execute("ip", "ad", "del", ip, "dev", iface)
 	// guessing
 	if err != nil {
 		return true, errors.New("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
@@ -120,7 +120,7 @@ Perform a curl request to a web host.
 This only returns a boolean based off the http status code received by the request.
  */
 func Curl(httpRequestURL string) bool {
-	output, err := Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
+	output, err := agent.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
 	if err != nil {
 		//log.Error("Http Curl request failed.")
 		return false
@@ -137,7 +137,7 @@ func Curl(httpRequestURL string) bool {
  */
 func ICMPv4(Ipv4Addr string) bool {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if err := ValidIPAddress(Ipv4Addr); err != nil {
+	if err := agent.ValidIPAddress(Ipv4Addr); err != nil {
 		//log.Error("Invalid IPv4 address for ICMP check..")
 		return false
 	}
@@ -162,7 +162,7 @@ func ICMPv4(Ipv4Addr string) bool {
 Function to perform an arp scan on the network. This will allow us to see which IP's are available.
  */
 func ArpScan(addrWSubnet string) string {
-	output, err := Execute("arp-scan", "arp-scan", addrWSubnet)
+	output, err := agent.Execute("arp-scan", "arp-scan", addrWSubnet)
 	if err != nil {
 		return err.Error()
 	}
@@ -173,7 +173,7 @@ func ArpScan(addrWSubnet string) string {
 Send the eq. of IPv4 arping with IPv6
  */
 func IPv6NDP(ipv6Iface string) string {
-	output, err := Execute("ndptool", "-t", "na", "-U", "-i", ipv6Iface)
+	output, err := agent.Execute("ndptool", "-t", "na", "-U", "-i", ipv6Iface)
 	if err != nil {
 		return err.Error()
 	}

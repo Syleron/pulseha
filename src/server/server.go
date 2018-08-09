@@ -15,13 +15,12 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package agent
+package server
 
 import (
 	"context"
 	"encoding/json"
 	"github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -33,6 +32,7 @@ import (
 	"crypto/tls"
 	"io/ioutil"
 	"crypto/x509"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -50,7 +50,7 @@ type Server struct {
  * Setup pulse server type
  */
 func (s *Server) Setup() {
-	hostname, err := GetHostname()
+	hostname, err := utils.GetHostname()
 	if err != nil {
 		log.Error("cannot setup server because unable to get local hostname")
 		return
@@ -66,7 +66,7 @@ func (s *Server) Setup() {
 		return
 	}
 	var bindIP string
-	bindIP = FormatIPv6(config.localNode().IP)
+	bindIP = utils.FormatIPv6(config.localNode().IP)
 	// Listen
 	s.Listener, err = net.Listen("tcp", bindIP +":" + config.localNode().Port)
 	if err != nil {

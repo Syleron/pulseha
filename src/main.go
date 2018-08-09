@@ -26,34 +26,9 @@ import (
 	"github.com/Syleron/PulseHA/src/agent"
 )
 
-type globalConfig struct {
-	sync.Mutex
-	agent.Config
-}
-
-/**
-Returns a copy of the config
-*/
-func (c *globalConfig) GetConfig() agent.Config {
-	//c.Lock()
-	//defer c.Unlock()
-	return c.Config
-}
-
-/**
-Should this save auto?
-*/
-func (c *globalConfig) SetConfig(config agent.Config) {
-	c.Lock()
-	c.Config = config
-	//set who we are might need to go somewhere else
-	c.Unlock()
-}
-
 var (
 	Version string
 	Build   string
-	gconf   globalConfig
 )
 
 var pulse *Pulse

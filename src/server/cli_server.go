@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package agent
+package server
 
 import (
 	"context"
@@ -29,6 +29,8 @@ import (
 	"time"
 	"os"
 	"errors"
+	"github.com/Syleron/PulseHA/src/client"
+	"github.com/Syleron/PulseHA/src/security"
 )
 
 /**
@@ -56,7 +58,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			genTLSKeys(in.BindIp)
 		}
 		// Create a new client
-		client := &Client{}
+		client := &client.Client{}
 		// Attempt to connect
 		err := client.Connect(in.Ip, in.Port, in.Hostname)
 		// Handle a client connection error
@@ -83,7 +85,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Send our join request
-		hostname, err := GetHostname()
+		hostname, err := utils.GetHostname()
 		if err != nil {
 			return nil, errors.New("cannot to join because unable to get hostname")
 		}

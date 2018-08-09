@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package agent
+package config
 
 import (
 	"encoding/json"
@@ -24,7 +24,32 @@ import (
 	"io/ioutil"
 	"os"
 	"errors"
+	"sync"
 )
+
+type globalConfig struct {
+	sync.Mutex
+	Config
+}
+
+/**
+Returns a copy of the config
+*/
+func (c *globalConfig) GetConfig() Config {
+	//c.Lock()
+	//defer c.Unlock()
+	return c.Config
+}
+
+/**
+Should this save auto?
+*/
+func (c *globalConfig) SetConfig(config Config) {
+	c.Lock()
+	c.Config = config
+	//set who we are might need to go somewhere else
+	c.Unlock()
+}
 
 type Config struct {
 	Pulse     Local               `json:"pulseha"`

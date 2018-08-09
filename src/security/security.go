@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package agent
+package security
 
 import (
 	"crypto/x509"
@@ -39,10 +39,10 @@ const certDir = "/etc/pulseha/certs/"
 Generate TLS keys if they don't already exist
  */
 func genTLSKeys(ip string) error {
-	CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder("/etc/pulseha/certs")
 	log.Warning("TLS keys are missing! Generating..")
-	if !CheckFileExists(certDir + "ca.crt") ||
-		!CheckFileExists(certDir + "ca.key") {
+	if !utils.CheckFileExists(certDir + "ca.crt") ||
+		!utils.CheckFileExists(certDir + "ca.key") {
 		return errors.New("Unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
