@@ -51,7 +51,9 @@ type Server struct {
 /**
  * Setup pulse server type
  */
-func (s *Server) Setup() {
+func (s *Server) Setup(cfg *config.Config) {
+	// Set our config
+	db.setConfig(cfg)
 	// Set the logging level
 	SetLogLevel(db.Logging.Level)
 	// Get our hostname

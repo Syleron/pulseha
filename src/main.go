@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -24,8 +24,8 @@ import (
 	"time"
 	"strings"
 	"github.com/Syleron/PulseHA/src/server"
-	"github.com/Syleron/PulseHA/src/plugins"
-		"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/cli_server"
 )
 
 var (
@@ -40,8 +40,7 @@ var pulse *Pulse
  */
 type Pulse struct {
 	Server *server.Server
-	CLI    *server.CLIServer
-	Plugins *plugins.Plugins
+	CLI    *cli_server.CLIServer
 }
 
 func (p *Pulse) getMemberlist() (*server.Memberlist) {
@@ -82,12 +81,11 @@ func createPulse() *Pulse {
 		Server: &server.Server{
 			Memberlist: memberList,
 		},
-		CLI: &server.CLIServer{
+		CLI: &cli_server.CLIServer{
 			Memberlist: memberList,
 		},
-		Plugins: &plugins.Plugins{},
 	}
-	// Set our server variable.. should this be a reference?
+	// Set our server variable
 	pulse.CLI.Server = pulse.Server
 	return pulse
 }
