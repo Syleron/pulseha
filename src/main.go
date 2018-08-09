@@ -23,17 +23,18 @@ import (
 	"sync"
 	"time"
 	"strings"
+	"github.com/Syleron/PulseHA/src/agent"
 )
 
 type globalConfig struct {
 	sync.Mutex
-	Config
+	agent.Config
 }
 
 /**
 Returns a copy of the config
 */
-func (c *globalConfig) GetConfig() Config {
+func (c *globalConfig) GetConfig() agent.Config {
 	//c.Lock()
 	//defer c.Unlock()
 	return c.Config
@@ -42,7 +43,7 @@ func (c *globalConfig) GetConfig() Config {
 /**
 Should this save auto?
 */
-func (c *globalConfig) SetConfig(config Config) {
+func (c *globalConfig) SetConfig(config agent.Config) {
 	c.Lock()
 	c.Config = config
 	//set who we are might need to go somewhere else
@@ -61,12 +62,12 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server *Server
-	CLI    *CLIServer
-	Plugins *Plugins
+	Server *agent.Server
+	CLI    *agent.CLIServer
+	Plugins *agent.Plugins
 }
 
-func (p *Pulse) getMemberlist() (*Memberlist) {
+func (p *Pulse) getMemberlist() (*agent.Memberlist) {
 	return pulse.Server.Memberlist
 }
 
