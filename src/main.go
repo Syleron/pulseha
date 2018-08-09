@@ -68,12 +68,6 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
-	// New instance of config
-	config := &config.Config{}
-	// Load the config
-	config.Load()
-	// Validate the config
-	config.Validate()
 	// Define new Member list
 	memberList := &server.Memberlist{}
 	// Create the Pulse object
@@ -105,6 +99,12 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
+	// New instance of config
+	config := &config.Config{}
+	// Load the config
+	config.Load()
+	// Validate the config
+	config.Validate()
 	// Load plugins
 	pulse.Plugins.Setup()
 	// Setup wait group
@@ -113,6 +113,6 @@ func main() {
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Setup()
+	go pulse.Server.Setup(config)
 	wg.Wait()
 }

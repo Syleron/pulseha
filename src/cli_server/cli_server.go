@@ -32,6 +32,7 @@ import (
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/net_utils"
 )
 
 /**
@@ -43,6 +44,22 @@ type CLIServer struct {
 	Listener   net.Listener
 	Memberlist *Memberlist
 
+}
+
+/**
+Setup pulse cli type
+*/
+func (s *CLIServer) Setup() {
+	log.Info("CLI server initialised on 127.0.0.1:49152")
+	lis, err := net.Listen("tcp", "127.0.0.1:49152")
+	if err != nil {
+		log.Errorf("Failed to listen: %s", err)
+		// TODO: Note: We exit because the service is useless without the CLI server running
+		os.Exit(0)
+	}
+	grpcServer := grpc.NewServer()
+	proto.RegisterCLIServer(grpcServer, s)
+	grpcServer.Serve(lis)
 }
 
 /**
@@ -166,7 +183,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	hostname := gconf.getLocalNode()
 	if gconf.clusterTotal() > 1 {
 		s.Memberlist.Broadcast(
-			SendLeave,
+			client.SendLeave,
 			&proto.PulseLeave{
 				Replicated: true,
 				Hostname:   hostname,
@@ -177,7 +194,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 
 	// TODO: horrible way to do this but it will do for now.
 	oldNode := gconf.Nodes[hostname]
-	newNode := &Node{
+	newNode := &config.Node{
 		IPGroups: oldNode.IPGroups,
 	}
 	// ---
@@ -309,7 +326,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	activeMember.Connect()
 	configCopy := gconf.GetConfig()
 	iface := configCopy.getGroupIface(activeHostname, in.Name)
-	activeMember.Send(SendBringUpIP, &proto.PulseBringIP{
+	activeMember.Send(client.SendBringUpIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips: in.Ips,
 	})
@@ -356,7 +373,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	activeMember.Connect()
 	configCopy := gconf.GetConfig()
 	iface := configCopy.getGroupIface(activeHostname, in.Name)
-	activeMember.Send(SendBringDownIP, &proto.PulseBringIP{
+	activeMember.Send(client.SendBringDownIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips: in.Ips,
 	})
@@ -483,7 +500,7 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()
 	defer s.Unlock()
-	err := genTLSKeys(in.BindIp)
+	err := security.GenTLSKeys(in.BindIp)
 	if err != nil {
 		return &proto.PulseCert{
 			Success: false,
@@ -494,20 +511,4 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 		Success: true,
 		Message: "Successfully generated new TLS certificates",
 	}, nil
-}
-
-/**
-Setup pulse cli type
-*/
-func (s *CLIServer) Setup() {
-	log.Info("CLI server initialised on 127.0.0.1:49152")
-	lis, err := net.Listen("tcp", "127.0.0.1:49152")
-	if err != nil {
-		log.Errorf("Failed to listen: %s", err)
-		// TODO: Note: We exit because the service is useless without the CLI server running
-		os.Exit(0)
-	}
-	grpcServer := grpc.NewServer()
-	proto.RegisterCLIServer(grpcServer, s)
-	grpcServer.Serve(lis)
 }
