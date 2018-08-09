@@ -37,10 +37,10 @@ type Client struct {
 }
 
 // This should probably go into an enums folder
-type protoFunction int
+type ProtoFunction int
 
 const (
-	SendConfigSync protoFunction = 1 + iota
+	SendConfigSync ProtoFunction = 1 + iota
 	SendJoin
 	SendLeave
 	SendMakePassive
@@ -61,7 +61,7 @@ var protoFunctions = []string{
 	"Promote",
 }
 
-func (p protoFunction) String() string {
+func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 

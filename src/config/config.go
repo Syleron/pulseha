@@ -19,37 +19,12 @@ package config
 
 import (
 	"encoding/json"
-	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
 	"io/ioutil"
 	"os"
 	"errors"
-	"sync"
+	"github.com/Syleron/PulseHA/src/utils"
 )
-
-type globalConfig struct {
-	sync.Mutex
-	Config
-}
-
-/**
-Returns a copy of the config
-*/
-func (c *globalConfig) GetConfig() Config {
-	//c.Lock()
-	//defer c.Unlock()
-	return c.Config
-}
-
-/**
-Should this save auto?
-*/
-func (c *globalConfig) SetConfig(config Config) {
-	c.Lock()
-	c.Config = config
-	//set who we are might need to go somewhere else
-	c.Unlock()
-}
 
 type Config struct {
 	Pulse     Local               `json:"pulseha"`
@@ -85,15 +60,15 @@ type Logging struct {
 /**
  * Returns a copy of the config
  */
-func (c *Config) getConfig() Config {
+func (c *Config) GetConfig() Config {
 	return *c
 }
 
 /**
  * Sets the local node name
  */
-func (c *Config) setLocalNode() error {
-	hostname, err := GetHostname()
+func (c *Config) SetLocalNode() error {
+	hostname, err := utils.GetHostname()
 	if err != nil {
 		return errors.New("cannot set local node because unable to get local hostname")
 	}
@@ -105,21 +80,21 @@ func (c *Config) setLocalNode() error {
 /**
 
  */
-func (c *Config) nodeCount() int {
+func (c *Config) NodeCount() int {
 	return len(c.Nodes)
 }
 
 /**
  * Return the local node name
  */
-func (c *Config) getLocalNode() string {
+func (c *Config) GetLocalNode() string {
 	return c.Pulse.LocalNode
 }
 
 /**
  * Function used to load the config
  */
-func (c *Config) load() {
+func (c *Config) Load() {
 	log.Info("Loading configuration file")
 	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
 	if err != nil {
@@ -127,7 +102,6 @@ func (c *Config) load() {
 		os.Exit(1)
 	}
 	err = json.Unmarshal([]byte(b), &c)
-	gconf.Config = *c
 	if err != nil {
 		log.Errorf("Unable to unmarshal config: %s", err)
 		os.Exit(1)
@@ -136,7 +110,7 @@ func (c *Config) load() {
 		log.Error("Unable to load config.json. Either it doesn't exist or there may be a permissions issue")
 		os.Exit(1)
 	}
-	err = c.setLocalNode()
+	err = c.SetLocalNode()
 	if err != nil {
 		log.Fatalf("The local Hostname does not match the configuration")
 	}
@@ -145,7 +119,7 @@ func (c *Config) load() {
 /**
  * Function used to save the config
  */
-func (c *Config) save() {
+func (c *Config) Save() {
 	log.Debug("Saving config..")
 	gconf.Lock()
 	defer gconf.Unlock()
@@ -166,16 +140,16 @@ func (c *Config) save() {
  * Reload the config file into memory.
  * Note: Need to clear memory value before calling Load()
  */
-func (c *Config) reload() {
+func (c *Config) Reload() {
 	log.Debug("Reloading PulseHA config")
 	// Reload the config file
-	c.load()
+	c.Load()
 }
 
 /**
  *
  */
-func (c *Config) validate() {
+func (c *Config) Validate() {
 	var success bool = true
 
 	// if we are in a cluster.. does our hostname exist?
@@ -202,8 +176,8 @@ func (c *Config) validate() {
 /**
  *
  */
-func (c *Config) localNode() Node {
-	hostname, err := GetHostname()
+func (c *Config) LocalNode() Node {
+	hostname, err := utils.GetHostname()
 	if err != nil {
 		return Node{}
 	}
@@ -213,18 +187,18 @@ func (c *Config) localNode() Node {
 /**
  * Private - Check to see if we are in a configured cluster or not.
  */
-func (c *Config) clusterCheck() bool {
+func (c *Config) ClusterCheck() bool {
 	config := gconf.GetConfig()
 	total := len(config.Nodes)
 	if total > 0 {
 		// if there is only one node we can assume it's ours
 		if total == 1 {
 			// make sure we have a bind IP/Port or we are not in a cluster
-			hostname, err := GetHostname()
+			hostname, err := utils.GetHostname()
 			if err != nil {
 				return false
 			}
-			node, err := nodeGetByName(hostname)
+			node, err := NodeGetByName(hostname)
 			if err != nil {
 				log.Error("There is a single node definition but it doesn't appear to be localhost...")
 				return false
@@ -241,7 +215,7 @@ func (c *Config) clusterCheck() bool {
 /**
  * Return the total number of configured nodes we have in our config.
  */
-func (c *Config) clusterTotal() int {
+func (c *Config) ClusterTotal() int {
 	config := gconf.GetConfig()
 	return len(config.Nodes)
 }
@@ -249,7 +223,7 @@ func (c *Config) clusterTotal() int {
 /**
 Returns the interface the group is assigned to
 */
-func (c *Config) getGroupIface(node string, groupName string) string {
+func (c *Config) GetGroupIface(node string, groupName string) string {
 	for nodeName, n := range c.Nodes {
 		if nodeName == node {
 			for iface, groups := range n.IPGroups {
@@ -262,17 +236,4 @@ func (c *Config) getGroupIface(node string, groupName string) string {
 		}
 	}
 	return ""
-}
-
-/**
- *
- */
-func DefaultLocalConfig() *Config {
-	return &Config{
-	//Cluster: {
-	//	//ClusterName: GetHostname(),
-	//	//BindIP: "0.0.0.0",
-	//	//BindPort: "8443",
-	//},
-	}
 }

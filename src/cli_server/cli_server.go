@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package server
+package cli_server
 
 import (
 	"context"
@@ -31,6 +31,7 @@ import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/security"
+	"github.com/Syleron/PulseHA/src/config"
 )
 
 /**
@@ -55,7 +56,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	if !gconf.clusterCheck() {
 		// Generate client server keys if tls is enabled
 		if gconf.Pulse.TLS {
-			genTLSKeys(in.BindIp)
+			security.GenTLSKeys(in.BindIp)
 		}
 		// Create a new client
 		client := &client.Client{}
@@ -110,7 +111,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Update our local config
-		peerConfig := &Config{}
+		peerConfig := &config.Config{}
 		err = json.Unmarshal(r.(*proto.PulseJoin).Config, peerConfig)
 		// handle errors
 		if err != nil {
@@ -222,10 +223,10 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		// Save back to our config
 		gconf.save()
 		// Cert stuff
-		GenerateCACert(in.BindIp)
+		security.GenerateCACert(in.BindIp)
 		// Generate client server keys if tls is enabled
 		if gconf.Pulse.TLS {
-			genTLSKeys(in.BindIp)
+			security.GenTLSKeys(in.BindIp)
 		}
 		go s.Server.Setup()
 		return &proto.PulseCreate{

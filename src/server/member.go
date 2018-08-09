@@ -25,8 +25,9 @@ import (
 	"sync"
 	"time"
 	"fmt"
-	"github.com/Syleron/PulseHA/src/utils"
 	"math"
+	"github.com/Syleron/PulseHA/src/client"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -44,7 +45,7 @@ type Member struct {
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
-	Client
+	client.Client
 	// The mutex to lock the member object
 	sync.Mutex
 }
@@ -167,7 +168,7 @@ func (m *Member) setStatus(status proto.MemberStatus_Status) {
 /**
 Set member Client GRPC
 */
-func (m *Member) setClient(client Client) {
+func (m *Member) setClient(client client.Client) {
 	m.Client = client
 }
 
@@ -201,7 +202,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
 	startTime := time.Now()
-	r, err := m.Send(SendHealthCheck, data)
+	r, err := m.Send(client.SendHealthCheck, data)
 	// This is a record for the active appliance to know when it was last sent/received!
 	m.setLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
@@ -228,22 +229,22 @@ func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 func (m *Member) makeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
 	// Make ourself active if we are refering to ourself
-	if m.getHostname() == gconf.getLocalNode() {
-		makeMemberActive()
+	if m.getHostname() == db.GetLocalNode() {
+		MakeMemberActive()
 		// Reset vars
 		m.setLatency("")
 		m.setLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
-		go Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
+		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
 		log.Debug("Member:PromoteMember() Starting health check handler")
-		go Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
+		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
 		_, err := m.Send(
-			SendPromote,
+			client.SendPromote,
 			&proto.PulsePromote{
 				Member: m.getHostname(),
 			})
@@ -262,9 +263,9 @@ Make the node passive (take down its groups)
 */
 func (m *Member) makePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
-	if m.getHostname() == gconf.getLocalNode() {
+	if m.getHostname() == db.GetLocalNode() {
 		// do this regardless to make sure we dont have any groups up
-		makeMemberPassive()
+		MakeMemberPassive()
 		// Update member variables
 		m.setLastHCResponse(time.Now())
 		// check if we are already passive before starting a new scheduler
@@ -272,13 +273,13 @@ func (m *Member) makePassive() bool {
 			m.setStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
 			log.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.getHostname())
-			go Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
+			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
 		_, err := m.Send(
-			SendMakePassive,
+			client.SendMakePassive,
 			&proto.PulsePromote{
 				Member:  m.getHostname(),
 			})
@@ -297,15 +298,15 @@ Note: We need to know the group to work out what interface to
 bring it up on.
 */
 func (m *Member) bringUpIPs(ips []string, group string) bool {
-	configCopy := gconf.GetConfig()
-	iface := configCopy.getGroupIface(m.Hostname, group)
-	if m.Hostname == gconf.getLocalNode() {
+	configCopy := db.GetConfig()
+	iface := configCopy.GetGroupIface(m.Hostname, group)
+	if m.Hostname == db.GetLocalNode() {
 		log.Debug("member is local node bringing up IP's")
-		bringUpIPs(iface, ips)
+		BringUpIPs(iface, ips)
 	} else {
 		log.Debug("member is not local node making grpc call")
 		_, err := m.Send(
-			SendBringUpIP,
+			client.SendBringUpIP,
 			&proto.PulseBringIP{
 				Iface: iface,
 				Ips:   ips,
@@ -357,7 +358,7 @@ func (m *Member) monitorReceivedHCs() bool {
 				return true
 			}
 			// If we are not the new member just return
-			if member.getHostname() != gconf.getLocalNode() {
+			if member.getHostname() != db.GetLocalNode() {
 				log.Info("Waiting on " + member.getHostname() + " to become active")
 				m.setLastHCResponse(time.Now())
 				return false

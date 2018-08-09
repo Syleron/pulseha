@@ -33,6 +33,8 @@ import (
 	"io/ioutil"
 	"crypto/x509"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/security"
 )
 
 /**
@@ -50,6 +52,9 @@ type Server struct {
  * Setup pulse server type
  */
 func (s *Server) Setup() {
+	// Set the logging level
+	SetLogLevel(db.Logging.Level)
+	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {
 		log.Error("cannot setup server because unable to get local hostname")
@@ -60,15 +65,15 @@ func (s *Server) Setup() {
 		// Create local node in config
 		nodecreateLocal()
 	}
-	config := gconf.GetConfig()
-	if !gconf.clusterCheck() {
+	config := db.GetConfig()
+	if !db.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
 	var bindIP string
-	bindIP = utils.FormatIPv6(config.localNode().IP)
+	bindIP = utils.FormatIPv6(config.LocalNode().IP)
 	// Listen
-	s.Listener, err = net.Listen("tcp", bindIP +":" + config.localNode().Port)
+	s.Listener, err = net.Listen("tcp", bindIP +":" + config.LocalNode().Port)
 	if err != nil {
 		debug.PrintStack()
 		panic(err)
@@ -77,13 +82,13 @@ func (s *Server) Setup() {
 	}
 	if config.Pulse.TLS {
 		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(certDir + hostname + ".server.crt", certDir + hostname + ".server.key")
+		peerCert, err := tls.LoadX509KeyPair(security.CertDir + hostname + ".server.crt", security.CertDir + hostname + ".server.key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
 			return
 		}
 		// Load CA cert
-		caCert, err := ioutil.ReadFile(certDir + "ca.crt")
+		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
 		if err != nil {
 			log.Error("read ca cert file error:%v", err)
 			return
@@ -103,7 +108,7 @@ func (s *Server) Setup() {
 	}
 	proto.RegisterServerServer(s.Server, s)
 	s.Memberlist.Setup()
-	log.Info("PulseHA initialised on " + config.localNode().IP + ":" + config.localNode().Port)
+	log.Info("PulseHA initialised on " + config.LocalNode().IP + ":" + config.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }
 
@@ -128,8 +133,8 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	s.Lock()
 	defer s.Unlock()
 	activeHostname, _ := s.Memberlist.getActiveMember()
-	if activeHostname != gconf.getLocalNode() {
-		localMember := s.Memberlist.GetMemberByHostname(gconf.getLocalNode())
+	if activeHostname != db.GetLocalNode() {
+		localMember := s.Memberlist.GetMemberByHostname(db.GetLocalNode())
 		// make passive to reset the networking
 		if _, activeMember := s.Memberlist.getActiveMember(); activeMember == nil {
 			log.Info("Local node is passive")
@@ -139,9 +144,9 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		s.Memberlist.update(in.Memberlist)
 	} else {
 		log.Warn("Active node mismatch")
-		hostname := getFailOverCountWinner(in.Memberlist)
+		hostname := GetFailOverCountWinner(in.Memberlist)
 		log.Info("Member " + hostname + " has been determined as the correct active node.")
-		if hostname != gconf.getLocalNode() {
+		if hostname != db.GetLocalNode() {
 			member, _ := s.Memberlist.getLocalMember()
 			member.makePassive()
 		} else {
@@ -161,9 +166,9 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if gconf.clusterCheck() {
+	if db.ClusterCheck() {
 		// Define new node
-		originNode := &Node{}
+		originNode := &config.Node{}
 		// unmarshal byte data to new node
 		err := json.Unmarshal(in.Config, originNode)
 		// handle errors
@@ -178,13 +183,13 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Add node to config
 		nodeAdd(in.Hostname, originNode)
 		// Save our new config to file
-		gconf.save()
+		db.Save()
 		// Update the cluster config
 		s.Memberlist.SyncConfig()
 		// Add node to the memberlist
 		s.Memberlist.Reload()
 		// Return with our new updated config
-		buf, err := json.Marshal(gconf.GetConfig())
+		buf, err := json.Marshal(db.GetConfig())
 		// Handle failure to marshal config
 		if err != nil {
 			log.Fatal("Unable to marshal config: %s", err)
@@ -223,7 +228,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	db.Save()
 	return &proto.PulseLeave{
 		Success: true,
 		Message: "Successfully removed node from local config",
@@ -238,7 +243,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	s.Lock()
 	defer s.Unlock()
 	// Define new node
-	newConfig := &Config{}
+	newConfig := &config.Config{}
 	// unmarshal byte data to new node
 	err := json.Unmarshal(in.Config, newConfig)
 	// Handle failure to marshal config
@@ -250,9 +255,9 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 		}, nil
 	}
 	// Set our new config in memory
-	gconf.SetConfig(*newConfig)
+	db.SetConfig(*newConfig)
 	// Save our config to file
-	gconf.save()
+	db.Save()
 	// Update our member list
 	s.Memberlist.Reload()
 	// Let the logs know
@@ -270,7 +275,7 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 	log.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
-	if in.Member != gconf.getLocalNode() {
+	if in.Member != db.GetLocalNode() {
 		return &proto.PulsePromote{
 			Success: false,
 		}, nil
@@ -295,7 +300,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 	log.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
-	if in.Member != gconf.getLocalNode() {
+	if in.Member != db.GetLocalNode() {
 		return &proto.PulsePromote{
 			Success: false,
 		}, nil
@@ -320,7 +325,7 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 	log.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
-	err := bringUpIPs(in.Iface, in.Ips)
+	err := BringUpIPs(in.Iface, in.Ips)
 	success := false
 	msg := "success"
 	if err != nil {
@@ -337,7 +342,7 @@ func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*prot
 	log.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
-	err := bringDownIPs(in.Iface, in.Ips)
+	err := BringDownIPs(in.Iface, in.Ips)
 	success := false
 	msg := "success"
 	if err != nil {

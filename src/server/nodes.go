@@ -21,7 +21,8 @@ import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/Syleron/PulseHA/src/netUtils"
+	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/net_utils"
 )
 
 /**
@@ -29,10 +30,10 @@ Create new local config node definition
  */
 func nodecreateLocal() (error) {
 	log.Debug("create localhost node config definition")
-	newNode := &Node{
+	newNode := &config.Node{
 		IPGroups: make(map[string][]string, 0),
 	}
-	hostname, err := GetHostname()
+	hostname, err := utils.GetHostname()
 	if err != nil {
 		return errors.New("cannot create cluster because unable to get hostname")
 	}
@@ -40,16 +41,16 @@ func nodecreateLocal() (error) {
 	nodeAdd(hostname, newNode)
 	// Create interface definitions each with their own group
 	// TODO: Probably move this to another function?
-	for _, ifaceName := range GetInterfaceNames() {
+	for _, ifaceName := range net_utils.GetInterfaceNames() {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := GenGroupName()
-			gconf.Groups[groupName] = []string{}
+			db.Groups[groupName] = []string{}
 			GroupAssign(groupName, hostname, ifaceName)
 		}
 	}
 	// Save to our config
-	gconf.save()
+	db.Save()
 	// return our results
 	return nil
 }
@@ -57,12 +58,12 @@ func nodecreateLocal() (error) {
 /**
  * Add a node type Node to our config.
  */
-func nodeAdd(hostname string, node *Node) error {
+func nodeAdd(hostname string, node *config.Node) error {
 	log.Debug(hostname + " added to local cluster config")
 	if !nodeExists(hostname) {
-		gconf.Lock()
-		gconf.Nodes[hostname] = *node
-		gconf.Unlock()
+		db.Lock()
+		db.Nodes[hostname] = *node
+		db.Unlock()
 		return nil
 	}
 	return errors.New("unable to add node as it already exists")
@@ -74,9 +75,9 @@ func nodeAdd(hostname string, node *Node) error {
 func nodeDelete(hostname string) error {
 	log.Debug(hostname + " remove from the local node")
 	if nodeExists(hostname) {
-		gconf.Lock()
-		delete(gconf.Nodes, hostname)
-		gconf.Unlock()
+		db.Lock()
+		delete(db.Nodes, hostname)
+		db.Unlock()
 		return nil
 	}
 	return errors.New("unable to delete node as it doesn't exist")
@@ -87,9 +88,9 @@ func nodeDelete(hostname string) error {
  */
 func nodesClearLocal() {
 	log.Debug("All nodes cleared from local config")
-	gconf.Lock()
-	gconf.Nodes = map[string]Node{}
-	gconf.Unlock()
+	db.Lock()
+	db.Nodes = map[string]config.Node{}
+	db.Unlock()
 }
 
 /**
@@ -97,7 +98,7 @@ func nodesClearLocal() {
   off the nodes hostname.
 */
 func nodeExists(hostname string) bool {
-	config := gconf.GetConfig()
+	config := db.GetConfig()
 	for key := range config.Nodes {
 		if key == hostname {
 			return true
@@ -109,14 +110,14 @@ func nodeExists(hostname string) bool {
 /**
 Get node by its hostname
 */
-func nodeGetByName(hostname string) (Node, error) {
-	config := gconf.GetConfig()
-	for key, node := range config.Nodes {
+func nodeGetByName(hostname string) (config.Node, error) {
+	cfg := db.GetConfig()
+	for key, node := range cfg.Nodes {
 		if key == hostname {
 			return node, nil
 		}
 	}
-	return Node{}, errors.New("unable to find node in config")
+	return config.Node{}, errors.New("unable to find node in config")
 }
 
 /**
@@ -124,7 +125,7 @@ func nodeGetByName(hostname string) (Node, error) {
  * Note: Eww three for loops.
  */
 func nodeAssignedToInterface(group string) bool {
-	config := gconf.GetConfig()         // :-)
+	config := db.GetConfig()         // :-)
 	for _, node := range config.Nodes { // :-|
 		for _, groups := range node.IPGroups { // :-s
 			for _, ifaceGroup := range groups { // :-(
@@ -142,7 +143,7 @@ func nodeAssignedToInterface(group string) bool {
  * Returns bool - exists/not & int - slice index
  */
 func nodeInterfaceGroupExists(node, iface, group string) (bool, int) {
-	config := gconf.GetConfig()
+	config := db.GetConfig()
 	for index, existingGroup := range config.Nodes[node].IPGroups[iface] {
 		if existingGroup == group {
 			return true, index

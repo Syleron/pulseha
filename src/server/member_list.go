@@ -25,6 +25,8 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
+	"github.com/Syleron/PulseHA/src/client"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -52,7 +54,7 @@ func (m *Memberlist) Unlock() {
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) AddMember(hostname string, client *Client) {
+func (m *Memberlist) AddMember(hostname string, client *client.Client) {
 	if !m.MemberExists(hostname) {
 		log.Debug("Memberlist:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
@@ -115,13 +117,13 @@ func (m *Memberlist) MemberExists(hostname string) bool {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName protoFunction, data interface{}) {
+func (m *Memberlist) Broadcast(funcName client.ProtoFunction, data interface{}) {
 	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
-		hostname, err := GetHostname()
+		hostname, err := utils.GetHostname()
 		if err != nil {
 			log.Error("cannot broadcast as unable to get local hostname")
 			return
@@ -142,19 +144,19 @@ func (m *Memberlist) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	if gconf.clusterCheck() {
+	if db.ClusterCheck() {
 		// Are we the only member in the cluster?
-		if gconf.clusterTotal() == 1 {
+		if db.ClusterTotal() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			m.PromoteMember(gconf.getLocalNode())
+			m.PromoteMember(db.GetLocalNode())
 		} else {
 			// come up passive and monitoring health checks
-			localMember := m.GetMemberByHostname(gconf.getLocalNode())
+			localMember := m.GetMemberByHostname(db.GetLocalNode())
 			localMember.setLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
 			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
-			go Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
+			go utils.Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
 }
@@ -163,9 +165,9 @@ func (m *Memberlist) Setup() {
 load the nodes in our config into our memberlist
 */
 func (m *Memberlist) LoadMembers() {
-	config := gconf.GetConfig()
+	config := db.GetConfig()
 	for key := range config.Nodes {
-		newClient := &Client{}
+		newClient := &client.Client{}
 		m.AddMember(key, newClient)
 	}
 }
@@ -176,7 +178,7 @@ func (m *Memberlist) LoadMembers() {
 func (m *Memberlist) Reload() {
 	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
 	// Do a config reload
-	gconf.reload()
+	db.Reload()
 	// clear local members
 	m.LoadMembers()
 }
@@ -227,7 +229,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 	switch member.getStatus() {
 	case p.MemberStatus_UNAVAILABLE:
 		//If we are the only node and just configured we will be unavailable
-		if gconf.nodeCount() > 1 {
+		if db.NodeCount() > 1 {
 			log.Warningf("Unable to promote member %s because it is unavailable", member.getHostname())
 			return errors.New("unable to promote member as it is unavailable")
 		}
@@ -281,7 +283,7 @@ func (m *Memberlist) monitorClientConns() bool {
 		return true
 	}
 	for _, member := range m.Members {
-		if member.getHostname() == gconf.getLocalNode() {
+		if member.getHostname() == db.GetLocalNode() {
 			continue
 		}
 		member.Connect()
@@ -312,7 +314,7 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 		return true
 	}
 	for _, member := range m.Members {
-		if member.getHostname() == gconf.getLocalNode() {
+		if member.getHostname() == db.GetLocalNode() {
 			continue
 		}
 		if !member.getHCBusy() && member.getStatus() == p.MemberStatus_PASSIVE {
@@ -338,12 +340,12 @@ Sync local config with each member in the cluster.
 func (m *Memberlist) SyncConfig() error {
 	log.Debug("Memberlist:SyncConfig Syncing config with peers..")
 	// Return with our new updated config
-	buf, err := json.Marshal(gconf.GetConfig())
+	buf, err := json.Marshal(db.GetConfig())
 	// Handle failure to marshal config
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	m.Broadcast(SendConfigSync, &p.PulseConfigSync{
+	m.Broadcast(client.SendConfigSync, &p.PulseConfigSync{
 		Replicated: true,
 		Config:     buf,
 	})
@@ -364,7 +366,7 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 				localMember.setStatus(member.Status)
 				localMember.setLatency(member.Latency)
 				// our local last received has priority
-				if member.GetHostname() != gconf.getLocalNode() {
+				if member.GetHostname() != db.GetLocalNode() {
 					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
 					localMember.setLastHCResponse(tym)
 				}
@@ -378,7 +380,7 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 Calculate who's next to become active in the memberlist
 */
 func (m *Memberlist) getNextActiveMember() (*Member, error) {
-	for hostname, _ := range gconf.Nodes {
+	for hostname, _ := range db.Nodes {
 		member := m.GetMemberByHostname(hostname)
 		if member == nil {
 			panic("Memberlist:getNextActiveMember() Cannot get member by hostname " + hostname)
@@ -396,7 +398,7 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 */
 func (m *Memberlist) getLocalMember() (*Member, error) {
 	for _, member := range m.Members {
-		if member.getHostname() == gconf.getLocalNode() {
+		if member.getHostname() == db.GetLocalNode() {
 			return member, nil
 		}
 	}

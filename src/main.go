@@ -23,7 +23,9 @@ import (
 	"sync"
 	"time"
 	"strings"
-	"github.com/Syleron/PulseHA/src/agent"
+	"github.com/Syleron/PulseHA/src/server"
+	"github.com/Syleron/PulseHA/src/plugins"
+		"github.com/Syleron/PulseHA/src/config"
 )
 
 var (
@@ -37,12 +39,12 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server *agent.Server
-	CLI    *agent.CLIServer
-	Plugins *agent.Plugins
+	Server *server.Server
+	CLI    *server.CLIServer
+	Plugins *plugins.Plugins
 }
 
-func (p *Pulse) getMemberlist() (*agent.Memberlist) {
+func (p *Pulse) getMemberlist() (*server.Memberlist) {
 	return pulse.Server.Memberlist
 }
 
@@ -67,24 +69,25 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
+	// New instance of config
+	config := &config.Config{}
 	// Load the config
-	gconf.load()
+	config.Load()
 	// Validate the config
-	gconf.validate()
-	// Set the logging level
-	setLogLevel(gconf.Logging.Level)
-	// Define new Memberlist
-	memberList := &Memberlist{}
+	config.Validate()
+	// Define new Member list
+	memberList := &server.Memberlist{}
 	// Create the Pulse object
 	pulse := &Pulse{
-		Server: &Server{
+		Server: &server.Server{
 			Memberlist: memberList,
 		},
-		CLI: &CLIServer{
+		CLI: &server.CLIServer{
 			Memberlist: memberList,
 		},
-		Plugins: &Plugins{},
+		Plugins: &plugins.Plugins{},
 	}
+	// Set our server variable.. should this be a reference?
 	pulse.CLI.Server = pulse.Server
 	return pulse
 }

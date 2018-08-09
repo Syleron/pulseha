@@ -27,11 +27,11 @@ import (
 /**
 Networking - Bring up the groups on the current node
 */
-func makeMemberActive() error {
+func MakeMemberActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
-	configCopy := gconf.GetConfig()
+	configCopy := db.GetConfig()
 	for name, node := range configCopy.Nodes {
-		if name == gconf.getLocalNode() {
+		if name == db.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupActive(iface, groupName)
@@ -45,11 +45,11 @@ func makeMemberActive() error {
 /**
 Networking - Bring down the ip groups on the current node
  */
-func makeMemberPassive() error {
+func MakeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
-	configCopy := gconf.GetConfig()
+	configCopy := db.GetConfig()
 	for name, node := range configCopy.Nodes {
-		if name == gconf.getLocalNode() {
+		if name == db.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupPassive(iface, groupName)
@@ -63,7 +63,7 @@ func makeMemberPassive() error {
 /**
 Bring up an []ips for a specific interface
  */
-func bringUpIPs(iface string, ips []string) error {
+func BringUpIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
 		log.Debug("No networking plugin.. skipping network action")
@@ -76,7 +76,7 @@ func bringUpIPs(iface string, ips []string) error {
 /**
 Bring down an []ips for a specific interface
  */
-func bringDownIPs(iface string, ips []string) error {
+func BringDownIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
 		log.Debug("No networking plugin.. skipping network action")
@@ -109,7 +109,7 @@ func MyCaller() string {
 /**
 
  */
-func setLogLevel(level string) {
+func SetLogLevel(level string) {
 	logLevel, err := log.ParseLevel(level)
 	if err != nil {
 		panic(err.Error())
@@ -120,7 +120,7 @@ func setLogLevel(level string) {
 /**
 Determine who is the correct active node if more than one active is brought online
  */
-func getFailOverCountWinner(members []*proto.MemberlistMember) string {
+func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
 	for _, member := range members {
 		if member.Status != proto.MemberStatus_UNAVAILABLE {
 			tym, _ := time.Parse(time.RFC1123, member.LastReceived)
