@@ -20,12 +20,13 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/cli_server"
+	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/plugins"
+	"github.com/Syleron/PulseHA/src/server"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"github.com/Syleron/PulseHA/src/server"
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/cli_server"
 )
 
 var (
@@ -39,16 +40,16 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server *server.Server
-	CLI    *cli_server.CLIServer
+	Server  *server.Server
+	CLI     *cli_server.CLIServer
+	Plugins plugins.Plugins
 }
 
-func (p *Pulse) getMemberlist() (*server.Memberlist) {
+func (p *Pulse) getMemberlist() *server.Memberlist {
 	return pulse.Server.Memberlist
 }
 
-type PulseLogFormat struct {}
-
+type PulseLogFormat struct{}
 
 func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
 	time := "[" + entry.Time.Format(time.Stamp) + "]"

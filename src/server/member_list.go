@@ -20,13 +20,13 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	p "github.com/Syleron/PulseHA/proto"
 	log "github.com/Sirupsen/logrus"
+	p "github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/client"
+	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
-	"github.com/Syleron/PulseHA/src/client"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
@@ -302,7 +302,7 @@ func (m *Memberlist) monitorClientConns() bool {
 /**
 Send health checks to users who have a healthy connection
 */
-func (m *Memberlist) addHealthCheckHandler() bool{
+func (m *Memberlist) addHealthCheckHandler() bool {
 	// make sure we are still the active appliance
 	member, err := m.getLocalMember()
 	if err != nil {
@@ -321,9 +321,9 @@ func (m *Memberlist) addHealthCheckHandler() bool{
 			memberlist := new(p.PulseHealthCheck)
 			for _, member := range m.Members {
 				newMember := &p.MemberlistMember{
-					Hostname: member.getHostname(),
-					Status:   member.getStatus(),
-					Latency: member.getLatency(),
+					Hostname:     member.getHostname(),
+					Status:       member.getStatus(),
+					Latency:      member.getLatency(),
 					LastReceived: member.getLastHCResponse().Format(time.RFC1123),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
@@ -359,7 +359,7 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 	log.Debug("Memberlist:update() Updating memberlist")
 	m.Lock()
 	defer m.Unlock()
-	 //do not update the memberlist if we are active
+	//do not update the memberlist if we are active
 	for _, member := range memberlist {
 		for _, localMember := range m.Members {
 			if member.GetHostname() == localMember.getHostname() {
@@ -395,7 +395,7 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 
 /**
 
-*/
+ */
 func (m *Memberlist) getLocalMember() (*Member, error) {
 	for _, member := range m.Members {
 		if member.getHostname() == db.GetLocalNode() {
@@ -407,7 +407,7 @@ func (m *Memberlist) getLocalMember() (*Member, error) {
 
 /**
 Reset the memberlist when we are no longer in a cluster.
- */
+*/
 func (m *Memberlist) reset() {
 	m.Lock()
 	defer m.Unlock()

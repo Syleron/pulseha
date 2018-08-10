@@ -18,9 +18,9 @@
 package server
 
 import (
-	"sync"
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/plugins"
+	"sync"
 )
 
 var db Database
@@ -47,4 +47,3 @@ func (d *Database) setConfig(config *config.Config) {
 	//set who we are might need to go somewhere else
 	d.Unlock()
 }
-

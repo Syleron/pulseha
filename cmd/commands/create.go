@@ -21,10 +21,10 @@ import (
 	"context"
 	"flag"
 	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/mitchellh/cli"
 	"google.golang.org/grpc"
 	"strings"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type CreateCommand struct {
@@ -44,7 +44,7 @@ Usage: pulseha create <bind IP> <bind port>
 
 /**
 Run the CLI command
- */
+*/
 func (c *CreateCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("create", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }

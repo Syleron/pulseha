@@ -1,12 +1,12 @@
 package commands
 
 import (
-	"github.com/mitchellh/cli"
-	"strings"
-	"flag"
-	"google.golang.org/grpc"
-	"github.com/Syleron/PulseHA/proto"
 	"context"
+	"flag"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/mitchellh/cli"
+	"google.golang.org/grpc"
+	"strings"
 )
 
 type PromoteCommand struct {

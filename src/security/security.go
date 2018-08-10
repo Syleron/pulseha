@@ -18,31 +18,31 @@
 package security
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"time"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/utils"
+	"math/big"
 	"net"
 	"os"
-	"fmt"
-	"encoding/pem"
-	"crypto/rsa"
-	"math/big"
-	"crypto/rand"
-	"errors"
-	"github.com/Syleron/PulseHA/src/utils"
-	log "github.com/Sirupsen/logrus"
+	"time"
 )
 
 const CertDir = "/etc/pulseha/certs/"
 
 /**
 Generate TLS keys if they don't already exist
- */
+*/
 func GenTLSKeys(ip string) error {
 	utils.CreateFolder("/etc/pulseha/certs")
 	log.Warning("TLS keys are missing! Generating..")
-	if !utils.CheckFileExists(CertDir + "ca.crt") ||
-		!utils.CheckFileExists(CertDir + "ca.key") {
+	if !utils.CheckFileExists(CertDir+"ca.crt") ||
+		!utils.CheckFileExists(CertDir+"ca.key") {
 		return errors.New("Unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
@@ -100,8 +100,8 @@ func GenerateCACert(ip string) {
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	writeCertFile("ca",rootCertPEM)
-	writeKeyFile("ca",rootKey)
+	writeCertFile("ca", rootCertPEM)
+	writeKeyFile("ca", rootKey)
 }
 
 /**
@@ -134,8 +134,8 @@ func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateK
 		log.Error("unable to generate cert because unable to get hostname")
 		return
 	}
-	writeCertFile(hostname + ".server", servCertPEM)
-	writeKeyFile(hostname + ".server", servKey)
+	writeCertFile(hostname+".server", servCertPEM)
+	writeKeyFile(hostname+".server", servKey)
 }
 
 /**
@@ -167,8 +167,8 @@ func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 		log.Error("unable to generate cert because unable to get hostname")
 		return
 	}
-	writeCertFile(hostname + ".client", clientCertPEM)
-	writeKeyFile(hostname + ".client", clientKey)
+	writeCertFile(hostname+".client", clientCertPEM)
+	writeKeyFile(hostname+".client", clientKey)
 }
 
 /**
@@ -186,13 +186,13 @@ func certTemplate() (*x509.Certificate, error) {
 		return nil, errors.New("unable to generate cert template because unable to get hostname")
 	}
 	tmpl := x509.Certificate{
-		SerialNumber:          serialNumber,
-		Subject:               pkix.Name{
+		SerialNumber: serialNumber,
+		Subject: pkix.Name{
 			Organization: []string{"PulseHA"},
-			CommonName: hostname,
+			CommonName:   hostname,
 		},
 		NotBefore:             time.Now(),
-		NotAfter: 			   time.Now().Add(time.Duration(730) * time.Hour * 24),
+		NotAfter:              time.Now().Add(time.Duration(730) * time.Hour * 24),
 		BasicConstraintsValid: true,
 	}
 	return &tmpl, nil
@@ -219,13 +219,13 @@ func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv 
 
 /**
 TODO: Use Utils functions
- */
+*/
 func writeCertFile(fileName string, cert []byte) {
 	// Write the cert to file
 	certOut, err := os.Create(CertDir + fileName + ".crt")
 	if err != nil {
 		hostname, _ := utils.GetHostname()
-		fmt.Println("Failed to open " + hostname + " for writing:", err)
+		fmt.Println("Failed to open "+hostname+" for writing:", err)
 		os.Exit(1)
 	}
 	certOut.Write(cert)
@@ -234,13 +234,13 @@ func writeCertFile(fileName string, cert []byte) {
 
 /**
 TODO: Use Utils functions
- */
+*/
 func writeKeyFile(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
-	keyOut, err := os.OpenFile(CertDir + filename + ".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyOut, err := os.OpenFile(CertDir+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		hostname, _ := utils.GetHostname()
-		fmt.Println("Failed to open key " + hostname + " for writing:", err)
+		fmt.Println("Failed to open key "+hostname+" for writing:", err)
 		os.Exit(1)
 	}
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})

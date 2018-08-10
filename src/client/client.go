@@ -19,16 +19,16 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
-	p "github.com/Syleron/PulseHA/proto"
 	log "github.com/Sirupsen/logrus"
+	p "github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-	"time"
-	"crypto/tls"
 	"io/ioutil"
-	"crypto/x509"
-	"github.com/Syleron/PulseHA/src/utils"
+	"time"
 )
 
 type Client struct {
@@ -113,7 +113,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 		if err != nil {
 			return errors.New("unable to connect because cannot get hostname")
 		}
-		peerCert, err := tls.LoadX509KeyPair(certDir + hostname + ".client.crt", certDir + hostname + ".client.key")
+		peerCert, err := tls.LoadX509KeyPair(certDir+hostname+".client.crt", certDir+hostname+".client.key")
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
 		}

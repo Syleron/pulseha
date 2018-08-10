@@ -19,22 +19,22 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
-	"github.com/Syleron/PulseHA/proto"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/security"
+	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"io/ioutil"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
-	"runtime/debug"
-	"crypto/tls"
-	"io/ioutil"
-	"crypto/x509"
-	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/security"
 )
 
 /**
@@ -51,7 +51,7 @@ type Server struct {
 /**
  * Setup pulse server type
  */
-func (s *Server) setup(cfg *config.Config) {
+func (s *Server) Setup(cfg *config.Config) {
 	// Set our config
 	db.setConfig(cfg)
 	// Set the logging level
@@ -63,7 +63,7 @@ func (s *Server) setup(cfg *config.Config) {
 		return
 	}
 	// Make sure our local node is setup and available
-	if exists := nodeExists(hostname); !exists  {
+	if exists := nodeExists(hostname); !exists {
 		// Create local node in config
 		nodecreateLocal()
 	}
@@ -75,7 +75,7 @@ func (s *Server) setup(cfg *config.Config) {
 	var bindIP string
 	bindIP = utils.FormatIPv6(config.LocalNode().IP)
 	// Listen
-	s.Listener, err = net.Listen("tcp", bindIP +":" + config.LocalNode().Port)
+	s.Listener, err = net.Listen("tcp", bindIP+":"+config.LocalNode().Port)
 	if err != nil {
 		debug.PrintStack()
 		panic(err)
@@ -84,7 +84,7 @@ func (s *Server) setup(cfg *config.Config) {
 	}
 	if config.Pulse.TLS {
 		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(security.CertDir + hostname + ".server.crt", security.CertDir + hostname + ".server.key")
+		peerCert, err := tls.LoadX509KeyPair(security.CertDir+hostname+".server.crt", security.CertDir+hostname+".server.key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
 			return
@@ -297,7 +297,7 @@ func (s *Server) promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 
 /**
 Make a member passive
- */
+*/
 func (s *Server) makePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Debug("Server:MakePassive() Making node passive")
 	s.Lock()

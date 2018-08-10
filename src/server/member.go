@@ -19,15 +19,15 @@ package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/proto"
-	log "github.com/Sirupsen/logrus"
-	"google.golang.org/grpc/connectivity"
-	"sync"
-	"time"
 	"fmt"
-	"math"
+	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/utils"
+	"google.golang.org/grpc/connectivity"
+	"math"
+	"sync"
+	"time"
 )
 
 /**
@@ -35,13 +35,13 @@ Member struct type
 */
 type Member struct {
 	// The hostname of the repented node
-	Hostname         string
+	Hostname string
 	// The status of the local member
-	Status           proto.MemberStatus_Status
+	Status proto.MemberStatus_Status
 	// The last time a health check was received
 	LastHCResponse time.Time
 	// The latency between the active and the current passive member
-	Latency             string
+	Latency string
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
@@ -72,10 +72,9 @@ func (m *Member) Unlock() {
 	Getters and setters for Member which allow us to make them go routine safe
 */
 
-
 /**
 
-*/
+ */
 func (m *Member) setHCBusy(busy bool) {
 	m.Lock()
 	defer m.Unlock()
@@ -84,7 +83,7 @@ func (m *Member) setHCBusy(busy bool) {
 
 /**
 
-*/
+ */
 func (m *Member) getHCBusy() bool {
 	m.Lock()
 	defer m.Unlock()
@@ -93,7 +92,7 @@ func (m *Member) getHCBusy() bool {
 
 /**
 
-*/
+ */
 func (m *Member) setLatency(latency string) {
 	m.Lock()
 	defer m.Unlock()
@@ -102,7 +101,7 @@ func (m *Member) setLatency(latency string) {
 
 /**
 
-*/
+ */
 func (m *Member) getLatency() string {
 	m.Lock()
 	defer m.Unlock()
@@ -212,7 +211,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 
 /**
 Send health check via a go routine and mark the HC busy/not
- */
+*/
 func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 	m.setHCBusy(true)
 	_, err := m.sendHealthCheck(data)
@@ -281,7 +280,7 @@ func (m *Member) makePassive() bool {
 		_, err := m.Send(
 			client.SendMakePassive,
 			&proto.PulsePromote{
-				Member:  m.getHostname(),
+				Member: m.getHostname(),
 			})
 		if err != nil {
 			log.Error(err)

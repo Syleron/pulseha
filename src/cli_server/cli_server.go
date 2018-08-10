@@ -20,19 +20,19 @@ package cli_server
 import (
 	"context"
 	"encoding/json"
-	"github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/utils"
-	log "github.com/Sirupsen/logrus"
-	"google.golang.org/grpc"
-	"net"
-	"sync"
-	"time"
-	"os"
 	"errors"
+	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/client"
-	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/net_utils"
+	"github.com/Syleron/PulseHA/src/security"
+	"github.com/Syleron/PulseHA/src/utils"
+	"google.golang.org/grpc"
+	"net"
+	"os"
+	"sync"
+	"time"
 )
 
 /**
@@ -43,7 +43,6 @@ type CLIServer struct {
 	Server     *Server
 	Listener   net.Listener
 	Memberlist *Memberlist
-
 }
 
 /**
@@ -232,8 +231,8 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		//TODO: horrible way to do this but it will do for now.
 		oldNode := gconf.Nodes[hostname]
 		newNode := &Node{
-			IP: in.BindIp,
-			Port: in.BindPort,
+			IP:       in.BindIp,
+			Port:     in.BindPort,
 			IPGroups: oldNode.IPGroups,
 		}
 		nodeDelete(hostname)
@@ -328,7 +327,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	iface := configCopy.getGroupIface(activeHostname, in.Name)
 	activeMember.Send(client.SendBringUpIP, &proto.PulseBringIP{
 		Iface: iface,
-		Ips: in.Ips,
+		Ips:   in.Ips,
 	})
 	// respond
 	return &proto.PulseGroupAdd{
@@ -375,7 +374,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	iface := configCopy.getGroupIface(activeHostname, in.Name)
 	activeMember.Send(client.SendBringDownIP, &proto.PulseBringIP{
 		Iface: iface,
-		Ips: in.Ips,
+		Ips:   in.Ips,
 	})
 	return &proto.PulseGroupRemove{
 		Success: true,
@@ -429,7 +428,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 
 /**
 Show all groups
- */
+*/
 func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto.GroupTable, error) {
 	log.Debug("CLIServer:GroupList() - Getting groups and their IPs")
 	s.Lock()
@@ -462,10 +461,10 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 			tymFormat = tym.Format(time.RFC1123)
 		}
 		row := &proto.StatusRow{
-			Hostname: member.getHostname(),
-			Ip:       details.IP,
-			Latency:     member.getLatency(),
-			Status:   member.getStatus(),
+			Hostname:     member.getHostname(),
+			Ip:           details.IP,
+			Latency:      member.getLatency(),
+			Status:       member.getStatus(),
 			LastReceived: tymFormat,
 		}
 		table.Row = append(table.Row, row)
@@ -475,7 +474,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 
 /**
 Handle CLI promote request
- */
+*/
 func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()
@@ -495,7 +494,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 
 /**
 Handle CLI promote request
- */
+*/
 func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseCert, error) {
 	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()

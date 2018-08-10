@@ -19,26 +19,26 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/utils"
 	"io/ioutil"
 	"os"
-	"errors"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type Config struct {
-	Pulse     Local               `json:"pulseha"`
-	Groups    map[string][]string `json:"floating_ip_groups"`
-	Nodes     map[string]Node     `json:"nodes"`
-	Logging   Logging             `json:"logging"`
+	Pulse   Local               `json:"pulseha"`
+	Groups  map[string][]string `json:"floating_ip_groups"`
+	Nodes   map[string]Node     `json:"nodes"`
+	Logging Logging             `json:"logging"`
 }
 
 type Local struct {
-	TLS bool `json:"tls"`
-	HealthCheckInterval   int             `json:"hcs_interval"`
-	FailOverInterval      int             `json:"fos_interval"`
-	FailOverLimit         int             `json:"fo_limit"`
-	LocalNode             string          `json:"local_node"`
+	TLS                 bool   `json:"tls"`
+	HealthCheckInterval int    `json:"hcs_interval"`
+	FailOverInterval    int    `json:"fos_interval"`
+	FailOverLimit       int    `json:"fo_limit"`
+	LocalNode           string `json:"local_node"`
 }
 
 type Nodes struct {
@@ -164,7 +164,6 @@ func (c *Config) Validate() {
 
 	// TODO: Check if our hostname exists inthe cluster config
 	// TODO: Check if we have valid network interface names
-
 
 	// Handles if shit hits the roof
 	if success == false {
