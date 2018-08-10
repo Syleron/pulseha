@@ -28,7 +28,6 @@ import (
 	"github.com/Syleron/PulseHA/src/database"
 	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/utils"
-	"github.com/coreos/go-systemd/dbus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"io/ioutil"
