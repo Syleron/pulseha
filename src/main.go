@@ -20,12 +20,13 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/cli_server"
+	"github.com/Syleron/PulseHA/src/database"
+	"github.com/Syleron/PulseHA/src/plugins"
+	"github.com/Syleron/PulseHA/src/server"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"github.com/Syleron/PulseHA/src/server"
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/cli_server"
 )
 
 var (
@@ -39,16 +40,16 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server *server.Server
-	CLI    *cli_server.CLIServer
+	Server  *server.Server
+	CLI     *cli_server.CLIServer
+	Plugins plugins.Plugins
 }
 
-func (p *Pulse) getMemberlist() (*server.Memberlist) {
+func (p *Pulse) getMemberlist() *server.Memberlist {
 	return pulse.Server.Memberlist
 }
 
-type PulseLogFormat struct {}
-
+type PulseLogFormat struct{}
 
 func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
 	time := "[" + entry.Time.Format(time.Stamp) + "]"
@@ -99,12 +100,11 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
-	// New instance of config
-	config := &config.Config{}
-	// Load the config
-	config.Load()
-	// Validate the config
-	config.Validate()
+
+	// load the db
+	db := database.Database{}
+	db.Load()
+
 	// Load plugins
 	pulse.Plugins.Setup()
 	// Setup wait group
@@ -113,6 +113,6 @@ func main() {
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Setup(config)
+	go pulse.Server.Setup(&db)
 	wg.Wait()
 }

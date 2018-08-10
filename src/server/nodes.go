@@ -20,15 +20,15 @@ package server
 import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/net_utils"
+	"github.com/Syleron/PulseHA/src/utils"
 )
 
 /**
 Create new local config node definition
- */
-func nodecreateLocal() (error) {
+*/
+func nodecreateLocal() error {
 	log.Debug("create localhost node config definition")
 	newNode := &config.Node{
 		IPGroups: make(map[string][]string, 0),
@@ -125,7 +125,7 @@ func nodeGetByName(hostname string) (config.Node, error) {
  * Note: Eww three for loops.
  */
 func nodeAssignedToInterface(group string) bool {
-	config := db.GetConfig()         // :-)
+	config := db.GetConfig()            // :-)
 	for _, node := range config.Nodes { // :-|
 		for _, groups := range node.IPGroups { // :-s
 			for _, ifaceGroup := range groups { // :-(

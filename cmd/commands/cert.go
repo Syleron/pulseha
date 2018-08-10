@@ -21,10 +21,10 @@ import (
 	"context"
 	"flag"
 	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/mitchellh/cli"
 	"google.golang.org/grpc"
 	"strings"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type CertCommand struct {
@@ -44,7 +44,7 @@ Usage: pulseha cert <Bind IP>
 
 /**
 Run the CLI command
- */
+*/
 func (c *CertCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("cert", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
@@ -88,7 +88,7 @@ func (c *CertCommand) Run(args []string) int {
 	client := proto.NewCLIClient(connection)
 
 	r, err := client.TLS(context.Background(), &proto.PulseCert{
-		BindIp:   bindIP,
+		BindIp: bindIP,
 	})
 
 	if err != nil {

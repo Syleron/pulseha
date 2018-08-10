@@ -19,15 +19,15 @@ package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/proto"
-	log "github.com/Sirupsen/logrus"
-	"google.golang.org/grpc/connectivity"
-	"sync"
-	"time"
 	"fmt"
-	"math"
+	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/utils"
+	"google.golang.org/grpc/connectivity"
+	"math"
+	"sync"
+	"time"
 )
 
 /**
@@ -35,13 +35,13 @@ Member struct type
 */
 type Member struct {
 	// The hostname of the repented node
-	Hostname         string
+	Hostname string
 	// The status of the local member
-	Status           proto.MemberStatus_Status
+	Status proto.MemberStatus_Status
 	// The last time a health check was received
 	LastHCResponse time.Time
 	// The latency between the active and the current passive member
-	Latency             string
+	Latency string
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
@@ -72,10 +72,9 @@ func (m *Member) Unlock() {
 	Getters and setters for Member which allow us to make them go routine safe
 */
 
-
 /**
 
-*/
+ */
 func (m *Member) setHCBusy(busy bool) {
 	m.Lock()
 	defer m.Unlock()
@@ -84,7 +83,7 @@ func (m *Member) setHCBusy(busy bool) {
 
 /**
 
-*/
+ */
 func (m *Member) getHCBusy() bool {
 	m.Lock()
 	defer m.Unlock()
@@ -93,7 +92,7 @@ func (m *Member) getHCBusy() bool {
 
 /**
 
-*/
+ */
 func (m *Member) setLatency(latency string) {
 	m.Lock()
 	defer m.Unlock()
@@ -102,7 +101,7 @@ func (m *Member) setLatency(latency string) {
 
 /**
 
-*/
+ */
 func (m *Member) getLatency() string {
 	m.Lock()
 	defer m.Unlock()
@@ -112,7 +111,7 @@ func (m *Member) getLatency() string {
 /**
   Set the last time this member received a health check
 */
-func (m *Member) setLastHCResponse(time time.Time) {
+func (m *Member) SetLastHCResponse(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
 	m.LastHCResponse = time
@@ -204,7 +203,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 	startTime := time.Now()
 	r, err := m.Send(client.SendHealthCheck, data)
 	// This is a record for the active appliance to know when it was last sent/received!
-	m.setLastHCResponse(time.Now())
+	m.SetLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
 	m.setLatency(elapsed)
 	return r, err
@@ -212,7 +211,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 
 /**
 Send health check via a go routine and mark the HC busy/not
- */
+*/
 func (m *Member) routineHC(data *proto.PulseHealthCheck) {
 	m.setHCBusy(true)
 	_, err := m.sendHealthCheck(data)
@@ -233,7 +232,7 @@ func (m *Member) makeActive() bool {
 		MakeMemberActive()
 		// Reset vars
 		m.setLatency("")
-		m.setLastHCResponse(time.Time{})
+		m.SetLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
@@ -267,7 +266,7 @@ func (m *Member) makePassive() bool {
 		// do this regardless to make sure we dont have any groups up
 		MakeMemberPassive()
 		// Update member variables
-		m.setLastHCResponse(time.Now())
+		m.SetLastHCResponse(time.Now())
 		// check if we are already passive before starting a new scheduler
 		if m.getStatus() != proto.MemberStatus_PASSIVE {
 			m.setStatus(proto.MemberStatus_PASSIVE)
@@ -281,7 +280,7 @@ func (m *Member) makePassive() bool {
 		_, err := m.Send(
 			client.SendMakePassive,
 			&proto.PulsePromote{
-				Member:  m.getHostname(),
+				Member: m.getHostname(),
 			})
 		if err != nil {
 			log.Error(err)
@@ -360,7 +359,7 @@ func (m *Member) monitorReceivedHCs() bool {
 			// If we are not the new member just return
 			if member.getHostname() != db.GetLocalNode() {
 				log.Info("Waiting on " + member.getHostname() + " to become active")
-				m.setLastHCResponse(time.Now())
+				m.SetLastHCResponse(time.Now())
 				return false
 			}
 			// get our current active member
@@ -376,7 +375,7 @@ func (m *Member) monitorReceivedHCs() bool {
 			log.Info("Local node is now active")
 			return true
 		} else {
-			m.setLastHCResponse(time.Now())
+			m.SetLastHCResponse(time.Now())
 		}
 	}
 	return false

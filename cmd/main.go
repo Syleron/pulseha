@@ -55,11 +55,11 @@ func realMain() int {
 	}
 
 	cli := &cli.CLI{
-		Name: "pulseha",
-		Args:     args,
-		Commands: Commands,
+		Name:         "pulseha",
+		Args:         args,
+		Commands:     Commands,
 		Autocomplete: true,
-		HelpFunc: cli.BasicHelpFunc("pulseha"),
+		HelpFunc:     cli.BasicHelpFunc("pulseha"),
 	}
 
 	exitCode, err := cli.Run()

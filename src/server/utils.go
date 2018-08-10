@@ -19,9 +19,9 @@ package server
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"time"
-	"runtime"
 	"github.com/Syleron/PulseHA/proto"
+	"runtime"
+	"time"
 )
 
 /**
@@ -44,7 +44,7 @@ func MakeMemberActive() error {
 
 /**
 Networking - Bring down the ip groups on the current node
- */
+*/
 func MakeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
 	configCopy := db.GetConfig()
@@ -62,7 +62,7 @@ func MakeMemberPassive() error {
 
 /**
 Bring up an []ips for a specific interface
- */
+*/
 func BringUpIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
@@ -75,7 +75,7 @@ func BringUpIPs(iface string, ips []string) error {
 
 /**
 Bring down an []ips for a specific interface
- */
+*/
 func BringDownIPs(iface string, ips []string) error {
 	plugin := pulse.Plugins.getNetworkingPlugin()
 	if plugin == nil {
@@ -119,7 +119,7 @@ func SetLogLevel(level string) {
 
 /**
 Determine who is the correct active node if more than one active is brought online
- */
+*/
 func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
 	for _, member := range members {
 		if member.Status != proto.MemberStatus_UNAVAILABLE {

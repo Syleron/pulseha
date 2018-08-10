@@ -49,7 +49,7 @@ func TestScheduler(t *testing.T) {
 func TestGetHostname(t *testing.T) {
 	_, err := GetHostname()
 
-	if err!= nil {
+	if err != nil {
 		t.Errorf(err.Error())
 	}
 }
