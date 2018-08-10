@@ -25,7 +25,6 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/net_utils"
 	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"

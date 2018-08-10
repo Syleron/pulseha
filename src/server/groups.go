@@ -3,7 +3,6 @@ package server
 import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/net_utils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"strconv"
