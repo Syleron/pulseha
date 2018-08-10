@@ -26,6 +26,7 @@ import (
 	"github.com/Syleron/PulseHA/src/client"
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/security"
+	"github.com/Syleron/PulseHA/src/server"
 	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"net"
@@ -39,9 +40,9 @@ Server struct type
 */
 type CLIServer struct {
 	sync.Mutex
-	Server     *Server
+	Server     *server.Server
 	Listener   net.Listener
-	Memberlist *Memberlist
+	Memberlist *server.Memberlist
 }
 
 /**
@@ -86,7 +87,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Create new local node config to send
-		newNode := &Node{
+		newNode := &config.Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: make(map[string][]string, 0),
@@ -146,8 +147,8 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		// Setup our daemon server
 		go s.Server.Setup()
 		// reset our HC last received time
-		localMember, _ := s.Memberlist.getLocalMember()
-		localMember.setLastHCResponse(time.Now())
+		localMember, _ := s.Memberlist.GetLocalMember()
+		localMember.SetLastHCResponse(time.Now())
 		// Close the connection
 		client.Close()
 		log.Info("Successfully joined cluster with " + in.Ip)
@@ -188,7 +189,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
-	makeMemberPassive()
+	server.MakeMemberPassive()
 
 	// TODO: horrible way to do this but it will do for now.
 	oldNode := gconf.Nodes[hostname]
@@ -264,7 +265,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 	log.Debug("CLIServer:NewGroup() - Create floating IP group")
 	s.Lock()
 	defer s.Unlock()
-	groupName, err := GroupNew(in.Name)
+	groupName, err := server.GroupNew(in.Name)
 	if err != nil {
 		return &proto.PulseGroupNew{
 			Success: false,
@@ -286,7 +287,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 	log.Debug("CLIServer:DeleteGroup() - Delete floating IP group")
 	s.Lock()
 	defer s.Unlock()
-	err := GroupDelete(in.Name)
+	err := server.GroupDelete(in.Name)
 	if err != nil {
 		return &proto.PulseGroupDelete{
 			Success: false,
@@ -356,7 +357,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			Message: "Unable to remove IP(s) to group as there no active node in the cluster.",
 		}, nil
 	}
-	err := GroupIpRemove(in.Name, in.Ips)
+	err := server.GroupIpRemove(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupRemove{
 			Success: false,
@@ -388,7 +389,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 	log.Debug("CLIServer:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
 	defer s.Unlock()
-	err := GroupAssign(in.Group, in.Node, in.Interface)
+	err := server.GroupAssign(in.Group, in.Node, in.Interface)
 	if err != nil {
 		return &proto.PulseGroupAssign{
 			Success: false,
@@ -410,7 +411,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 	log.Debug("CLIServer:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
 	defer s.Unlock()
-	err := GroupUnassign(in.Group, in.Node, in.Interface)
+	err := server.GroupUnassign(in.Group, in.Node, in.Interface)
 	if err != nil {
 		return &proto.PulseGroupUnassign{
 			Success: false,

@@ -153,7 +153,7 @@ func (c *Config) Validate() {
 	var success bool = true
 
 	// if we are in a cluster.. does our hostname exist?
-	if c.clusterCheck() {
+	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
 				log.Error("Hostname mistmatch. Localhost does not exist in cluster config.")

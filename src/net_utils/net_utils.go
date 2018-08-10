@@ -21,11 +21,11 @@ import (
 	"bytes"
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/utils"
 	"net"
 	"os"
 	"os/exec"
 	"strings"
-	"github.com/Syleron/PulseHA/src/utils"
 )
 
 type ICMPv6MessageHeader struct {

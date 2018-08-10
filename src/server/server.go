@@ -142,14 +142,14 @@ func (s *Server) healthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 			log.Info("Local node is passive")
 			localMember.makePassive()
 		}
-		localMember.setLastHCResponse(time.Now())
+		localMember.SetLastHCResponse(time.Now())
 		s.Memberlist.update(in.Memberlist)
 	} else {
 		log.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		log.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != db.GetLocalNode() {
-			member, _ := s.Memberlist.getLocalMember()
+			member, _ := s.Memberlist.GetLocalMember()
 			member.makePassive()
 		} else {
 			localMember, _ := pulse.getMemberlist().getLocalMember()

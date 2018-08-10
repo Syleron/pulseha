@@ -111,7 +111,7 @@ func (m *Member) getLatency() string {
 /**
   Set the last time this member received a health check
 */
-func (m *Member) setLastHCResponse(time time.Time) {
+func (m *Member) SetLastHCResponse(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
 	m.LastHCResponse = time
@@ -203,7 +203,7 @@ func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, err
 	startTime := time.Now()
 	r, err := m.Send(client.SendHealthCheck, data)
 	// This is a record for the active appliance to know when it was last sent/received!
-	m.setLastHCResponse(time.Now())
+	m.SetLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
 	m.setLatency(elapsed)
 	return r, err
@@ -232,7 +232,7 @@ func (m *Member) makeActive() bool {
 		MakeMemberActive()
 		// Reset vars
 		m.setLatency("")
-		m.setLastHCResponse(time.Time{})
+		m.SetLastHCResponse(time.Time{})
 		m.setStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
@@ -266,7 +266,7 @@ func (m *Member) makePassive() bool {
 		// do this regardless to make sure we dont have any groups up
 		MakeMemberPassive()
 		// Update member variables
-		m.setLastHCResponse(time.Now())
+		m.SetLastHCResponse(time.Now())
 		// check if we are already passive before starting a new scheduler
 		if m.getStatus() != proto.MemberStatus_PASSIVE {
 			m.setStatus(proto.MemberStatus_PASSIVE)
@@ -359,7 +359,7 @@ func (m *Member) monitorReceivedHCs() bool {
 			// If we are not the new member just return
 			if member.getHostname() != db.GetLocalNode() {
 				log.Info("Waiting on " + member.getHostname() + " to become active")
-				m.setLastHCResponse(time.Now())
+				m.SetLastHCResponse(time.Now())
 				return false
 			}
 			// get our current active member
@@ -375,7 +375,7 @@ func (m *Member) monitorReceivedHCs() bool {
 			log.Info("Local node is now active")
 			return true
 		} else {
-			m.setLastHCResponse(time.Now())
+			m.SetLastHCResponse(time.Now())
 		}
 	}
 	return false

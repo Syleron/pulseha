@@ -153,7 +153,7 @@ func (m *Memberlist) Setup() {
 		} else {
 			// come up passive and monitoring health checks
 			localMember := m.GetMemberByHostname(db.GetLocalNode())
-			localMember.setLastHCResponse(time.Now())
+			localMember.SetLastHCResponse(time.Now())
 			localMember.setStatus(p.MemberStatus_PASSIVE)
 			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
@@ -273,7 +273,7 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 */
 func (m *Memberlist) monitorClientConns() bool {
 	// make sure we are still the active appliance
-	member, err := m.getLocalMember()
+	member, err := m.GetLocalMember()
 	if err != nil {
 		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
 		return true
@@ -304,7 +304,7 @@ Send health checks to users who have a healthy connection
 */
 func (m *Memberlist) addHealthCheckHandler() bool {
 	// make sure we are still the active appliance
-	member, err := m.getLocalMember()
+	member, err := m.GetLocalMember()
 	if err != nil {
 		log.Debug("Memberlist:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
 		return true
@@ -368,7 +368,7 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 				// our local last received has priority
 				if member.GetHostname() != db.GetLocalNode() {
 					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
-					localMember.setLastHCResponse(tym)
+					localMember.SetLastHCResponse(tym)
 				}
 				break
 			}
@@ -396,7 +396,7 @@ func (m *Memberlist) getNextActiveMember() (*Member, error) {
 /**
 
  */
-func (m *Memberlist) getLocalMember() (*Member, error) {
+func (m *Memberlist) GetLocalMember() (*Member, error) {
 	for _, member := range m.Members {
 		if member.getHostname() == db.GetLocalNode() {
 			return member, nil
