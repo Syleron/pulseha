@@ -21,7 +21,7 @@ import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/src/cli_server"
-	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/database"
 	"github.com/Syleron/PulseHA/src/plugins"
 	"github.com/Syleron/PulseHA/src/server"
 	"strings"
@@ -100,12 +100,11 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
-	// New instance of config
-	config := &config.Config{}
-	// Load the config
-	config.Load()
-	// Validate the config
-	config.Validate()
+
+	// load the db
+	db := database.Database{}
+	db.Load()
+
 	// Load plugins
 	pulse.Plugins.Setup()
 	// Setup wait group
@@ -114,6 +113,6 @@ func main() {
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Setup(config)
+	go pulse.Server.Setup(&db)
 	wg.Wait()
 }

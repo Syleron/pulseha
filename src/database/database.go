@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package server
+package database
 
 import (
 	"github.com/Syleron/PulseHA/src/config"
@@ -23,25 +23,32 @@ import (
 	"sync"
 )
 
-var db Database
-
 type Database struct {
 	sync.Mutex
 	*config.Config
 	Plugins plugins.Plugins
 }
 
+// Load, reads the config file and saves it to the db
+// then validates the config
+func (d *Database) Load() {
+	d.Lock()
+	defer d.Unlock()
+	d.Config.Load()
+	d.Config.Validate()
+}
+
 /**
 Returns a copy of the config
 */
-func (d *Database) getConfig() *config.Config {
+func (d *Database) GetConfig() *config.Config {
 	return d.Config
 }
 
 /**
 Should this save auto?
 */
-func (d *Database) setConfig(config *config.Config) {
+func (d *Database) SetConfig(config *config.Config) {
 	d.Lock()
 	d.Config = config
 	//set who we are might need to go somewhere else
