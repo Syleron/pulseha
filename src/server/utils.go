@@ -106,17 +106,6 @@ func MyCaller() string {
 }
 
 /**
-
- */
-func SetLogLevel(level string) {
-	logLevel, err := log.ParseLevel(level)
-	if err != nil {
-		panic(err.Error())
-	}
-	log.SetLevel(logLevel)
-}
-
-/**
 Determine who is the correct active node if more than one active is brought online
 */
 func GetFailOverCountWinner(members []*proto.MemberlistMember) string {

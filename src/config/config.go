@@ -230,9 +230,9 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 /**
 Instantiate, setup and return our Config
  */
-func GetConfig() Config {
+func GetConfig() *Config {
 	cfg := Config{}
 	cfg.Load()
 	cfg.Validate()
-	return cfg
+	return &cfg
 }

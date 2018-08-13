@@ -58,8 +58,6 @@ type Server struct {
 func (s *Server) Setup(db *Database) {
 	// Set our config
 	DB = db
-	// Set the logging level
-	SetLogLevel(DB.Config.Logging.Level)
 	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {

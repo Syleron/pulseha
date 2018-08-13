@@ -25,7 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-	)
+	"github.com/Syleron/PulseHA/src/config"
+)
 
 var (
 	Version string
@@ -92,7 +93,9 @@ func main() {
 		Plugins: &plugins.Plugins{},
 	}
 	// Load the config
-	db.Config.GetConfig()
+	db.Config = config.GetConfig()
+	// Set the logging level
+	setLogLevel(db.Config.Logging.Level)
 	// Load plugins
 	db.Plugins.Setup()
 	// Setup wait group
@@ -103,4 +106,15 @@ func main() {
 	// Setup server
 	go pulse.Server.Setup(&db)
 	wg.Wait()
+}
+
+/**
+
+ */
+func setLogLevel(level string) {
+	logLevel, err := log.ParseLevel(level)
+	if err != nil {
+		panic(err.Error())
+	}
+	log.SetLevel(logLevel)
 }
