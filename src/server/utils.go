@@ -22,7 +22,6 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"runtime"
 	"time"
-	"github.com/Syleron/PulseHA/src/plugins"
 )
 
 /**
@@ -34,7 +33,7 @@ func MakeMemberActive() error {
 		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
-					MakeGroupActive(iface, groupName)
+					makeGroupActive(iface, groupName)
 				}
 			}
 		}
@@ -51,7 +50,7 @@ func MakeMemberPassive() error {
 		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
-					MakeGroupPassive(iface, groupName)
+					makeGroupPassive(iface, groupName)
 				}
 			}
 		}
@@ -68,7 +67,7 @@ func BringUpIPs(iface string, ips []string) error {
 		log.Debug("No networking plugin.. skipping network action")
 		return nil
 	}
-	err := plugin.Plugin.(plugins.PluginNet).BringUpIPs(iface, ips)
+	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
 	return err
 }
 
@@ -81,7 +80,7 @@ func BringDownIPs(iface string, ips []string) error {
 		log.Debug("No networking plugin.. skipping network action")
 		return nil
 	}
-	err := plugin.Plugin.(plugins.PluginNet).BringDownIPs(iface, ips)
+	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)
 	return err
 }
 

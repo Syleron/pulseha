@@ -176,7 +176,7 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 */
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
-		nodeDetails, _ := NodeGetByName(m.Hostname)
+		nodeDetails, _ := nodeGetByName(m.Hostname)
 		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname)
 		if err != nil {
 			return err

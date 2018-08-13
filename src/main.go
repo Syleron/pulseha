@@ -20,7 +20,6 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/plugins"
 	"github.com/Syleron/PulseHA/src/server"
 	"strings"
 	"sync"
@@ -90,7 +89,7 @@ func main() {
 	pulse = createPulse()
 	// load the config
 	db := server.Database{
-		Plugins: &plugins.Plugins{},
+		Plugins: &server.Plugins{},
 	}
 	// Load the config
 	db.Config = config.GetConfig()

@@ -65,9 +65,9 @@ func (s *Server) Setup(db *Database) {
 		return
 	}
 	// Make sure our local node is setup and available
-	if exists := NodeExists(hostname); !exists {
+	if exists := nodeExists(hostname); !exists {
 		// Create local node in config
-		NodecreateLocal()
+		nodecreateLocal()
 	}
 	if !DB.Config.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
@@ -184,7 +184,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 		// TODO: Node validation?
 		// Add node to config
-		NodeAdd(in.Hostname, originNode)
+		nodeAdd(in.Hostname, originNode)
 		// Save our new config to file
 		DB.Config.Save()
 		// Update the cluster config
@@ -224,7 +224,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	// Remove from our memberlist
 	Members.MemberRemoveByName(in.Hostname)
 	// Remove from our config
-	err := NodeDelete(in.Hostname)
+	err := nodeDelete(in.Hostname)
 	if err != nil {
 		return &proto.PulseLeave{
 			Success: false,

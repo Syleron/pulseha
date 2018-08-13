@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package plugins
+package server
 
 import (
 	log "github.com/Sirupsen/logrus"
@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"strconv"
+	"github.com/Syleron/PulseHA/src/config"
 )
 
 /**
@@ -47,7 +48,7 @@ type PluginNet interface {
 type PluginGen interface {
 	Name() string
 	Version() float64
-	Run() error
+	Run(ml *MemberList, cfg *config.Config) error
 }
 
 /**
@@ -158,7 +159,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
-			go e.Run()
+			go e.Run(Members, DB.Config)
 		case PluginHealthCheck:
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {
