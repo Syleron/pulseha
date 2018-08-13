@@ -20,8 +20,6 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/cli_server"
-	"github.com/Syleron/PulseHA/src/database"
 	"github.com/Syleron/PulseHA/src/plugins"
 	"github.com/Syleron/PulseHA/src/server"
 	"strings"
@@ -41,7 +39,7 @@ var pulse *Pulse
  */
 type Pulse struct {
 	Server  *server.Server
-	CLI     *cli_server.CLIServer
+	CLI     *server.CLIServer
 }
 
 type PulseLogFormat struct{}
@@ -67,7 +65,7 @@ func createPulse() *Pulse {
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &server.Server{},
-		CLI: &cli_server.CLIServer{},
+		CLI: &server.CLIServer{},
 	}
 	// Set our server variable
 	pulse.CLI.Server = pulse.Server
@@ -90,7 +88,7 @@ func main() {
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
 	// load the config
-	db := database.Database{
+	db := server.Database{
 		Plugins: &plugins.Plugins{},
 	}
 	// Load the config
@@ -101,7 +99,7 @@ func main() {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
-	go pulse.CLI.Setup(&db)
+	go pulse.CLI.Setup()
 	// Setup server
 	go pulse.Server.Setup(&db)
 	wg.Wait()

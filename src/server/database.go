@@ -15,17 +15,15 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package database
+package server
 
 import (
 	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/server"
 	"github.com/Syleron/PulseHA/src/plugins"
 )
 
 type Database struct {
 	Config *config.Config
-	Server *server.MemberList
 	Plugins *plugins.Plugins
 }
 

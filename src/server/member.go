@@ -236,9 +236,9 @@ func (m *Member) MakeActive() bool {
 		m.SetStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(DB.Server.MonitorClientConns, 1*time.Second)
+		go utils.Scheduler(Members.MonitorClientConns, 1*time.Second)
 		log.Debug("Member:PromoteMember() Starting health check handler")
-		go utils.Scheduler(DB.Server.AddHealthCheckHandler, 1*time.Second)
+		go utils.Scheduler(Members.AddHealthCheckHandler, 1*time.Second)
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
@@ -323,7 +323,7 @@ Monitor the last time we received a health check and or failover
 */
 func (m *Member) MonitorReceivedHCs() bool {
 	// make sure we are still the active appliance
-	member, err := DB.Server.GetLocalMember()
+	member, err := Members.GetLocalMember()
 	if err != nil {
 		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are no longer in a cluster")
 		return true
@@ -347,7 +347,7 @@ func (m *Member) MonitorReceivedHCs() bool {
 		if !addHCSuccess {
 			log.Warn("Additional health checks have failed.")
 			// Nothing has worked.. assume the master has failed. Fail over.
-			member, err := DB.Server.GetNextActiveMember()
+			member, err := Members.GetNextActiveMember()
 			// no new active appliance was found
 			if err != nil {
 				log.Warn("unable to find new active member.. we are now the active")
@@ -362,7 +362,7 @@ func (m *Member) MonitorReceivedHCs() bool {
 				return false
 			}
 			// get our current active member
-			_, activeMember := DB.Server.GetActiveMember()
+			_, activeMember := Members.GetActiveMember()
 			// If we have an active appliance mark it unavailable
 			if activeMember != nil {
 				activeMember.SetStatus(proto.MemberStatus_UNAVAILABLE)

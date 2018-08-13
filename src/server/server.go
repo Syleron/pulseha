@@ -35,11 +35,10 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	"github.com/Syleron/PulseHA/src/database"
 )
 
 var (
-	DB *database.Database
+	DB *Database
 	Members  *MemberList
 )
 
@@ -56,7 +55,7 @@ type Server struct {
 /**
  * Setup pulse server type
  */
-func (s *Server) Setup(db *database.Database) {
+func (s *Server) Setup(db *Database) {
 	// Set our config
 	DB = db
 	// Set the logging level
@@ -134,7 +133,7 @@ func (s *Server) Shutdown() {
 /**
 Perform appr. health checks
 */
-func (s *Server) healthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
+func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
 	log.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
@@ -168,7 +167,7 @@ func (s *Server) healthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 /**
 Join request for a configured cluster
 */
-func (s *Server) join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
+func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
 	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
@@ -220,7 +219,7 @@ func (s *Server) join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 /**
 Update our local config from a Resync request
 */
-func (s *Server) leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
+func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
 	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
@@ -244,7 +243,7 @@ func (s *Server) leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 /**
 Update our local config from a Resync request
 */
-func (s *Server) configSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
+func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
 	log.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
@@ -277,7 +276,7 @@ func (s *Server) configSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 /**
 Network action functions
 */
-func (s *Server) promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
+func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
@@ -302,7 +301,7 @@ func (s *Server) promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 /**
 Make a member passive
 */
-func (s *Server) makePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
+func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	log.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
@@ -327,7 +326,7 @@ func (s *Server) makePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 /**
 
  */
-func (s *Server) bringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
+func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
 	log.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
@@ -344,7 +343,7 @@ func (s *Server) bringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 /**
 
  */
-func (s *Server) bringDownIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
+func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
 	log.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
