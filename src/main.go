@@ -27,7 +27,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-)
+	)
 
 var (
 	Version string
@@ -42,11 +42,6 @@ var pulse *Pulse
 type Pulse struct {
 	Server  *server.Server
 	CLI     *cli_server.CLIServer
-	Plugins plugins.Plugins
-}
-
-func (p *Pulse) getMemberlist() *server.Memberlist {
-	return pulse.Server.Memberlist
 }
 
 type PulseLogFormat struct{}
@@ -69,16 +64,10 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
-	// Define new Member list
-	memberList := &server.Memberlist{}
 	// Create the Pulse object
 	pulse := &Pulse{
-		Server: &server.Server{
-			Memberlist: memberList,
-		},
-		CLI: &cli_server.CLIServer{
-			Memberlist: memberList,
-		},
+		Server: &server.Server{},
+		CLI: &cli_server.CLIServer{},
 	}
 	// Set our server variable
 	pulse.CLI.Server = pulse.Server
@@ -100,18 +89,19 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
-
-	// load the db
-	db := database.Database{}
-	db.Load()
-
+	// load the config
+	db := database.Database{
+		Plugins: &plugins.Plugins{},
+	}
+	// Load the config
+	db.Config.GetConfig()
 	// Load plugins
-	pulse.Plugins.Setup()
+	db.Plugins.Setup()
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
-	go pulse.CLI.Setup()
+	go pulse.CLI.Setup(&db)
 	// Setup server
 	go pulse.Server.Setup(&db)
 	wg.Wait()

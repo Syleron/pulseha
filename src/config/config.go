@@ -24,6 +24,7 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 	"io/ioutil"
 	"os"
+	"sync"
 )
 
 type Config struct {
@@ -31,6 +32,7 @@ type Config struct {
 	Groups  map[string][]string `json:"floating_ip_groups"`
 	Nodes   map[string]Node     `json:"nodes"`
 	Logging Logging             `json:"logging"`
+	sync.Mutex
 }
 
 type Local struct {
@@ -96,6 +98,8 @@ func (c *Config) GetLocalNode() string {
  */
 func (c *Config) Load() {
 	log.Info("Loading configuration file")
+	c.Lock()
+	defer c.Unlock()
 	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
 	if err != nil {
 		log.Errorf("Error reading config file: %s", err)
@@ -121,10 +125,10 @@ func (c *Config) Load() {
  */
 func (c *Config) Save() {
 	log.Debug("Saving config..")
-	gconf.Lock()
-	defer gconf.Unlock()
+	c.Lock()
+	defer c.Unlock()
 	// Validate before we save
-	c.validate()
+	c.Validate()
 	// Convert struct back to JSON format
 	configJSON, _ := json.MarshalIndent(c, "", "    ")
 	// Save back to file
@@ -142,7 +146,6 @@ func (c *Config) Save() {
  */
 func (c *Config) Reload() {
 	log.Debug("Reloading PulseHA config")
-	// Reload the config file
 	c.Load()
 }
 
@@ -151,7 +154,7 @@ func (c *Config) Reload() {
  */
 func (c *Config) Validate() {
 	var success bool = true
-
+	c.Lock()
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
@@ -162,9 +165,10 @@ func (c *Config) Validate() {
 		}
 	}
 
-	// TODO: Check if our hostname exists inthe cluster config
+	// TODO: Check if our hostname exists in the cluster config
 	// TODO: Check if we have valid network interface names
 
+	c.Unlock()
 	// Handles if shit hits the roof
 	if success == false {
 		// log why we exited?
@@ -187,8 +191,7 @@ func (c *Config) LocalNode() Node {
  * Private - Check to see if we are in a configured cluster or not.
  */
 func (c *Config) ClusterCheck() bool {
-	config := gconf.GetConfig()
-	total := len(config.Nodes)
+	total := len(c.Nodes)
 	if total > 0 {
 		// if there is only one node we can assume it's ours
 		if total == 1 {
@@ -197,26 +200,13 @@ func (c *Config) ClusterCheck() bool {
 			if err != nil {
 				return false
 			}
-			node, err := NodeGetByName(hostname)
-			if err != nil {
-				log.Error("There is a single node definition but it doesn't appear to be localhost...")
-				return false
-			}
-			if node.IP == "" && node.Port == "" {
+			if c.Nodes[hostname].IP == "" && c.Nodes[hostname].Port == "" {
 				return false
 			}
 		}
 		return true
 	}
 	return false
-}
-
-/**
- * Return the total number of configured nodes we have in our config.
- */
-func (c *Config) ClusterTotal() int {
-	config := gconf.GetConfig()
-	return len(config.Nodes)
 }
 
 /**
@@ -235,4 +225,14 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 		}
 	}
 	return ""
+}
+
+/**
+Instantiate, setup and return our Config
+ */
+func GetConfig() Config {
+	cfg := Config{}
+	cfg.Load()
+	cfg.Validate()
+	return cfg
 }

@@ -111,7 +111,7 @@ func (p *Plugins) Setup() {
 	p.Load(PluginHealthCheck, plugins)
 	p.Load(PluginNetworking, plugins)
 	p.Load(PluginGeneral, plugins)
-	p.validate()
+	p.Validate()
 	if len(p.modules) > 0 {
 		var pluginNames string = ""
 		for _, plgn := range p.modules {
@@ -124,9 +124,9 @@ func (p *Plugins) Setup() {
 /**
 Validate that we have the required plugins
 */
-func (p *Plugins) validate() {
+func (p *Plugins) Validate() {
 	// make sure we have a networking plugin
-	if p.getNetworkingPlugin() == nil {
+	if p.GetNetworkingPlugin() == nil {
 		log.Warning("No networking plugin loaded. PulseHA now in monitoring mode..")
 	}
 }
@@ -181,7 +181,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 		case PluginNetworking:
 			// Make sure we are not loading another networking plugin.
 			// Only one networking plugin can be loaded at one time.
-			if p.getNetworkingPlugin() != nil {
+			if p.GetNetworkingPlugin() != nil {
 				continue
 			}
 			symEvt, err := plugin.Lookup(pluginType.String())
@@ -209,7 +209,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 /**
 Returns a slice of health check plugins
 */
-func (p *Plugins) getHealthCheckPlugins() []*Plugin {
+func (p *Plugins) GetHealthCheckPlugins() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginHealthCheck {
@@ -222,7 +222,7 @@ func (p *Plugins) getHealthCheckPlugins() []*Plugin {
 /**
 Returns a single networking plugin (as you should only ever have one loaded)
 */
-func (p *Plugins) getNetworkingPlugin() *Plugin {
+func (p *Plugins) GetNetworkingPlugin() *Plugin {
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginNetworking {
 			return plgin
@@ -234,7 +234,7 @@ func (p *Plugins) getNetworkingPlugin() *Plugin {
 /**
 Returns a slice of general plugins
 */
-func (p *Plugins) getGeneralPlugin() []*Plugin {
+func (p *Plugins) GetGeneralPlugin() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginGeneral {

@@ -22,6 +22,7 @@ import (
 	"github.com/Syleron/PulseHA/proto"
 	"runtime"
 	"time"
+	"github.com/Syleron/PulseHA/src/plugins"
 )
 
 /**
@@ -29,12 +30,11 @@ Networking - Bring up the groups on the current node
 */
 func MakeMemberActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
-	configCopy := db.GetConfig()
-	for name, node := range configCopy.Nodes {
-		if name == db.GetLocalNode() {
+	for name, node := range DB.Config.Nodes {
+		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
-					makeGroupActive(iface, groupName)
+					MakeGroupActive(iface, groupName)
 				}
 			}
 		}
@@ -47,12 +47,11 @@ Networking - Bring down the ip groups on the current node
 */
 func MakeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
-	configCopy := db.GetConfig()
-	for name, node := range configCopy.Nodes {
-		if name == db.GetLocalNode() {
+	for name, node := range DB.Config.Nodes {
+		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
-					makeGroupPassive(iface, groupName)
+					MakeGroupPassive(iface, groupName)
 				}
 			}
 		}
@@ -64,12 +63,12 @@ func MakeMemberPassive() error {
 Bring up an []ips for a specific interface
 */
 func BringUpIPs(iface string, ips []string) error {
-	plugin := pulse.Plugins.getNetworkingPlugin()
+	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
 		log.Debug("No networking plugin.. skipping network action")
 		return nil
 	}
-	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
+	err := plugin.Plugin.(plugins.PluginNet).BringUpIPs(iface, ips)
 	return err
 }
 
@@ -77,12 +76,12 @@ func BringUpIPs(iface string, ips []string) error {
 Bring down an []ips for a specific interface
 */
 func BringDownIPs(iface string, ips []string) error {
-	plugin := pulse.Plugins.getNetworkingPlugin()
+	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
 		log.Debug("No networking plugin.. skipping network action")
 		return nil
 	}
-	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)
+	err := plugin.Plugin.(plugins.PluginNet).BringDownIPs(iface, ips)
 	return err
 }
 

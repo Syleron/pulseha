@@ -28,7 +28,7 @@ import (
 /**
 Create new local config node definition
 */
-func nodecreateLocal() error {
+func NodecreateLocal() error {
 	log.Debug("create localhost node config definition")
 	newNode := &config.Node{
 		IPGroups: make(map[string][]string, 0),
@@ -38,19 +38,19 @@ func nodecreateLocal() error {
 		return errors.New("cannot create cluster because unable to get hostname")
 	}
 	// Add the new node
-	nodeAdd(hostname, newNode)
+	NodeAdd(hostname, newNode)
 	// Create interface definitions each with their own group
 	// TODO: Probably move this to another function?
 	for _, ifaceName := range net_utils.GetInterfaceNames() {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := GenGroupName()
-			db.Groups[groupName] = []string{}
+			DB.Config.Groups[groupName] = []string{}
 			GroupAssign(groupName, hostname, ifaceName)
 		}
 	}
 	// Save to our config
-	db.Save()
+	DB.Config.Save()
 	// return our results
 	return nil
 }
@@ -58,12 +58,12 @@ func nodecreateLocal() error {
 /**
  * Add a node type Node to our config.
  */
-func nodeAdd(hostname string, node *config.Node) error {
+func NodeAdd(hostname string, node *config.Node) error {
 	log.Debug(hostname + " added to local cluster config")
-	if !nodeExists(hostname) {
-		db.Lock()
-		db.Nodes[hostname] = *node
-		db.Unlock()
+	if !NodeExists(hostname) {
+		DB.Config.Lock()
+		DB.Config.Nodes[hostname] = *node
+		DB.Config.Unlock()
 		return nil
 	}
 	return errors.New("unable to add node as it already exists")
@@ -72,12 +72,12 @@ func nodeAdd(hostname string, node *config.Node) error {
 /**
  * Remove a node from our config by hostname.
  */
-func nodeDelete(hostname string) error {
+func NodeDelete(hostname string) error {
 	log.Debug(hostname + " remove from the local node")
-	if nodeExists(hostname) {
-		db.Lock()
-		delete(db.Nodes, hostname)
-		db.Unlock()
+	if NodeExists(hostname) {
+		DB.Config.Lock()
+		delete(DB.Config.Nodes, hostname)
+		DB.Config.Unlock()
 		return nil
 	}
 	return errors.New("unable to delete node as it doesn't exist")
@@ -86,20 +86,19 @@ func nodeDelete(hostname string) error {
 /**
  * Clear out local Nodes section of config.
  */
-func nodesClearLocal() {
+func NodesClearLocal() {
 	log.Debug("All nodes cleared from local config")
-	db.Lock()
-	db.Nodes = map[string]config.Node{}
-	db.Unlock()
+	DB.Config.Lock()
+	DB.Config.Nodes = map[string]config.Node{}
+	DB.Config.Unlock()
 }
 
 /**
 * Determines whether a Node already exists in a config based
   off the nodes hostname.
 */
-func nodeExists(hostname string) bool {
-	config := db.GetConfig()
-	for key := range config.Nodes {
+func NodeExists(hostname string) bool {
+	for key := range DB.Config.Nodes {
 		if key == hostname {
 			return true
 		}
@@ -110,9 +109,8 @@ func nodeExists(hostname string) bool {
 /**
 Get node by its hostname
 */
-func nodeGetByName(hostname string) (config.Node, error) {
-	cfg := db.GetConfig()
-	for key, node := range cfg.Nodes {
+func NodeGetByName(hostname string) (config.Node, error) {
+	for key, node := range DB.Config.Nodes {
 		if key == hostname {
 			return node, nil
 		}
@@ -124,9 +122,8 @@ func nodeGetByName(hostname string) (config.Node, error) {
  * Checks to see if a node has any interface assignments.
  * Note: Eww three for loops.
  */
-func nodeAssignedToInterface(group string) bool {
-	config := db.GetConfig()            // :-)
-	for _, node := range config.Nodes { // :-|
+func NodeAssignedToInterface(group string) bool {
+	for _, node := range DB.Config.Nodes { // :-|
 		for _, groups := range node.IPGroups { // :-s
 			for _, ifaceGroup := range groups { // :-(
 				if ifaceGroup == group {
@@ -142,9 +139,8 @@ func nodeAssignedToInterface(group string) bool {
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */
-func nodeInterfaceGroupExists(node, iface, group string) (bool, int) {
-	config := db.GetConfig()
-	for index, existingGroup := range config.Nodes[node].IPGroups[iface] {
+func NodeInterfaceGroupExists(node, iface, group string) (bool, int) {
+	for index, existingGroup := range DB.Config.Nodes[node].IPGroups[iface] {
 		if existingGroup == group {
 			return true, index
 		}

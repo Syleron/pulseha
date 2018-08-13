@@ -27,12 +27,12 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
-)
+	)
 
 /**
- * Memberlist struct type
+ * MemberList struct type
  */
-type Memberlist struct {
+type MemberList struct {
 	Members []*Member
 	sync.Mutex
 }
@@ -40,44 +40,44 @@ type Memberlist struct {
 /**
 
  */
-func (m *Memberlist) Lock() {
+func (m *MemberList) Lock() {
 	m.Mutex.Lock()
 }
 
 /**
 
  */
-func (m *Memberlist) Unlock() {
+func (m *MemberList) Unlock() {
 	m.Mutex.Unlock()
 }
 
 /**
  * Add a member to the client list
  */
-func (m *Memberlist) AddMember(hostname string, client *client.Client) {
+func (m *MemberList) AddMember(hostname string, client *client.Client) {
 	if !m.MemberExists(hostname) {
-		log.Debug("Memberlist:MemberAdd() " + hostname + " added to memberlist")
+		log.Debug("MemberList:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
 		newMember := &Member{}
-		newMember.setHostname(hostname)
-		newMember.setStatus(p.MemberStatus_UNAVAILABLE)
-		newMember.setClient(*client)
+		newMember.SetHostname(hostname)
+		newMember.SetStatus(p.MemberStatus_UNAVAILABLE)
+		newMember.SetClient(*client)
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
-		log.Debug("Memberlist:MemberAdd() Member " + hostname + " already exists. Skipping.")
+		log.Debug("MemberList:MemberAdd() Member " + hostname + " already exists. Skipping.")
 	}
 }
 
 /**
  * Remove a member from the client list by hostname
  */
-func (m *Memberlist) MemberRemoveByName(hostname string) {
-	log.Debug("Memberlist:MemberRemoveByName() " + hostname + " removed from the memberlist")
+func (m *MemberList) MemberRemoveByName(hostname string) {
+	log.Debug("MemberList:MemberRemoveByName() " + hostname + " removed from the memberlist")
 	m.Lock()
 	defer m.Unlock()
 	for i, member := range m.Members {
-		if member.getHostname() == hostname {
+		if member.GetHostname() == hostname {
 			m.Members = append(m.Members[:i], m.Members[i+1:]...)
 		}
 	}
@@ -86,14 +86,14 @@ func (m *Memberlist) MemberRemoveByName(hostname string) {
 /**
  * Return Member by hostname
  */
-func (m *Memberlist) GetMemberByHostname(hostname string) *Member {
+func (m *MemberList) GetMemberByHostname(hostname string) *Member {
 	m.Lock()
 	defer m.Unlock()
 	if hostname == "" {
-		log.Warning("Memberlist:GetMemberByHostname() Unable to get get member by hostname as hostname is empty!")
+		log.Warning("MemberList:GetMemberByHostname() Unable to get get member by hostname as hostname is empty!")
 	}
 	for _, member := range m.Members {
-		if member.getHostname() == hostname {
+		if member.GetHostname() == hostname {
 			return member
 		}
 	}
@@ -103,11 +103,11 @@ func (m *Memberlist) GetMemberByHostname(hostname string) *Member {
 /**
  * Return true/false whether a member exists or not.
  */
-func (m *Memberlist) MemberExists(hostname string) bool {
+func (m *MemberList) MemberExists(hostname string) bool {
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		if member.getHostname() == hostname {
+		if member.GetHostname() == hostname {
 			return true
 		}
 	}
@@ -117,8 +117,8 @@ func (m *Memberlist) MemberExists(hostname string) bool {
 /**
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
-func (m *Memberlist) Broadcast(funcName client.ProtoFunction, data interface{}) {
-	log.Debug("Memberlist:Broadcast() Broadcasting " + funcName.String())
+func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) {
+	log.Debug("MemberList:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
@@ -128,10 +128,10 @@ func (m *Memberlist) Broadcast(funcName client.ProtoFunction, data interface{}) 
 			log.Error("cannot broadcast as unable to get local hostname")
 			return
 		}
-		if member.getHostname() == hostname {
+		if member.GetHostname() == hostname {
 			continue
 		}
-		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.getHostname())
+		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.GetHostname())
 		member.Connect()
 		member.Send(funcName, data)
 	}
@@ -140,23 +140,23 @@ func (m *Memberlist) Broadcast(funcName client.ProtoFunction, data interface{}) 
 /**
 Setup process for the memberlist
 */
-func (m *Memberlist) Setup() {
+func (m *MemberList) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	if db.ClusterCheck() {
+	if DB.Config.ClusterCheck() {
 		// Are we the only member in the cluster?
-		if db.ClusterTotal() == 1 {
+		if DB.Config.NodeCount() == 1 {
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
-			m.PromoteMember(db.GetLocalNode())
+			m.PromoteMember(DB.Config.GetLocalNode())
 		} else {
 			// come up passive and monitoring health checks
-			localMember := m.GetMemberByHostname(db.GetLocalNode())
+			localMember := m.GetMemberByHostname(DB.Config.GetLocalNode())
 			localMember.SetLastHCResponse(time.Now())
-			localMember.setStatus(p.MemberStatus_PASSIVE)
-			log.Debug("Memberlist:Setup() - starting the monitor received health checks scheduler")
-			go utils.Scheduler(localMember.monitorReceivedHCs, 2000*time.Millisecond)
+			localMember.SetStatus(p.MemberStatus_PASSIVE)
+			log.Debug("MemberList:Setup() - starting the monitor received health checks scheduler")
+			go utils.Scheduler(localMember.MonitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
 }
@@ -164,9 +164,8 @@ func (m *Memberlist) Setup() {
 /**
 load the nodes in our config into our memberlist
 */
-func (m *Memberlist) LoadMembers() {
-	config := db.GetConfig()
-	for key := range config.Nodes {
+func (m *MemberList) LoadMembers() {
+	for key := range DB.Config.Nodes {
 		newClient := &client.Client{}
 		m.AddMember(key, newClient)
 	}
@@ -175,10 +174,8 @@ func (m *Memberlist) LoadMembers() {
 /**
 
  */
-func (m *Memberlist) Reload() {
-	log.Debug("Memberlist:ReloadMembers() Reloading member nodes")
-	// Do a config reload
-	db.Reload()
+func (m *MemberList) Reload() {
+	log.Debug("MemberList:ReloadMembers() Reloading member nodes")
 	// clear local members
 	m.LoadMembers()
 }
@@ -186,12 +183,12 @@ func (m *Memberlist) Reload() {
 /**
 Get status of a specific member by hostname
 */
-func (m *Memberlist) MemberGetStatus(hostname string) (p.MemberStatus_Status, error) {
+func (m *MemberList) MemberGetStatus(hostname string) (p.MemberStatus_Status, error) {
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
-		if member.getHostname() == hostname {
-			return member.getStatus(), nil
+		if member.GetHostname() == hostname {
+			return member.GetStatus(), nil
 		}
 	}
 	return p.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
@@ -201,10 +198,10 @@ func (m *Memberlist) MemberGetStatus(hostname string) (p.MemberStatus_Status, er
 	Return the hostname of the active member
 	or empty string if non are active
 */
-func (m *Memberlist) getActiveMember() (string, *Member) {
+func (m *MemberList) GetActiveMember() (string, *Member) {
 	for _, member := range m.Members {
-		if member.getStatus() == p.MemberStatus_ACTIVE {
-			return member.getHostname(), member
+		if member.GetStatus() == p.MemberStatus_ACTIVE {
+			return member.GetHostname(), member
 		}
 	}
 	return "", nil
@@ -214,8 +211,8 @@ func (m *Memberlist) getActiveMember() (string, *Member) {
 Promote a member within the memberlist to become the active
 node
 */
-func (m *Memberlist) PromoteMember(hostname string) error {
-	log.Debug("Memberlist:PromoteMember() Memberlist promoting " + hostname + " as active member..")
+func (m *MemberList) PromoteMember(hostname string) error {
+	log.Debug("MemberList:PromoteMember() MemberList promoting " + hostname + " as active member..")
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 	// get host is it active?
@@ -226,37 +223,37 @@ func (m *Memberlist) PromoteMember(hostname string) error {
 		return errors.New("the specified host does not exist in the configured cluster")
 	}
 	// if unavailable check it works or do nothing?
-	switch member.getStatus() {
+	switch member.GetStatus() {
 	case p.MemberStatus_UNAVAILABLE:
 		//If we are the only node and just configured we will be unavailable
-		if db.NodeCount() > 1 {
-			log.Warningf("Unable to promote member %s because it is unavailable", member.getHostname())
+		if DB.Config.NodeCount() > 1 {
+			log.Warningf("Unable to promote member %s because it is unavailable", member.GetHostname())
 			return errors.New("unable to promote member as it is unavailable")
 		}
 	case p.MemberStatus_ACTIVE:
-		log.Warningf("Unable to promote member %s as it is active", member.getHostname())
+		log.Warningf("Unable to promote member %s as it is active", member.GetHostname())
 		return errors.New("unable to promote member as it is already active")
 	}
 	// get the current active member
-	_, activeMember := m.getActiveMember()
+	_, activeMember := m.GetActiveMember()
 	// handle if we do not have an active member
 	if activeMember != nil {
 		// Make the current Active appliance passive
-		success := activeMember.makePassive()
+		success := activeMember.MakePassive()
 		if !success {
-			log.Warningf("Failed to make %s passive, continuing", activeMember.getHostname())
+			log.Warningf("Failed to make %s passive, continuing", activeMember.GetHostname())
 		}
 		// TODO: Note: Do we need this?
 		// Update our local value for the active member
-		activeMember.setStatus(p.MemberStatus_PASSIVE)
+		activeMember.SetStatus(p.MemberStatus_PASSIVE)
 	}
 	// make the hostname the new active
-	success := member.makeActive()
+	success := member.MakeActive()
 	// make new node active
 	if !success {
-		log.Warningf("Failed to promote %s to active. Falling back to %s", member.getHostname(), activeMember.getHostname())
+		log.Warningf("Failed to promote %s to active. Falling back to %s", member.GetHostname(), activeMember.GetHostname())
 		// Somethings gone wrong.. attempt to make the previous active - active again.
-		success := activeMember.makeActive()
+		success := activeMember.MakeActive()
 		if !success {
 			log.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
@@ -271,19 +268,19 @@ func (m *Memberlist) PromoteMember(hostname string) error {
           where this logic will stay.. just playing around at this point.
 	monitors the connections states for each member
 */
-func (m *Memberlist) monitorClientConns() bool {
+func (m *MemberList) MonitorClientConns() bool {
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {
-		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
+		log.Debug("MemberList:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
 		return true
 	}
-	if member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("Memberlist:monitorClientConns() Client monitoring has stopped as we are no longer active")
+	if member.GetStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("MemberList:monitorClientConns() Client monitoring has stopped as we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
-		if member.getHostname() == db.GetLocalNode() {
+		if member.GetHostname() == DB.Config.GetLocalNode() {
 			continue
 		}
 		member.Connect()
@@ -291,9 +288,9 @@ func (m *Memberlist) monitorClientConns() bool {
 		switch member.Connection.GetState() {
 		case connectivity.Idle:
 		case connectivity.Ready:
-			member.setStatus(p.MemberStatus_PASSIVE)
+			member.SetStatus(p.MemberStatus_PASSIVE)
 		default:
-			member.setStatus(p.MemberStatus_UNAVAILABLE)
+			member.SetStatus(p.MemberStatus_UNAVAILABLE)
 		}
 	}
 	return false
@@ -302,33 +299,33 @@ func (m *Memberlist) monitorClientConns() bool {
 /**
 Send health checks to users who have a healthy connection
 */
-func (m *Memberlist) addHealthCheckHandler() bool {
+func (m *MemberList) AddHealthCheckHandler() bool {
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {
-		log.Debug("Memberlist:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
+		log.Debug("MemberList:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
 		return true
 	}
-	if member.getStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("Memberlist:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
+	if member.GetStatus() == p.MemberStatus_PASSIVE {
+		log.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
-		if member.getHostname() == db.GetLocalNode() {
+		if member.GetHostname() == DB.Config.GetLocalNode() {
 			continue
 		}
-		if !member.getHCBusy() && member.getStatus() == p.MemberStatus_PASSIVE {
+		if !member.GetHCBusy() && member.GetStatus() == p.MemberStatus_PASSIVE {
 			memberlist := new(p.PulseHealthCheck)
 			for _, member := range m.Members {
 				newMember := &p.MemberlistMember{
-					Hostname:     member.getHostname(),
-					Status:       member.getStatus(),
-					Latency:      member.getLatency(),
-					LastReceived: member.getLastHCResponse().Format(time.RFC1123),
+					Hostname:     member.GetHostname(),
+					Status:       member.GetStatus(),
+					Latency:      member.GetLatency(),
+					LastReceived: member.GetLastHCResponse().Format(time.RFC1123),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
-			go member.routineHC(memberlist)
+			go member.RoutineHC(memberlist)
 		}
 	}
 	return false
@@ -337,10 +334,10 @@ func (m *Memberlist) addHealthCheckHandler() bool {
 /**
 Sync local config with each member in the cluster.
 */
-func (m *Memberlist) SyncConfig() error {
-	log.Debug("Memberlist:SyncConfig Syncing config with peers..")
+func (m *MemberList) SyncConfig() error {
+	log.Debug("MemberList:SyncConfig Syncing config with peers..")
 	// Return with our new updated config
-	buf, err := json.Marshal(db.GetConfig())
+	buf, err := json.Marshal(DB.Config.GetConfig())
 	// Handle failure to marshal config
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
@@ -355,18 +352,18 @@ func (m *Memberlist) SyncConfig() error {
 /**
 Update the local memberlist statuses based on the proto memberlist message
 */
-func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
-	log.Debug("Memberlist:update() Updating memberlist")
+func (m *MemberList) Update(memberlist []*p.MemberlistMember) {
+	log.Debug("MemberList:update() Updating memberlist")
 	m.Lock()
 	defer m.Unlock()
 	//do not update the memberlist if we are active
 	for _, member := range memberlist {
 		for _, localMember := range m.Members {
-			if member.GetHostname() == localMember.getHostname() {
-				localMember.setStatus(member.Status)
-				localMember.setLatency(member.Latency)
+			if member.GetHostname() == localMember.GetHostname() {
+				localMember.SetStatus(member.Status)
+				localMember.SetLatency(member.Latency)
 				// our local last received has priority
-				if member.GetHostname() != db.GetLocalNode() {
+				if member.GetHostname() != DB.Config.GetLocalNode() {
 					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
 					localMember.SetLastHCResponse(tym)
 				}
@@ -379,26 +376,26 @@ func (m *Memberlist) update(memberlist []*p.MemberlistMember) {
 /**
 Calculate who's next to become active in the memberlist
 */
-func (m *Memberlist) getNextActiveMember() (*Member, error) {
-	for hostname, _ := range db.Nodes {
+func (m *MemberList) GetNextActiveMember() (*Member, error) {
+	for hostname, _ := range DB.Config.Nodes {
 		member := m.GetMemberByHostname(hostname)
 		if member == nil {
-			panic("Memberlist:getNextActiveMember() Cannot get member by hostname " + hostname)
+			panic("MemberList:getNextActiveMember() Cannot get member by hostname " + hostname)
 		}
-		if member.getStatus() == p.MemberStatus_PASSIVE {
-			log.Debug("Memberlist:getNextActiveMember() " + member.getHostname() + " is the new active appliance")
+		if member.GetStatus() == p.MemberStatus_PASSIVE {
+			log.Debug("MemberList:getNextActiveMember() " + member.GetHostname() + " is the new active appliance")
 			return member, nil
 		}
 	}
-	return &Member{}, errors.New("Memberlist:getNextActiveMember() No new active member found")
+	return &Member{}, errors.New("MemberList:getNextActiveMember() No new active member found")
 }
 
 /**
 
  */
-func (m *Memberlist) GetLocalMember() (*Member, error) {
+func (m *MemberList) GetLocalMember() (*Member, error) {
 	for _, member := range m.Members {
-		if member.getHostname() == db.GetLocalNode() {
+		if member.GetHostname() == DB.Config.GetLocalNode() {
 			return member, nil
 		}
 	}
@@ -408,7 +405,7 @@ func (m *Memberlist) GetLocalMember() (*Member, error) {
 /**
 Reset the memberlist when we are no longer in a cluster.
 */
-func (m *Memberlist) reset() {
+func (m *MemberList) Reset() {
 	m.Lock()
 	defer m.Unlock()
 	m.Members = []*Member{}

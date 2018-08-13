@@ -33,7 +33,10 @@ import (
 	"os"
 	"sync"
 	"time"
+	"github.com/Syleron/PulseHA/src/database"
 )
+
+var DB *database.Database
 
 /**
 Server struct type
@@ -42,13 +45,14 @@ type CLIServer struct {
 	sync.Mutex
 	Server     *server.Server
 	Listener   net.Listener
-	Memberlist *server.Memberlist
+	Memberlist *server.MemberList
 }
 
 /**
 Setup pulse cli type
 */
-func (s *CLIServer) Setup() {
+func (s *CLIServer) Setup(database *database.Database) {
+	DB = database
 	log.Info("CLI server initialised on 127.0.0.1:49152")
 	lis, err := net.Listen("tcp", "127.0.0.1:49152")
 	if err != nil {
@@ -70,15 +74,17 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !gconf.clusterCheck() {
+	if !DB.Config.ClusterCheck() {
 		// Generate client server keys if tls is enabled
-		if gconf.Pulse.TLS {
+		if DB.Config.Pulse.TLS {
 			security.GenTLSKeys(in.BindIp)
 		}
 		// Create a new client
-		client := &client.Client{}
+		c := &client.Client{
+			Config: DB.Config.GetConfig(),
+		}
 		// Attempt to connect
-		err := client.Connect(in.Ip, in.Port, in.Hostname)
+		err := c.Connect(in.Ip, in.Port, in.Hostname)
 		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
@@ -107,7 +113,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		if err != nil {
 			return nil, errors.New("cannot to join because unable to get hostname")
 		}
-		r, err := client.Send(SendJoin, &proto.PulseJoin{
+		r, err := c.Send(client.SendJoin, &proto.PulseJoin{
 			Config:   buf,
 			Hostname: hostname,
 		})
@@ -139,18 +145,18 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Set the config
-		gconf.SetConfig(*peerConfig)
+		DB.SetConfig(peerConfig)
 		// Save the config
-		gconf.save()
+		DB.Config.Save()
 		// Reload config in memory
-		gconf.reload()
+		DB.Config.Reload()
 		// Setup our daemon server
-		go s.Server.Setup()
+		go s.Server.Setup(DB)
 		// reset our HC last received time
 		localMember, _ := s.Memberlist.GetLocalMember()
 		localMember.SetLastHCResponse(time.Now())
 		// Close the connection
-		client.Close()
+		c.Close()
 		log.Info("Successfully joined cluster with " + in.Ip)
 		return &proto.PulseJoin{
 			Success: true,
@@ -171,7 +177,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !gconf.clusterCheck() {
+	if !DB.Config.ClusterCheck() {
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "Unable to leave as no cluster was found",
@@ -179,8 +185,8 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
-	hostname := gconf.getLocalNode()
-	if gconf.clusterTotal() > 1 {
+	hostname := DB.Config.GetLocalNode()
+	if DB.Config.NodeCount() > 1 {
 		s.Memberlist.Broadcast(
 			client.SendLeave,
 			&proto.PulseLeave{
@@ -192,21 +198,21 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	server.MakeMemberPassive()
 
 	// TODO: horrible way to do this but it will do for now.
-	oldNode := gconf.Nodes[hostname]
+	oldNode := DB.Config.Nodes[hostname]
 	newNode := &config.Node{
 		IPGroups: oldNode.IPGroups,
 	}
 	// ---
-	nodesClearLocal()
+	server.NodesClearLocal()
 	// ewww
-	nodeAdd(hostname, newNode)
+	server.NodeAdd(hostname, newNode)
 	// ---
-	s.Memberlist.reset()
-	gconf.save()
-	s.Server.shutdown()
+	s.Memberlist.Reset()
+	DB.Config.Save()
+	s.Server.Shutdown()
 	// bring down the ips
 	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
-	if gconf.clusterTotal() == 1 {
+	if DB.Config.NodeCount() == 1 {
 		return &proto.PulseLeave{
 			Success: true,
 			Message: "Successfully dismantled cluster",
@@ -226,26 +232,26 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	s.Lock()
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
-	if !gconf.clusterCheck() {
-		hostname := gconf.getLocalNode()
+	if !DB.Config.ClusterCheck() {
+		hostname := DB.Config.GetLocalNode()
 		//TODO: horrible way to do this but it will do for now.
-		oldNode := gconf.Nodes[hostname]
-		newNode := &Node{
+		oldNode := DB.Config.Nodes[hostname]
+		newNode := &config.Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: oldNode.IPGroups,
 		}
-		nodeDelete(hostname)
-		nodeAdd(hostname, newNode)
+		server.NodeDelete(hostname)
+		server.NodeAdd(hostname, newNode)
 		// Save back to our config
-		gconf.save()
+		DB.Config.Save()
 		// Cert stuff
 		security.GenerateCACert(in.BindIp)
 		// Generate client server keys if tls is enabled
-		if gconf.Pulse.TLS {
+		if DB.Config.Pulse.TLS {
 			security.GenTLSKeys(in.BindIp)
 		}
-		go s.Server.Setup()
+		go s.Server.Setup(DB)
 		return &proto.PulseCreate{
 			Success: true,
 			Message: "Pulse cluster successfully created!",
@@ -272,7 +278,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupNew{
 		Success: true,
@@ -294,7 +300,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupDelete{
 		Success: true,
@@ -310,21 +316,21 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	s.Lock()
 	defer s.Unlock()
 	log.Info("test")
-	err := GroupIpAdd(in.Name, in.Ips)
+	err := server.GroupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupAdd{
 			Success: false,
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	// bring up the ip on the active appliance
-	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	activeHostname, activeMember := s.Memberlist.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
-	configCopy := gconf.GetConfig()
-	iface := configCopy.getGroupIface(activeHostname, in.Name)
+	configCopy := DB.Config.GetConfig()
+	iface := configCopy.GetGroupIface(activeHostname, in.Name)
 	activeMember.Send(client.SendBringUpIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips:   in.Ips,
@@ -350,7 +356,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			Message: "Unable to process RPC call. Required parameters: Ips, Name",
 		}, nil
 	}
-	_, activeMember := s.Memberlist.getActiveMember()
+	_, activeMember := s.Memberlist.GetActiveMember()
 	if activeMember == nil {
 		return &proto.PulseGroupRemove{
 			Success: false,
@@ -364,14 +370,13 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	// bring down the ip on the active appliance
-	activeHostname, activeMember := s.Memberlist.getActiveMember()
+	activeHostname, activeMember := s.Memberlist.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
-	configCopy := gconf.GetConfig()
-	iface := configCopy.getGroupIface(activeHostname, in.Name)
+	iface := DB.Config.GetGroupIface(activeHostname, in.Name)
 	activeMember.Send(client.SendBringDownIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips:   in.Ips,
@@ -396,7 +401,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupAssign{
 		Success: true,
@@ -418,7 +423,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 			Message: err.Error(),
 		}, nil
 	}
-	gconf.save()
+	DB.Config.Save()
 	s.Memberlist.SyncConfig()
 	return &proto.PulseGroupUnassign{
 		Success: true,
@@ -434,9 +439,9 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.GroupTable)
-	config := gconf.GetConfig()
+	config := DB.Config.GetConfig()
 	for name, ips := range config.Groups {
-		nodes, interfaces := getGroupNodes(name)
+		nodes, interfaces := server.GetGroupNodes(name)
 		row := &proto.GroupRow{Name: name, Ip: ips, Nodes: nodes, Interfaces: interfaces}
 		table.Row = append(table.Row, row)
 	}
@@ -452,8 +457,8 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
 	for _, member := range s.Memberlist.Members {
-		details, _ := nodeGetByName(member.Hostname)
-		tym := member.getLastHCResponse()
+		details, _ := server.NodeGetByName(member.Hostname)
+		tym := member.GetLastHCResponse()
 		var tymFormat string
 		if tym == (time.Time{}) {
 			tymFormat = ""
@@ -461,10 +466,10 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 			tymFormat = tym.Format(time.RFC1123)
 		}
 		row := &proto.StatusRow{
-			Hostname:     member.getHostname(),
+			Hostname:     member.GetHostname(),
 			Ip:           details.IP,
-			Latency:      member.getLatency(),
-			Status:       member.getStatus(),
+			Latency:      member.GetLatency(),
+			Status:       member.GetStatus(),
 			LastReceived: tymFormat,
 		}
 		table.Row = append(table.Row, row)
