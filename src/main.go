@@ -95,8 +95,6 @@ func main() {
 	db.Config = config.GetConfig()
 	// Set the logging level
 	setLogLevel(db.Config.Logging.Level)
-	// Load plugins
-	db.Plugins.Setup()
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)

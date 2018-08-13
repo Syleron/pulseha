@@ -58,6 +58,8 @@ type Server struct {
 func (s *Server) Setup(db *Database) {
 	// Set our config
 	DB = db
+	// Load plugins
+	DB.Plugins.Setup()
 	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {
