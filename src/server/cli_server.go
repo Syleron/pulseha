@@ -41,7 +41,6 @@ type CLIServer struct {
 	sync.Mutex
 	Server     *Server
 	Listener   net.Listener
-	Memberlist *MemberList
 }
 
 /**
@@ -148,7 +147,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		// Setup our daemon server
 		go s.Server.Setup(DB)
 		// reset our HC last received time
-		localMember, _ := s.Memberlist.GetLocalMember()
+		localMember, _ := DB.MemberList.GetLocalMember()
 		localMember.SetLastHCResponse(time.Now())
 		// Close the connection
 		c.Close()
@@ -182,7 +181,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	// Let everyone else know that we are leaving the cluster
 	hostname := DB.Config.GetLocalNode()
 	if DB.Config.NodeCount() > 1 {
-		s.Memberlist.Broadcast(
+		DB.MemberList.Broadcast(
 			client.SendLeave,
 			&proto.PulseLeave{
 				Replicated: true,
@@ -202,7 +201,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	// ewww
 	nodeAdd(hostname, newNode)
 	// ---
-	s.Memberlist.Reset()
+	DB.MemberList.Reset()
 	DB.Config.Save()
 	s.Server.Shutdown()
 	// bring down the ips
@@ -274,7 +273,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupNew{
 		Success: true,
 		Message: groupName + " successfully added.",
@@ -296,7 +295,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupDelete{
 		Success: true,
 		Message: in.Name + " successfully deleted.",
@@ -319,9 +318,9 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	// bring up the ip on the active appliance
-	activeHostname, activeMember := s.Memberlist.GetActiveMember()
+	activeHostname, activeMember := DB.MemberList.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
 	iface := DB.Config.GetGroupIface(activeHostname, in.Name)
@@ -350,7 +349,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			Message: "Unable to process RPC call. Required parameters: Ips, Name",
 		}, nil
 	}
-	_, activeMember := s.Memberlist.GetActiveMember()
+	_, activeMember := DB.MemberList.GetActiveMember()
 	if activeMember == nil {
 		return &proto.PulseGroupRemove{
 			Success: false,
@@ -365,9 +364,9 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	// bring down the ip on the active appliance
-	activeHostname, activeMember := s.Memberlist.GetActiveMember()
+	activeHostname, activeMember := DB.MemberList.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
 	iface := DB.Config.GetGroupIface(activeHostname, in.Name)
@@ -396,7 +395,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupAssign{
 		Success: true,
 		Message: in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
@@ -418,7 +417,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 		}, nil
 	}
 	DB.Config.Save()
-	s.Memberlist.SyncConfig()
+	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupUnassign{
 		Success: true,
 		Message: in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
@@ -449,7 +448,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
-	for _, member := range s.Memberlist.Members {
+	for _, member := range DB.MemberList.Members {
 		details, _ := nodeGetByName(member.Hostname)
 		tym := member.GetLastHCResponse()
 		var tymFormat string
@@ -477,7 +476,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()
 	defer s.Unlock()
-	err := s.Memberlist.PromoteMember(in.Member)
+	err := DB.MemberList.PromoteMember(in.Member)
 	if err != nil {
 		return &proto.PulsePromote{
 			Success: false,

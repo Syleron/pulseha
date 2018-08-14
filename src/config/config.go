@@ -154,7 +154,6 @@ func (c *Config) Reload() {
  */
 func (c *Config) Validate() {
 	var success bool = true
-	c.Lock()
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
@@ -168,7 +167,6 @@ func (c *Config) Validate() {
 	// TODO: Check if our hostname exists in the cluster config
 	// TODO: Check if we have valid network interface names
 
-	c.Unlock()
 	// Handles if shit hits the roof
 	if success == false {
 		// log why we exited?
