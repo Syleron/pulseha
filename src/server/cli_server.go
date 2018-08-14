@@ -30,13 +30,15 @@ import (
 	"google.golang.org/grpc"
 	"net"
 	"os"
-		"time"
+	"sync"
+	"time"
 )
 
 /**
 Server struct type
 */
 type CLIServer struct {
+	sync.Mutex
 	Server     *Server
 	Listener   net.Listener
 	Memberlist *MemberList

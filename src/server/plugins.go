@@ -23,8 +23,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"strconv"
-	"github.com/Syleron/PulseHA/src/config"
-)
+	)
 
 /**
 Health Check plugin type
@@ -48,7 +47,7 @@ type PluginNet interface {
 type PluginGen interface {
 	Name() string
 	Version() float64
-	Run(ml *MemberList, cfg *config.Config) error
+	Run(db *Database) error
 }
 
 /**
@@ -159,7 +158,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
-			go e.Run(DB.MemberList, DB.Config)
+			go e.Run(DB)
 		case PluginHealthCheck:
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {
