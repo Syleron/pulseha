@@ -31,10 +31,11 @@ maccli: get
 	 env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
 protos:
 	 protoc ./proto/pulse.proto --go_out=plugins=grpc:.
-testCMD:
-	 go test -timeout 10s -v ./cmd/
 test:
 	 go test -timeout 10s -v ./src/
+	 go test -timeout 10s -v ./cmd/
+	 go test -timeout 10s -v ./src/utils/
+	 go test -timeout 10s -v ./src/netUtils/
 clean:
 	go clean
 install: 

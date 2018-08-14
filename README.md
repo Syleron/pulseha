@@ -1,7 +1,7 @@
 <p align="center">
 <img src="pulse-logo.png" width="250">
 <br><br>
-<a href="https://semaphoreci.com/syleron/pulseha"><img src="https://semaphoreci.com/api/v1/syleron/pulseha/branches/dev/shields_badge.svg"><a/>
+<a href="https://travis-ci.org/Syleron/PulseHA"><img src="https://travis-ci.org/Syleron/PulseHA.svg?branch=master"><a/>
 <a href="https://godoc.org/github.com/Syleron/PulseHA"><img src="https://godoc.org/github.com/Syleron/PulseHA?status.svg"><a/>
 <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL%20v3-blue.svg"><a/>
 </p>
@@ -31,7 +31,6 @@ $ sudo make install
 ...
 ```
 
-Uses Dep for package managment (https://github.com/golang/dep)
 ## License
 PulseHA source code is available under the AGPL License which can be found in the LICENSE file.
 

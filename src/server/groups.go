@@ -1,38 +1,38 @@
-package main
+package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/src/netUtils"
-	"github.com/Syleron/PulseHA/src/utils"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/net_utils"
+	"github.com/Syleron/PulseHA/src/utils"
 	"strconv"
-)
+	)
 
 /**
 Generate a new group in memory.
- */
-func GroupNew(groupName string) (string, error) {
-	gconf.Lock()
-	defer gconf.Unlock()
+*/
+func groupNew(groupName string) (string, error) {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
 	var name string
 	if groupName != "" {
 		name = groupName
 	} else {
-		name = GenGroupName()
+		name = genGroupName()
 	}
-	gconf.Groups[name] = []string{}
+	DB.Config.Groups[name] = []string{}
 	return name, nil
 }
 
 /**
 Remove group from memory
- */
-func GroupDelete(groupName string) error {
-	gconf.Lock()
-	defer gconf.Unlock()
-	if GroupExist(groupName) {
-		if !NodeAssignedToInterface(groupName) {
-			delete(gconf.Groups, groupName)
+*/
+func groupDelete(groupName string) error {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	if groupExist(groupName) {
+		if !nodeAssignedToInterface(groupName) {
+			delete(DB.Config.Groups, groupName)
 			return nil
 		}
 		return errors.New("group has network interface assignments. Please remove them and try again")
@@ -43,31 +43,31 @@ func GroupDelete(groupName string) error {
 
 /**
 Clear out all local Groups
- */
-func GroupClearLocal() {
-	gconf.Lock()
-	defer gconf.Unlock()
-	gconf.Groups = map[string][]string{}
+*/
+func groupClearLocal() {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	DB.Config.Groups = map[string][]string{}
 }
 
 /**
 Add floating IP to group
- */
-func GroupIpAdd(groupName string, ips []string) error {
-	gconf.Lock()
-	defer gconf.Unlock()
-	_, activeMember := pulse.Server.Memberlist.getActiveMember()
+*/
+func groupIpAdd(groupName string, ips []string) error {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	_, activeMember := DB.MemberList.GetActiveMember()
 	if activeMember == nil {
 		return errors.New("unable to add IP(s) to group as there no active node in the cluster")
 	}
-	if !GroupExist(groupName) {
+	if !groupExist(groupName) {
 		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
 		if err := utils.ValidIPAddress(ip); err == nil {
 			// Check to see if the IP exists in any of the groups
-			if !GroupIpExistAll(ip) {
-				gconf.Groups[groupName] = append(gconf.Groups[groupName], ip)
+			if !groupIpExistAll(ip) {
+				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName], ip)
 			} else {
 				return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
 			}
@@ -80,17 +80,17 @@ func GroupIpAdd(groupName string, ips []string) error {
 
 /**
 Remove floating IP from group
- */
-func GroupIpRemove(groupName string, ips []string) error {
-	gconf.Lock()
-	defer gconf.Unlock()
-	if !GroupExist(groupName) {
+*/
+func groupIpRemove(groupName string, ips []string) error {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	if !groupExist(groupName) {
 		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
-		if len(gconf.Groups[groupName]) > 0 {
-			if exists, i := GroupIPExist(groupName, ip); exists {
-				gconf.Groups[groupName] = append(gconf.Groups[groupName][:i], gconf.Groups[groupName][i+1:]...)
+		if len(DB.Config.Groups[groupName]) > 0 {
+			if exists, i := groupIPExist(groupName, ip); exists {
+				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName][:i], DB.Config.Groups[groupName][i+1:]...)
 			} else {
 				log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
 			}
@@ -101,20 +101,17 @@ func GroupIpRemove(groupName string, ips []string) error {
 
 /**
 Assign a group to a node's interface
- */
-func GroupAssign(groupName, node, iface string) error {
-	gconf.Lock()
-	defer gconf.Unlock()
-	if !gconf.ClusterCheck() {
-		return errors.New("action can only be completed in a configured cluster")
-	}
-	if !GroupExist(groupName) {
+*/
+func groupAssign(groupName, node, iface string) error {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	if !groupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
-	if netUtils.InterfaceExist(iface) {
-		if exists, _ := NodeInterfaceGroupExists(node, iface, groupName); !exists {
+	if net_utils.InterfaceExist(iface) {
+		if exists, _ := nodeInterfaceGroupExists(node, iface, groupName); !exists {
 			// Add the group
-			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface], groupName)
+			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface], groupName)
 			// make the group active
 			makeGroupActive(iface, groupName)
 		} else {
@@ -127,19 +124,16 @@ func GroupAssign(groupName, node, iface string) error {
 
 /**
 Unassign a group from a node's interface
- */
-func GroupUnassign(groupName, node, iface string) error {
-	gconf.Lock()
-	defer gconf.Unlock()
-	if !GroupExist(groupName) {
-		return errors.New("IP group does not exist")
-	}
-	if netUtils.InterfaceExist(iface) {
-		if exists, i := NodeInterfaceGroupExists(node, iface, groupName); exists {
+*/
+func groupUnassign(groupName, node, iface string) error {
+	DB.Config.Lock()
+	defer DB.Config.Unlock()
+	if net_utils.InterfaceExist(iface) {
+		if exists, i := nodeInterfaceGroupExists(node, iface, groupName); exists {
 			// make the group passive before removing it
 			makeGroupPassive(iface, groupName)
 			// Remove it
-			gconf.Nodes[node].IPGroups[iface] = append(gconf.Nodes[node].IPGroups[iface][:i], gconf.Nodes[node].IPGroups[iface][i+1:]...)
+			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface][:i], DB.Config.Nodes[node].IPGroups[iface][i+1:]...)
 		} else {
 			log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
 		}
@@ -150,13 +144,12 @@ func GroupUnassign(groupName, node, iface string) error {
 
 /**
 Generates an available IP floating group name.
- */
-func GenGroupName() string {
-	config := gconf.GetConfig()
-	totalGroups := len(config.Groups)
+*/
+func genGroupName() string {
+	totalGroups := len(DB.Config.Groups)
 	for i := 1; i <= totalGroups; i++ {
 		newName := "group" + strconv.Itoa(i)
-		if _, ok := config.Groups[newName]; !ok {
+		if _, ok := DB.Config.Groups[newName]; !ok {
 			return newName
 		}
 	}
@@ -165,10 +158,9 @@ func GenGroupName() string {
 
 /**
 Checks to see if a floating IP group already exists
- */
-func GroupExist(name string) bool {
-	config := gconf.GetConfig()
-	if _, ok := config.Groups[name]; ok {
+*/
+func groupExist(name string) bool {
+	if _, ok := DB.Config.Groups[name]; ok {
 		return true
 	}
 	return false
@@ -176,10 +168,9 @@ func GroupExist(name string) bool {
 
 /**
 Checks to see if a floating IP already exists inside of a floating ip group
- */
-func GroupIPExist(name string, ip string) (bool, int) {
-	config := gconf.GetConfig()
-	for index, cip := range config.Groups[name] {
+*/
+func groupIPExist(name string, ip string) (bool, int) {
+	for index, cip := range DB.Config.Groups[name] {
 		if ip == cip {
 			return true, index
 		}
@@ -189,10 +180,9 @@ func GroupIPExist(name string, ip string) (bool, int) {
 
 /**
 Checks to see if a floating IP already exists in any of the floating IP groups
- */
-func GroupIpExistAll(ip string) (bool) {
-	config := gconf.GetConfig()
-	for _, cip := range config.Groups {
+*/
+func groupIpExistAll(ip string) bool {
+	for _, cip := range DB.Config.Groups {
 		for _, dip := range cip {
 			if ip == dip {
 				return true
@@ -204,13 +194,12 @@ func GroupIpExistAll(ip string) (bool) {
 
 /**
 function to get the nodes and interfaces that relate to the specified node
- */
+*/
 func getGroupNodes(group string) ([]string, []string) {
 	var hosts []string
 	var interfaces []string
 	var found = false
-	config := gconf.GetConfig()
-	for name, node := range config.Nodes {
+	for name, node := range DB.Config.Nodes {
 		for iface, groupNameSlice := range node.IPGroups {
 			for _, groupName := range groupNameSlice {
 				if group == groupName {
@@ -229,19 +218,14 @@ func getGroupNodes(group string) ([]string, []string) {
 
 /**
 Make a group of IPs active
- */
+*/
 func makeGroupActive(iface string, groupName string) {
-	//log.Infof("Bringing up IPs on Interface: %s, Group: %s", iface, groupName)
-	// gconf.Reload()
-	configCopy := gconf.GetConfig()
-	bringUpIPs(iface, configCopy.Groups[groupName])
-	//garp?
+	BringUpIPs(iface, DB.Config.Groups[groupName])
 }
 
+/**
+Make a group of IPs passive
+ */
 func makeGroupPassive(iface string, groupName string) {
-	//log.Infof("Bringing down IPs on Interface: %s, Group: %s", iface, groupName)
-	// gconf.Reload()
-	configCopy := gconf.GetConfig()
-	bringDownIPs(iface, configCopy.Groups[groupName])
-	//garp?
+	BringDownIPs(iface, DB.Config.Groups[groupName])
 }

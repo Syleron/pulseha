@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -20,39 +20,16 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/server"
+	"strings"
 	"sync"
 	"time"
-	"strings"
+	"github.com/Syleron/PulseHA/src/config"
 )
-
-type globalConfig struct {
-	sync.Mutex
-	Config
-}
-
-/**
-Returns a copy of the config
-*/
-func (c *globalConfig) GetConfig() Config {
-	//c.Lock()
-	//defer c.Unlock()
-	return c.Config
-}
-
-/**
-Should this save auto?
-*/
-func (c *globalConfig) SetConfig(config Config) {
-	c.Lock()
-	c.Config = config
-	//set who we are might need to go somewhere else
-	c.Unlock()
-}
 
 var (
 	Version string
 	Build   string
-	gconf   globalConfig
 )
 
 var pulse *Pulse
@@ -61,17 +38,11 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server *Server
-	CLI    *CLIServer
-	Plugins *Plugins
+	Server  *server.Server
+	CLI     *server.CLIServer
 }
 
-func (p *Pulse) getMemberlist() (*Memberlist) {
-	return pulse.Server.Memberlist
-}
-
-type PulseLogFormat struct {}
-
+type PulseLogFormat struct{}
 
 func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
 	time := "[" + entry.Time.Format(time.Stamp) + "]"
@@ -91,24 +62,12 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
  * Create a new instance of PulseHA
  */
 func createPulse() *Pulse {
-	// Load the config
-	gconf.Load()
-	// Validate the config
-	gconf.Validate()
-	// Set the logging level
-	setLogLevel(gconf.Logging.Level)
-	// Define new Memberlist
-	memberList := &Memberlist{}
 	// Create the Pulse object
 	pulse := &Pulse{
-		Server: &Server{
-			Memberlist: memberList,
-		},
-		CLI: &CLIServer{
-			Memberlist: memberList,
-		},
-		Plugins: &Plugins{},
+		Server: &server.Server{},
+		CLI: &server.CLIServer{},
 	}
+	// Set our server variable
 	pulse.CLI.Server = pulse.Server
 	return pulse
 }
@@ -128,14 +87,32 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
-	// Load plugins
-	pulse.Plugins.Setup()
+	// load the config
+	db := server.Database{
+		Plugins: &server.Plugins{},
+		MemberList: &server.MemberList{},
+	}
+	// Load the config
+	db.Config = config.GetConfig()
+	// Set the logging level
+	setLogLevel(db.Config.Logging.Level)
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Setup()
+	go pulse.Server.Setup(&db)
 	wg.Wait()
+}
+
+/**
+
+ */
+func setLogLevel(level string) {
+	logLevel, err := log.ParseLevel(level)
+	if err != nil {
+		panic(err.Error())
+	}
+	log.SetLevel(logLevel)
 }

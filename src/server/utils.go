@@ -1,20 +1,36 @@
-package main
+/*
+   PulseHA - HA Cluster Daemon
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published
+   by the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
+
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+package server
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"runtime"
 	"github.com/Syleron/PulseHA/proto"
+	"runtime"
 	"time"
 )
 
 /**
 Networking - Bring up the groups on the current node
 */
-func makeMemberActive() error {
+func MakeMemberActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
-	configCopy := gconf.GetConfig()
-	for name, node := range configCopy.Nodes {
-		if name == gconf.getLocalNode() {
+	for name, node := range DB.Config.Nodes {
+		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupActive(iface, groupName)
@@ -27,12 +43,11 @@ func makeMemberActive() error {
 
 /**
 Networking - Bring down the ip groups on the current node
- */
-func makeMemberPassive() error {
+*/
+func MakeMemberPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
-	configCopy := gconf.GetConfig()
-	for name, node := range configCopy.Nodes {
-		if name == gconf.getLocalNode() {
+	for name, node := range DB.Config.Nodes {
+		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupPassive(iface, groupName)
@@ -45,11 +60,12 @@ func makeMemberPassive() error {
 
 /**
 Bring up an []ips for a specific interface
- */
-func bringUpIPs(iface string, ips []string) error {
-	plugin := pulse.Plugins.getNetworkingPlugin()
+*/
+func BringUpIPs(iface string, ips []string) error {
+	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Fatal("Missing network plugin")
+		log.Debug("No networking plugin.. skipping network action")
+		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
 	return err
@@ -57,11 +73,12 @@ func bringUpIPs(iface string, ips []string) error {
 
 /**
 Bring down an []ips for a specific interface
- */
-func bringDownIPs(iface string, ips []string) error {
-	plugin := pulse.Plugins.getNetworkingPlugin()
+*/
+func BringDownIPs(iface string, ips []string) error {
+	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Fatal("Missing network plugin")
+		log.Debug("No networking plugin.. skipping network action")
+		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)
 	return err
@@ -88,20 +105,9 @@ func MyCaller() string {
 }
 
 /**
-
- */
-func setLogLevel(level string) {
-	logLevel, err := log.ParseLevel(level)
-	if err != nil {
-		panic(err.Error())
-	}
-	log.SetLevel(logLevel)
-}
-
-/**
 Determine who is the correct active node if more than one active is brought online
- */
-func getFailOverCountWinner(members []*proto.MemberlistMember) string {
+*/
+func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
 	for _, member := range members {
 		if member.Status != proto.MemberStatus_UNAVAILABLE {
 			tym, _ := time.Parse(time.RFC1123, member.LastReceived)

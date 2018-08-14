@@ -35,3 +35,7 @@ cmake-build-debug/
 
 # Project-local glide cache
 .glide/
+
+
+# Bin directory
+bin/
