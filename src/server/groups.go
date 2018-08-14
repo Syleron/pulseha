@@ -56,7 +56,7 @@ Add floating IP to group
 func groupIpAdd(groupName string, ips []string) error {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
-	_, activeMember := Members.GetActiveMember()
+	_, activeMember := DB.MemberList.GetActiveMember()
 	if activeMember == nil {
 		return errors.New("unable to add IP(s) to group as there no active node in the cluster")
 	}

@@ -35,11 +35,10 @@ import (
 	"strconv"
 	"sync"
 	"time"
-)
+	)
 
 var (
 	DB *Database
-	Members  *MemberList
 )
 
 /**
@@ -58,7 +57,7 @@ type Server struct {
 func (s *Server) Setup(db *Database) {
 	// Set our config
 	DB = db
-	// Load plugins
+	// Setup/Load plugins
 	DB.Plugins.Setup()
 	// Get our hostname
 	hostname, err := utils.GetHostname()
@@ -112,7 +111,7 @@ func (s *Server) Setup(db *Database) {
 		s.Server = grpc.NewServer()
 	}
 	proto.RegisterServerServer(s.Server, s)
-	Members.Setup()
+	DB.MemberList.Setup()
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }
@@ -137,25 +136,25 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	log.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
-	activeHostname, _ := Members.GetActiveMember()
+	activeHostname, _ := DB.MemberList.GetActiveMember()
 	if activeHostname != DB.Config.GetLocalNode() {
-		localMember := Members.GetMemberByHostname(DB.Config.GetLocalNode())
+		localMember := DB.MemberList.GetMemberByHostname(DB.Config.GetLocalNode())
 		// make passive to reset the networking
-		if _, activeMember := Members.GetActiveMember(); activeMember == nil {
+		if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
 			log.Info("Local node is passive")
 			localMember.MakePassive()
 		}
 		localMember.SetLastHCResponse(time.Now())
-		Members.Update(in.Memberlist)
+		DB.MemberList.Update(in.Memberlist)
 	} else {
 		log.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		log.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != DB.Config.GetLocalNode() {
-			member, _ := Members.GetLocalMember()
+			member, _ := DB.MemberList.GetLocalMember()
 			member.MakePassive()
 		} else {
-			localMember, _ := Members.GetLocalMember()
+			localMember, _ := DB.MemberList.GetLocalMember()
 			localMember.SetLastHCResponse(time.Time{})
 		}
 	}
@@ -190,9 +189,9 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Save our new config to file
 		DB.Config.Save()
 		// Update the cluster config
-		Members.SyncConfig()
+		DB.MemberList.SyncConfig()
 		// Add node to the memberlist
-		Members.Reload()
+		DB.MemberList.Reload()
 		// Return with our new updated config
 		buf, err := json.Marshal(DB.Config)
 		// Handle failure to marshal config
@@ -224,7 +223,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	s.Lock()
 	defer s.Unlock()
 	// Remove from our memberlist
-	Members.MemberRemoveByName(in.Hostname)
+	DB.MemberList.MemberRemoveByName(in.Hostname)
 	// Remove from our config
 	err := nodeDelete(in.Hostname)
 	if err != nil {
@@ -264,7 +263,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Save our config to file
 	DB.Config.Save()
 	// Update our member list
-	Members.Reload()
+	DB.MemberList.Reload()
 	// Let the logs know
 	log.Info("Successfully r-synced local config")
 	// Return with yay
@@ -285,7 +284,7 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 			Success: false,
 		}, nil
 	}
-	member := Members.GetMemberByHostname(in.Member)
+	member := DB.MemberList.GetMemberByHostname(in.Member)
 	if member == nil {
 		return &proto.PulsePromote{
 			Success: false,
@@ -310,7 +309,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 			Success: false,
 		}, nil
 	}
-	member := Members.GetMemberByHostname(in.Member)
+	member := DB.MemberList.GetMemberByHostname(in.Member)
 	if member == nil {
 		return &proto.PulsePromote{
 			Success: false,

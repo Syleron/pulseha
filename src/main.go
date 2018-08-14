@@ -90,6 +90,7 @@ func main() {
 	// load the config
 	db := server.Database{
 		Plugins: &server.Plugins{},
+		MemberList: &server.MemberList{},
 	}
 	// Load the config
 	db.Config = config.GetConfig()

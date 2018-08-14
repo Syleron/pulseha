@@ -22,8 +22,9 @@ import (
 )
 
 type Database struct {
-	Config *config.Config
-	Plugins *Plugins
+	Config     *config.Config
+	Plugins    *Plugins
+	MemberList *MemberList
 }
 
 func (d *Database) SetConfig(config *config.Config) {
