@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -45,7 +45,7 @@ type Member struct {
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
-	client.Client
+	*client.Client
 	// The mutex to lock the member object
 	sync.Mutex
 }
@@ -167,7 +167,9 @@ func (m *Member) SetStatus(status proto.MemberStatus_Status) {
 /**
 Set member Client GRPC
 */
-func (m *Member) SetClient(client client.Client) {
+func (m *Member) SetClient(client *client.Client) {
+	m.Lock()
+	defer m.Unlock()
 	m.Client = client
 }
 
@@ -177,8 +179,10 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		nodeDetails, _ := nodeGetByName(m.Hostname)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname)
+		log.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
 		if err != nil {
+			log.Error("Member:Connect() " + err.Error())
 			return err
 		}
 	}
@@ -229,7 +233,7 @@ func (m *Member) MakeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.GetHostname())
 	// Make ourself active if we are refering to ourself
 	if m.GetHostname() == DB.Config.GetLocalNode() {
-		MakeMemberActive()
+		MakeLocalActive()
 		// Reset vars
 		m.SetLatency("")
 		m.SetLastHCResponse(time.Time{})
@@ -264,7 +268,7 @@ func (m *Member) MakePassive() bool {
 	log.Debugf("Member:makePassive() Making %s passive", m.GetHostname())
 	if m.GetHostname() == DB.Config.GetLocalNode() {
 		// do this regardless to make sure we dont have any groups up
-		MakeMemberPassive()
+		MakeLocalPassive()
 		// Update member variables
 		m.SetLastHCResponse(time.Now())
 		// check if we are already passive before starting a new scheduler
@@ -345,7 +349,6 @@ func (m *Member) MonitorReceivedHCs() bool {
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
-			log.Warn("Additional health checks have failed.")
 			// Nothing has worked.. assume the master has failed. Fail over.
 			member, err := DB.MemberList.GetNextActiveMember()
 			// no new active appliance was found

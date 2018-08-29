@@ -51,14 +51,19 @@ type Server struct {
 	HCScheduler func()
 }
 
-/**
- * Setup pulse server type
- */
-func (s *Server) Setup(db *Database) {
+func (s *Server) Init(db *Database) {
 	// Set our config
 	DB = db
 	// Setup/Load plugins
 	DB.Plugins.Setup()
+	// Setup the server
+	s.Setup()
+}
+
+/**
+ * Setup pulse server type
+ */
+func (s *Server) Setup() {
 	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {
@@ -111,7 +116,9 @@ func (s *Server) Setup(db *Database) {
 		s.Server = grpc.NewServer()
 	}
 	proto.RegisterServerServer(s.Server, s)
+	// Setup our members
 	DB.MemberList.Setup()
+	// Start PulseHA daemon server
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
 	s.Server.Serve(s.Listener)
 }

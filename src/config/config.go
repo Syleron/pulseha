@@ -124,7 +124,7 @@ func (c *Config) Load() {
  * Function used to save the config
  */
 func (c *Config) Save() {
-	log.Debug("Saving config..")
+	log.Debug("Config:Save() Saving config..")
 	c.Lock()
 	defer c.Unlock()
 	// Validate before we save

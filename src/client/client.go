@@ -30,13 +30,11 @@ import (
 	"io/ioutil"
 	"time"
 	"github.com/Syleron/PulseHA/src/security"
-	"github.com/Syleron/PulseHA/src/config"
 )
 
 type Client struct {
 	Connection *grpc.ClientConn
 	Requester  p.ServerClient
-	Config     config.Config
 }
 
 // This should probably go into an enums folder
@@ -106,10 +104,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 /**
 Note: Hostname is required for TLS as the certs are named after the hostname.
 */
-func (c *Client) Connect(ip, port, hostname string) error {
-	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
+func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	var err error
-	if c.Config.Pulse.TLS {
+	if tlsEnabled {
 		// Load member cert/key
 		hostname, err := utils.GetHostname()
 		if err != nil {
@@ -142,6 +139,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 		return errors.New("Could not connect to host: " + err.Error())
 	}
 	c.Requester = p.NewServerClient(c.Connection)
+	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
 	return nil
 }
 

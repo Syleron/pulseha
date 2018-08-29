@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -61,7 +61,7 @@ func (m *MemberList) AddMember(hostname string, client *client.Client) {
 		newMember := &Member{}
 		newMember.SetHostname(hostname)
 		newMember.SetStatus(p.MemberStatus_UNAVAILABLE)
-		newMember.SetClient(*client)
+		newMember.SetClient(client)
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
@@ -155,7 +155,7 @@ func (m *MemberList) Setup() {
 			localMember := m.GetMemberByHostname(DB.Config.GetLocalNode())
 			localMember.SetLastHCResponse(time.Now())
 			localMember.SetStatus(p.MemberStatus_PASSIVE)
-			log.Debug("MemberList:Setup() - starting the monitor received health checks scheduler")
+			log.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.MonitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
@@ -172,7 +172,7 @@ func (m *MemberList) LoadMembers() {
 }
 
 /**
-
+Reload the memberlist
  */
 func (m *MemberList) Reload() {
 	log.Debug("MemberList:ReloadMembers() Reloading member nodes")
@@ -284,7 +284,7 @@ func (m *MemberList) MonitorClientConns() bool {
 			continue
 		}
 		member.Connect()
-		log.Debug(member.Hostname + " connection status is " + member.Connection.GetState().String())
+		log.Debug("MemberList:MonitorClientConns() " + member.Hostname + " connection status is " + member.Connection.GetState().String())
 		switch member.Connection.GetState() {
 		case connectivity.Idle:
 		case connectivity.Ready:
@@ -394,6 +394,8 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 
  */
 func (m *MemberList) GetLocalMember() (*Member, error) {
+	m.Lock()
+	defer m.Unlock()
 	for _, member := range m.Members {
 		if member.GetHostname() == DB.Config.GetLocalNode() {
 			return member, nil

@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -65,7 +65,7 @@ Notes: We create a new client in attempt to communicate with our peer.
        If successful we acknowledge it and update our memberlist.
 */
 func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	log.Debug("CLIServer:Join() Join Pulse cluster")
+	//log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
@@ -74,11 +74,9 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			security.GenTLSKeys(in.BindIp)
 		}
 		// Create a new client
-		c := &client.Client{
-			Config: DB.Config.GetConfig(),
-		}
+		c := &client.Client{}
 		// Attempt to connect
-		err := c.Connect(in.Ip, in.Port, in.Hostname)
+		err := c.Connect(in.Ip, in.Port, in.Hostname, DB.Config.Pulse.TLS)
 		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
@@ -145,7 +143,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		// Reload config in memory
 		DB.Config.Reload()
 		// Setup our daemon server
-		go s.Server.Setup(DB)
+		go s.Server.Setup()
 		// reset our HC last received time
 		localMember, _ := DB.MemberList.GetLocalMember()
 		localMember.SetLastHCResponse(time.Now())
@@ -168,7 +166,7 @@ Break cluster / Leave from cluster
 TODO: Remember to reassign active role on leave
 */
 func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
-	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
+	//log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
@@ -189,8 +187,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
-	MakeMemberPassive()
-
+	MakeLocalPassive()
 	// TODO: horrible way to do this but it will do for now.
 	oldNode := DB.Config.Nodes[hostname]
 	newNode := &config.Node{
@@ -222,20 +219,24 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 Create new PulseHA cluster
 */
 func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
-	log.Debug("CLIServer:Create() - Create Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
 	if !DB.Config.ClusterCheck() {
 		hostname := DB.Config.GetLocalNode()
 		//TODO: horrible way to do this but it will do for now.
+		// Store the old node section
 		oldNode := DB.Config.Nodes[hostname]
+		// Create a new node section and populate it using new details
+		// and old node details.
 		newNode := &config.Node{
 			IP:       in.BindIp,
 			Port:     in.BindPort,
 			IPGroups: oldNode.IPGroups,
 		}
+		// Remove the old instance
 		nodeDelete(hostname)
+		// Add the new node instance
 		nodeAdd(hostname, newNode)
 		// Save back to our config
 		DB.Config.Save()
@@ -245,7 +246,7 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		if DB.Config.Pulse.TLS {
 			security.GenTLSKeys(in.BindIp)
 		}
-		go s.Server.Setup(DB)
+		go s.Server.Setup()
 		return &proto.PulseCreate{
 			Success: true,
 			Message: "Pulse cluster successfully created!",
@@ -262,7 +263,6 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 Add a new floating IP group
 */
 func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
-	log.Debug("CLIServer:NewGroup() - Create floating IP group")
 	s.Lock()
 	defer s.Unlock()
 	groupName, err := groupNew(in.Name)
@@ -284,7 +284,6 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 Delete floating IP group
 */
 func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*proto.PulseGroupDelete, error) {
-	log.Debug("CLIServer:DeleteGroup() - Delete floating IP group")
 	s.Lock()
 	defer s.Unlock()
 	err := groupDelete(in.Name)
@@ -306,10 +305,8 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 Add IP to group
 */
 func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
-	log.Debug("CLIServer:GroupIPAdd() - Add IP addresses to group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
-	log.Info("test")
 	err := groupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupAdd{
@@ -339,7 +336,6 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 Remove IP from group
 */
 func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
-	log.Debug("CLIServer:GroupIPRemove() - Removing IPs from group " + in.Name)
 	s.Lock()
 	defer s.Unlock()
 	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
@@ -384,7 +380,6 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 Assign group to interface
 */
 func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
-	log.Debug("CLIServer:GroupAssign() - Assigning group " + in.Group + " to interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
 	defer s.Unlock()
 	err := groupAssign(in.Group, in.Node, in.Interface)
@@ -406,7 +401,6 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 Unassign group from interface
 */
 func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
-	log.Debug("CLIServer:GroupUnassign() - Unassigning group " + in.Group + " from interface " + in.Interface + " on node " + in.Node)
 	s.Lock()
 	defer s.Unlock()
 	err := groupUnassign(in.Group, in.Node, in.Interface)
@@ -428,7 +422,6 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 Show all groups
 */
 func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto.GroupTable, error) {
-	log.Debug("CLIServer:GroupList() - Getting groups and their IPs")
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.GroupTable)
@@ -444,7 +437,6 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 Return the status for each node within the cluster
 */
 func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
-	log.Debug("CLIServer:Status() - Getting cluster node statuses")
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.PulseStatus)
@@ -473,7 +465,6 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 Handle CLI promote request
 */
 func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()
 	defer s.Unlock()
 	err := DB.MemberList.PromoteMember(in.Member)
@@ -493,7 +484,6 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 Handle CLI promote request
 */
 func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseCert, error) {
-	log.Debug("CLIServer:Promote() - Promote a new member")
 	s.Lock()
 	defer s.Unlock()
 	err := security.GenTLSKeys(in.BindIp)

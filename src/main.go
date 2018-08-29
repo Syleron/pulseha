@@ -102,7 +102,7 @@ func main() {
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Setup(&db)
+	go pulse.Server.Init(&db)
 	wg.Wait()
 }
 

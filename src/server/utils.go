@@ -27,7 +27,7 @@ import (
 /**
 Networking - Bring up the groups on the current node
 */
-func MakeMemberActive() error {
+func MakeLocalActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
 	for name, node := range DB.Config.Nodes {
 		if name == DB.Config.GetLocalNode() {
@@ -44,7 +44,7 @@ func MakeMemberActive() error {
 /**
 Networking - Bring down the ip groups on the current node
 */
-func MakeMemberPassive() error {
+func MakeLocalPassive() error {
 	log.Debug("Utils:MakeMemberPassive() Local node now passive")
 	for name, node := range DB.Config.Nodes {
 		if name == DB.Config.GetLocalNode() {
@@ -64,7 +64,7 @@ Bring up an []ips for a specific interface
 func BringUpIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Debug("No networking plugin.. skipping network action")
+		log.Debug("Utils:BringUpIps() No networking plugin.. skipping network action")
 		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
@@ -77,7 +77,7 @@ Bring down an []ips for a specific interface
 func BringDownIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Debug("No networking plugin.. skipping network action")
+		log.Debug("Utils:BringDownIps() No networking plugin.. skipping network action")
 		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)

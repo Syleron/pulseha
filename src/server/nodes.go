@@ -73,7 +73,7 @@ func nodeAdd(hostname string, node *config.Node) error {
  * Remove a node from our config by hostname.
  */
 func nodeDelete(hostname string) error {
-	log.Debug(hostname + " remove from the local node")
+	log.Debug("Nodes:nodeDelete()" + hostname + " node removed.")
 	if nodeExists(hostname) {
 		DB.Config.Lock()
 		delete(DB.Config.Nodes, hostname)
