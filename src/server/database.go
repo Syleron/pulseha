@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -15,4 +15,18 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package main
+package server
+
+import (
+	"github.com/Syleron/PulseHA/src/config"
+)
+
+type Database struct {
+	Config     *config.Config
+	Plugins    *Plugins
+	MemberList *MemberList
+}
+
+func (d *Database) SetConfig(config *config.Config) {
+	d.Config = config
+}

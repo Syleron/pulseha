@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -15,18 +15,19 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package main
+package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/proto"
+	"fmt"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/client"
+	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc/connectivity"
+	"math"
 	"sync"
 	"time"
-	"fmt"
-	"github.com/Syleron/PulseHA/src/utils"
-	"math"
 )
 
 /**
@@ -34,17 +35,17 @@ Member struct type
 */
 type Member struct {
 	// The hostname of the repented node
-	Hostname         string
+	Hostname string
 	// The status of the local member
-	Status           proto.MemberStatus_Status
+	Status proto.MemberStatus_Status
 	// The last time a health check was received
 	LastHCResponse time.Time
 	// The latency between the active and the current passive member
-	Latency             string
+	Latency string
 	// Determines if the health check is being made.
 	HCBusy bool
 	// The client for the member that is used to send GRPC calls
-	Client
+	*client.Client
 	// The mutex to lock the member object
 	sync.Mutex
 }
@@ -71,11 +72,10 @@ func (m *Member) Unlock() {
 	Getters and setters for Member which allow us to make them go routine safe
 */
 
-
 /**
 
-*/
-func (m *Member) setHCBusy(busy bool) {
+ */
+func (m *Member) SetHCBusy(busy bool) {
 	m.Lock()
 	defer m.Unlock()
 	m.HCBusy = busy
@@ -83,8 +83,8 @@ func (m *Member) setHCBusy(busy bool) {
 
 /**
 
-*/
-func (m *Member) getHCBusy() bool {
+ */
+func (m *Member) GetHCBusy() bool {
 	m.Lock()
 	defer m.Unlock()
 	return m.HCBusy
@@ -92,8 +92,8 @@ func (m *Member) getHCBusy() bool {
 
 /**
 
-*/
-func (m *Member) setLatency(latency string) {
+ */
+func (m *Member) SetLatency(latency string) {
 	m.Lock()
 	defer m.Unlock()
 	m.Latency = latency
@@ -101,8 +101,8 @@ func (m *Member) setLatency(latency string) {
 
 /**
 
-*/
-func (m *Member) getLatency() string {
+ */
+func (m *Member) GetLatency() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.Latency
@@ -111,7 +111,7 @@ func (m *Member) getLatency() string {
 /**
   Set the last time this member received a health check
 */
-func (m *Member) setLastHCResponse(time time.Time) {
+func (m *Member) SetLastHCResponse(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
 	m.LastHCResponse = time
@@ -120,7 +120,7 @@ func (m *Member) setLastHCResponse(time time.Time) {
 /**
 Get the last time this member received a health check
 */
-func (m *Member) getLastHCResponse() time.Time {
+func (m *Member) GetLastHCResponse() time.Time {
 	m.Lock()
 	defer m.Unlock()
 	return m.LastHCResponse
@@ -129,7 +129,7 @@ func (m *Member) getLastHCResponse() time.Time {
 /**
 Get member hostname
 */
-func (m *Member) getHostname() string {
+func (m *Member) GetHostname() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.Hostname
@@ -138,7 +138,7 @@ func (m *Member) getHostname() string {
 /**
 Set member hostname
 */
-func (m *Member) setHostname(hostname string) {
+func (m *Member) SetHostname(hostname string) {
 	m.Lock()
 	defer m.Unlock()
 	m.Hostname = hostname
@@ -147,7 +147,7 @@ func (m *Member) setHostname(hostname string) {
 /**
 Get member status
 */
-func (m *Member) getStatus() proto.MemberStatus_Status {
+func (m *Member) GetStatus() proto.MemberStatus_Status {
 	//log.Debug("Member:getStatus() called by " + MyCaller())
 	m.Lock()
 	defer m.Unlock()
@@ -157,8 +157,8 @@ func (m *Member) getStatus() proto.MemberStatus_Status {
 /**
 Set member status
 */
-func (m *Member) setStatus(status proto.MemberStatus_Status) {
-	log.Debug("Member:setStatus() " + m.getHostname() + " status set to " + status.String() + " called by " + MyCaller())
+func (m *Member) SetStatus(status proto.MemberStatus_Status) {
+	log.Debug("Member:setStatus() " + m.GetHostname() + " status set to " + status.String() + " called by " + MyCaller())
 	m.Lock()
 	defer m.Unlock()
 	m.Status = status
@@ -167,7 +167,9 @@ func (m *Member) setStatus(status proto.MemberStatus_Status) {
 /**
 Set member Client GRPC
 */
-func (m *Member) setClient(client Client) {
+func (m *Member) SetClient(client *client.Client) {
+	m.Lock()
+	defer m.Unlock()
 	m.Client = client
 }
 
@@ -176,9 +178,11 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 */
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
-		nodeDetails, _ := NodeGetByName(m.Hostname)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname)
+		nodeDetails, _ := nodeGetByName(m.Hostname)
+		log.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
 		if err != nil {
+			log.Error("Member:Connect() " + err.Error())
 			return err
 		}
 	}
@@ -196,61 +200,61 @@ func (m *Member) Close() {
 /**
 Active function - Send GRPC health check to current member
 */
-func (m *Member) sendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
+func (m *Member) SendHealthCheck(data *proto.PulseHealthCheck) (interface{}, error) {
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
 	startTime := time.Now()
-	r, err := m.Send(SendHealthCheck, data)
+	r, err := m.Send(client.SendHealthCheck, data)
 	// This is a record for the active appliance to know when it was last sent/received!
-	m.setLastHCResponse(time.Now())
+	m.SetLastHCResponse(time.Now())
 	elapsed := fmt.Sprint(time.Since(startTime).Round(time.Millisecond))
-	m.setLatency(elapsed)
+	m.SetLatency(elapsed)
 	return r, err
 }
 
 /**
 Send health check via a go routine and mark the HC busy/not
- */
-func (m *Member) routineHC(data *proto.PulseHealthCheck) {
-	m.setHCBusy(true)
-	_, err := m.sendHealthCheck(data)
+*/
+func (m *Member) RoutineHC(data *proto.PulseHealthCheck) {
+	m.SetHCBusy(true)
+	_, err := m.SendHealthCheck(data)
 	if err != nil {
 		m.Close()
-		m.setStatus(proto.MemberStatus_UNAVAILABLE) // This may not be required
+		m.SetStatus(proto.MemberStatus_UNAVAILABLE) // This may not be required
 	}
-	m.setHCBusy(false)
+	m.SetHCBusy(false)
 }
 
 /*
 	Make the node active (bring up its groups)
 */
-func (m *Member) makeActive() bool {
-	log.Debugf("Member:makeActive() Making %s active", m.getHostname())
+func (m *Member) MakeActive() bool {
+	log.Debugf("Member:makeActive() Making %s active", m.GetHostname())
 	// Make ourself active if we are refering to ourself
-	if m.getHostname() == gconf.getLocalNode() {
-		makeMemberActive()
+	if m.GetHostname() == DB.Config.GetLocalNode() {
+		MakeLocalActive()
 		// Reset vars
-		m.setLatency("")
-		m.setLastHCResponse(time.Time{})
-		m.setStatus(proto.MemberStatus_ACTIVE)
+		m.SetLatency("")
+		m.SetLastHCResponse(time.Time{})
+		m.SetStatus(proto.MemberStatus_ACTIVE)
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(pulse.Server.Memberlist.monitorClientConns, 1*time.Second)
+		go utils.Scheduler(DB.MemberList.MonitorClientConns, 1*time.Second)
 		log.Debug("Member:PromoteMember() Starting health check handler")
-		go utils.Scheduler(pulse.Server.Memberlist.addHealthCheckHandler, 1*time.Second)
+		go utils.Scheduler(DB.MemberList.AddHealthCheckHandler, 1*time.Second)
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
 		_, err := m.Send(
-			SendPromote,
+			client.SendPromote,
 			&proto.PulsePromote{
-				Member: m.getHostname(),
+				Member: m.GetHostname(),
 			})
 		// Handle if we have an error
 		if err != nil {
 			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
 			return false
 		}
 	}
@@ -260,31 +264,31 @@ func (m *Member) makeActive() bool {
 /**
 Make the node passive (take down its groups)
 */
-func (m *Member) makePassive() bool {
-	log.Debugf("Member:makePassive() Making %s passive", m.getHostname())
-	if m.getHostname() == gconf.getLocalNode() {
+func (m *Member) MakePassive() bool {
+	log.Debugf("Member:makePassive() Making %s passive", m.GetHostname())
+	if m.GetHostname() == DB.Config.GetLocalNode() {
 		// do this regardless to make sure we dont have any groups up
-		makeMemberPassive()
+		MakeLocalPassive()
 		// Update member variables
-		m.setLastHCResponse(time.Now())
+		m.SetLastHCResponse(time.Now())
 		// check if we are already passive before starting a new scheduler
-		if m.getStatus() != proto.MemberStatus_PASSIVE {
-			m.setStatus(proto.MemberStatus_PASSIVE)
+		if m.GetStatus() != proto.MemberStatus_PASSIVE {
+			m.SetStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
-			log.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.getHostname())
-			go utils.Scheduler(m.monitorReceivedHCs, 10000*time.Millisecond)
+			log.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.GetHostname())
+			go utils.Scheduler(m.MonitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
 		_, err := m.Send(
-			SendMakePassive,
+			client.SendMakePassive,
 			&proto.PulsePromote{
-				Member:  m.getHostname(),
+				Member: m.GetHostname(),
 			})
 		if err != nil {
 			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
 			return false
 		}
 	}
@@ -296,23 +300,22 @@ Used to bring up a single IP on member
 Note: We need to know the group to work out what interface to
 bring it up on.
 */
-func (m *Member) bringUpIPs(ips []string, group string) bool {
-	configCopy := gconf.GetConfig()
-	iface := configCopy.GetGroupIface(m.Hostname, group)
-	if m.Hostname == gconf.getLocalNode() {
+func (m *Member) BringUpIPs(ips []string, group string) bool {
+	iface := DB.Config.GetGroupIface(m.Hostname, group)
+	if m.Hostname == DB.Config.GetLocalNode() {
 		log.Debug("member is local node bringing up IP's")
-		bringUpIPs(iface, ips)
+		BringUpIPs(iface, ips)
 	} else {
 		log.Debug("member is not local node making grpc call")
 		_, err := m.Send(
-			SendBringUpIP,
+			client.SendBringUpIP,
 			&proto.PulseBringIP{
 				Iface: iface,
 				Ips:   ips,
 			})
 		if err != nil {
 			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.getHostname(), err.Error())
+			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
 			return false
 		}
 	}
@@ -322,19 +325,19 @@ func (m *Member) bringUpIPs(ips []string, group string) bool {
 /**
 Monitor the last time we received a health check and or failover
 */
-func (m *Member) monitorReceivedHCs() bool {
+func (m *Member) MonitorReceivedHCs() bool {
 	// make sure we are still the active appliance
-	member, err := pulse.getMemberlist().getLocalMember()
+	member, err := DB.MemberList.GetLocalMember()
 	if err != nil {
 		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are no longer in a cluster")
 		return true
 	}
-	if member.getStatus() == proto.MemberStatus_ACTIVE {
+	if member.GetStatus() == proto.MemberStatus_ACTIVE {
 		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are now active.")
 		return true
 	}
 	// calculate elapsed time
-	elapsed := math.Floor(float64(time.Since(m.getLastHCResponse()).Seconds()))
+	elapsed := math.Floor(float64(time.Since(m.GetLastHCResponse()).Seconds()))
 	// determine if we might need to failover
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		log.Warning("No health checks are being made.. Perhaps a failover is required?")
@@ -346,36 +349,35 @@ func (m *Member) monitorReceivedHCs() bool {
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
-			log.Warn("Additional health checks have failed.")
 			// Nothing has worked.. assume the master has failed. Fail over.
-			member, err := pulse.getMemberlist().getNextActiveMember()
+			member, err := DB.MemberList.GetNextActiveMember()
 			// no new active appliance was found
 			if err != nil {
 				log.Warn("unable to find new active member.. we are now the active")
 				// make ourself active as no new active can be found apparently
-				m.makeActive()
+				m.MakeActive()
 				return true
 			}
 			// If we are not the new member just return
-			if member.getHostname() != gconf.getLocalNode() {
-				log.Info("Waiting on " + member.getHostname() + " to become active")
-				m.setLastHCResponse(time.Now())
+			if member.GetHostname() != DB.Config.GetLocalNode() {
+				log.Info("Waiting on " + member.GetHostname() + " to become active")
+				m.SetLastHCResponse(time.Now())
 				return false
 			}
 			// get our current active member
-			_, activeMember := pulse.getMemberlist().getActiveMember()
+			_, activeMember := DB.MemberList.GetActiveMember()
 			// If we have an active appliance mark it unavailable
 			if activeMember != nil {
-				activeMember.setStatus(proto.MemberStatus_UNAVAILABLE)
+				activeMember.SetStatus(proto.MemberStatus_UNAVAILABLE)
 			}
 			// lets go active
-			member.makeActive()
+			member.MakeActive()
 			// Set the FO priority
-			member.setLastHCResponse(time.Time{})
+			member.SetLastHCResponse(time.Time{})
 			log.Info("Local node is now active")
 			return true
 		} else {
-			m.setLastHCResponse(time.Now())
+			m.SetLastHCResponse(time.Now())
 		}
 	}
 	return false

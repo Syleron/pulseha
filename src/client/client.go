@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -15,16 +15,21 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package main
+package client
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
-	p "github.com/Syleron/PulseHA/proto"
 	log "github.com/Sirupsen/logrus"
+	p "github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"io/ioutil"
 	"time"
+	"github.com/Syleron/PulseHA/src/security"
 )
 
 type Client struct {
@@ -33,10 +38,10 @@ type Client struct {
 }
 
 // This should probably go into an enums folder
-type protoFunction int
+type ProtoFunction int
 
 const (
-	SendConfigSync protoFunction = 1 + iota
+	SendConfigSync ProtoFunction = 1 + iota
 	SendJoin
 	SendLeave
 	SendMakePassive
@@ -57,7 +62,7 @@ var protoFunctions = []string{
 	"Promote",
 }
 
-func (p protoFunction) String() string {
+func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 
@@ -99,16 +104,32 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 /**
 Note: Hostname is required for TLS as the certs are named after the hostname.
 */
-func (c *Client) Connect(ip, port, hostname string) error {
-	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
+func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	var err error
-	config := gconf.GetConfig()
-	if config.Pulse.TLS {
-		creds, err := credentials.NewClientTLSFromFile("/etc/pulseha/certs/"+hostname+".crt", "")
+	if tlsEnabled {
+		// Load member cert/key
+		hostname, err := utils.GetHostname()
 		if err != nil {
-			log.Errorf("Could not load TLS cert: %s", err.Error())
-			return errors.New("Could not load node TLS cert: " + hostname + ".crt")
+			return errors.New("unable to connect because cannot get hostname")
 		}
+		peerCert, err := tls.LoadX509KeyPair(
+			security.CertDir+hostname+".client.crt",
+			security.CertDir+hostname+".client.key",
+		)
+		if err != nil {
+			return errors.New("Could not connect to host: " + err.Error())
+		}
+		// Load CA
+		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
+		if err != nil {
+			return errors.New("Could not connect to host: " + err.Error())
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+		creds := credentials.NewTLS(&tls.Config{
+			Certificates: []tls.Certificate{peerCert},
+			RootCAs:      caCertPool,
+		})
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
@@ -118,6 +139,7 @@ func (c *Client) Connect(ip, port, hostname string) error {
 		return errors.New("Could not connect to host: " + err.Error())
 	}
 	c.Requester = p.NewServerClient(c.Connection)
+	log.Debug("Client:Connect() Connection made to " + ip + ":" + port)
 	return nil
 }
 
@@ -135,7 +157,7 @@ func (c *Client) Close() {
 /**
 Send a specific GRPC call
 */
-func (c *Client) Send(funcName protoFunction, data interface{}) (interface{}, error) {
+func (c *Client) Send(funcName ProtoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

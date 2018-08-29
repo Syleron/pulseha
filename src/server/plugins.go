@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -15,7 +15,7 @@
    You should have received a copy of the GNU Affero General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
-package main
+package server
 
 import (
 	log "github.com/Sirupsen/logrus"
@@ -23,11 +23,11 @@ import (
 	"path/filepath"
 	"plugin"
 	"strconv"
-)
+	)
 
 /**
 Health Check plugin type
- */
+*/
 type PluginHC interface {
 	Name() string
 	Version() float64
@@ -36,7 +36,7 @@ type PluginHC interface {
 
 /**
 Networking plugin type
- */
+*/
 type PluginNet interface {
 	Name() string
 	Version() float64
@@ -44,21 +44,27 @@ type PluginNet interface {
 	BringDownIPs(iface string, ips []string) error
 }
 
+type PluginGen interface {
+	Name() string
+	Version() float64
+	Run(db *Database) error
+}
+
 /**
 Plugins struct
- */
+*/
 type Plugins struct {
 	modules []*Plugin
 }
 
 /**
 Struct for a specific plugin
- */
+*/
 type Plugin struct {
-	Name string
+	Name    string
 	Version float64
-	Type interface{}
-	Plugin interface{}
+	Type    interface{}
+	Plugin  interface{}
 }
 
 type pluginType int
@@ -66,11 +72,13 @@ type pluginType int
 const (
 	PluginHealthCheck pluginType = 1 + iota
 	PluginNetworking
+	PluginGeneral
 )
 
 var pluginTypeNames = []string{
 	"PluginHC",
 	"PluginNet",
+	"PluginGeneral",
 }
 
 func (p pluginType) String() string {
@@ -79,7 +87,7 @@ func (p pluginType) String() string {
 
 /**
 Define each type of plugin to load
- */
+*/
 func (p *Plugins) Setup() {
 	// Join any number of file paths into a single path
 	evtGlob := path.Join("/usr/local/lib/pulseha/", "/*.so")
@@ -102,7 +110,8 @@ func (p *Plugins) Setup() {
 	}
 	p.Load(PluginHealthCheck, plugins)
 	p.Load(PluginNetworking, plugins)
-	p.validate()
+	p.Load(PluginGeneral, plugins)
+	p.Validate()
 	if len(p.modules) > 0 {
 		var pluginNames string = ""
 		for _, plgn := range p.modules {
@@ -113,19 +122,43 @@ func (p *Plugins) Setup() {
 }
 
 /**
-
- */
-func (p *Plugins) validate() {
+Validate that we have the required plugins
+*/
+func (p *Plugins) Validate() {
 	// make sure we have a networking plugin
-	if p.getNetworkingPlugin() == nil {
-		log.Fatal("No networking plugin loaded. Please install a networking plugin in order to use PulseHA")
+	if p.GetNetworkingPlugin() == nil {
+		log.Warning("No networking plugin loaded. PulseHA now in monitoring mode..")
 	}
 }
 
+/**
+Load plugins of a specific type
+TODO: This needs to be cleaned up so code can be reused instead of repeated so much
+*/
 func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 	// TODO: Note: Unfortunately a switch statement must be used as you cannot dynamically typecast a variable.
-	for _, plugin := range pluginList	 {
+	for _, plugin := range pluginList {
 		switch pluginType {
+		case PluginGeneral:
+			symEvt, err := plugin.Lookup(pluginType.String())
+			if err != nil {
+				log.Debugf("Plugin does not match pluginType symbol: %v", err)
+				continue
+			}
+			e, ok := symEvt.(PluginGen)
+			if !ok {
+				continue
+			}
+			// Create a new instance of plugins
+			newPlugin := &Plugin{
+				Name:    e.Name(),
+				Version: e.Version(),
+				Type:    pluginType,
+				Plugin:  e,
+			}
+			// Add to the list of plugins
+			p.modules = append(p.modules, newPlugin)
+			go e.Run(DB)
 		case PluginHealthCheck:
 			symEvt, err := plugin.Lookup(pluginType.String())
 			if err != nil {
@@ -138,15 +171,17 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Create a new instance of plugins
 			newPlugin := &Plugin{
-				Name: e.Name(),
-				Type: pluginType,
+				Name:    e.Name(),
+				Version: e.Version(),
+				Type:    pluginType,
+				Plugin:  e,
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
 		case PluginNetworking:
 			// Make sure we are not loading another networking plugin.
 			// Only one networking plugin can be loaded at one time.
-			if p.getNetworkingPlugin() != nil {
+			if p.GetNetworkingPlugin() != nil {
 				continue
 			}
 			symEvt, err := plugin.Lookup(pluginType.String())
@@ -160,10 +195,10 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Create a new instance of plugins
 			newPlugin := &Plugin{
-				Name: e.Name(),
+				Name:    e.Name(),
 				Version: e.Version(),
-				Type: pluginType,
-				Plugin: e,
+				Type:    pluginType,
+				Plugin:  e,
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
@@ -173,8 +208,8 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 
 /**
 Returns a slice of health check plugins
- */
-func (p *Plugins) getHealthCheckPlugins() []*Plugin {
+*/
+func (p *Plugins) GetHealthCheckPlugins() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginHealthCheck {
@@ -186,12 +221,25 @@ func (p *Plugins) getHealthCheckPlugins() []*Plugin {
 
 /**
 Returns a single networking plugin (as you should only ever have one loaded)
- */
-func (p *Plugins) getNetworkingPlugin() *Plugin {
+*/
+func (p *Plugins) GetNetworkingPlugin() *Plugin {
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginNetworking {
 			return plgin
 		}
 	}
 	return nil
+}
+
+/**
+Returns a slice of general plugins
+*/
+func (p *Plugins) GetGeneralPlugin() []*Plugin {
+	modules := []*Plugin{}
+	for _, plgin := range p.modules {
+		if plgin.Type == PluginGeneral {
+			modules = append(modules, plgin)
+		}
+	}
+	return modules
 }
