@@ -340,7 +340,11 @@ func (m *Member) MonitorReceivedHCs() bool {
 	elapsed := math.Floor(float64(time.Since(m.GetLastHCResponse()).Seconds()))
 	// determine if we might need to failover
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
-		log.Warning("No health checks are being made.. Perhaps a failover is required?")
+		_, member := DB.MemberList.GetActiveMember()
+		if member != nil {
+			member.SetStatus(proto.MemberStatus_SUSPICIOUS)
+		}
+		log.Debug("Member:MonitorReceivedHCs() No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
 	//log.Info(elapsed)
