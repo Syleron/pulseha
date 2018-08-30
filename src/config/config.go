@@ -154,6 +154,19 @@ func (c *Config) Reload() {
  */
 func (c *Config) Validate() {
 	var success bool = true
+
+	// Make sure our groups section is valid
+	if c.Groups == nil || c.Nodes == nil {
+		log.Error("Unable to load Groups section of the config.")
+		success = false
+	}
+
+	// Make sure our nodes section is valid
+	if c.Groups == nil || c.Nodes == nil {
+		log.Error("Unable to load Nodes section of the config.")
+		success = false
+	}
+
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
