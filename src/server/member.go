@@ -231,13 +231,15 @@ func (m *Member) RoutineHC(data *proto.PulseHealthCheck) {
 */
 func (m *Member) MakeActive() bool {
 	log.Debugf("Member:makeActive() Making %s active", m.GetHostname())
-	// Make ourself active if we are refering to ourself
+	// Make ourself active if we are referring to ourself
 	if m.GetHostname() == DB.Config.GetLocalNode() {
-		MakeLocalActive()
 		// Reset vars
 		m.SetLatency("")
 		m.SetLastHCResponse(time.Time{})
+		// Set our state
 		m.SetStatus(proto.MemberStatus_ACTIVE)
+		// Bring up our addresses if we have any
+		MakeLocalActive()
 		// Start performing health checks
 		log.Debug("Member:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(DB.MemberList.MonitorClientConns, 1*time.Second)

@@ -130,7 +130,10 @@ func groupAssign(groupName, node, iface string) error {
 			// Add the group
 			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface], groupName)
 			// make the group active
-			makeGroupActive(iface, groupName)
+			hostname, _ := DB.MemberList.GetActiveMember()
+			if hostname == DB.Config.GetLocalNode() {
+				makeGroupActive(iface, groupName)
+			}
 		} else {
 			log.Warning(groupName + " already exists in node " + node + ".. skipping.")
 		}
