@@ -176,6 +176,8 @@ Reload the memberlist
  */
 func (m *MemberList) Reload() {
 	log.Debug("MemberList:ReloadMembers() Reloading member nodes")
+	// Reload our config
+	DB.Config.Reload()
 	// clear local members
 	m.LoadMembers()
 }
@@ -335,7 +337,7 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 Sync local config with each member in the cluster.
 */
 func (m *MemberList) SyncConfig() error {
-	log.Debug("MemberList:SyncConfig Syncing config with peers..")
+	log.Debug("MemberList:SyncConfig() Syncing config with peers..")
 	// Return with our new updated config
 	buf, err := json.Marshal(DB.Config.GetConfig())
 	// Handle failure to marshal config
