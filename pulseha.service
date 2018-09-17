@@ -1,4 +1,6 @@
 [Unit]
+After=network.target
+Require=network.target
 Description=PulseHA Daemon
 
 [Service]
