@@ -82,7 +82,15 @@ This function is to bring up a network interface
 */
 func BringIPup(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
-		return false, errors.New("Unable to bring IP up as the network interface does not exist")
+		return false, errors.New("unable to bring IP up as the network interface does not exist")
+	}
+	// Check to see if the ip already exists on another interface
+	exists, eIface, err := CheckIfIPExists(ip)
+	if err != nil {
+		return false, err
+	}
+	if exists {
+		BringIPdown(eIface, ip)
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
 	// guessing
@@ -101,7 +109,7 @@ This function is to bring down a network interface
 */
 func BringIPdown(iface, ip string) (bool, error) {
 	if !InterfaceExist(iface) {
-		return false, errors.New("Unable to bring IP down as the network interface does not exist")
+		return false, errors.New("unable to bring IP down as the network interface does not exist")
 	}
 	output, err := utils.Execute("ip", "ad", "del", ip, "dev", iface)
 	// guessing
@@ -211,4 +219,33 @@ func InterfaceExist(name string) bool {
 		}
 	}
 	return false
+}
+
+/**
+Checks to see if an IP exists on an interface already
+ */
+func CheckIfIPExists(ipAddr string) (bool, string, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return true, "", err
+	}
+	for _, i := range ifaces {
+		addrs, err := i.Addrs()
+		if err != nil {
+			return true, "", err
+		}
+		for _, addr := range addrs {
+			var ip net.IP
+			switch v := addr.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
+			if ipAddr == ip.String() {
+				return true, i.Name, nil
+			}
+			return false, i.Name, nil
+		}
+	}
 }
