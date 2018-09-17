@@ -90,6 +90,7 @@ func BringIPup(iface, ip string) (bool, error) {
 		return false, err
 	}
 	if exists {
+		log.Debug("netUtils:BringIPup() IP already exists on interface " + eIface + ". Bringing down..")
 		BringIPdown(eIface, ip)
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
