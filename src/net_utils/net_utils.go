@@ -85,12 +85,12 @@ func BringIPup(iface, ip string) (bool, error) {
 		return false, errors.New("unable to bring IP up as the network interface does not exist")
 	}
 	// Check to see if the ip already exists on another interface
-	exists, eIface, err := CheckIfIPExists(ip)
+	ipOb, _ := utils.GetCIDR(ip)
+	exists, eIface, err := CheckIfIPExists(ipOb.String())
 	if err != nil {
 		return false, err
 	}
 	if exists {
-		log.Debug("netUtils:BringIPup() IP already exists on interface " + eIface + ". Bringing down..")
 		BringIPdown(eIface, ip)
 	}
 	output, err := utils.Execute("ip", "ad", "ad", ip, "dev", iface)
