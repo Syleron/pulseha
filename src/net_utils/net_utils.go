@@ -248,4 +248,5 @@ func CheckIfIPExists(ipAddr string) (bool, string, error) {
 			return false, i.Name, nil
 		}
 	}
+	return false, "", nil
 }
