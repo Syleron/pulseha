@@ -245,7 +245,6 @@ func CheckIfIPExists(ipAddr string) (bool, string, error) {
 			if ipAddr == ip.String() {
 				return true, i.Name, nil
 			}
-			return false, i.Name, nil
 		}
 	}
 	return false, "", nil
