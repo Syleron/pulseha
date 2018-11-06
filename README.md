@@ -14,7 +14,7 @@
 PulseHA is an active-passive cluster communications manager (CCM) daemon written in GO that provides a means of communication and membership monitoring within a network cluster. By utilising Remote Procedure Calls (RPC) using Google's GRPC, PulseHA provides a reliable method of communication to ensure network high availability.
 
 ## Why
-There are other production tested and more feature rich solutions, however, PulseHA attempts to solve high availability with a more simple approach but allowing for more functionality with the use of custom plugins.
+PulseHA attempts to solve high availability with a more simple approach but without restricting functionality with the use of additional custom plugins.
 
 ## Features
 - Remote procedual calls via GRPC
@@ -56,4 +56,4 @@ Thank you to all authors who have and continue to contribute to this project.
 ## License
 PulseHA source code is available under the AGPL License which can be found in the LICENSE file.
 
-Copyright (c) 2017 Andrew Zak <<andrew@pulseha.com>>
+Copyright (c) 2017-2018 Andrew Zak <<andrew@pulseha.com>>
