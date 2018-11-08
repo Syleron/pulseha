@@ -27,7 +27,7 @@ PulseHA attempts to solve high availability with a more simple approach but with
 
 ## Prerequisites
 
-* Go v9 or later
+* Go v1.9 or later
 * Protoc v3.4 or later
 
 ## Build & Install
