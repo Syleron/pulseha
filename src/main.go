@@ -25,11 +25,20 @@ import (
 	"sync"
 	"time"
 	"github.com/Syleron/PulseHA/src/config"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+const (
+	PRE_SIGNAL  = iota
+	POST_SIGNAL
 )
 
 var (
-	Version string
-	Build   string
+	Version         string
+	Build           string
+	hookableSignals []os.Signal
 )
 
 var pulse *Pulse
@@ -38,8 +47,11 @@ var pulse *Pulse
  * Main Pulse struct type
  */
 type Pulse struct {
-	Server  *server.Server
-	CLI     *server.CLIServer
+	DB          server.Database
+	Server      *server.Server
+	CLI         *server.CLIServer
+	Sigs        chan os.Signal
+	SignalHooks map[int]map[os.Signal][]func()
 }
 
 type PulseLogFormat struct{}
@@ -65,11 +77,22 @@ func createPulse() *Pulse {
 	// Create the Pulse object
 	pulse := &Pulse{
 		Server: &server.Server{},
-		CLI: &server.CLIServer{},
+		CLI:    &server.CLIServer{},
 	}
 	// Set our server variable
 	pulse.CLI.Server = pulse.Server
 	return pulse
+}
+
+func init() {
+	hookableSignals = []os.Signal{
+		syscall.SIGHUP,
+		syscall.SIGUSR1,
+		syscall.SIGUSR2,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGTSTP,
+	}
 }
 
 /**
@@ -87,22 +110,27 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
+	// listen for singals
+	pulse.Sigs = make(chan os.Signal)
+	signal.Notify(pulse.Sigs)
+	// Handle the signals
+	go handleSignals()
 	// load the config
-	db := server.Database{
-		Plugins: &server.Plugins{},
+	pulse.DB = server.Database{
+		Plugins:    &server.Plugins{},
 		MemberList: &server.MemberList{},
 	}
 	// Load the config
-	db.Config = config.GetConfig()
+	pulse.DB.Config = config.GetConfig()
 	// Set the logging level
-	setLogLevel(db.Config.Logging.Level)
+	setLogLevel(pulse.DB.Config.Logging.Level)
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Init(&db)
+	go pulse.Server.Init(&pulse.DB)
 	wg.Wait()
 }
 
@@ -115,4 +143,48 @@ func setLogLevel(level string) {
 		panic(err.Error())
 	}
 	log.SetLevel(logLevel)
+}
+
+/**
+Handle OS signals
+ */
+func handleSignals() {
+	var sig os.Signal
+	signal.Notify(pulse.Sigs, hookableSignals...)
+	for {
+		sig = <-pulse.Sigs
+		signalHooks(PRE_SIGNAL, sig)
+		switch sig {
+		case syscall.SIGINT:
+			// Bring down our floating IPS
+			server.MakeLocalPassive()
+			// Shutdown our server
+			pulse.Server.Shutdown()
+			// Reload our config
+			pulse.DB.Config.Reload()
+			// Start a new server
+			go pulse.Server.Setup()
+		break
+		case syscall.SIGTERM:
+			// Bring down floating IPS
+			server.MakeLocalActive()
+			// Shutdown our service
+			pulse.Server.Shutdown()
+			os.Exit(1)
+		}
+		signalHooks(POST_SIGNAL, sig)
+	}
+}
+
+/**
+
+ */
+func signalHooks(ppFlag int, sig os.Signal) {
+	if _, notSet := pulse.SignalHooks[ppFlag][sig]; !notSet {
+		return
+	}
+	for _, f := range pulse.SignalHooks[ppFlag][sig] {
+		f()
+	}
+	return
 }

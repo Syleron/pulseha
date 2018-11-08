@@ -97,7 +97,6 @@ func (c *Config) GetLocalNode() string {
  * Function used to load the config
  */
 func (c *Config) Load() {
-	log.Info("Loading configuration file")
 	c.Lock()
 	defer c.Unlock()
 	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
@@ -145,7 +144,7 @@ func (c *Config) Save() {
  * Note: Need to clear memory value before calling Load()
  */
 func (c *Config) Reload() {
-	log.Debug("Reloading PulseHA config")
+	log.Info("Reloading PulseHA config")
 	c.Load()
 }
 

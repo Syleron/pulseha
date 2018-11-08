@@ -135,7 +135,7 @@ func groupAssign(groupName, node, iface string) error {
 				makeGroupActive(iface, groupName)
 			}
 		} else {
-			log.Warning(groupName + " already exists in node " + node + ".. skipping.")
+			log.Warning(groupName + " is already assigned to " + iface + ".. skipping.")
 		}
 		return nil
 	}

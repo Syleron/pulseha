@@ -31,7 +31,6 @@ import (
 	"google.golang.org/grpc/credentials"
 	"io/ioutil"
 	"net"
-	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -84,7 +83,6 @@ func (s *Server) Setup() {
 	// Listen
 	s.Listener, err = net.Listen("tcp", bindIP+":"+DB.Config.LocalNode().Port)
 	if err != nil {
-		debug.PrintStack()
 		panic(err)
 		// TODO: Note: Should we exit here?
 		return
@@ -127,7 +125,7 @@ func (s *Server) Setup() {
  * Shutdown pulse server (not cli/cmd)
  */
 func (s *Server) Shutdown() {
-	log.Debug("Shutting down server")
+	log.Info("Shutting down PulseHA daemon")
 	if s.Server != nil {
 		s.Server.GracefulStop()
 	}
