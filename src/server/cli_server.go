@@ -458,6 +458,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 		}
 		table.Row = append(table.Row, row)
 	}
+	table.Success = true
 	return table, nil
 }
 
