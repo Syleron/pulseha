@@ -51,6 +51,7 @@ type Node struct {
 	IP       string              `json:"bind_address"`
 	Port     string              `json:"bind_port"`
 	IPGroups map[string][]string `json:"group_assignments"`
+	Weight int32				 `json:"weight"`
 }
 
 type Logging struct {
