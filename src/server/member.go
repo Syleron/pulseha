@@ -344,7 +344,7 @@ func (m *Member) MonitorReceivedHCs() bool {
 	if int(elapsed) > 0 && int(elapsed)%4 == 0 {
 		_, member := DB.MemberList.GetActiveMember()
 		if member != nil {
-			member.SetStatus(proto.MemberStatus_ICIOUS)
+			member.SetStatus(proto.MemberStatus_SUSPICIOUS)
 		}
 		log.Debug("Member:MonitorReceivedHCs() No health checks are being made.. Perhaps a failover is required?")
 	}
