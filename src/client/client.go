@@ -71,7 +71,7 @@ func (p ProtoFunction) String() string {
 /**
 
  */
-func (c *Client) GetProtoFuncList() map[string]interface{} {
+func (c *Client) getProtoFuncList() map[string]interface{} {
 	funcList := map[string]interface{}{
 		"ConfigSync": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.ConfigSync(ctx, data.(*p.PulseConfigSync))
@@ -159,10 +159,23 @@ Send a specific GRPC call
 */
 func (c *Client) Send(funcName ProtoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
-	funcList := c.GetProtoFuncList()
+	funcList := c.getProtoFuncList()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return funcList[funcName.String()].(func(context.Context, interface{}) (interface{}, error))(
 		ctx, data,
 	)
+}
+
+/**
+Create a new instance of our Client
+ */
+func New(ip, port, hostname string, tlsEnabled bool) (*Client, error) {
+	log.Debug("Client:New() Creating new client object for " + hostname)
+	client := new(Client)
+	err := client.Connect(ip, port, hostname, tlsEnabled)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }

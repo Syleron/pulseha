@@ -54,14 +54,13 @@ func (m *MemberList) Unlock() {
 /**
  * Add a member to the client list
  */
-func (m *MemberList) AddMember(hostname string, client *client.Client) {
+func (m *MemberList) AddMember(hostname string) {
 	if !m.MemberExists(hostname) {
 		log.Debug("MemberList:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
 		newMember := &Member{}
 		newMember.SetHostname(hostname)
 		newMember.SetStatus(p.MemberStatus_UNAVAILABLE)
-		newMember.SetClient(client)
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
@@ -165,9 +164,8 @@ func (m *MemberList) Setup() {
 load the nodes in our config into our memberlist
 */
 func (m *MemberList) LoadMembers() {
-	for key := range DB.Config.Nodes {
-		newClient := &client.Client{}
-		m.AddMember(key, newClient)
+	for hostname := range DB.Config.Nodes {
+		m.AddMember(hostname)
 	}
 }
 

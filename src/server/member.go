@@ -54,8 +54,6 @@ type Member struct {
 
  */
 func (m *Member) Lock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
 	m.Mutex.Lock()
 }
 
@@ -63,8 +61,6 @@ func (m *Member) Lock() {
 
  */
 func (m *Member) Unlock() {
-	//_, _, no, _ := runtime.Caller(1)
-	//log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
@@ -165,26 +161,23 @@ func (m *Member) SetStatus(status proto.MemberStatus_Status) {
 }
 
 /**
-Set member Client GRPC
-*/
-func (m *Member) SetClient(client *client.Client) {
-	m.Lock()
-	defer m.Unlock()
-	m.Client = client
-}
-
-/**
 Note: Hostname is required for TLS as the certs are named after the hostname.
 */
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		nodeDetails, _ := nodeGetByName(m.Hostname)
 		log.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
+		// Create new instance of client
+		c, err := client.New(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
+		// Check for errors
 		if err != nil {
 			log.Error("Member:Connect() " + err.Error())
 			return err
 		}
+		// Set our new client
+		m.Lock()
+		m.Client = c
+		m.Unlock()
 	}
 	return nil
 }

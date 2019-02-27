@@ -74,9 +74,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			security.GenTLSKeys(in.BindIp)
 		}
 		// Create a new client
-		c := &client.Client{}
-		// Attempt to connect
-		err := c.Connect(in.Ip, in.Port, in.Hostname, DB.Config.Pulse.TLS)
+		c, err := client.New(in.Ip, in.Port, in.Hostname, DB.Config.Pulse.TLS)
 		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
