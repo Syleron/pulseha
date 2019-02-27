@@ -29,10 +29,15 @@ import (
 
 type Config struct {
 	Pulse   Local               `json:"pulseha"`
-	Groups  map[string][]string `json:"floating_ip_groups"`
+	Groups  FloatingIPGroups    `json:"floating_ip_groups"`
 	Nodes   map[string]Node     `json:"nodes"`
 	Logging Logging             `json:"logging"`
 	sync.Mutex
+}
+
+type FloatingIPGroups struct {
+	NodeWeights   map[string]int32    `json:"nodes"`
+	Fips		  map[string][]string  `json:"fips"`
 }
 
 type Local struct {
