@@ -95,7 +95,7 @@ func (c *StatusCommand) drawStatusTable(client proto.CLIClient) {
 		table.SetCenterSeparator("-")
 		table.SetColumnSeparator("|")
 		table.SetRowLine(true)
-		table.SetAutoMergeCells(true)
+		table.SetAutoMergeCells(false)
 		table.AppendBulk(data)
 		table.Render()
 	}
