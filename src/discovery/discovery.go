@@ -11,6 +11,5 @@ func (r *Registry) Unregister() {}
 func (r *Registry) Connect() {}
 
 func New() {
-	r := new(Registry)
-
+	//r := new(Registry)
 }
