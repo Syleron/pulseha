@@ -20,6 +20,7 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
+	discovery2 "github.com/Syleron/PulseHA/src/discovery"
 	"github.com/Syleron/PulseHA/src/server"
 	"strings"
 	"sync"
@@ -76,7 +77,6 @@ func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
 func createPulse() *Pulse {
 	// Create the Pulse object
 	pulse := &Pulse{
-		Server: &server.Server{},
 		CLI:    &server.CLIServer{},
 	}
 	// Set our server variable
@@ -124,13 +124,21 @@ func main() {
 	pulse.DB.Config = config.GetConfig()
 	// Set the logging level
 	setLogLevel(pulse.DB.Config.Logging.Level)
+	// Create a new instance of our server
+	pulse.Server = server.New(&pulse.DB)
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
-	go pulse.Server.Init(&pulse.DB)
+	go pulse.Server.Setup()
+	// Create a new discovery listener
+	discovery := discovery2.New(discovery2.Settings{
+		Port: "65000",
+	})
+	go discovery.Listen()
+	// Wait
 	wg.Wait()
 }
 

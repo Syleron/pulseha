@@ -50,13 +50,18 @@ type Server struct {
 	HCScheduler func()
 }
 
-func (s *Server) Init(db *Database) {
+/**
+Create a new instance of the server
+ */
+func New(db *Database) *Server {
+	// Create new instance of our server
+	s := new(Server)
 	// Set our config
 	DB = db
 	// Setup/Load plugins
 	DB.Plugins.Setup()
-	// Setup the server
-	s.Setup()
+	// return our server
+	return s
 }
 
 /**
