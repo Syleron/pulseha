@@ -45,7 +45,7 @@ func nodecreateLocal() error {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := genGroupName()
-			DB.Config.Groups[groupName] = []string{}
+			DB.Config.Groups[groupName] = config.FloatingIPGroup{}
 			groupAssign(groupName, hostname, ifaceName)
 		}
 	}

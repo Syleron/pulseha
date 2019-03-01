@@ -423,9 +423,14 @@ func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto
 	s.Lock()
 	defer s.Unlock()
 	table := new(proto.GroupTable)
-	for name, ips := range DB.Config.Groups {
+	for name, fipGroup := range DB.Config.Groups {
 		nodes, interfaces := getGroupNodes(name)
-		row := &proto.GroupRow{Name: name, Ip: ips, Nodes: nodes, Interfaces: interfaces}
+		row := &proto.GroupRow{
+			Name: name,
+			Ip: fipGroup.Fips,
+			Nodes: nodes,
+			Interfaces: interfaces,
+		}
 		table.Row = append(table.Row, row)
 	}
 	return table, nil

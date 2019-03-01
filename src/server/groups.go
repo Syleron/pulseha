@@ -20,6 +20,7 @@ package server
 import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/net_utils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"strconv"
@@ -37,7 +38,7 @@ func groupNew(groupName string) (string, error) {
 	} else {
 		name = genGroupName()
 	}
-	DB.Config.Groups[name] = []string{}
+	DB.Config.Groups[name] = config.FloatingIPGroup{}
 	return name, nil
 }
 
@@ -64,7 +65,7 @@ Clear out all local Groups
 func groupClearLocal() {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
-	DB.Config.Groups = map[string][]string{}
+	DB.Config.Groups = map[string]config.FloatingIPGroup{}
 }
 
 /**
@@ -84,7 +85,7 @@ func groupIpAdd(groupName string, ips []string) error {
 		if err := utils.ValidIPAddress(ip); err == nil {
 			// Check to see if the IP exists in any of the groups
 			if !groupIpExistAll(ip) {
-				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName], ip)
+				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName].Fips, ip)
 			} else {
 				return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
 			}
@@ -105,9 +106,9 @@ func groupIpRemove(groupName string, ips []string) error {
 		return errors.New("group does not exist")
 	}
 	for _, ip := range ips {
-		if len(DB.Config.Groups[groupName]) > 0 {
+		if len(DB.Config.Groups[groupName].Fips) > 0 {
 			if exists, i := groupIPExist(groupName, ip); exists {
-				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName][:i], DB.Config.Groups[groupName][i+1:]...)
+				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName].Fips[:i], DB.Config.Groups[groupName].Fips[i+1:]...)
 			} else {
 				log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
 			}
@@ -190,7 +191,7 @@ func groupExist(name string) bool {
 Checks to see if a floating IP already exists inside of a floating ip group
 */
 func groupIPExist(name string, ip string) (bool, int) {
-	for index, cip := range DB.Config.Groups[name] {
+	for index, cip := range DB.Config.Groups[name].Fips {
 		if ip == cip {
 			return true, index
 		}
@@ -240,12 +241,12 @@ func getGroupNodes(group string) ([]string, []string) {
 Make a group of IPs active
 */
 func makeGroupActive(iface string, groupName string) {
-	BringUpIPs(iface, DB.Config.Groups[groupName])
+	BringUpIPs(iface, DB.Config.Groups[groupName].Fips)
 }
 
 /**
 Make a group of IPs passive
  */
 func makeGroupPassive(iface string, groupName string) {
-	BringDownIPs(iface, DB.Config.Groups[groupName])
+	BringDownIPs(iface, DB.Config.Groups[groupName].Fips)
 }
