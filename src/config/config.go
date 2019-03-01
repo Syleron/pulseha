@@ -29,7 +29,7 @@ import (
 
 type Config struct {
 	Pulse   Local               `json:"pulseha"`
-	Groups  FloatingIPGroups    `json:"floating_ip_groups"`
+	Groups  map[string][]FloatingIPGroups    `json:"floating_ip_groups"`
 	Nodes   map[string]Node     `json:"nodes"`
 	Logging Logging             `json:"logging"`
 	sync.Mutex
@@ -37,7 +37,7 @@ type Config struct {
 
 type FloatingIPGroups struct {
 	NodeWeights   map[string]int32    `json:"nodes"`
-	Fips		  map[string][]string  `json:"fips"`
+	Fip		      string              `json:"fip"`
 }
 
 type Local struct {
@@ -161,16 +161,16 @@ func (c *Config) Validate() {
 	var success bool = true
 
 	// Make sure our groups section is valid
-	if c.Groups == nil || c.Nodes == nil {
-		log.Error("Unable to load Groups section of the config.")
-		success = false
-	}
+	//if c.Groups.Fips == nil || c.Nodes == nil {
+	//	log.Error("Unable to load Groups section of the config.")
+	//	success = false
+	//}
 
 	// Make sure our nodes section is valid
-	if c.Groups == nil || c.Nodes == nil {
-		log.Error("Unable to load Nodes section of the config.")
-		success = false
-	}
+	//if c.Groups == nil || c.Nodes == nil {
+	//	log.Error("Unable to load Nodes section of the config.")
+	//	success = false
+	//}
 
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
