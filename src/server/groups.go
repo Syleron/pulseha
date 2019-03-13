@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2019  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -38,7 +38,10 @@ func groupNew(groupName string) (string, error) {
 	} else {
 		name = genGroupName()
 	}
-	DB.Config.Groups[name] = config.FloatingIPGroup{}
+	DB.Config.Groups[name] = &config.FloatingIPGroup{
+		NodeWeight: make(map[string]int),
+		Fips: []string{},
+	}
 	return name, nil
 }
 
@@ -65,7 +68,7 @@ Clear out all local Groups
 func groupClearLocal() {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
-	DB.Config.Groups = map[string]config.FloatingIPGroup{}
+	DB.Config.Groups = map[string]*config.FloatingIPGroup{}
 }
 
 /**
@@ -85,7 +88,7 @@ func groupIpAdd(groupName string, ips []string) error {
 		if err := utils.ValidIPAddress(ip); err == nil {
 			// Check to see if the IP exists in any of the groups
 			if !groupIpExistAll(ip) {
-				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName].Fips, ip)
+				DB.Config.Groups[groupName].Fips = append(DB.Config.Groups[groupName].Fips, ip)
 			} else {
 				return errors.New(ip + " already exists in group " + groupName + ".. skipping.")
 			}
@@ -108,7 +111,7 @@ func groupIpRemove(groupName string, ips []string) error {
 	for _, ip := range ips {
 		if len(DB.Config.Groups[groupName].Fips) > 0 {
 			if exists, i := groupIPExist(groupName, ip); exists {
-				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName].Fips[:i], DB.Config.Groups[groupName].Fips[i+1:]...)
+				DB.Config.Groups[groupName].Fips = append(DB.Config.Groups[groupName].Fips[:i], DB.Config.Groups[groupName].Fips[i+1:]...)
 			} else {
 				log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
 			}
@@ -203,9 +206,9 @@ func groupIPExist(name string, ip string) (bool, int) {
 Checks to see if a floating IP already exists in any of the floating IP groups
 */
 func groupIpExistAll(ip string) bool {
-	for _, cip := range DB.Config.Groups {
-		for _, dip := range cip {
-			if ip == dip {
+	for _, group := range DB.Config.Groups {
+		for _, fip := range group.Fips {
+			if ip == fip {
 				return true
 			}
 		}

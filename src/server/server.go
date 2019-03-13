@@ -25,6 +25,7 @@ import (
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/config"
+	discovery2 "github.com/Syleron/PulseHA/src/discovery"
 	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
@@ -48,7 +49,11 @@ type Server struct {
 	Server      *grpc.Server
 	Listener    net.Listener
 	HCScheduler func()
+	Discovery *discovery2.Registry
 }
+
+type DiscoveryHandler struct {}
+
 
 /**
 Create a new instance of the server
@@ -60,8 +65,23 @@ func New(db *Database) *Server {
 	DB = db
 	// Setup/Load plugins
 	DB.Plugins.Setup()
+	// Create a new discovery listener
+	s.Discovery = discovery2.New(
+		discovery2.Settings{
+		Port: "65000",
+		},
+		&DiscoveryHandler{},
+	)
 	// return our server
 	return s
+}
+
+/**
+Handle a newly discovered host
+ */
+func (d *DiscoveryHandler) DiscoveredHost(h string) {
+	log.Info("this is from the discovered host area")
+	log.Info(h)
 }
 
 /**
@@ -81,6 +101,8 @@ func (s *Server) Setup() {
 	}
 	if !DB.Config.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
+		// Attempt to discover clusters on the network
+		go s.Discovery.Discover()
 		return
 	}
 	var bindIP string
@@ -123,6 +145,10 @@ func (s *Server) Setup() {
 	DB.MemberList.Setup()
 	// Start PulseHA daemon server
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
+	// Setup service discovery
+	s.Discovery.Reset()
+	go s.Discovery.Listen()
+	// Setup our server listener
 	s.Server.Serve(s.Listener)
 }
 

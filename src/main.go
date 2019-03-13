@@ -20,15 +20,14 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	discovery2 "github.com/Syleron/PulseHA/src/discovery"
-	"github.com/Syleron/PulseHA/src/server"
-	"strings"
-	"sync"
-	"time"
 	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/server"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 const (
@@ -128,16 +127,11 @@ func main() {
 	pulse.Server = server.New(&pulse.DB)
 	// Setup wait group
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server
 	go pulse.Server.Setup()
-	// Create a new discovery listener
-	discovery := discovery2.New(discovery2.Settings{
-		Port: "65000",
-	})
-	go discovery.Listen()
 	// Wait
 	wg.Wait()
 }

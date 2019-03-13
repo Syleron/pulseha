@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2019  Andrew Zak <andrew@pulseha.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -45,7 +45,10 @@ func nodecreateLocal() error {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := genGroupName()
-			DB.Config.Groups[groupName] = config.FloatingIPGroup{}
+			DB.Config.Groups[groupName] = &config.FloatingIPGroup{
+				NodeWeight: make(map[string]int),
+				Fips: []string{},
+			}
 			groupAssign(groupName, hostname, ifaceName)
 		}
 	}
