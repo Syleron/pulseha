@@ -143,11 +143,11 @@ func (s *Server) Setup() {
 	proto.RegisterServerServer(s.Server, s)
 	// Setup our members
 	DB.MemberList.Setup()
-	// Start PulseHA daemon server
-	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
 	// Setup service discovery
 	s.Discovery.Reset()
 	go s.Discovery.Listen()
+	// Start PulseHA daemon server
+	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
 	// Setup our server listener
 	s.Server.Serve(s.Listener)
 }

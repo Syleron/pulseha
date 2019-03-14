@@ -54,7 +54,8 @@ func (d Discovered) String() string {
 Used to find other instances on the network
  */
 func (r *Registry) Discover() {
-	log.Debug("PulseHA discovery search initialised..")
+	log.Debug("Discovery search initialised..")
+
 	address := net.JoinHostPort(MulticastAddress, r.Settings.Port)
 	portNum, err := strconv.Atoi(r.Settings.Port)
 
@@ -108,9 +109,11 @@ func (r *Registry) Discover() {
 				log.Print(errMulticast)
 				continue
 			}
+			log.Info("discovery sending broadcast...")
 		}
 
 		if exit || TimeLimit * time.Second > 0 && t.Sub(start) > TimeLimit * time.Second {
+			log.Debug("Discovery stopped broadcasting...")
 			break
 		}
 	}
@@ -129,7 +132,6 @@ Listen in for other instances on the network
 func (r *Registry) Listen() {
 	log.Info("PulseHA discovery listening..")
 	// Setup
-	r.Settings.multicastAddressNumbers = net.ParseIP(MulticastAddress)
 
 	// Variables
 	address := net.JoinHostPort(MulticastAddress, r.Settings.Port)
@@ -198,6 +200,7 @@ func New(s Settings, h DiscoverHandler) *Registry {
 		s.Payload = []byte("We are aware only of the empty space in the forest, which only yesterday was filled with trees.")
 	}
 	r.Settings = s
+	r.Settings.multicastAddressNumbers = net.ParseIP(MulticastAddress)
 	r.stopChan = make(chan bool)
 	r.handler = h
 	return r
