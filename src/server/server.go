@@ -68,7 +68,7 @@ func New(db *Database) *Server {
 	// Create a new discovery listener
 	s.Discovery = discovery2.New(
 		discovery2.Settings{
-		Port: "65000",
+			Port: "1900",
 		},
 		&DiscoveryHandler{},
 	)
@@ -144,7 +144,7 @@ func (s *Server) Setup() {
 	// Setup our members
 	DB.MemberList.Setup()
 	// Setup service discovery
-	s.Discovery.Reset()
+	go s.Discovery.Reset()
 	go s.Discovery.Listen()
 	// Start PulseHA daemon server
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
