@@ -55,7 +55,7 @@ func (d Discovered) String() string {
 
 /**
 Used to find other instances on the network
- */
+*/
 func (r *Registry) Discover() {
 	log.Debug("Discovery search initialised..")
 
@@ -126,14 +126,14 @@ func (r *Registry) Discover() {
 
 /**
 Stop attempting to find new service on the network
- */
+*/
 func (r *Registry) Reset() {
 	r.stopChan <- true
 }
 
 /**
 Listen in for other instances on the network
- */
+*/
 func (r *Registry) Listen() {
 	log.Info("PulseHA discovery listening..")
 	// Setup

@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@linux.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -16,3 +16,9 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 package logging
+
+type Logging struct {
+
+}
+
+func NewLogging() {}
