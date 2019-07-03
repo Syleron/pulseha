@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017  Andrew Zak <andrew@linux.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -95,7 +95,7 @@ func (c *StatusCommand) drawStatusTable(client proto.CLIClient) {
 		table.SetCenterSeparator("-")
 		table.SetColumnSeparator("|")
 		table.SetRowLine(true)
-		table.SetAutoMergeCells(true)
+		table.SetAutoMergeCells(false)
 		table.AppendBulk(data)
 		table.Render()
 	}

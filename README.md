@@ -56,4 +56,4 @@ Thank you to all authors who have and continue to contribute to this project.
 ## License
 PulseHA source code is available under the AGPL License which can be found in the LICENSE file.
 
-Copyright (c) 2017-2018 Andrew Zak <<andrew@pulseha.com>>
+Copyright (c) 2017-2019 Andrew Zak <<andrew@linux.com>>
