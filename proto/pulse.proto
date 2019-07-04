@@ -1,6 +1,6 @@
 /*
     PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@pulseha.com>
+    Copyright (C) 2017  Andrew Zak <andrew@linux.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published
@@ -32,11 +32,12 @@ message MemberlistMember {
 }
 message MemberStatus {
     enum Status {
-        ACTIVE = 0; // everyhting is okay
+        ACTIVE = 0; // We are active and responsible for live services
         LEAVING = 1; // ??
         PASSIVE = 2; // okay and waiting to become active
         UNAVAILABLE = 3; // dead
         SUSPICIOUS = 4; // potentially dead but given the benefit of the doubt.
+        MONITORING = 5; // Node is permanently passive and monitoring
     }
     Status status = 1;
 }

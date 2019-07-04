@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2019  Andrew Zak <andrew@linux.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -263,6 +263,8 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 			Message: err.Error(),
 		}, nil
 	}
+	// !!!IMPORTANT!!!: Do not replace our local config
+	newConfig.Pulse = DB.Config.Pulse
 	// Set our new config in memory
 	DB.SetConfig(newConfig)
 	// Save our config to file
