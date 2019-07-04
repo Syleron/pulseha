@@ -1,6 +1,6 @@
 /*
     PulseHA - HA Cluster Daemon
-    Copyright (C) 2017  Andrew Zak <andrew@linux.com>
+    Copyright (C) 2017-2019  Andrew Zak <andrew@linux.com>
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU Affero General Public License as published
@@ -146,6 +146,17 @@ message PulseBringIP {
     string iface = 3;
     repeated string ips = 4;
 }
+message PulseLogs {
+    enum Level {
+        INFO = 0;
+        WARNING = 1;
+        ERROR = 2;
+        DEBUG = 3;
+    }
+    string message = 1;
+    string node = 2;
+    Level level = 3;
+}
 
 // Services
 service CLI {
@@ -194,6 +205,8 @@ service Server {
     rpc BringUpIP (PulseBringIP) returns (PulseBringIP);
     // Bring down IP
     rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
+    // Bring down IP
+    rpc Logs (PulseLogs) returns (PulseLogs);
 }
 
 

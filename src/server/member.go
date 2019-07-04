@@ -158,7 +158,7 @@ func (m *Member) GetStatus() proto.MemberStatus_Status {
 Set member status
 */
 func (m *Member) SetStatus(status proto.MemberStatus_Status) {
-	log.Debug("Member:setStatus() " + m.GetHostname() + " status set to " + status.String() + " called by " + MyCaller())
+	DB.Logging.Debug("Member:setStatus() " + m.GetHostname() + " status set to " + status.String() + " called by " + MyCaller())
 	m.Lock()
 	defer m.Unlock()
 	m.Status = status
@@ -179,7 +179,7 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		nodeDetails, _ := nodeGetByName(m.Hostname)
-		log.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
+		DB.Logging.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
 		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
 		if err != nil {
 			log.Error("Member:Connect() " + err.Error())
@@ -193,7 +193,7 @@ func (m *Member) Connect() error {
 Close the client connection
 */
 func (m *Member) Close() {
-	log.Debug("Member:Close() Connection closed")
+	DB.Logging.Debug("Member:Close() Connection closed")
 	m.Client.Close()
 }
 
@@ -230,7 +230,7 @@ func (m *Member) RoutineHC(data *proto.PulseHealthCheck) {
 	Make the node active (bring up its groups)
 */
 func (m *Member) MakeActive() bool {
-	log.Debugf("Member:makeActive() Making %s active", m.GetHostname())
+	DB.Logging.Debug("Member:makeActive() Making " + m.GetHostname() + " active")
 	// Make ourself active if we are referring to ourself
 	if m.GetHostname() == DB.Config.GetLocalNode() {
 		// Reset vars
@@ -241,9 +241,9 @@ func (m *Member) MakeActive() bool {
 		// Bring up our addresses if we have any
 		MakeLocalActive()
 		// Start performing health checks
-		log.Debug("Member:PromoteMember() Starting client connections monitor")
+		DB.Logging.Debug("Member:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(DB.MemberList.MonitorClientConns, 1*time.Second)
-		log.Debug("Member:PromoteMember() Starting health check handler")
+		DB.Logging.Debug("Member:PromoteMember() Starting health check handler")
 		go utils.Scheduler(DB.MemberList.AddHealthCheckHandler, 1*time.Second)
 	} else {
 		// TODO: Handle the closing of this connection
@@ -256,7 +256,7 @@ func (m *Member) MakeActive() bool {
 		// Handle if we have an error
 		if err != nil {
 			log.Error(err)
-			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
+			log.Errorf("Error making %s active. Error: %s", m.GetHostname(), err.Error())
 			return false
 		}
 	}
@@ -267,7 +267,7 @@ func (m *Member) MakeActive() bool {
 Make the node passive (take down its groups)
 */
 func (m *Member) MakePassive() bool {
-	log.Debugf("Member:makePassive() Making %s passive", m.GetHostname())
+	DB.Logging.Debug("Member:makePassive() Making " + m.GetHostname() + " passive")
 	if m.GetHostname() == DB.Config.GetLocalNode() {
 		// do this regardless to make sure we dont have any groups up
 		MakeLocalPassive()
@@ -277,7 +277,7 @@ func (m *Member) MakePassive() bool {
 		if m.GetStatus() != proto.MemberStatus_PASSIVE {
 			m.SetStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
-			log.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.GetHostname())
+			DB.Logging.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.GetHostname())
 			go utils.Scheduler(m.MonitorReceivedHCs, 10000*time.Millisecond)
 		}
 	} else {
@@ -305,10 +305,10 @@ bring it up on.
 func (m *Member) BringUpIPs(ips []string, group string) bool {
 	iface := DB.Config.GetGroupIface(m.Hostname, group)
 	if m.Hostname == DB.Config.GetLocalNode() {
-		log.Debug("member is local node bringing up IP's")
+		DB.Logging.Debug("member is local node bringing up IP's")
 		BringUpIPs(iface, ips)
 	} else {
-		log.Debug("member is not local node making grpc call")
+		DB.Logging.Debug("member is not local node making grpc call")
 		_, err := m.Send(
 			client.SendBringUpIP,
 			&proto.PulseBringIP{
@@ -331,11 +331,11 @@ func (m *Member) MonitorReceivedHCs() bool {
 	// make sure we are still the active appliance
 	member, err := DB.MemberList.GetLocalMember()
 	if err != nil {
-		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are no longer in a cluster")
+		DB.Logging.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are no longer in a cluster")
 		return true
 	}
 	if member.GetStatus() == proto.MemberStatus_ACTIVE {
-		log.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are now active.")
+		DB.Logging.Debug("Member:monitorReceivedHCs() Health check received monitor disabled as we are now active.")
 		return true
 	}
 	// calculate elapsed time
@@ -346,12 +346,12 @@ func (m *Member) MonitorReceivedHCs() bool {
 		if member != nil {
 			member.SetStatus(proto.MemberStatus_SUSPICIOUS)
 		}
-		log.Debug("Member:MonitorReceivedHCs() No health checks are being made.. Perhaps a failover is required?")
+		DB.Logging.Debug("Member:MonitorReceivedHCs() No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
 	//log.Info(elapsed)
 	if int(elapsed) >= 10 {
-		log.Debug("Member:monitorReceivedHCs() Performing Failover..")
+		DB.Logging.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE
 		if !addHCSuccess {
@@ -359,14 +359,14 @@ func (m *Member) MonitorReceivedHCs() bool {
 			member, err := DB.MemberList.GetNextActiveMember()
 			// no new active appliance was found
 			if err != nil {
-				log.Warn("unable to find new active member.. we are now the active")
+				DB.Logging.Warn("unable to find new active member.. we are now the active")
 				// make ourself active as no new active can be found apparently
 				m.MakeActive()
 				return true
 			}
 			// If we are not the new member just return
 			if member.GetHostname() != DB.Config.GetLocalNode() {
-				log.Info("Waiting on " + member.GetHostname() + " to become active")
+				DB.Logging.Info("Waiting on " + member.GetHostname() + " to become active")
 				m.SetLastHCResponse(time.Now())
 				return false
 			}
@@ -380,7 +380,7 @@ func (m *Member) MonitorReceivedHCs() bool {
 			member.MakeActive()
 			// Set the FO priority
 			member.SetLastHCResponse(time.Time{})
-			log.Info("Local node is now active")
+			DB.Logging.Info("Local node is now active")
 			return true
 		} else {
 			m.SetLastHCResponse(time.Now())

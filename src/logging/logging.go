@@ -16,3 +16,69 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 package logging
+
+import (
+	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/client"
+	"os"
+)
+
+type Logging struct {
+	Level proto.PulseLogs_Level
+	Hostname string
+	Broadcast
+}
+
+type Broadcast func(funcName client.ProtoFunction, data interface{})
+
+// NewLogger Returns a new distributes logging object
+func NewLogger(broadcast Broadcast) (Logging, error) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return Logging{}, err
+	}
+	// Set our memberlist
+	logging := Logging{
+		proto.PulseLogs_INFO,
+		hostname,
+		broadcast,
+	}
+	// Return with our logger
+	return logging, nil
+}
+
+// Debug Send a debug message to the cluster
+func (l *Logging) Debug(message string) {
+	if l.Level == proto.PulseLogs_DEBUG {
+		log.Debugf("[%s] %s", l.Hostname, message)
+		l.send(message, proto.PulseLogs_DEBUG)
+	}
+}
+
+// Warning Send a warning message to the cluster
+func (l *Logging) Warn(message string) {
+	log.Warnf("[%s] %s", l.Hostname, message)
+	l.send(message, proto.PulseLogs_WARNING)
+}
+
+// Info Send an info message to the cluster
+func (l *Logging) Info(message string) {
+	log.Infof("[%s] %s", l.Hostname, message)
+	l.send(message, proto.PulseLogs_INFO)
+}
+
+// Info Send an error message to the cluster
+func (l *Logging) Error(message string) {
+	log.Errorf("[%s] %s", l.Hostname, message)
+	l.send(message, proto.PulseLogs_ERROR)
+}
+
+// Send a message to the cluster
+func (l *Logging) send(message string, level proto.PulseLogs_Level) {
+	l.Broadcast(client.SendLogs, &proto.PulseLogs{
+		Message: message,
+		Node:    l.Hostname,
+		Level:   level,
+	})
+}

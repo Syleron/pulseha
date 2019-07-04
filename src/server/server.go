@@ -34,7 +34,7 @@ import (
 	"strconv"
 	"sync"
 	"time"
-	)
+)
 
 var (
 	DB *Database
@@ -138,7 +138,7 @@ func (s *Server) Shutdown() {
 Perform appr. health checks
 */
 func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*proto.PulseHealthCheck, error) {
-	log.Debug("Server:HealthCheck() Receiving health check")
+	DB.Logging.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
 	activeHostname, _ := DB.MemberList.GetActiveMember()
@@ -146,15 +146,15 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		localMember := DB.MemberList.GetMemberByHostname(DB.Config.GetLocalNode())
 		// make passive to reset the networking
 		if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
-			log.Info("Local node is passive")
+			DB.Logging.Info("Local node is passive")
 			localMember.MakePassive()
 		}
 		localMember.SetLastHCResponse(time.Now())
 		DB.MemberList.Update(in.Memberlist)
 	} else {
-		log.Warn("Active node mismatch")
+		DB.Logging.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
-		log.Info("Member " + hostname + " has been determined as the correct active node.")
+		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != DB.Config.GetLocalNode() {
 			member, _ := DB.MemberList.GetLocalMember()
 			member.MakePassive()
@@ -172,7 +172,7 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 Join request for a configured cluster
 */
 func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoin, error) {
-	log.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
+	DB.Logging.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if DB.Config.ClusterCheck() {
@@ -207,7 +207,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: err.Error(),
 			}, nil
 		}
-		log.Info(in.Hostname + " has joined the cluster")
+		DB.Logging.Info(in.Hostname + " has joined the cluster")
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
@@ -224,7 +224,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 Update our local config from a Resync request
 */
 func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
-	log.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
+	DB.Logging.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
 	// Remove from our memberlist
@@ -238,6 +238,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 		}, nil
 	}
 	DB.Config.Save()
+	DB.Logging.Info("Succesfully removed " + in.Hostname + " from the cluster")
 	return &proto.PulseLeave{
 		Success: true,
 		Message: "Successfully removed node from local config",
@@ -248,7 +249,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 Update our local config from a Resync request
 */
 func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*proto.PulseConfigSync, error) {
-	log.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
+	DB.Logging.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
 	// Define new node
@@ -272,7 +273,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Update our member list
 	DB.MemberList.Reload()
 	// Let the logs know
-	log.Info("Successfully r-synced local config")
+	DB.Logging.Info("Successfully r-synced local config")
 	// Return with yay
 	return &proto.PulseConfigSync{
 		Success: true,
@@ -283,7 +284,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 Network action functions
 */
 func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Debug("Server:MakeActive() Making node active")
+	DB.Logging.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != DB.Config.GetLocalNode() {
@@ -298,7 +299,7 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 		}, nil
 	}
 	success := member.MakeActive()
-	log.Info(in.Member + " has been promoted to active")
+	DB.Logging.Info(in.Member + " has been promoted to active")
 	return &proto.PulsePromote{
 		Success: success,
 	}, nil
@@ -308,7 +309,7 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 Make a member passive
 */
 func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
-	log.Debug("Server:MakePassive() Making node passive")
+	DB.Logging.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
 	if in.Member != DB.Config.GetLocalNode() {
@@ -323,7 +324,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 		}, nil
 	}
 	success := member.MakePassive()
-	log.Info(in.Member + " has been demoted to passive")
+	DB.Logging.Info(in.Member + " has been demoted to passive")
 	return &proto.PulsePromote{
 		Success: success,
 	}, nil
@@ -333,7 +334,7 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 
  */
 func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Debug("Server:BringUpIP() Bringing up IP(s)")
+	DB.Logging.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	err := BringUpIPs(in.Iface, in.Ips)
@@ -350,7 +351,7 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 
  */
 func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*proto.PulseBringIP, error) {
-	log.Debug("Server:BringDownIP() Bringing down IP(s)")
+	DB.Logging.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	err := BringDownIPs(in.Iface, in.Ips)
@@ -361,4 +362,24 @@ func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*prot
 		msg = err.Error()
 	}
 	return &proto.PulseBringIP{Success: success, Message: msg}, nil
+}
+
+// Logs Listens for new log entries and displays them in journal
+func (s *Server) Logs(ctx context.Context, in *proto.PulseLogs) (*proto.PulseLogs, error) {
+	// Log the incoming errors
+	switch in.Level {
+	case proto.PulseLogs_DEBUG:
+		log.Debugf("[%s] %s", in.Node, in.Message)
+		break;
+	case proto.PulseLogs_INFO:
+		log.Infof("[%s] %s", in.Node, in.Message)
+		break;
+	case proto.PulseLogs_ERROR:
+		log.Errorf("[%s] %s", in.Node, in.Message)
+		break;
+	case proto.PulseLogs_WARNING:
+		log.Warnf("[%s] %s", in.Node, in.Message)
+		break;
+	}
+	return &proto.PulseLogs{}, nil
 }

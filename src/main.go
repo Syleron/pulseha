@@ -20,18 +20,19 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/server"
-	"strings"
-	"sync"
-	"time"
 	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/logging"
+	"github.com/Syleron/PulseHA/src/server"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
+	"time"
 )
 
 const (
-	PRE_SIGNAL  = iota
+	PRE_SIGNAL = iota
 	POST_SIGNAL
 )
 
@@ -120,6 +121,13 @@ func main() {
 		Plugins:    &server.Plugins{},
 		MemberList: &server.MemberList{},
 	}
+	// Setup a new pulse Logger
+	pulseLogger, err := logging.NewLogger(pulse.DB.MemberList.Broadcast)
+	if err != nil {
+		panic("unable to create pulseha distributed logger")
+	}
+	// Set our pulse logger
+	pulse.DB.Logging = pulseLogger
 	// Load the config
 	pulse.DB.Config = config.GetConfig()
 	// Set the logging level
@@ -147,7 +155,7 @@ func setLogLevel(level string) {
 
 /**
 Handle OS signals
- */
+*/
 func handleSignals() {
 	var sig os.Signal
 	signal.Notify(pulse.Sigs, hookableSignals...)
@@ -157,14 +165,14 @@ func handleSignals() {
 		switch sig {
 		case syscall.SIGINT:
 			// Bring down our floating IPS
-			//server.MakeLocalPassive()
+			server.MakeLocalPassive()
 			// Shutdown our server
-			//pulse.Server.Shutdown()
+			pulse.Server.Shutdown()
 			// Reload our config
-			//pulse.DB.Config.Reload()
+			pulse.DB.Config.Reload()
 			// Start a new server
-			//go pulse.Server.Setup()
-		break
+			go pulse.Server.Setup()
+			break
 		case syscall.SIGTERM:
 			// Bring down floating IPS
 			server.MakeLocalPassive()

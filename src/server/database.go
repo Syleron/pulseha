@@ -19,12 +19,14 @@ package server
 
 import (
 	"github.com/Syleron/PulseHA/src/config"
+	"github.com/Syleron/PulseHA/src/logging"
 )
 
 type Database struct {
 	Config     *config.Config
 	Plugins    *Plugins
 	MemberList *MemberList
+	Logging logging.Logging
 }
 
 func (d *Database) SetConfig(config *config.Config) {
