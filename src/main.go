@@ -165,19 +165,14 @@ func handleSignals() {
 		switch sig {
 		case syscall.SIGINT:
 			// Bring down our floating IPS
-			//server.MakeLocalPassive()
+			server.MakeLocalPassive()
 			// Shutdown our server
-			//pulse.Server.Shutdown()
+			pulse.Server.Shutdown()
 			// Reload our config
-			//pulse.DB.Config.Reload()
+			pulse.DB.Config.Reload()
 			// Start a new server
-<<<<<<< HEAD
 			go pulse.Server.Setup()
 			break
-=======
-			//go pulse.Server.Setup()
-		break
->>>>>>> 2ec9990be5ae743949ee5c0cd5f57593c9081ec0
 		case syscall.SIGTERM:
 			// Bring down floating IPS
 			server.MakeLocalPassive()
