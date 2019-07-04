@@ -263,6 +263,8 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 			Message: err.Error(),
 		}, nil
 	}
+	// !!!IMPORTANT!!!: Do not replace our local config
+	newConfig.Pulse = DB.Config.Pulse
 	// Set our new config in memory
 	DB.SetConfig(newConfig)
 	// Save our config to file
