@@ -64,7 +64,7 @@ Bring up an []ips for a specific interface
 func BringUpIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Debug("Utils:BringUpIps() No networking plugin.. skipping network action")
+		DB.Logging.Debug("Utils:BringUpIps() No networking plugin.. skipping network action")
 		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringUpIPs(iface, ips)
@@ -77,7 +77,7 @@ Bring down an []ips for a specific interface
 func BringDownIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
-		log.Debug("Utils:BringDownIps() No networking plugin.. skipping network action")
+		DB.Logging.Debug("Utils:BringDownIps() No networking plugin.. skipping network action")
 		return nil
 	}
 	err := plugin.Plugin.(PluginNet).BringDownIPs(iface, ips)

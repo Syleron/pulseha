@@ -56,7 +56,7 @@ func (m *MemberList) Unlock() {
  */
 func (m *MemberList) AddMember(hostname string, client *client.Client) {
 	if !m.MemberExists(hostname) {
-		log.Debug("MemberList:MemberAdd() " + hostname + " added to memberlist")
+		DB.Logging.Debug("MemberList:MemberAdd() " + hostname + " added to memberlist")
 		m.Lock()
 		newMember := &Member{}
 		newMember.SetHostname(hostname)
@@ -65,7 +65,7 @@ func (m *MemberList) AddMember(hostname string, client *client.Client) {
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {
-		log.Debug("MemberList:MemberAdd() Member " + hostname + " already exists. Skipping.")
+		DB.Logging.Debug("MemberList:MemberAdd() Member " + hostname + " already exists. Skipping.")
 	}
 }
 
@@ -73,7 +73,7 @@ func (m *MemberList) AddMember(hostname string, client *client.Client) {
  * Remove a member from the client list by hostname
  */
 func (m *MemberList) MemberRemoveByName(hostname string) {
-	log.Debug("MemberList:MemberRemoveByName() " + hostname + " removed from the memberlist")
+	DB.Logging.Debug("MemberList:MemberRemoveByName() " + hostname + " removed from the memberlist")
 	m.Lock()
 	defer m.Unlock()
 	for i, member := range m.Members {
@@ -90,7 +90,7 @@ func (m *MemberList) GetMemberByHostname(hostname string) *Member {
 	m.Lock()
 	defer m.Unlock()
 	if hostname == "" {
-		log.Warning("MemberList:GetMemberByHostname() Unable to get get member by hostname as hostname is empty!")
+		DB.Logging.Warn("MemberList:GetMemberByHostname() Unable to get get member by hostname as hostname is empty!")
 	}
 	for _, member := range m.Members {
 		if member.GetHostname() == hostname {
@@ -118,7 +118,7 @@ func (m *MemberList) MemberExists(hostname string) bool {
  * Attempt to broadcast a client function to other nodes (clients) within the memberlist
  */
 func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) {
-	log.Debug("MemberList:Broadcast() Broadcasting " + funcName.String())
+	DB.Logging.Debug("MemberList:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
 	for _, member := range m.Members {
@@ -131,7 +131,7 @@ func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) 
 		if member.GetHostname() == hostname {
 			continue
 		}
-		log.Debugf("Broadcast: %s to member %s", funcName.String(), member.GetHostname())
+		DB.Logging.Debug("Broadcast: " + funcName.String() + " to member " + member.GetHostname())
 		member.Connect()
 		member.Send(funcName, data)
 	}
@@ -155,7 +155,7 @@ func (m *MemberList) Setup() {
 			localMember := m.GetMemberByHostname(DB.Config.GetLocalNode())
 			localMember.SetLastHCResponse(time.Now())
 			localMember.SetStatus(p.MemberStatus_PASSIVE)
-			log.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
+			DB.Logging.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
 			go utils.Scheduler(localMember.MonitorReceivedHCs, 2000*time.Millisecond)
 		}
 	}
@@ -175,7 +175,7 @@ func (m *MemberList) LoadMembers() {
 Reload the memberlist
  */
 func (m *MemberList) Reload() {
-	log.Debug("MemberList:ReloadMembers() Reloading member nodes")
+	DB.Logging.Debug("MemberList:ReloadMembers() Reloading member nodes")
 	// Reload our config
 	DB.Config.Reload()
 	// clear local members
@@ -214,14 +214,14 @@ Promote a member within the memberlist to become the active
 node
 */
 func (m *MemberList) PromoteMember(hostname string) error {
-	log.Debug("MemberList:PromoteMember() MemberList promoting " + hostname + " as active member..")
+	DB.Logging.Debug("MemberList:PromoteMember() MemberList promoting " + hostname + " as active member..")
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 	// get host is it active?
 	// Make sure the hostname member exists
 	member := m.GetMemberByHostname(hostname)
 	if member == nil {
-		log.Warningf("Unknown hostname %s give in call to promoteMember", hostname)
+		DB.Logging.Warn("Unknown hostname " + hostname + " give in call to promoteMember")
 		return errors.New("the specified host does not exist in the configured cluster")
 	}
 	// if unavailable check it works or do nothing?
@@ -229,11 +229,11 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	case p.MemberStatus_UNAVAILABLE:
 		//If we are the only node and just configured we will be unavailable
 		if DB.Config.NodeCount() > 1 {
-			log.Warningf("Unable to promote member %s because it is unavailable", member.GetHostname())
+			DB.Logging.Warn("Unable to promote member " + member.GetHostname() + " because it is unavailable")
 			return errors.New("unable to promote member as it is unavailable")
 		}
 	case p.MemberStatus_ACTIVE:
-		log.Warningf("Unable to promote member %s as it is active", member.GetHostname())
+		DB.Logging.Warn("Unable to promote member " + member.GetHostname() + " as it is active")
 		return errors.New("unable to promote member as it is already active")
 	}
 	// get the current active member
@@ -243,7 +243,7 @@ func (m *MemberList) PromoteMember(hostname string) error {
 		// Make the current Active appliance passive
 		success := activeMember.MakePassive()
 		if !success {
-			log.Warningf("Failed to make %s passive, continuing", activeMember.GetHostname())
+			DB.Logging.Warn("Failed to make " + activeMember.GetHostname() + " passive, continuing")
 		}
 		// TODO: Note: Do we need this?
 		// Update our local value for the active member
@@ -253,11 +253,11 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	success := member.MakeActive()
 	// make new node active
 	if !success {
-		log.Warningf("Failed to promote %s to active. Falling back to %s", member.GetHostname(), activeMember.GetHostname())
+		DB.Logging.Warn("Failed to promote " + member.GetHostname() + " to active. Falling back to " + activeMember.GetHostname())
 		// Somethings gone wrong.. attempt to make the previous active - active again.
 		success := activeMember.MakeActive()
 		if !success {
-			log.Error("Failed to make reinstate the active node. Something is really wrong")
+			DB.Logging.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
 		// Note: we don't need to update the active status as we should receive an updated memberlist from the active
 	}
@@ -274,11 +274,11 @@ func (m *MemberList) MonitorClientConns() bool {
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {
-		log.Debug("MemberList:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
+		DB.Logging.Debug("MemberList:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
 		return true
 	}
 	if member.GetStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("MemberList:monitorClientConns() Client monitoring has stopped as we are no longer active")
+		DB.Logging.Debug("MemberList:monitorClientConns() Client monitoring has stopped as we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -286,7 +286,7 @@ func (m *MemberList) MonitorClientConns() bool {
 			continue
 		}
 		member.Connect()
-		log.Debug("MemberList:MonitorClientConns() " + member.Hostname + " connection status is " + member.Connection.GetState().String())
+		DB.Logging.Debug("MemberList:MonitorClientConns() " + member.Hostname + " connection status is " + member.Connection.GetState().String())
 		switch member.Connection.GetState() {
 		case connectivity.Idle:
 		case connectivity.Ready:
@@ -305,11 +305,11 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {
-		log.Debug("MemberList:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
+		DB.Logging.Debug("MemberList:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
 		return true
 	}
 	if member.GetStatus() == p.MemberStatus_PASSIVE {
-		log.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
+		DB.Logging.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
 	for _, member := range m.Members {
@@ -337,7 +337,7 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 Sync local config with each member in the cluster.
 */
 func (m *MemberList) SyncConfig() error {
-	log.Debug("MemberList:SyncConfig() Syncing config with peers..")
+	DB.Logging.Debug("MemberList:SyncConfig() Syncing config with peers..")
 	// Return with our new updated config
 	buf, err := json.Marshal(DB.Config.GetConfig())
 	// Handle failure to marshal config
@@ -355,7 +355,7 @@ func (m *MemberList) SyncConfig() error {
 Update the local memberlist statuses based on the proto memberlist message
 */
 func (m *MemberList) Update(memberlist []*p.MemberlistMember) {
-	log.Debug("MemberList:update() Updating memberlist")
+	DB.Logging.Debug("MemberList:update() Updating memberlist")
 	m.Lock()
 	defer m.Unlock()
 	//do not update the memberlist if we are active

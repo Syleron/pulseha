@@ -166,7 +166,7 @@ Break cluster / Leave from cluster
 TODO: Remember to reassign active role on leave
 */
 func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseLeave, error) {
-	//log.Debug("CLIServer:Leave() - Leave Pulse cluster")
+	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {

@@ -19,11 +19,10 @@ package server
 
 import (
 	"errors"
-	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/src/net_utils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"strconv"
-	)
+)
 
 /**
 Generate a new group in memory.
@@ -109,7 +108,7 @@ func groupIpRemove(groupName string, ips []string) error {
 			if exists, i := groupIPExist(groupName, ip); exists {
 				DB.Config.Groups[groupName] = append(DB.Config.Groups[groupName][:i], DB.Config.Groups[groupName][i+1:]...)
 			} else {
-				log.Warning(ip + " does not exist in group " + groupName + ".. skipping.")
+				DB.Logging.Warn(ip + " does not exist in group " + groupName + ".. skipping.")
 			}
 		}
 	}
@@ -135,7 +134,7 @@ func groupAssign(groupName, node, iface string) error {
 				makeGroupActive(iface, groupName)
 			}
 		} else {
-			log.Warning(groupName + " is already assigned to " + iface + ".. skipping.")
+			DB.Logging.Warn(groupName + " is already assigned to " + iface + ".. skipping.")
 		}
 		return nil
 	}
@@ -155,7 +154,7 @@ func groupUnassign(groupName, node, iface string) error {
 			// Remove it
 			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface][:i], DB.Config.Nodes[node].IPGroups[iface][i+1:]...)
 		} else {
-			log.Warning(groupName + " does not exist in node " + node + ".. skipping.")
+			DB.Logging.Warn(groupName + " does not exist in node " + node + ".. skipping.")
 		}
 		return nil
 	}

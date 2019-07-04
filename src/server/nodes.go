@@ -19,7 +19,6 @@ package server
 
 import (
 	"errors"
-	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/net_utils"
 	"github.com/Syleron/PulseHA/src/utils"
@@ -29,7 +28,7 @@ import (
 Create new local config node definition
 */
 func nodecreateLocal() error {
-	log.Debug("create localhost node config definition")
+	DB.Logging.Debug("create localhost node config definition")
 	newNode := &config.Node{
 		IPGroups: make(map[string][]string, 0),
 	}
@@ -59,7 +58,7 @@ func nodecreateLocal() error {
  * Add a node type Node to our config.
  */
 func nodeAdd(hostname string, node *config.Node) error {
-	log.Debug(hostname + " added to local cluster config")
+	DB.Logging.Debug(hostname + " added to local cluster config")
 	if !nodeExists(hostname) {
 		DB.Config.Lock()
 		DB.Config.Nodes[hostname] = *node
@@ -73,7 +72,7 @@ func nodeAdd(hostname string, node *config.Node) error {
  * Remove a node from our config by hostname.
  */
 func nodeDelete(hostname string) error {
-	log.Debug("Nodes:nodeDelete()" + hostname + " node removed.")
+	DB.Logging.Debug("Nodes:nodeDelete()" + hostname + " node removed.")
 	if nodeExists(hostname) {
 		DB.Config.Lock()
 		delete(DB.Config.Nodes, hostname)
@@ -87,7 +86,7 @@ func nodeDelete(hostname string) error {
  * Clear out local Nodes section of config.
  */
 func nodesClearLocal() {
-	log.Debug("All nodes cleared from local config")
+	DB.Logging.Debug("All nodes cleared from local config")
 	DB.Config.Lock()
 	DB.Config.Nodes = map[string]config.Node{}
 	DB.Config.Unlock()
