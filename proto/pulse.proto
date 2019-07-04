@@ -37,7 +37,7 @@ message MemberStatus {
         PASSIVE = 2; // okay and waiting to become active
         UNAVAILABLE = 3; // dead
         SUSPICIOUS = 4; // potentially dead but given the benefit of the doubt.
-        Monitoring = 5; // Node is permanently passive and monitoring
+        MONITORING = 5; // Node is permanently passive and monitoring
     }
     Status status = 1;
 }
