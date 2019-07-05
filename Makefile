@@ -1,6 +1,6 @@
 .PHONEY: clean get
 
-VERSION=`git describe`
+VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
 LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.Build=${BUILD}"
 
