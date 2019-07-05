@@ -23,6 +23,7 @@ macbuild: get
 get:
 	 go get -d ./src/
 	 go get -d ./cmd/
+	 go get -u github.com/golang/protobuf/protoc-gen-go
 cli: get 
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
