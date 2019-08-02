@@ -1,6 +1,6 @@
 .PHONEY: clean get
 
-VERSION=`git describe`
+VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
 LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.Build=${BUILD}"
 
@@ -23,13 +23,14 @@ macbuild: get
 get:
 	 go get -d ./src/
 	 go get -d ./cmd/
+	 go get -u github.com/golang/protobuf/protoc-gen-go
 cli: get 
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
 maccli: get 
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
-protos:
+protos: get
 	 protoc ./proto/pulse.proto --go_out=plugins=grpc:.
 test:
 	 go test -timeout 10s -v ./src/
