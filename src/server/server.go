@@ -126,6 +126,9 @@ func (s *Server) Setup() {
  */
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
+	// Clear our
+	DB.MemberList.Reset()
+	// Shutdown our RPC server
 	if s.Server != nil {
 		s.Server.GracefulStop()
 	}
