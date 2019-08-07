@@ -125,7 +125,7 @@ func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
 /**
 Determine if a connection is coming in is a member of our config
  */
-func CanCommunicate(ctx context.Context) (bool) {
+func CanCommunicate(ctx context.Context) bool {
 	pr, ok := peer.FromContext(ctx)
 	if !ok {
 		DB.Logging.Warn("Unable to get address details for context")
