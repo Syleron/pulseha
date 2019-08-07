@@ -22,6 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/proto"
 	"github.com/Syleron/PulseHA/src/config"
@@ -144,6 +145,9 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 	DB.Logging.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	activeHostname, _ := DB.MemberList.GetActiveMember()
 	if activeHostname != DB.Config.GetLocalNode() {
 		localMember := DB.MemberList.GetMemberByHostname(DB.Config.GetLocalNode())
@@ -178,6 +182,9 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	DB.Logging.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	if DB.Config.ClusterCheck() {
 		// Define new node
 		originNode := &config.Node{}
@@ -230,6 +237,9 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 	DB.Logging.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	// Remove from our memberlist
 	DB.MemberList.MemberRemoveByName(in.Hostname)
 	// Remove from our config
@@ -255,6 +265,9 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	DB.Logging.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	// Define new node
 	newConfig := &config.Config{}
 	// unmarshal byte data to new node
@@ -290,6 +303,9 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 	DB.Logging.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	if in.Member != DB.Config.GetLocalNode() {
 		return &proto.PulsePromote{
 			Success: false,
@@ -315,6 +331,9 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 	DB.Logging.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	if in.Member != DB.Config.GetLocalNode() {
 		return &proto.PulsePromote{
 			Success: false,
@@ -340,6 +359,9 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 	DB.Logging.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	err := BringUpIPs(in.Iface, in.Ips)
 	success := false
 	msg := "success"
@@ -357,6 +379,9 @@ func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*prot
 	DB.Logging.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	err := BringDownIPs(in.Iface, in.Ips)
 	success := false
 	msg := "success"
@@ -369,6 +394,9 @@ func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*prot
 
 // Logs Listens for new log entries and displays them in journal
 func (s *Server) Logs(ctx context.Context, in *proto.PulseLogs) (*proto.PulseLogs, error) {
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
 	// Log the incoming errors
 	switch in.Level {
 	case proto.PulseLogs_DEBUG:

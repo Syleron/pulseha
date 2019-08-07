@@ -163,22 +163,24 @@ func handleSignals() {
 		sig = <-pulse.Sigs
 		signalHooks(PRE_SIGNAL, sig)
 		switch sig {
+		case syscall.SIGUSR2:
+				// Bring down our floating IPS
+				server.MakeLocalPassive()
+				// Shutdown our server
+				pulse.Server.Shutdown()
+				// Reload our config
+				pulse.DB.Config.Reload()
+				// Start a new server
+				go pulse.Server.Setup()
+				break
 		case syscall.SIGINT:
-			// Bring down our floating IPS
-			server.MakeLocalPassive()
-			// Shutdown our server
-			pulse.Server.Shutdown()
-			// Reload our config
-			pulse.DB.Config.Reload()
-			// Start a new server
-			go pulse.Server.Setup()
-			break
+			fallthrough
 		case syscall.SIGTERM:
 			// Bring down floating IPS
 			server.MakeLocalPassive()
 			// Shutdown our service
 			pulse.Server.Shutdown()
-			os.Exit(1)
+			os.Exit(0)
 		}
 		signalHooks(POST_SIGNAL, sig)
 	}

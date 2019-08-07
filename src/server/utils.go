@@ -18,8 +18,11 @@
 package server
 
 import (
+	"context"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/proto"
+	"google.golang.org/grpc/peer"
+	"net"
 	"runtime"
 	"time"
 )
@@ -117,4 +120,22 @@ func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
 		}
 	}
 	return ""
+}
+
+/**
+Determine if a connection is coming in is a member of our config
+ */
+func CanCommunicate(ctx context.Context) bool {
+	pr, ok := peer.FromContext(ctx)
+	if !ok {
+		DB.Logging.Warn("Unable to get address details for context")
+		return false
+	}
+	// check to make sure the peer IP
+	_, err := DB.Config.GetNodeHostnameByAddress(pr.Addr.(*net.TCPAddr).IP.String())
+	if err != nil {
+		DB.Logging.Warn(err.Error() + ". Communication received from another node not in cluster")
+		return false
+	}
+	return true
 }
