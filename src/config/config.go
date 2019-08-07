@@ -246,3 +246,15 @@ func GetConfig() *Config {
 	cfg.Validate()
 	return &cfg
 }
+
+/**
+Returns the hostname for a node based of it's IP address
+*/
+func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
+	for name, node := range c.Nodes {
+		if node.IP == address {
+			return name, nil
+		}
+	}
+	return "", errors.New("unable to find node with IP address " + address)
+}
