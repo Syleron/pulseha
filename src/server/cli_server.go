@@ -215,6 +215,61 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}, nil
 }
 
+// Remove - Remove node from cluster by hostname
+func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.PulseRemove, error) {
+	log.Debug("CLIServer:Leave() - Remove node from Pulse cluster")
+	s.Lock()
+	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to perform remove as no cluster was found",
+		}, nil
+	}
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to perform remove as unable to get local hostname",
+		}, nil
+	}
+	// Check if I am the node being removed
+	if in.Hostname == hostname {
+		MakeLocalPassive()
+		nodesClearLocal()
+		DB.MemberList.Reset()
+		DB.Config.Save()
+		s.Server.Shutdown()
+		log.Info("Successfully removed " + hostname + " from cluster. PulseHA no longer listening..")
+	} else {
+		// Remove from our memberlist
+		DB.MemberList.MemberRemoveByName(in.Hostname)
+		// Remove from our config
+		err := nodeDelete(in.Hostname)
+		if err != nil {
+			return &proto.PulseRemove{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		DB.Config.Save()
+	}
+	// Tell everyone else to do the same
+	if DB.Config.NodeCount() > 1 {
+		DB.MemberList.Broadcast(
+			client.SendRemove,
+			&proto.PulseRemove{
+				Replicated: true,
+				Hostname:   hostname,
+			},
+		)
+	}
+	return &proto.PulseRemove{
+		Success: true,
+		Message: "Successfully left from cluster",
+	}, nil
+}
+
 /**
 Create new PulseHA cluster
 */

@@ -258,8 +258,51 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 		}, nil
 	}
 	DB.Config.Save()
-	DB.Logging.Info("Succesfully removed " + in.Hostname + " from the cluster")
+	DB.Logging.Info("Successfully removed " + in.Hostname + " from the cluster")
 	return &proto.PulseLeave{
+		Success: true,
+		Message: "Successfully removed node from local config",
+	}, nil
+}
+
+// Remove - Remove node from cluster by hostname
+func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.PulseRemove, error) {
+	DB.Logging.Debug("Server:Remove() " + strconv.FormatBool(in.Replicated) + " - Remove " + in.Hostname + "from cluster")
+	s.Lock()
+	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		DB.Logging.Debug("Server:Remove() Fail. Unable to get local hostname to remove node from cluster")
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to perform remove as unable to get local hostname",
+		}, nil
+	}
+	if in.Hostname == hostname {
+		MakeLocalPassive()
+		nodesClearLocal()
+		DB.MemberList.Reset()
+		DB.Config.Save()
+		s.Server.Shutdown()
+		log.Info("Successfully removed " + hostname + " from cluster. PulseHA no longer listening..")
+	} else {
+		// Remove from our memberlist
+		DB.MemberList.MemberRemoveByName(in.Hostname)
+		// Remove from our config
+		err := nodeDelete(in.Hostname)
+		if err != nil {
+			return &proto.PulseRemove{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+	}
+	DB.Config.Save()
+	DB.Logging.Info("Successfully removed node " + in.Hostname + " from the cluster")
+	return &proto.PulseRemove{
 		Success: true,
 		Message: "Successfully removed node from local config",
 	}, nil

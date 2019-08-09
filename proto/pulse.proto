@@ -58,6 +58,12 @@ message PulseLeave {
     string hostname = 3;
     bool replicated = 4;
 }
+message PulseRemove {
+    bool success = 1;
+    string message = 2;
+    string hostname = 3;
+    bool replicated = 4;
+}
 message PulseCreate {
     bool success = 1;
     string message = 2;
@@ -164,6 +170,8 @@ service CLI {
     rpc Join (PulseJoin) returns (PulseJoin);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
+    // Remove from cluster
+    rpc Remove (PulseRemove) returns (PulseRemove);
     // Create Cluster
     rpc Create (PulseCreate) returns (PulseCreate);
     // Create Certs
@@ -197,6 +205,8 @@ service Server {
     rpc ConfigSync (PulseConfigSync) returns (PulseConfigSync);
     // Leave Cluster
     rpc Leave (PulseLeave) returns (PulseLeave);
+    // Remove from Cluster
+    rpc Remove (PulseRemove) returns (PulseRemove);
     // Promote
     rpc Promote (PulsePromote) returns (PulsePromote);
     // demote
