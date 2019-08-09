@@ -286,7 +286,7 @@ func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.Puls
 		nodesClearLocal()
 		DB.MemberList.Reset()
 		DB.Config.Save()
-		s.Server.Shutdown()
+		s.Shutdown()
 		log.Info("Successfully removed " + hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
