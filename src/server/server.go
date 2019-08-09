@@ -70,11 +70,21 @@ func (s *Server) Setup() {
 		log.Error("cannot setup server because unable to get local hostname")
 		return
 	}
+	// Check to make sure that our hostname matches with the one in the config
+	if DB.Config.Pulse.LocalNode != hostname {
+		log.Fatal(errors.New("pulse config 'localnode' does not match system hostname"))
+	}
+
 	// Make sure our local node is setup and available
 	if exists := nodeExists(hostname); !exists {
-		// Create local node in config
-		nodecreateLocal()
+		log.Fatal(errors.New("cannot find local hostname in pulse cluster config"))
+
+		if len(DB.Config.Nodes) == 0 {
+			// Create local node in config
+			nodecreateLocal()
+		}
 	}
+
 	if !DB.Config.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
 		return
@@ -182,9 +192,6 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	DB.Logging.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
-	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
-	}
 	if DB.Config.ClusterCheck() {
 		// Define new node
 		originNode := &config.Node{}
