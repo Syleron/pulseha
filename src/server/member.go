@@ -352,6 +352,7 @@ func (m *Member) MonitorReceivedHCs() bool {
 	var foLimit int
 	if DB.StartDelay && DB.StartInterval < 1 {
 		foLimit = DB.Config.Pulse.FailOverLimit * 2
+		DB.StartInterval++
 	} else {
 		foLimit = DB.Config.Pulse.FailOverLimit
 		DB.StartDelay = false
