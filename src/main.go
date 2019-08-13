@@ -164,8 +164,6 @@ func handleSignals() {
 		signalHooks(PRE_SIGNAL, sig)
 		switch sig {
 		case syscall.SIGUSR2:
-				// Bring down our floating IPS
-				server.MakeLocalPassive()
 				// Shutdown our server
 				pulse.Server.Shutdown()
 				// Reload our config
@@ -176,8 +174,6 @@ func handleSignals() {
 		case syscall.SIGINT:
 			fallthrough
 		case syscall.SIGTERM:
-			// Bring down floating IPS
-			server.MakeLocalPassive()
 			// Shutdown our service
 			pulse.Server.Shutdown()
 			os.Exit(0)
