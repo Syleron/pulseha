@@ -125,6 +125,8 @@ func (s *Server) Setup() {
 		s.Server = grpc.NewServer()
 	}
 	proto.RegisterServerServer(s.Server, s)
+	// Set our start delay
+	DB.StartDelay = true
 	// Setup our members
 	DB.MemberList.Setup()
 	// Start PulseHA daemon server
@@ -137,11 +139,13 @@ func (s *Server) Setup() {
  */
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
+	// Make passive
+	MakeLocalPassive()
 	// Clear our
 	DB.MemberList.Reset()
 	// Shutdown our RPC server
 	if s.Server != nil {
-		s.Server.GracefulStop()
+		s.Server.Stop()
 	}
 	if s.Listener != nil {
 		s.Listener.Close()
@@ -258,8 +262,52 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 		}, nil
 	}
 	DB.Config.Save()
-	DB.Logging.Info("Succesfully removed " + in.Hostname + " from the cluster")
+	DB.Logging.Info("Successfully removed " + in.Hostname + " from the cluster")
 	return &proto.PulseLeave{
+		Success: true,
+		Message: "Successfully removed node from local config",
+	}, nil
+}
+
+// Remove - Remove node from cluster by hostname
+func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.PulseRemove, error) {
+	DB.Logging.Debug("Server:Remove() " + strconv.FormatBool(in.Replicated) + " - Remove " + in.Hostname + "from cluster")
+	s.Lock()
+	defer s.Unlock()
+	if !CanCommunicate(ctx) {
+		return nil, errors.New("unauthorized")
+	}
+	// Make sure we can get our own hostname
+	localHostname, err := utils.GetHostname()
+	if err != nil {
+		DB.Logging.Debug("Server:Remove() Fail. Unable to get local hostname to remove node from cluster")
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to perform remove as unable to get local hostname",
+		}, nil
+	}
+	// Set our member status
+	member := DB.MemberList.GetMemberByHostname(in.Hostname)
+	member.SetStatus(proto.MemberStatus_LEAVING)
+	if in.Hostname == localHostname {
+		nodesClearLocal()
+		s.Shutdown()
+		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
+	} else {
+		// Remove from our memberlist
+		DB.MemberList.MemberRemoveByName(in.Hostname)
+		// Remove from our config
+		err := nodeDelete(in.Hostname)
+		if err != nil {
+			return &proto.PulseRemove{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+	}
+	DB.Config.Save()
+	DB.Logging.Info("Successfully removed node " + in.Hostname + " from the cluster")
+	return &proto.PulseRemove{
 		Success: true,
 		Message: "Successfully removed node from local config",
 	}, nil

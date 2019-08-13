@@ -50,6 +50,7 @@ const (
 	SendHealthCheck
 	SendPromote
 	SendLogs
+	SendRemove
 )
 
 var protoFunctions = []string{
@@ -62,6 +63,7 @@ var protoFunctions = []string{
 	"HealthCheck",
 	"Promote",
 	"Logs",
+	"Remove",
 }
 
 func (p ProtoFunction) String() string {
@@ -101,6 +103,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"Logs": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.Requester.Logs(ctx, data.(*p.PulseLogs))
+		},
+		"Remove": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.Requester.Remove(ctx, data.(*p.PulseRemove))
 		},
 	}
 	return funcList

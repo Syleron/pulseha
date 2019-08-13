@@ -47,8 +47,8 @@ func MakeLocalActive() error {
 /**
 Networking - Bring down the ip groups on the current node
 */
-func MakeLocalPassive() error {
-	log.Debug("Utils:MakeMemberPassive() Local node now passive")
+func MakeLocalPassive() {
+	DB.Logging.Debug("Utils:MakeMemberPassive() Making local node passive")
 	for name, node := range DB.Config.Nodes {
 		if name == DB.Config.GetLocalNode() {
 			for iface, groups := range node.IPGroups {
@@ -58,7 +58,6 @@ func MakeLocalPassive() error {
 			}
 		}
 	}
-	return nil
 }
 
 /**
@@ -111,6 +110,7 @@ func MyCaller() string {
 Determine who is the correct active node if more than one active is brought online
 */
 func GetFailOverCountWinner(members []*proto.MemberlistMember) string {
+	// GO through our members
 	for _, member := range members {
 		if member.Status != proto.MemberStatus_UNAVAILABLE {
 			tym, _ := time.Parse(time.RFC1123, member.LastReceived)

@@ -52,6 +52,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"remove": func() (cli.Command, error) {
+			return &commands.RemoveCommand{
+				Ui: ui,
+			}, nil
+		},
 		"status": func() (cli.Command, error) {
 			return &commands.StatusCommand{
 				Ui: ui,

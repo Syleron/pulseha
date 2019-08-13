@@ -72,6 +72,7 @@ func (c *GroupsCommand) Run(args []string) int {
 	if err != nil {
 		c.Ui.Error("GRPC client connection error")
 		c.Ui.Error(err.Error())
+		return 1
 	}
 
 	defer connection.Close()

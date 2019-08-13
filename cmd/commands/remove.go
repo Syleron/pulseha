@@ -18,27 +18,28 @@
 package commands
 
 import (
-	"context"
-	"flag"
-	"github.com/Syleron/PulseHA/proto"
-	"github.com/mitchellh/cli"
-	"google.golang.org/grpc"
-	"strings"
+"context"
+"flag"
+"github.com/Syleron/PulseHA/proto"
+"github.com/mitchellh/cli"
+"google.golang.org/grpc"
+"strings"
 )
 
-type LeaveCommand struct {
+type RemoveCommand struct {
 	Ui cli.Ui
 }
 
 /**
  *
  */
-func (c *LeaveCommand) Help() string {
+func (c *RemoveCommand) Help() string {
 	helpText := `
-Usage: pulseha leave [options] ...
-  Tells a running PulseHA agent to join the cluster
-  by specifying at least one existing member.
+Usage: pulseha remove [hostname] ...
+  Tells a running PulseHA agent to remove a node from the cluster
+  by specifying at least one existing member's hostname'.
 Options:
+  - hostname - node hostname
 `
 	return strings.TrimSpace(helpText)
 }
@@ -46,7 +47,7 @@ Options:
 /**
  *
  */
-func (c *LeaveCommand) Run(args []string) int {
+func (c *RemoveCommand) Run(args []string) int {
 	cmdFlags := flag.NewFlagSet("leave", flag.ContinueOnError)
 	cmdFlags.Usage = func() { c.Ui.Output(c.Help()) }
 
@@ -54,6 +55,13 @@ func (c *LeaveCommand) Run(args []string) int {
 		return 1
 	}
 
+	cmds := cmdFlags.Args()
+	if len(cmds) == 0 {
+		c.Ui.Error("Please specify a node hostname to remove")
+		c.Ui.Error("")
+		c.Ui.Error(c.Help())
+		return 1
+	}
 	connection, err := grpc.Dial("127.0.0.1:49152", grpc.WithInsecure())
 
 	if err != nil {
@@ -66,7 +74,9 @@ func (c *LeaveCommand) Run(args []string) int {
 
 	client := proto.NewCLIClient(connection)
 
-	r, err := client.Leave(context.Background(), &proto.PulseLeave{})
+	r, err := client.Remove(context.Background(), &proto.PulseRemove{
+		Hostname: cmds[0],
+	})
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")
@@ -86,6 +96,6 @@ func (c *LeaveCommand) Run(args []string) int {
 /**
  *
  */
-func (c *LeaveCommand) Synopsis() string {
-	return "Tell Pulse to create new HA cluster"
+func (c *RemoveCommand) Synopsis() string {
+	return "Remove node from PulseHA cluster"
 }
