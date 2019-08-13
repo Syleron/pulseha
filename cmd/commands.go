@@ -53,7 +53,7 @@ func init() {
 			}, nil
 		},
 		"remove": func() (cli.Command, error) {
-			return &commands.LeaveCommand{
+			return &commands.RemoveCommand{
 				Ui: ui,
 			}, nil
 		},
