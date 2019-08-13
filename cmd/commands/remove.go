@@ -67,6 +67,7 @@ func (c *RemoveCommand) Run(args []string) int {
 	if err != nil {
 		c.Ui.Error("GRPC client connection error. Is the PulseHA service running?")
 		c.Ui.Error(err.Error())
+		return 1
 	}
 
 	defer connection.Close()
@@ -85,6 +86,7 @@ func (c *RemoveCommand) Run(args []string) int {
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 
@@ -95,5 +97,5 @@ func (c *RemoveCommand) Run(args []string) int {
  *
  */
 func (c *RemoveCommand) Synopsis() string {
-	return "Remove node from Pulseha cluster"
+	return "Remove node from PulseHA cluster"
 }

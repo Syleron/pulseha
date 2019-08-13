@@ -99,6 +99,7 @@ func (c *CertCommand) Run(args []string) int {
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 
