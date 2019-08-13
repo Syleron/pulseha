@@ -101,17 +101,14 @@ func (c *Config) Load() {
 	defer c.Unlock()
 	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
 	if err != nil {
-		log.Errorf("Error reading config file: %s", err)
-		os.Exit(1)
+		log.Fatalf("Error reading config file: %s", err)
 	}
 	err = json.Unmarshal([]byte(b), &c)
 	if err != nil {
-		log.Errorf("Unable to unmarshal config: %s", err)
-		os.Exit(1)
+		log.Fatalf("Unable to unmarshal config: %s", err)
 	}
 	if err != nil {
-		log.Error("Unable to load config.json. Either it doesn't exist or there may be a permissions issue")
-		os.Exit(1)
+		log.Fatal("Unable to load config.json. Either it doesn't exist or there may be a permissions issue")
 	}
 	err = c.SetLocalNode()
 	if err != nil {
@@ -155,14 +152,14 @@ func (c *Config) Validate() {
 	var success bool = true
 
 	// Make sure our groups section is valid
-	if c.Groups == nil || c.Nodes == nil {
-		log.Error("Unable to load Groups section of the config.")
+	if c.Groups == nil {
+		log.Fatal("Unable to load Groups section of the config.")
 		success = false
 	}
 
 	// Make sure our nodes section is valid
-	if c.Groups == nil || c.Nodes == nil {
-		log.Error("Unable to load Nodes section of the config.")
+	if c.Nodes == nil {
+		log.Fatal("Unable to load Nodes section of the config.")
 		success = false
 	}
 
@@ -170,10 +167,20 @@ func (c *Config) Validate() {
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
-				log.Error("Hostname mistmatch. Localhost does not exist in cluster config.")
+				log.Fatal()"Hostname mistmatch. Localhost does not exist in cluster config.")
 				success = false
 			}
 		}
+	}
+
+	if c.Pulse.FailOverInterval < 1000 || c.Pulse.FailOverLimit < 1000 || c.Pulse.HealthCheckInterval < 1000 {
+		log.Fatal("Please make sure the interval and limit values in your config are valid millisecond values of at least 1 second")
+		success = false
+	}
+
+	if c.Pulse.FailOverLimit < c.Pulse.FailOverInterval {
+		log.Fatal("The fos_interval value must be a smaller value then your fo_limit")
+		success = false
 	}
 
 	// TODO: Check if our hostname exists in the cluster config
@@ -182,7 +189,7 @@ func (c *Config) Validate() {
 	// Handles if shit hits the roof
 	if success == false {
 		// log why we exited?
-		os.Exit(0)
+		os.Exit(1)
 	}
 }
 

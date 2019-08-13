@@ -220,27 +220,47 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 	log.Debug("CLIServer:Leave() - Remove node from Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
+	// make sure we are in a cluster
 	if !DB.Config.ClusterCheck() {
 		return &proto.PulseRemove{
 			Success: false,
 			Message: "Unable to perform remove as no cluster was found",
 		}, nil
 	}
-	hostname, err := utils.GetHostname()
+	// make sure we are not removing our active node
+	activeHostname, _ := DB.MemberList.GetActiveMember()
+	if in.Hostname == activeHostname {
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to remove active node. Please promote another node and try again",
+		}, nil
+	}
+	localHostname, err := utils.GetHostname()
 	if err != nil {
 		return &proto.PulseRemove{
 			Success: false,
 			Message: "Unable to perform remove as unable to get local hostname",
 		}, nil
 	}
+	// Tell everyone else to do the same
+	// TODO: This must come first otherwise the node we remove later wont be included in the request
+	if DB.Config.NodeCount() > 1 {
+		DB.MemberList.Broadcast(
+			client.SendRemove,
+			&proto.PulseRemove{
+				Replicated: true,
+				Hostname:   in.Hostname,
+			},
+		)
+	}
+	// Set our member status
+	member := DB.MemberList.GetMemberByHostname(in.Hostname)
+	member.SetStatus(proto.MemberStatus_LEAVING)
 	// Check if I am the node being removed
-	if in.Hostname == hostname {
-		MakeLocalPassive()
+	if in.Hostname == localHostname {
 		nodesClearLocal()
-		DB.MemberList.Reset()
-		DB.Config.Save()
 		s.Server.Shutdown()
-		log.Info("Successfully removed " + hostname + " from cluster. PulseHA no longer listening..")
+		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
 		DB.MemberList.MemberRemoveByName(in.Hostname)
@@ -252,18 +272,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 				Message: err.Error(),
 			}, nil
 		}
-		DB.Config.Save()
 	}
-	// Tell everyone else to do the same
-	if DB.Config.NodeCount() > 1 {
-		DB.MemberList.Broadcast(
-			client.SendRemove,
-			&proto.PulseRemove{
-				Replicated: true,
-				Hostname:   hostname,
-			},
-		)
-	}
+	DB.Config.Save()
 	return &proto.PulseRemove{
 		Success: true,
 		Message: "Successfully left from cluster",

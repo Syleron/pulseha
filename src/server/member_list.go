@@ -147,6 +147,8 @@ func (m *MemberList) Setup() {
 	if DB.Config.ClusterCheck() {
 		// Are we the only member in the cluster?
 		if DB.Config.NodeCount() == 1 {
+			// Disable start up delay
+			DB.StartDelay = false
 			// We are the only member in the cluster so
 			// we are assume that we are now the active appliance.
 			m.PromoteMember(DB.Config.GetLocalNode())
@@ -156,7 +158,7 @@ func (m *MemberList) Setup() {
 			localMember.SetLastHCResponse(time.Now())
 			localMember.SetStatus(p.MemberStatus_PASSIVE)
 			DB.Logging.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
-			go utils.Scheduler(localMember.MonitorReceivedHCs, 2000*time.Millisecond)
+			go utils.Scheduler(localMember.MonitorReceivedHCs, time.Duration(DB.Config.Pulse.FailOverInterval))
 		}
 	}
 }

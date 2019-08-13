@@ -125,6 +125,8 @@ func (s *Server) Setup() {
 		s.Server = grpc.NewServer()
 	}
 	proto.RegisterServerServer(s.Server, s)
+	// Set our start delay
+	DB.StartDelay = true
 	// Setup our members
 	DB.MemberList.Setup()
 	// Start PulseHA daemon server
@@ -137,11 +139,13 @@ func (s *Server) Setup() {
  */
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
+	// Make passive
+	MakeLocalPassive()
 	// Clear our
 	DB.MemberList.Reset()
 	// Shutdown our RPC server
 	if s.Server != nil {
-		s.Server.GracefulStop()
+		s.Server.Stop()
 	}
 	if s.Listener != nil {
 		s.Listener.Close()
@@ -273,7 +277,8 @@ func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.Puls
 	if !CanCommunicate(ctx) {
 		return nil, errors.New("unauthorized")
 	}
-	hostname, err := utils.GetHostname()
+	// Make sure we can get our own hostname
+	localHostname, err := utils.GetHostname()
 	if err != nil {
 		DB.Logging.Debug("Server:Remove() Fail. Unable to get local hostname to remove node from cluster")
 		return &proto.PulseRemove{
@@ -281,13 +286,13 @@ func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.Puls
 			Message: "Unable to perform remove as unable to get local hostname",
 		}, nil
 	}
-	if in.Hostname == hostname {
-		MakeLocalPassive()
+	// Set our member status
+	member := DB.MemberList.GetMemberByHostname(in.Hostname)
+	member.SetStatus(proto.MemberStatus_LEAVING)
+	if in.Hostname == localHostname {
 		nodesClearLocal()
-		DB.MemberList.Reset()
-		DB.Config.Save()
 		s.Shutdown()
-		log.Info("Successfully removed " + hostname + " from cluster. PulseHA no longer listening..")
+		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
 		DB.MemberList.MemberRemoveByName(in.Hostname)

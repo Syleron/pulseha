@@ -242,9 +242,9 @@ func (m *Member) MakeActive() bool {
 		MakeLocalActive()
 		// Start performing health checks
 		DB.Logging.Debug("Member:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(DB.MemberList.MonitorClientConns, 1*time.Second)
+		go utils.Scheduler(DB.MemberList.MonitorClientConns, time.Duration(DB.Config.Pulse.HealthCheckInterval))
 		DB.Logging.Debug("Member:PromoteMember() Starting health check handler")
-		go utils.Scheduler(DB.MemberList.AddHealthCheckHandler, 1*time.Second)
+		go utils.Scheduler(DB.MemberList.AddHealthCheckHandler, time.Duration(DB.Config.Pulse.HealthCheckInterval))
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
@@ -278,7 +278,7 @@ func (m *Member) MakePassive() bool {
 			m.SetStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
 			DB.Logging.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.GetHostname())
-			go utils.Scheduler(m.MonitorReceivedHCs, 10000*time.Millisecond)
+			go utils.Scheduler(m.MonitorReceivedHCs, time.Duration(DB.Config.Pulse.FailOverInterval))
 		}
 	} else {
 		// TODO: Handle the closing of this connection
@@ -349,8 +349,14 @@ func (m *Member) MonitorReceivedHCs() bool {
 		DB.Logging.Debug("Member:MonitorReceivedHCs() No health checks are being made.. Perhaps a failover is required?")
 	}
 	// has our threshold been met? Failover?
-	//log.Info(elapsed)
-	if int(elapsed) >= 10 {
+	var foLimit int
+	if DB.StartDelay && DB.StartInterval < 1 {
+		foLimit = DB.Config.Pulse.FailOverLimit * 2
+	} else {
+		foLimit = DB.Config.Pulse.FailOverLimit
+		DB.StartDelay = false
+	}
+	if int(elapsed) >= (foLimit / 1000)  {
 		DB.Logging.Debug("Member:monitorReceivedHCs() Performing Failover..")
 		var addHCSuccess bool = false
 		// TODO: Perform additional health checks plugin stuff HERE

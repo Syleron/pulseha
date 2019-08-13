@@ -239,12 +239,18 @@ func getGroupNodes(group string) ([]string, []string) {
 Make a group of IPs active
 */
 func makeGroupActive(iface string, groupName string) {
-	BringUpIPs(iface, DB.Config.Groups[groupName])
+	DB.Logging.Debug("Groups:makeGroupActive() Adding floating IPs from " + iface + " defined in group " + groupName)
+	if err := BringUpIPs(iface, DB.Config.Groups[groupName]); err != nil {
+		DB.Logging.Error(err.Error())
+	}
 }
 
 /**
 Make a group of IPs passive
  */
 func makeGroupPassive(iface string, groupName string) {
-	BringDownIPs(iface, DB.Config.Groups[groupName])
+	DB.Logging.Debug("Groups:makeGroupPassive() Removing floating IPs from " + iface + " defined in group " + groupName)
+	if err := BringDownIPs(iface, DB.Config.Groups[groupName]); err != nil {
+		DB.Logging.Error(err.Error())
+	}
 }
