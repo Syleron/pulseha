@@ -100,7 +100,7 @@ func (s *Server) Setup() {
 	}
 	if DB.Config.Pulse.TLS {
 		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(security.CertDir+hostname+".server.crt", security.CertDir+hostname+".server.key")
+		peerCert, err := tls.LoadX509KeyPair(security.CertDir+hostname+".crt", security.CertDir+hostname+".key")
 		if err != nil {
 			log.Error("load peer cert/key error:%v", err)
 			return

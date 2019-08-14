@@ -123,8 +123,8 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 			return errors.New("unable to connect because cannot get hostname")
 		}
 		peerCert, err := tls.LoadX509KeyPair(
-			security.CertDir+hostname+".client.crt",
-			security.CertDir+hostname+".client.key",
+			security.CertDir+hostname+".crt",
+			security.CertDir+hostname+".key",
 		)
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())

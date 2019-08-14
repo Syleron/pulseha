@@ -67,10 +67,8 @@ func GenTLSKeys(ip string) error {
 		fmt.Println("parsekey:", e.Error())
 		os.Exit(1)
 	}
-	// Generate Server certs
-	GenerateServerCert(ip, cert, key)
-	// Generate Client certs
-	GenerateClientCert(cert, key)
+	// Generate certs
+	GenerateCerts(ip, cert, key)
 	return nil
 }
 
@@ -102,6 +100,38 @@ func GenerateCACert(ip string) {
 	// write keys
 	writeCertFile("ca", rootCertPEM)
 	writeKeyFile("ca", rootKey)
+}
+
+// Generate certs
+func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
+	utils.CreateFolder("/etc/pulseha/certs")
+	// Generate new key pair
+	servKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		log.Fatalf("generating random key: %v", err)
+	}
+	// Generate Cert template
+	servCertTmpl, err := certTemplate()
+	if err != nil {
+		log.Fatalf("creating cert template: %v", err)
+	}
+	// Populate cert template
+	servCertTmpl.KeyUsage = x509.KeyUsageDigitalSignature
+	servCertTmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+	servCertTmpl.IPAddresses = []net.IP{net.ParseIP(ip)}
+	// Generate cert from template and sign
+	_, servCertPEM, err := createCert(servCertTmpl, caCert, &servKey.PublicKey, caKey)
+	if err != nil {
+		log.Fatalf("error creating cert: %v", err)
+	}
+	// write keys
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		log.Error("unable to generate cert because unable to get hostname")
+		return
+	}
+	writeCertFile(hostname, servCertPEM)
+	writeKeyFile(hostname, servKey)
 }
 
 /**
