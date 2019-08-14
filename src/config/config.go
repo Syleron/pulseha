@@ -153,13 +153,13 @@ func (c *Config) Validate() {
 
 	// Make sure our groups section is valid
 	if c.Groups == nil {
-		log.Fatal("Unable to load Groups section of the config.")
+		log.Fatal("Unable to load Groups section of the config")
 		success = false
 	}
 
 	// Make sure our nodes section is valid
 	if c.Nodes == nil {
-		log.Fatal("Unable to load Nodes section of the config.")
+		log.Fatal("Unable to load Nodes section of the config")
 		success = false
 	}
 
@@ -167,7 +167,7 @@ func (c *Config) Validate() {
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
-				log.Fatal("Hostname mistmatch. Localhost does not exist in cluster config.")
+				log.Fatal("Hostname mistmatch. Localhost does not exist in cluster config")
 				success = false
 			}
 		}
