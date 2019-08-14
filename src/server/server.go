@@ -102,13 +102,13 @@ func (s *Server) Setup() {
 		// load member cert/key
 		peerCert, err := tls.LoadX509KeyPair(security.CertDir+hostname+".crt", security.CertDir+hostname+".key")
 		if err != nil {
-			log.Error("load peer cert/key error:%v", err)
+			log.Fatalf("load peer cert/key error:%v", err)
 			return
 		}
 		// Load CA cert
 		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
 		if err != nil {
-			log.Error("read ca cert file error:%v", err)
+			log.Fatalf("read ca cert file error:%v", err)
 			return
 		}
 		// Define cert pool
