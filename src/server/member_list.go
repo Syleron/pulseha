@@ -158,7 +158,10 @@ func (m *MemberList) Setup() {
 			localMember.SetLastHCResponse(time.Now())
 			localMember.SetStatus(p.MemberStatus_PASSIVE)
 			DB.Logging.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
-			go utils.Scheduler(localMember.MonitorReceivedHCs, time.Duration(DB.Config.Pulse.FailOverInterval))
+			go utils.Scheduler(
+				localMember.MonitorReceivedHCs,
+				time.Duration(DB.Config.Pulse.FailOverInterval) * time.Millisecond,
+			)
 		}
 	}
 }

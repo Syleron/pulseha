@@ -165,6 +165,7 @@ func (c *GroupsCommand) New(groupName *string, client proto.CLIClient) int {
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n [x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
@@ -191,6 +192,7 @@ func (c *GroupsCommand) Delete(groupName *string, client proto.CLIClient) int {
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
@@ -225,6 +227,7 @@ func (c *GroupsCommand) Add(groupName, fIPs *string, client proto.CLIClient) int
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
@@ -259,6 +262,7 @@ func (c *GroupsCommand) Remove(groupName, fIPs *string, client proto.CLIClient) 
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
@@ -299,6 +303,7 @@ func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, clien
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
@@ -339,6 +344,7 @@ func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, cli
 			c.Ui.Output("\n[\u2713] " + r.Message + "\n")
 		} else {
 			c.Ui.Output("\n[x] " + r.Message + "\n")
+			return 1
 		}
 	}
 	return 0
