@@ -242,9 +242,15 @@ func (m *Member) MakeActive() bool {
 		MakeLocalActive()
 		// Start performing health checks
 		DB.Logging.Debug("Member:PromoteMember() Starting client connections monitor")
-		go utils.Scheduler(DB.MemberList.MonitorClientConns, time.Duration(DB.Config.Pulse.HealthCheckInterval))
+		go utils.Scheduler(
+			DB.MemberList.MonitorClientConns,
+			time.Duration(DB.Config.Pulse.HealthCheckInterval) * time.Millisecond,
+		)
 		DB.Logging.Debug("Member:PromoteMember() Starting health check handler")
-		go utils.Scheduler(DB.MemberList.AddHealthCheckHandler, time.Duration(DB.Config.Pulse.HealthCheckInterval))
+		go utils.Scheduler(
+			DB.MemberList.AddHealthCheckHandler,
+			time.Duration(DB.Config.Pulse.HealthCheckInterval) * time.Millisecond,
+		)
 	} else {
 		// TODO: Handle the closing of this connection
 		m.Connect()
@@ -278,7 +284,10 @@ func (m *Member) MakePassive() bool {
 			m.SetStatus(proto.MemberStatus_PASSIVE)
 			// Start the scheduler
 			DB.Logging.Debug("Member:makePassive() Starting the monitor received health checks scheduler " + m.GetHostname())
-			go utils.Scheduler(m.MonitorReceivedHCs, time.Duration(DB.Config.Pulse.FailOverInterval))
+			go utils.Scheduler(
+				m.MonitorReceivedHCs,
+				time.Duration(DB.Config.Pulse.FailOverInterval) * time.Millisecond,
+			)
 		}
 	} else {
 		// TODO: Handle the closing of this connection

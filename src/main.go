@@ -164,13 +164,13 @@ func handleSignals() {
 		signalHooks(PRE_SIGNAL, sig)
 		switch sig {
 		case syscall.SIGUSR2:
-				// Shutdown our server
-				pulse.Server.Shutdown()
-				// Reload our config
-				pulse.DB.Config.Reload()
-				// Start a new server
-				go pulse.Server.Setup()
-				break
+			// Shutdown our server
+			pulse.Server.Shutdown()
+			// Reload our config
+			pulse.DB.Config.Reload()
+			// Start a new server
+			go pulse.Server.Setup()
+			break
 		case syscall.SIGINT:
 			fallthrough
 		case syscall.SIGTERM:
