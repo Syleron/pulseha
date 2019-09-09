@@ -564,3 +564,20 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 		Message: "Successfully generated new TLS certificates",
 	}, nil
 }
+
+// Config - Update any key's value in the pulseha section of the config
+func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.PulseConfig, error) {
+	s.Lock()
+	defer s.Unlock()
+	// Update our key value
+	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
+		return &proto.PulseConfig{
+			Success: false,
+			Message: err.Error(),
+		}, nil
+	}
+	return &proto.PulseConfig{
+		Success: true,
+		Message: "Successfully updated pulseha config",
+	}, nil
+}
