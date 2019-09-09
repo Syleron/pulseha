@@ -152,6 +152,12 @@ message PulseBringIP {
     string iface = 3;
     repeated string ips = 4;
 }
+message PulseConfig {
+    bool success = 1;
+    string message = 2;
+    string key = 3;
+    string value = 4;
+}
 message PulseLogs {
     enum Level {
         INFO = 0;
@@ -194,6 +200,8 @@ service CLI {
     rpc Status (PulseStatus) returns (PulseStatus);
     // Promote a member
     rpc Promote (PulsePromote) returns (PulsePromote);
+    // Promote a member
+    rpc Config (PulseConfig) returns (PulseConfig);
 }
 
 service Server {
