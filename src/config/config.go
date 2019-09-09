@@ -272,30 +272,30 @@ func (c *Config) UpdateValue(key string, value string) error {
 	switch key {
 	case "fo_limit":
 		v, err := strconv.Atoi(value)
-		if err == nil {
+		if err != nil {
 			return errors.New("invalid config value")
 		}
 		c.Pulse.FailOverLimit = v
 	case "fos_interval":
 		v, err := strconv.Atoi(value)
-		if err == nil {
+		if err != nil {
 			return errors.New("invalid config value")
 		}
 		c.Pulse.FailOverInterval = v
 	case "hcs_interval":
 		v, err := strconv.Atoi(value)
-		if err == nil {
+		if err != nil {
 			return errors.New("invalid config value")
 		}
 		c.Pulse.HealthCheckInterval = v
 	case "local_node":
 		c.Pulse.LocalNode = value
 	case "tls":
-		b, err := strconv.ParseBool(value)
-		if err == nil {
+		v, err := strconv.ParseBool(value)
+		if err != nil {
 			return errors.New("invalid config value")
 		}
-		c.Pulse.TLS = b
+		c.Pulse.TLS = v
 	default:
 		return errors.New("invalid config key")
 	}
