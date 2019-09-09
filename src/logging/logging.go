@@ -25,7 +25,7 @@ import (
 )
 
 type Logging struct {
-	Level proto.PulseLogs_Level
+	Level    proto.PulseLogs_Level
 	Hostname string
 	Broadcast
 }

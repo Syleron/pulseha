@@ -247,7 +247,7 @@ func makeGroupActive(iface string, groupName string) {
 
 /**
 Make a group of IPs passive
- */
+*/
 func makeGroupPassive(iface string, groupName string) {
 	DB.Logging.Debug("Groups:makeGroupPassive() Removing floating IPs from " + iface + " defined in group " + groupName)
 	if err := BringDownIPs(iface, DB.Config.Groups[groupName]); err != nil {

@@ -195,7 +195,7 @@ Return network interface names
 func GetInterfaceNames() []string {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		log.Errorf("Error retrieving network interfaces: ", err)
+		log.Error("Error retrieving network interfaces: ", err)
 		return nil
 	}
 	var interfaceNames []string
@@ -211,7 +211,7 @@ Check if an interface exists on the local node
 func InterfaceExist(name string) bool {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		log.Errorf("Error retrieving network interfaces: ", err)
+		log.Error("Error retrieving network interfaces: ", err)
 		return false
 	}
 	for _, iface := range ifaces {
@@ -224,7 +224,7 @@ func InterfaceExist(name string) bool {
 
 /**
 Checks to see if an IP exists on an interface already
- */
+*/
 func CheckIfIPExists(ipAddr string) (bool, string, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {

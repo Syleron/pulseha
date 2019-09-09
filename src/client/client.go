@@ -24,12 +24,12 @@ import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
 	p "github.com/Syleron/PulseHA/proto"
+	"github.com/Syleron/PulseHA/src/security"
 	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"io/ioutil"
 	"time"
-	"github.com/Syleron/PulseHA/src/security"
 )
 
 type Client struct {

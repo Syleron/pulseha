@@ -39,8 +39,8 @@ Server struct type
 */
 type CLIServer struct {
 	sync.Mutex
-	Server     *Server
-	Listener   net.Listener
+	Server   *Server
+	Listener net.Listener
 }
 
 /**
@@ -94,7 +94,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		buf, err := json.Marshal(newNode)
 		// Handle failure to marshal config
 		if err != nil {
-			log.Error("Join() Unable to marshal config: %s", err)
+			log.Errorf("Join() Unable to marshal config: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Join failure. Please check the logs for more information",
@@ -111,7 +111,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		})
 		// Handle a failed request
 		if err != nil {
-			log.Error("Join() Request error: %s", err)
+			log.Errorf("Join() Request error: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Join failure. Unable to connect to host.",
@@ -119,7 +119,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		}
 		// Handle an unsuccessful request
 		if !r.(*proto.PulseJoin).Success {
-			log.Error("Join() Peer error: %s", err)
+			log.Errorf("Join() Peer error: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: r.(*proto.PulseJoin).Message,

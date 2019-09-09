@@ -23,11 +23,11 @@ import (
 )
 
 type Database struct {
-	Config     *config.Config
-	Plugins    *Plugins
-	MemberList *MemberList
-	Logging    logging.Logging
-	StartDelay   bool
+	Config        *config.Config
+	Plugins       *Plugins
+	MemberList    *MemberList
+	Logging       logging.Logging
+	StartDelay    bool
 	StartInterval int
 }
 
