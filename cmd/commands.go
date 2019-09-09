@@ -72,6 +72,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"config": func() (cli.Command, error) {
+			return &commands.ConfigCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version: Version,
