@@ -168,7 +168,7 @@ func (c *Config) Validate() {
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
-				log.Fatal("Hostname mistmatch. Localhost does not exist in cluster config")
+				log.Fatal("Hostname mismatch. Localhost does not exist in cluster config")
 				success = false
 			}
 		}
