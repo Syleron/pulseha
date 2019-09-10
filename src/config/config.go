@@ -267,25 +267,29 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 	return "", errors.New("unable to find node with IP address " + address)
 }
 
+var ErrInvalidConfigValue = errors.New("invalid config value")
+var ErrInvalidConfigKey = errors.New("invalid config key")
+
+
 // UpdateValue - Update a key's value
 func (c *Config) UpdateValue(key string, value string) error {
 	switch key {
 	case "fo_limit":
 		v, err := strconv.Atoi(value)
 		if err == nil {
-			return errors.New("invalid config value")
+			return ErrInvalidConfigValue
 		}
 		c.Pulse.FailOverLimit = v
 	case "fos_interval":
 		v, err := strconv.Atoi(value)
 		if err == nil {
-			return errors.New("invalid config value")
+			return ErrInvalidConfigValue
 		}
 		c.Pulse.FailOverInterval = v
 	case "hcs_interval":
 		v, err := strconv.Atoi(value)
 		if err == nil {
-			return errors.New("invalid config value")
+			return ErrInvalidConfigValue
 		}
 		c.Pulse.HealthCheckInterval = v
 	case "local_node":
@@ -293,11 +297,11 @@ func (c *Config) UpdateValue(key string, value string) error {
 	case "tls":
 		b, err := strconv.ParseBool(value)
 		if err == nil {
-			return errors.New("invalid config value")
+			return ErrInvalidConfigValue
 		}
 		c.Pulse.TLS = b
 	default:
-		return errors.New("invalid config key")
+		return ErrInvalidConfigKey
 	}
 	// Save our config with the updated info
 	c.Save()
