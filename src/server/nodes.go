@@ -20,7 +20,7 @@ package server
 import (
 	"errors"
 	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/net_utils"
+	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
 )
 
@@ -40,7 +40,7 @@ func nodecreateLocal() error {
 	nodeAdd(hostname, newNode)
 	// Create interface definitions each with their own group
 	// TODO: Probably move this to another function?
-	for _, ifaceName := range net_utils.GetInterfaceNames() {
+	for _, ifaceName := range netUtils.GetInterfaceNames() {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := genGroupName()

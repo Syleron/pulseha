@@ -111,7 +111,7 @@ func main() {
 `, Version, Build[0:7])
 	log.SetFormatter(new(PulseLogFormat))
 	pulse = createPulse()
-	// listen for singals
+	// listen for signals
 	pulse.Sigs = make(chan os.Signal)
 	signal.Notify(pulse.Sigs)
 	// Handle the signals

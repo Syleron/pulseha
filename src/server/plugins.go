@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"strconv"
-	)
+)
 
 /**
 Health Check plugin type

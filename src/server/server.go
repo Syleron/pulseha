@@ -222,7 +222,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		buf, err := json.Marshal(DB.Config)
 		// Handle failure to marshal config
 		if err != nil {
-			log.Fatal("Unable to marshal config: %s", err)
+			log.Fatalf("Unable to marshal config: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
@@ -329,7 +329,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	err := json.Unmarshal(in.Config, newConfig)
 	// Handle failure to marshal config
 	if err != nil {
-		log.Fatal("Unable to marshal config: %s", err)
+		log.Fatalf("Unable to marshal config: %s", err)
 		return &proto.PulseConfigSync{
 			Success: false,
 			Message: err.Error(),
@@ -456,16 +456,16 @@ func (s *Server) Logs(ctx context.Context, in *proto.PulseLogs) (*proto.PulseLog
 	switch in.Level {
 	case proto.PulseLogs_DEBUG:
 		log.Debugf("[%s] %s", in.Node, in.Message)
-		break;
+		break
 	case proto.PulseLogs_INFO:
 		log.Infof("[%s] %s", in.Node, in.Message)
-		break;
+		break
 	case proto.PulseLogs_ERROR:
 		log.Errorf("[%s] %s", in.Node, in.Message)
-		break;
+		break
 	case proto.PulseLogs_WARNING:
 		log.Warnf("[%s] %s", in.Node, in.Message)
-		break;
+		break
 	}
 	return &proto.PulseLogs{}, nil
 }
