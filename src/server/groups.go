@@ -19,7 +19,7 @@ package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/src/net_utils"
+	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"strconv"
 )
@@ -124,7 +124,7 @@ func groupAssign(groupName, node, iface string) error {
 	if !groupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
-	if net_utils.InterfaceExist(iface) {
+	if netUtils.InterfaceExist(iface) {
 		if exists, _ := nodeInterfaceGroupExists(node, iface, groupName); !exists {
 			// Add the group
 			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface], groupName)
@@ -147,7 +147,7 @@ Unassign a group from a node's interface
 func groupUnassign(groupName, node, iface string) error {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
-	if net_utils.InterfaceExist(iface) {
+	if netUtils.InterfaceExist(iface) {
 		if exists, i := nodeInterfaceGroupExists(node, iface, groupName); exists {
 			// make the group passive before removing it
 			makeGroupPassive(iface, groupName)

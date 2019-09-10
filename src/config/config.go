@@ -21,10 +21,10 @@ import (
 	"encoding/json"
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/jsonHelper"
 	"github.com/Syleron/PulseHA/src/utils"
 	"io/ioutil"
 	"os"
-	"strconv"
 	"sync"
 )
 
@@ -267,43 +267,13 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 	return "", errors.New("unable to find node with IP address " + address)
 }
 
-var ErrInvalidConfigValue = errors.New("invalid config value")
-var ErrInvalidConfigKey = errors.New("invalid config key")
-
-
 // UpdateValue - Update a key's value
 func (c *Config) UpdateValue(key string, value string) error {
-	switch key {
-	case "fo_limit":
-		v, err := strconv.Atoi(value)
-		if err == nil {
-			return ErrInvalidConfigValue
-		}
-		c.Pulse.FailOverLimit = v
-	case "fos_interval":
-		v, err := strconv.Atoi(value)
-		if err == nil {
-			return ErrInvalidConfigValue
-		}
-		c.Pulse.FailOverInterval = v
-	case "hcs_interval":
-		v, err := strconv.Atoi(value)
-		if err == nil {
-			return ErrInvalidConfigValue
-		}
-		c.Pulse.HealthCheckInterval = v
-	case "local_node":
-		c.Pulse.LocalNode = value
-	case "tls":
-		b, err := strconv.ParseBool(value)
-		if err == nil {
-			return ErrInvalidConfigValue
-		}
-		c.Pulse.TLS = b
-	default:
-		return ErrInvalidConfigKey
+	err := jsonHelper.SetStructFieldByTag(key, value, c.Pulse)
+	if err != nil {
+		return err
 	}
 	// Save our config with the updated info
 	c.Save()
-	return nil
+	return  nil
 }
