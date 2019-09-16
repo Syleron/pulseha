@@ -180,7 +180,7 @@ func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		nodeDetails, _ := nodeGetByName(m.Hostname)
 		DB.Logging.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, DB.Config.Pulse.TLS)
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, true)
 		if err != nil {
 			log.Error("Member:Connect() " + err.Error())
 			return err

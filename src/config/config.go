@@ -37,11 +37,11 @@ type Config struct {
 }
 
 type Local struct {
-	TLS                 bool   `json:"tls"`
 	HealthCheckInterval int    `json:"hcs_interval"`
 	FailOverInterval    int    `json:"fos_interval"`
 	FailOverLimit       int    `json:"fo_limit"`
 	LocalNode           string `json:"local_node"`
+	ClusterToken        string `json:"cluster_token"`
 }
 
 type Nodes struct {
@@ -247,7 +247,7 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 
 /**
 Instantiate, setup and return our Config
- */
+*/
 func GetConfig() *Config {
 	cfg := Config{}
 	cfg.Load()
@@ -290,12 +290,6 @@ func (c *Config) UpdateValue(key string, value string) error {
 		c.Pulse.HealthCheckInterval = v
 	case "local_node":
 		c.Pulse.LocalNode = value
-	case "tls":
-		v, err := strconv.ParseBool(value)
-		if err != nil {
-			return errors.New("invalid config value")
-		}
-		c.Pulse.TLS = v
 	default:
 		return errors.New("invalid config key")
 	}
