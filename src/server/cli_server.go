@@ -130,7 +130,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		security.WriteKeyFile("ca", []byte(r.(*proto.PulseJoin).CaKey))
 		// Generate our new keys
 		if err := security.GenTLSKeys(in.BindIp); err != nil {
-			log.Error("Join() Unable to generate TLS keys: %s", err)
+			log.Errorf("Join() Unable to generate TLS keys: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),

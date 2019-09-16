@@ -154,7 +154,7 @@ func (s *Server) serverInterceptor(ctx context.Context,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler) (interface{}, error) {
 
-	log.Debug("Request - Method:%s", info.FullMethod)
+	log.Debugf("Request - Method:%s", info.FullMethod)
 
 	// Skip authorize when join is requested
 	if info.FullMethod != "/proto.Server/Join" {
@@ -287,7 +287,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Attempt to read our CA details
 		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
 		if err != nil {
-			log.Fatal("Unable to load ca.crt: %s", err)
+			log.Fatalf("Unable to load ca.crt: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
@@ -305,7 +305,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		// Load our cert details
 		caKey, err := ioutil.ReadFile(security.CertDir + "ca.key")
 		if err != nil {
-			log.Fatal("Unable to load ca.key: %s", err)
+			log.Fatalf("Unable to load ca.key: %s", err)
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
