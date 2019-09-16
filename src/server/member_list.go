@@ -27,7 +27,7 @@ import (
 	"google.golang.org/grpc/connectivity"
 	"sync"
 	"time"
-	)
+)
 
 /**
  * MemberList struct type
@@ -160,7 +160,7 @@ func (m *MemberList) Setup() {
 			DB.Logging.Debug("MemberList:Setup() starting the monitor received health checks scheduler")
 			go utils.Scheduler(
 				localMember.MonitorReceivedHCs,
-				time.Duration(DB.Config.Pulse.FailOverInterval) * time.Millisecond,
+				time.Duration(DB.Config.Pulse.FailOverInterval)*time.Millisecond,
 			)
 		}
 	}
@@ -178,7 +178,7 @@ func (m *MemberList) LoadMembers() {
 
 /**
 Reload the memberlist
- */
+*/
 func (m *MemberList) Reload() {
 	DB.Logging.Debug("MemberList:ReloadMembers() Reloading member nodes")
 	// Reload our config

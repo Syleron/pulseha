@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-const CertDir = "/etc/pulseha/certs/"
+const CertDir = "/etc/pulseha/certs"
 
 /**
 Generate TLS keys if they don't already exist
@@ -41,9 +41,9 @@ Generate TLS keys if they don't already exist
 func GenTLSKeys(ip string) error {
 	utils.CreateFolder(CertDir)
 	log.Warning("TLS keys are missing! Generating..")
-	if !utils.CheckFileExists(CertDir+"ca.crt") ||
-		!utils.CheckFileExists(CertDir+"ca.key") {
-		return errors.New("Unable to generate TLS keys as ca.crt/ca.key are missing")
+	if !utils.CheckFileExists(CertDir+"/ca.crt") ||
+		!utils.CheckFileExists(CertDir+"/ca.key") {
+		return errors.New("unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
 	caCert, err := utils.LoadFile(CertDir + "ca.crt")
@@ -250,7 +250,7 @@ TODO: Use Utils functions
 */
 func WriteCertFile(fileName string, cert []byte) {
 	// Write the cert to file
-	certOut, err := os.Create(CertDir + fileName + ".crt")
+	certOut, err := os.Create(CertDir + "/" + fileName + ".crt")
 	if err != nil {
 		fmt.Println("Failed writing key:", err)
 		os.Exit(1)
@@ -276,7 +276,7 @@ TODO: Use Utils functions
 */
 func WriteKeyFileFromRSAKey(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
-	keyOut, err := os.OpenFile(CertDir+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	keyOut, err := os.OpenFile(CertDir+"/"+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
 		fmt.Println("Failed writing key:", err)
 		os.Exit(1)

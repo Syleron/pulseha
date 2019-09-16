@@ -21,10 +21,10 @@ import (
 	"encoding/json"
 	"errors"
 	log "github.com/Sirupsen/logrus"
+	"github.com/Syleron/PulseHA/src/jsonHelper"
 	"github.com/Syleron/PulseHA/src/utils"
 	"io/ioutil"
 	"os"
-	"strconv"
 	"sync"
 )
 
@@ -168,7 +168,7 @@ func (c *Config) Validate() {
 	if c.ClusterCheck() {
 		for name, _ := range c.Nodes {
 			if _, ok := c.Nodes[name]; !ok {
-				log.Fatal("Hostname mistmatch. Localhost does not exist in cluster config")
+				log.Fatal("Hostname mismatch. Localhost does not exist in cluster config")
 				success = false
 			}
 		}
@@ -269,31 +269,11 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 
 // UpdateValue - Update a key's value
 func (c *Config) UpdateValue(key string, value string) error {
-	switch key {
-	case "fo_limit":
-		v, err := strconv.Atoi(value)
-		if err != nil {
-			return errors.New("invalid config value")
-		}
-		c.Pulse.FailOverLimit = v
-	case "fos_interval":
-		v, err := strconv.Atoi(value)
-		if err != nil {
-			return errors.New("invalid config value")
-		}
-		c.Pulse.FailOverInterval = v
-	case "hcs_interval":
-		v, err := strconv.Atoi(value)
-		if err != nil {
-			return errors.New("invalid config value")
-		}
-		c.Pulse.HealthCheckInterval = v
-	case "local_node":
-		c.Pulse.LocalNode = value
-	default:
-		return errors.New("invalid config key")
+	err := jsonHelper.SetStructFieldByTag(key, value, c.Pulse)
+	if err != nil {
+		return err
 	}
 	// Save our config with the updated info
 	c.Save()
-	return nil
+	return  nil
 }

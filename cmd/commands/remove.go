@@ -18,12 +18,12 @@
 package commands
 
 import (
-"context"
-"flag"
-"github.com/Syleron/PulseHA/proto"
-"github.com/mitchellh/cli"
-"google.golang.org/grpc"
-"strings"
+	"context"
+	"flag"
+	"github.com/Syleron/PulseHA/proto"
+	"github.com/mitchellh/cli"
+	"google.golang.org/grpc"
+	"strings"
 )
 
 type RemoveCommand struct {
