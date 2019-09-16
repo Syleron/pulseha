@@ -19,6 +19,8 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
+	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/proto"
 	"google.golang.org/grpc/peer"
@@ -138,4 +140,14 @@ func CanCommunicate(ctx context.Context) bool {
 		return false
 	}
 	return true
+}
+
+// generateRandomString -  Generate a random string of length len
+func generateRandomString(len int) string {
+	b := make([]byte, len)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	s := fmt.Sprintf("%X", b)
+	return s
 }

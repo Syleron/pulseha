@@ -70,13 +70,11 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
 		// Generate client server keys if tls is enabled
-		if DB.Config.Pulse.TLS {
-			security.GenTLSKeys(in.BindIp)
-		}
+		//security.GenTLSKeys(in.BindIp)
 		// Create a new client
 		c := &client.Client{}
 		// Attempt to connect
-		err := c.Connect(in.Ip, in.Port, in.Hostname, DB.Config.Pulse.TLS)
+		err := c.Connect(in.Ip, in.Port, in.Hostname, false)
 		// Handle a client connection error
 		if err != nil {
 			return &proto.PulseJoin{
@@ -108,6 +106,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		r, err := c.Send(client.SendJoin, &proto.PulseJoin{
 			Config:   buf,
 			Hostname: hostname,
+			Token: in.Token,
 		})
 		// Handle a failed request
 		if err != nil {
@@ -123,6 +122,18 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: r.(*proto.PulseJoin).Message,
+			}, nil
+		}
+		// write CA keys
+		utils.CreateFolder(security.CertDir)
+		security.WriteCertFile("ca", []byte(r.(*proto.PulseJoin).CaCrt))
+		security.WriteKeyFile("ca", []byte(r.(*proto.PulseJoin).CaKey))
+		// Generate our new keys
+		if err := security.GenTLSKeys(in.BindIp); err != nil {
+			log.Errorf("Join() Unable to generate TLS keys: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
 			}, nil
 		}
 		// Update our local config
@@ -201,6 +212,10 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	DB.MemberList.Reset()
 	DB.Config.Save()
 	s.Server.Shutdown()
+	// Remove our generated keys
+	if !utils.DeleteFolder(security.CertDir) {
+		log.Warn("Failed to remove certs directory. Please manually remove hanging certs.")
+	}
 	// bring down the ips
 	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
 	if DB.Config.NodeCount() == 1 {
@@ -303,18 +318,29 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		nodeDelete(hostname)
 		// Add the new node instance
 		nodeAdd(hostname, newNode)
+		// Generate new token
+		token := generateRandomString(20)
+		// Create a new hasher for sha 256
+		token_hash := security.GenerateSHA256Hash(token)
+		// Set our token in our config
+		DB.Config.Pulse.ClusterToken = token_hash
 		// Save back to our config
 		DB.Config.Save()
 		// Cert stuff
 		security.GenerateCACert(in.BindIp)
 		// Generate client server keys if tls is enabled
-		if DB.Config.Pulse.TLS {
-			security.GenTLSKeys(in.BindIp)
-		}
+		security.GenTLSKeys(in.BindIp)
+		// Setup our pulse server
 		go s.Server.Setup()
+		// Save our newly generated token
 		return &proto.PulseCreate{
 			Success: true,
-			Message: "Pulse cluster successfully created!",
+			Message: `Pulse cluster successfully created!
+	
+You can now join any number of machines by running the following on each node:
+
+pulseha join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + in.BindIp + ` ` + in.BindPort + ` ` + hostname + `
+			`,
 		}, nil
 	} else {
 		return &proto.PulseCreate{

@@ -37,11 +37,11 @@ type Config struct {
 }
 
 type Local struct {
-	TLS                 bool   `json:"tls"`
 	HealthCheckInterval int    `json:"hcs_interval"`
 	FailOverInterval    int    `json:"fos_interval"`
 	FailOverLimit       int    `json:"fo_limit"`
 	LocalNode           string `json:"local_node"`
+	ClusterToken        string `json:"cluster_token"`
 }
 
 type Nodes struct {
