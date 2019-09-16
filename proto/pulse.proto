@@ -51,6 +51,9 @@ message PulseJoin {
     string hostname = 7;
     bool replicated = 8;
     bytes config = 9;
+    string token = 10;
+    string ca_crt = 11;
+    string ca_key = 12;
 }
 message PulseLeave {
     bool success = 1;

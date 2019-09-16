@@ -30,6 +30,7 @@ import (
 	"github.com/Syleron/PulseHA/src/utils"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 	"io/ioutil"
 	"net"
 	"strconv"
@@ -64,6 +65,11 @@ func (s *Server) Init(db *Database) {
  * Setup pulse server type
  */
 func (s *Server) Setup() {
+	if !DB.Config.ClusterCheck() {
+		log.Info("PulseHA is currently un-configured.")
+		return
+	}
+
 	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {
@@ -73,6 +79,13 @@ func (s *Server) Setup() {
 	// Check to make sure that our hostname matches with the one in the config
 	if DB.Config.Pulse.LocalNode != hostname {
 		log.Fatal(errors.New("pulse config 'localnode' does not match system hostname"))
+		return
+	}
+
+	// make sure we have a cluster token
+	if DB.Config.Pulse.ClusterToken == "" {
+		log.Fatal(errors.New("pulse config 'cluster_token' is not set"))
+		return
 	}
 
 	// Make sure our local node is setup and available
@@ -81,16 +94,13 @@ func (s *Server) Setup() {
 
 		if len(DB.Config.Nodes) == 0 {
 			// Create local node in config
-			nodecreateLocal()
+			if err := nodecreateLocal(); err != nil {
+				log.Errorf(err.Error())
+				return
+			}
 		}
 	}
-
-	if !DB.Config.ClusterCheck() {
-		log.Info("PulseHA is currently un-configured.")
-		return
-	}
-	var bindIP string
-	bindIP = utils.FormatIPv6(DB.Config.LocalNode().IP)
+	bindIP := utils.FormatIPv6(DB.Config.LocalNode().IP)
 	// Listen
 	s.Listener, err = net.Listen("tcp", bindIP+":"+DB.Config.LocalNode().Port)
 	if err != nil {
@@ -98,32 +108,34 @@ func (s *Server) Setup() {
 		// TODO: Note: Should we exit here?
 		return
 	}
-	if DB.Config.Pulse.TLS {
-		// load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(security.CertDir+hostname+".crt", security.CertDir+hostname+".key")
-		if err != nil {
-			log.Fatalf("load peer cert/key error:%v", err)
-			return
-		}
-		// Load CA cert
-		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
-		if err != nil {
-			log.Fatalf("read ca cert file error:%v", err)
-			return
-		}
-		// Define cert pool
-		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
-		creds := credentials.NewTLS(&tls.Config{
-			Certificates: []tls.Certificate{peerCert},
-			ClientCAs:    caCertPool,
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-		})
-		s.Server = grpc.NewServer(grpc.Creds(creds))
-	} else {
-		log.Warning("TLS Disabled! PulseHA server connection unsecured.")
-		s.Server = grpc.NewServer()
+	// load member cert/key
+	peerCert, err := tls.LoadX509KeyPair(security.CertDir+"server.crt", security.CertDir+"server.key")
+	if err != nil {
+		log.Fatalf("load peer cert/key error:%v", err)
+		return
 	}
+	// Load CA cert
+	caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
+	if err != nil {
+		log.Fatalf("read ca cert file error:%v", err)
+		return
+	}
+	// Define cert pool
+	caCertPool := x509.NewCertPool()
+	if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
+		log.Fatal("failed to append certs")
+		return
+	}
+	creds := credentials.NewTLS(&tls.Config{
+		Certificates: []tls.Certificate{peerCert},
+		ClientCAs:    caCertPool,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+	})
+	s.Server = grpc.NewServer(
+		grpc.Creds(creds),
+		grpc.UnaryInterceptor(s.serverInterceptor),
+	)
+	// Register proto server handlers
 	proto.RegisterServerServer(s.Server, s)
 	// Set our start delay
 	DB.StartDelay = true
@@ -131,7 +143,35 @@ func (s *Server) Setup() {
 	DB.MemberList.Setup()
 	// Start PulseHA daemon server
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)
-	s.Server.Serve(s.Listener)
+	if err := s.Server.Serve(s.Listener); err != nil {
+		log.Fatalf("grpc serve error: %s", err)
+	}
+}
+
+// serverInterceptor - Intercept each request to ensure only Join can be used without a verified cert
+func (s *Server) serverInterceptor(ctx context.Context,
+	req interface{},
+	info *grpc.UnaryServerInfo,
+	handler grpc.UnaryHandler) (interface{}, error) {
+
+	log.Debug("Request - Method:%s", info.FullMethod)
+
+	// Skip authorize when join is requested
+	if info.FullMethod != "/proto.Server/Join" {
+		peer, ok := peer.FromContext(ctx)
+		if ok {
+			tlsInfo := peer.AuthInfo.(credentials.TLSInfo)
+			v := tlsInfo.State.PeerCertificates
+			if len(v) <= 0 {
+				return nil, errors.New("invalid permissions")
+			}
+		}
+	}
+
+	// Calls the handler
+	h, err := handler(ctx, req)
+
+	return h, err
 }
 
 /**
@@ -196,7 +236,16 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 	DB.Logging.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
+	// Make sure we are in a cluster
 	if DB.Config.ClusterCheck() {
+		// Validate our cluster token
+		if !security.SHA256StringValidation(in.Token, DB.Config.Pulse.ClusterToken) {
+			DB.Logging.Warn(in.Hostname + " attempted to join with an invalid cluster token")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Invalid cluster token",
+			}, nil
+		}
 		// Define new node
 		originNode := &config.Node{}
 		// unmarshal byte data to new node
@@ -207,6 +256,13 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Unable to unmarshal config node.",
+			}, nil
+		}
+		// Make sure the node doesnt already exist
+		if nodeExists(in.Hostname) {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "unable to join cluster as a node with hostname " + in.Hostname + " already exists!",
 			}, nil
 		}
 		// TODO: Node validation?
@@ -228,11 +284,40 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 				Message: err.Error(),
 			}, nil
 		}
+		// Attempt to read our CA details
+		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
+		if err != nil {
+			log.Fatal("Unable to load ca.crt: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		// Make sure our CA cert files exist
+		if !utils.CheckFileExists(security.CertDir + "ca.crt") ||
+			!utils.CheckFileExists(security.CertDir + "ca.key") {
+			log.Fatal("ca.crt and or ca.key does not exists")
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Unable to gather TLS details to join the cluster",
+			}, nil
+		}
+		// Load our cert details
+		caKey, err := ioutil.ReadFile(security.CertDir + "ca.key")
+		if err != nil {
+			log.Fatal("Unable to load ca.key: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
 		DB.Logging.Info(in.Hostname + " has joined the cluster")
 		return &proto.PulseJoin{
 			Success: true,
 			Message: "Successfully added ",
 			Config:  buf,
+			CaCrt:   string(caCert),
+			CaKey:   string(caKey),
 		}, nil
 	}
 	return &proto.PulseJoin{

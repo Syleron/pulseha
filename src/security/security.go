@@ -39,7 +39,7 @@ const CertDir = "/etc/pulseha/certs/"
 Generate TLS keys if they don't already exist
 */
 func GenTLSKeys(ip string) error {
-	utils.CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder(CertDir)
 	log.Warning("TLS keys are missing! Generating..")
 	if !utils.CheckFileExists(CertDir+"ca.crt") ||
 		!utils.CheckFileExists(CertDir+"ca.key") {
@@ -47,10 +47,18 @@ func GenTLSKeys(ip string) error {
 	}
 	// Load the CA
 	caCert, err := utils.LoadFile(CertDir + "ca.crt")
+	if err != nil {
+		log.Error(err.Error())
+		return errors.New(err.Error())
+	}
 	caKey, err := utils.LoadFile(CertDir + "ca.key")
 	if err != nil {
 		log.Error(err.Error())
 		return errors.New(err.Error())
+	}
+	// Make sure we have values for both caCert and caKey
+	if len(caKey) == 0 || len(caCert) == 0 {
+		return errors.New("invalid ca.cert ca.key values")
 	}
 	// Decode the cert and key
 	cpb, _ := pem.Decode(caCert)
@@ -67,8 +75,10 @@ func GenTLSKeys(ip string) error {
 		fmt.Println("parsekey:", e.Error())
 		os.Exit(1)
 	}
-	// Generate certs
-	GenerateCerts(ip, cert, key)
+	// Generate Server certs
+	GenerateServerCert(ip, cert, key)
+	// Generate Client certs
+	GenerateClientCert(cert, key)
 	return nil
 }
 
@@ -76,7 +86,7 @@ func GenTLSKeys(ip string) error {
 
  */
 func GenerateCACert(ip string) {
-	utils.CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder(CertDir)
 	// Generate new key pair
 	rootKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -98,13 +108,13 @@ func GenerateCACert(ip string) {
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	writeCertFile("ca", rootCertPEM)
-	writeKeyFile("ca", rootKey)
+	WriteCertFile("ca", rootCertPEM)
+	WriteKeyFileFromRSAKey("ca", rootKey)
 }
 
 // Generate certs
 func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder(CertDir)
 	// Generate new key pair
 	servKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -130,15 +140,15 @@ func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 		log.Error("unable to generate cert because unable to get hostname")
 		return
 	}
-	writeCertFile(hostname, servCertPEM)
-	writeKeyFile(hostname, servKey)
+	WriteCertFile(hostname, servCertPEM)
+	WriteKeyFileFromRSAKey(hostname, servKey)
 }
 
 /**
 
  */
 func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder(CertDir)
 	// Generate new key pair
 	servKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -158,21 +168,15 @@ func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateK
 	if err != nil {
 		log.Fatalf("error creating cert: %v", err)
 	}
-	// write keys
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		log.Error("unable to generate cert because unable to get hostname")
-		return
-	}
-	writeCertFile(hostname+".server", servCertPEM)
-	writeKeyFile(hostname+".server", servKey)
+	WriteCertFile("server", servCertPEM)
+	WriteKeyFileFromRSAKey("server", servKey)
 }
 
 /**
 
  */
 func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder("/etc/pulseha/certs")
+	utils.CreateFolder(CertDir)
 	// Generate new key pair
 	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -191,14 +195,8 @@ func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	if err != nil {
 		log.Fatalf("error creating cert: %v", err)
 	}
-	// write keys
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		log.Error("unable to generate cert because unable to get hostname")
-		return
-	}
-	writeCertFile(hostname+".client", clientCertPEM)
-	writeKeyFile(hostname+".client", clientKey)
+	WriteCertFile("client", clientCertPEM)
+	WriteKeyFileFromRSAKey("client", clientKey)
 }
 
 /**
@@ -250,27 +248,37 @@ func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv 
 /**
 TODO: Use Utils functions
 */
-func writeCertFile(fileName string, cert []byte) {
+func WriteCertFile(fileName string, cert []byte) {
 	// Write the cert to file
 	certOut, err := os.Create(CertDir + fileName + ".crt")
 	if err != nil {
-		hostname, _ := utils.GetHostname()
-		fmt.Println("Failed to open "+hostname+" for writing:", err)
+		fmt.Println("Failed writing key:", err)
 		os.Exit(1)
 	}
 	certOut.Write(cert)
 	certOut.Close()
 }
 
+//
+func WriteKeyFile(fileName string, key []byte) {
+	// Write the key to file
+	keyOut, err := os.OpenFile(CertDir+fileName+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		fmt.Println("Failed writing key:", err)
+		os.Exit(1)
+	}
+	keyOut.Write(key)
+	keyOut.Close()
+}
+
 /**
 TODO: Use Utils functions
 */
-func writeKeyFile(filename string, key *rsa.PrivateKey) {
+func WriteKeyFileFromRSAKey(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(CertDir+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		hostname, _ := utils.GetHostname()
-		fmt.Println("Failed to open key "+hostname+" for writing:", err)
+		fmt.Println("Failed writing key:", err)
 		os.Exit(1)
 	}
 	pem.Encode(keyOut, &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})

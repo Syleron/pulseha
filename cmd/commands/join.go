@@ -36,12 +36,13 @@ type JoinCommand struct {
  */
 func (c *JoinCommand) Help() string {
 	helpText := `
-Usage: pulseha join [bind-ip] [bind-port] <destination IP> <destination port> <destination hostname>
+Usage: pulseha join [bind-ip] [bind-port] [token] <destination IP> <destination port> <destination hostname>
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
   -bind-ip pulse daemon bind address
   -bind-port pulse daemon bind  port
+  -token - unique cluster token
 `
 	return strings.TrimSpace(helpText)
 }
@@ -56,6 +57,7 @@ func (c *JoinCommand) Run(args []string) int {
 	// Set the acceptable cmd flags
 	bindIP := cmdFlags.String("bind-ip", "127.0.0.1", "Bind IP address for local Pulse daemon")
 	bindPort := cmdFlags.String("bind-port", "1234", "Bind port for local Pulse daemon")
+	clusterToken := cmdFlags.String("token", "", "Unique cluster join token")
 
 	// Parse and handle error
 	if err := cmdFlags.Parse(args); err != nil {
@@ -67,7 +69,7 @@ func (c *JoinCommand) Run(args []string) int {
 
 	// Make sure that the join address and port is set
 	if len(cmds) < 3 {
-		c.Ui.Error("Please specify an address, port and hostname to join.")
+		c.Ui.Error("Please specify an address, port and hostname to join")
 		c.Ui.Error("")
 		c.Ui.Error(c.Help())
 		return 1
@@ -75,14 +77,21 @@ func (c *JoinCommand) Run(args []string) int {
 
 	// If we have the default.. which we don't want.. error out.
 	if *bindIP == "127.0.0.1" {
-		c.Ui.Error("Please specify a bind IP address.\n")
+		c.Ui.Error("Please specify a bind IP address\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
 	// If we have the default.. which we don't want.. error out.
 	if *bindPort == "1234" {
-		c.Ui.Error("Please specify a bind port.\n")
+		c.Ui.Error("Please specify a bind port\n")
+		c.Ui.Output(c.Help())
+		return 1
+	}
+
+	// Make sure we are providing a valid cluster token
+	if *clusterToken == "" {
+		c.Ui.Error("Please provide a valid unique cluster token\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
@@ -99,7 +108,7 @@ func (c *JoinCommand) Run(args []string) int {
 
 	// Port validation
 	if !utils.IsPort(*bindPort) {
-		c.Ui.Error("Please specify a valid port 0-65536.\n")
+		c.Ui.Error("Please specify a valid port 0-65536\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
@@ -112,14 +121,14 @@ func (c *JoinCommand) Run(args []string) int {
 	if utils.IsIPv6(joinIP) {
 		joinIP = utils.SanitizeIPv6(joinIP)
 	} else if !utils.IsIPv4(joinIP) {
-		c.Ui.Error("Please specify a valid join address.\n")
+		c.Ui.Error("Please specify a valid join address\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
 
 	// Validate join Port
 	if !utils.IsPort(joinPort) {
-		c.Ui.Error("Please specify a valid join port 0-65536.\n")
+		c.Ui.Error("Please specify a valid join port 0-65536\n")
 		c.Ui.Output(c.Help())
 		return 1
 	}
@@ -146,6 +155,7 @@ func (c *JoinCommand) Run(args []string) int {
 		BindIp:   *bindIP,
 		BindPort: *bindPort,
 		Hostname: hostname,
+		Token: *clusterToken,
 	})
 
 	if err != nil {

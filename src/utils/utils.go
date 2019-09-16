@@ -99,6 +99,15 @@ func CreateFolder(path string) bool {
 	return false
 }
 
+// DeleteFolder - Remove a folder and its conents
+func DeleteFolder(path string) bool {
+	err := os.RemoveAll(path)
+	if err != nil {
+		return false
+	}
+	return true
+}
+
 /**
 Check if a folder exists.
 */

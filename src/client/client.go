@@ -24,12 +24,11 @@ import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
 	p "github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/Syleron/PulseHA/src/security"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"io/ioutil"
 	"time"
-	"github.com/Syleron/PulseHA/src/security"
 )
 
 type Client struct {
@@ -118,13 +117,9 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	var err error
 	if tlsEnabled {
 		// Load member cert/key
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			return errors.New("unable to connect because cannot get hostname")
-		}
 		peerCert, err := tls.LoadX509KeyPair(
-			security.CertDir+hostname+".crt",
-			security.CertDir+hostname+".key",
+			security.CertDir+"client.crt",
+			security.CertDir+"client.key",
 		)
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
@@ -135,14 +130,20 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 			return errors.New("Could not connect to host: " + err.Error())
 		}
 		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
+		if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
+			return errors.New("failed to append ca certs")
+		}
 		creds := credentials.NewTLS(&tls.Config{
+			ServerName: ip,
 			Certificates: []tls.Certificate{peerCert},
 			RootCAs:      caCertPool,
 		})
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
-		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithInsecure())
+		config := &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(credentials.NewTLS(config)))
 	}
 	if err != nil {
 		log.Errorf("GRPC client connection error: %s", err.Error())
