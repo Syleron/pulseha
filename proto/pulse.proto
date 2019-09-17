@@ -72,6 +72,7 @@ message PulseCreate {
     string message = 2;
     string bind_ip = 3;
     string bind_port = 4;
+    string token = 5;
 }
 message PulseCert {
     bool success = 1;
@@ -161,6 +162,11 @@ message PulseConfig {
     string key = 3;
     string value = 4;
 }
+message PulseToken {
+    bool success = 1;
+    string message = 2;
+    string token = 3;
+}
 message PulseLogs {
     enum Level {
         INFO = 0;
@@ -205,6 +211,8 @@ service CLI {
     rpc Promote (PulsePromote) returns (PulsePromote);
     // Promote a member
     rpc Config (PulseConfig) returns (PulseConfig);
+    // Generate new cluster token
+    rpc Token (PulseToken) returns (PulseToken);
 }
 
 service Server {

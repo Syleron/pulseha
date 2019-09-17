@@ -299,6 +299,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 Create new PulseHA cluster
 */
 func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.PulseCreate, error) {
+	var token string
 	s.Lock()
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
@@ -319,7 +320,7 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		// Add the new node instance
 		nodeAdd(hostname, newNode)
 		// Generate new token
-		token := generateRandomString(20)
+		token = generateRandomString(20)
 		// Create a new hasher for sha 256
 		token_hash := security.GenerateSHA256Hash(token)
 		// Set our token in our config
@@ -346,6 +347,7 @@ pulseha join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + in
 		return &proto.PulseCreate{
 			Success: false,
 			Message: "Pulse daemon is already in a configured cluster",
+			Token: token,
 		}, nil
 	}
 }
@@ -605,5 +607,38 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 	return &proto.PulseConfig{
 		Success: true,
 		Message: "Successfully updated pulseha config",
+	}, nil
+}
+
+// Token - Generate a new cluster token
+func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.PulseToken, error) {
+	s.Lock()
+	defer s.Unlock()
+
+	// Generate new token
+	token := generateRandomString(20)
+
+	// Create a new hasher for sha 256
+	token_hash := security.GenerateSHA256Hash(token)
+
+	// Set our token in our config
+	DB.Config.Pulse.ClusterToken = token_hash
+
+	// Sync our config with the cluster
+	if err := DB.MemberList.SyncConfig(); err != nil {
+		return &proto.PulseToken{
+			Success: false,
+			Message: "PulseHA was unable to update the cluster with the new token. Failed.",
+		}, nil
+	}
+
+	// Save back to our config
+	DB.Config.Save()
+
+	// report back with success
+	return &proto.PulseToken{
+		Success: true,
+		Message: "Success! Your new cluster token is " + token,
+		Token: token,
 	}, nil
 }

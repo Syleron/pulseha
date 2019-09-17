@@ -72,6 +72,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"token": func() (cli.Command, error) {
+			return &commands.TokenCommand{
+				Ui: ui,
+			}, nil
+		},
 		"config": func() (cli.Command, error) {
 			return &commands.ConfigCommand{
 				Ui: ui,

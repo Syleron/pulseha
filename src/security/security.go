@@ -33,7 +33,7 @@ import (
 	"time"
 )
 
-const CertDir = "/etc/pulseha/certs"
+const CertDir = "/etc/pulseha/certs/"
 
 /**
 Generate TLS keys if they don't already exist
