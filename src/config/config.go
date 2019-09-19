@@ -263,7 +263,7 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 
 // UpdateValue - Update a key's value
 func (c *Config) UpdateValue(key string, value string) error {
-	err := jsonHelper.SetStructFieldByTag(key, value, c.Pulse)
+	err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse)
 	if err != nil {
 		return err
 	}
