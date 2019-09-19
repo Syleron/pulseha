@@ -3,13 +3,9 @@
         "tls": false,
         "hcs_interval": 1000,
         "fos_interval": 5000,
-        "fo_limit": 10000
+        "fo_limit": 10000,
+        "logging_loevel": "info"
     },
     "floating_ip_groups": {},
-    "nodes": {},
-    "logging": {
-        "level": "info",
-        "to_logfile": false,
-        "logfile": "/var/log/pulseha.log"
-    }
+    "nodes": {}
 }

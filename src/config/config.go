@@ -28,16 +28,15 @@ import (
 )
 
 type Config struct {
-	Pulse   Local               `json:"pulseha"`
-	Groups  map[string]*FloatingIPGroup    `json:"floating_ip_groups"`
-	Nodes   map[string]Node     `json:"nodes"`
-	Logging Logging             `json:"logging"`
+	Pulse   Local                       `json:"pulseha"`
+	Groups  map[string]*FloatingIPGroup `json:"floating_ip_groups"`
+	Nodes   map[string]Node             `json:"nodes"`
 	sync.Mutex
 }
 
 type FloatingIPGroup struct {
-	NodeWeight   	  map[string]int    `json:"nodes"`
-	Fips		      []string        	  `json:"fips"`
+	NodeWeight map[string]int `json:"nodes"`
+	Fips       []string       `json:"fips"`
 }
 
 type Local struct {
@@ -46,6 +45,7 @@ type Local struct {
 	FailOverInterval    int    `json:"fos_interval"`
 	FailOverLimit       int    `json:"fo_limit"`
 	LocalNode           string `json:"local_node"`
+	LoggingLevel        string `json:"logging_level"`
 }
 
 type Nodes struct {
@@ -56,13 +56,7 @@ type Node struct {
 	IP       string              `json:"bind_address"`
 	Port     string              `json:"bind_port"`
 	IPGroups map[string][]string `json:"group_assignments"`
-	Weight int32				 `json:"weight"`
-}
-
-type Logging struct {
-	Level     string `json:"level"`
-	ToLogFile bool   `json:"to_logfile"`
-	LogFile   string `json:"logfile"`
+	Weight   int32               `json:"weight"`
 }
 
 /**
@@ -245,7 +239,7 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 
 /**
 Instantiate, setup and return our Config
- */
+*/
 func GetConfig() *Config {
 	cfg := Config{}
 	cfg.Load()
