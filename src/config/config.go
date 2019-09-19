@@ -32,7 +32,6 @@ type Config struct {
 	Pulse   Local               `json:"pulseha"`
 	Groups  map[string][]string `json:"floating_ip_groups"`
 	Nodes   map[string]Node     `json:"nodes"`
-	Logging Logging             `json:"logging"`
 	sync.Mutex
 }
 
@@ -42,6 +41,7 @@ type Local struct {
 	FailOverLimit       int    `json:"fo_limit"`
 	LocalNode           string `json:"local_node"`
 	ClusterToken        string `json:"cluster_token"`
+	LoggingLevel        string `json:"logging_level"`
 }
 
 type Nodes struct {
@@ -52,12 +52,6 @@ type Node struct {
 	IP       string              `json:"bind_address"`
 	Port     string              `json:"bind_port"`
 	IPGroups map[string][]string `json:"group_assignments"`
-}
-
-type Logging struct {
-	Level     string `json:"level"`
-	ToLogFile bool   `json:"to_logfile"`
-	LogFile   string `json:"logfile"`
 }
 
 /**
