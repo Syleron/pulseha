@@ -131,7 +131,7 @@ func main() {
 	// Load the config
 	pulse.DB.Config = config.GetConfig()
 	// Set the logging level
-	setLogLevel(pulse.DB.Config.Logging.Level)
+	setLogLevel(pulse.DB.Config.Pulse.LoggingLevel)
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)
