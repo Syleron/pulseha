@@ -62,19 +62,6 @@ func (c *Config) GetConfig() Config {
 }
 
 /**
- * Sets the local node name
- */
-func (c *Config) SetLocalNode() error {
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		return errors.New("cannot set local node because unable to get local hostname")
-	}
-	log.Debugf("Config:setLocalNode Hostname is: %s", hostname)
-	c.Pulse.LocalNode = hostname
-	return nil
-}
-
-/**
 
  */
 func (c *Config) NodeCount() int {
@@ -98,37 +85,38 @@ func (c *Config) Load() {
 	if err != nil {
 		log.Fatalf("Error reading config file: %s", err)
 	}
-	err = json.Unmarshal([]byte(b), &c)
-	if err != nil {
+	if err = json.Unmarshal([]byte(b), &c); err != nil {
 		log.Fatalf("Unable to unmarshal config: %s", err)
 	}
-	if err != nil {
-		log.Fatal("Unable to load config.json. Either it doesn't exist or there may be a permissions issue")
-	}
-	err = c.SetLocalNode()
-	if err != nil {
-		log.Fatalf("The local Hostname does not match the configuration")
+	if !c.Validate() {
+		os.Exit(1)
 	}
 }
 
 /**
  * Function used to save the config
  */
-func (c *Config) Save() {
+func (c *Config) Save() error {
 	log.Debug("Config:Save() Saving config..")
 	c.Lock()
 	defer c.Unlock()
 	// Validate before we save
-	c.Validate()
+	if !c.Validate() {
+		return errors.New("unable to save config. value mismatch")
+	}
 	// Convert struct back to JSON format
-	configJSON, _ := json.MarshalIndent(c, "", "    ")
+	configJSON, err := json.MarshalIndent(c, "", "    ")
+	if err != nil {
+		return err
+	}
 	// Save back to file
-	err := ioutil.WriteFile("/etc/pulseha/config.json", configJSON, 0644)
+	err = ioutil.WriteFile("/etc/pulseha/config.json", configJSON, 0644)
 	// Check for errors
 	if err != nil {
 		log.Error("Unable to save config.json. Either it doesn't exist or there may be a permissions issue")
-		os.Exit(1)
+		return err
 	}
+	return nil
 }
 
 /**
@@ -143,49 +131,54 @@ func (c *Config) Reload() {
 /**
  *
  */
-func (c *Config) Validate() {
-	var success bool = true
-
+func (c *Config) Validate() bool {
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		log.Fatal("Unable to get local hostname")
+		return false
+	}
 	// Make sure our groups section is valid
 	if c.Groups == nil {
 		log.Fatal("Unable to load Groups section of the config")
-		success = false
+		return false
 	}
 
 	// Make sure our nodes section is valid
 	if c.Nodes == nil {
 		log.Fatal("Unable to load Nodes section of the config")
-		success = false
+		return false
+	}
+
+	// Make sure our local_node hostname matches our hostname
+	if c.Pulse.LocalNode != hostname {
+		log.Fatal("hostname mismatch. 'local_node' config value does not match system hostname")
+		return false
 	}
 
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
-		for name, _ := range c.Nodes {
-			if _, ok := c.Nodes[name]; !ok {
-				log.Fatal("Hostname mismatch. Localhost does not exist in cluster config")
-				success = false
+		for range c.Nodes {
+			_, ok := c.Nodes[hostname]
+			if !ok {
+				log.Fatal("hostname mismatch. Local hostname does not exist in nodes section")
+				return false
 			}
 		}
 	}
 
 	if c.Pulse.FailOverInterval < 1000 || c.Pulse.FailOverLimit < 1000 || c.Pulse.HealthCheckInterval < 1000 {
 		log.Fatal("Please make sure the interval and limit values in your config are valid millisecond values of at least 1 second")
-		success = false
+		return false
 	}
 
 	if c.Pulse.FailOverLimit < c.Pulse.FailOverInterval {
 		log.Fatal("The fos_interval value must be a smaller value then your fo_limit")
-		success = false
+		return false
 	}
 
-	// TODO: Check if our hostname exists in the cluster config
 	// TODO: Check if we have valid network interface names
 
-	// Handles if shit hits the roof
-	if success == false {
-		// log why we exited?
-		os.Exit(1)
-	}
+	return true
 }
 
 /**
@@ -245,7 +238,6 @@ Instantiate, setup and return our Config
 func GetConfig() *Config {
 	cfg := Config{}
 	cfg.Load()
-	cfg.Validate()
 	return &cfg
 }
 
@@ -263,11 +255,12 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 
 // UpdateValue - Update a key's value
 func (c *Config) UpdateValue(key string, value string) error {
-	err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse)
-	if err != nil {
+	if err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse); err != nil {
 		return err
 	}
 	// Save our config with the updated info
-	c.Save()
+	if err := c.Save(); err != nil {
+		return err
+	}
 	return  nil
 }

@@ -82,12 +82,6 @@ func (s *Server) Setup() {
 		return
 	}
 
-	// make sure we have a cluster token
-	if DB.Config.Pulse.ClusterToken == "" {
-		log.Fatal(errors.New("pulse config 'cluster_token' is not set"))
-		return
-	}
-
 	// Make sure our local node is setup and available
 	if exists := nodeExists(hostname); !exists {
 		log.Fatal(errors.New("cannot find local hostname in pulse cluster config"))
@@ -267,11 +261,27 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 		// TODO: Node validation?
 		// Add node to config
-		nodeAdd(in.Hostname, originNode)
+		if err := nodeAdd(in.Hostname, originNode); err != nil {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Failed to add new node to membership list",
+			}, nil
+		}
 		// Save our new config to file
-		DB.Config.Save()
+		if err := DB.Config.Save(); err != nil {
+			if nodeExists(in.Hostname) {
+				if err := nodeDelete(in.Hostname); err != nil {
+					return &proto.PulseJoin{
+						Success: false,
+						Message: "Failed to clean up after a failed join attempt",
+					}, nil
+				}
+			}
+		}
 		// Update the cluster config
-		DB.MemberList.SyncConfig()
+		if err := DB.MemberList.SyncConfig(); err != nil {
+			DB.Logging.Warn("Unable to sync config when a join attempt was made")
+		}
 		// Add node to the memberlist
 		DB.MemberList.Reload()
 		// Return with our new updated config

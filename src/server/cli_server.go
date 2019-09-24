@@ -69,8 +69,6 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		// Generate client server keys if tls is enabled
-		//security.GenTLSKeys(in.BindIp)
 		// Create a new client
 		c := &client.Client{}
 		// Attempt to connect
@@ -147,10 +145,17 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 				Message: "Unable to unmarshal config node.",
 			}, nil
 		}
+		// !!!IMPORTANT!!!: Do not replace our local config
+		peerConfig.Pulse = DB.Config.Pulse
 		// Set the config
 		DB.SetConfig(peerConfig)
 		// Save the config
-		DB.Config.Save()
+		if err := DB.Config.Save(); err != nil {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Failed to write config. Joined failed.",
+			}, nil
+		}
 		// Reload config in memory
 		DB.Config.Reload()
 		// Setup our daemon server
@@ -308,6 +313,10 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		//TODO: horrible way to do this but it will do for now.
 		// Store the old node section
 		oldNode := DB.Config.Nodes[hostname]
+		// some validation
+		if oldNode.IPGroups == nil {
+			oldNode.IPGroups = map[string][]string{}
+		}
 		// Create a new node section and populate it using new details
 		// and old node details.
 		newNode := &config.Node{
@@ -597,6 +606,13 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.PulseConfig, error) {
 	s.Lock()
 	defer s.Unlock()
+	// If the value is hostname, update our node in our nodes section as well
+	if in.Key == "local_node" {
+		return &proto.PulseConfig{
+			Success: false,
+			Message: "Please restart the PulseHA daemon to update the local node hostname.",
+		}, nil
+	}
 	// Update our key value
 	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
 		return &proto.PulseConfig{
@@ -604,6 +620,8 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			Message: err.Error(),
 		}, nil
 	}
+	DB.Config.Save()
+	DB.Config.Reload()
 	return &proto.PulseConfig{
 		Success: true,
 		Message: "Successfully updated pulseha config",

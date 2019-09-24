@@ -32,5 +32,7 @@ type Database struct {
 }
 
 func (d *Database) SetConfig(config *config.Config) {
+	d.Config.Lock()
+	defer d.Config.Unlock()
 	d.Config = config
 }
