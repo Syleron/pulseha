@@ -151,6 +151,9 @@ func setLogLevel(level string) {
 		panic(err.Error())
 	}
 	log.SetLevel(logLevel)
+	if level ==  "debug" {
+		log.Info("**** DEBUG LOGGING ENABLED ****")
+	}
 }
 
 /**

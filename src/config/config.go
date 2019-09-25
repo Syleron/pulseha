@@ -28,10 +28,14 @@ import (
 	"sync"
 )
 
+var (
+	CONFIG_LOCATION = "/etc/pulseha/config.json"
+)
+
 type Config struct {
-	Pulse   Local               `json:"pulseha"`
-	Groups  map[string][]string `json:"floating_ip_groups"`
-	Nodes   map[string]Node     `json:"nodes"`
+	Pulse  Local               `json:"pulseha"`
+	Groups map[string][]string `json:"floating_ip_groups"`
+	Nodes  map[string]Node     `json:"nodes"`
 	sync.Mutex
 }
 
@@ -78,19 +82,32 @@ func (c *Config) GetLocalNode() string {
 /**
  * Function used to load the config
  */
-func (c *Config) Load() {
+func (c *Config) Load() error {
 	c.Lock()
 	defer c.Unlock()
-	b, err := ioutil.ReadFile("/etc/pulseha/config.json")
-	if err != nil {
-		log.Fatalf("Error reading config file: %s", err)
+	// Check to see if we have a config already
+	if utils.CheckFileExists(CONFIG_LOCATION) {
+		b, err := ioutil.ReadFile(CONFIG_LOCATION)
+		if err != nil {
+			log.Fatalf("Error reading config file: %s", err)
+			return err
+		}
+		if err = json.Unmarshal([]byte(b), &c); err != nil {
+			log.Fatalf("Unable to unmarshal config: %s", err)
+			return err
+		}
+		if !c.Validate() {
+			log.Fatalf("invalid PulseHA config")
+			os.Exit(1)
+		}
+	} else {
+		// Create a default config
+		if err := c.SaveDefaultLocalConfig(); err != nil {
+			log.Fatalf("unable to load PulseHA config")
+			os.Exit(1)
+		}
 	}
-	if err = json.Unmarshal([]byte(b), &c); err != nil {
-		log.Fatalf("Unable to unmarshal config: %s", err)
-	}
-	if !c.Validate() {
-		os.Exit(1)
-	}
+	return nil
 }
 
 /**
@@ -110,7 +127,7 @@ func (c *Config) Save() error {
 		return err
 	}
 	// Save back to file
-	err = ioutil.WriteFile("/etc/pulseha/config.json", configJSON, 0644)
+	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
 	// Check for errors
 	if err != nil {
 		log.Error("Unable to save config.json. Either it doesn't exist or there may be a permissions issue")
@@ -262,5 +279,38 @@ func (c *Config) UpdateValue(key string, value string) error {
 	if err := c.Save(); err != nil {
 		return err
 	}
-	return  nil
+	return nil
+}
+
+// DefaultLocalConfig - Generate a default config to write
+func (c *Config) SaveDefaultLocalConfig() error {
+	hostname, err := os.Hostname()
+	if err != nil {
+		panic(err)
+	}
+	defaultConfig := &Config{
+		Pulse: Local{
+			HealthCheckInterval: 1000,
+			FailOverInterval:    5000,
+			FailOverLimit:       10000,
+			LocalNode:           hostname,
+			ClusterToken:        "",
+			LoggingLevel:        "info",
+		},
+		Groups: map[string][]string{},
+		Nodes:  map[string]Node{},
+	}
+	// Convert struct back to JSON format
+	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")
+	if err != nil {
+		return err
+	}
+	// Save back to file
+	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
+	// Check for errors
+	if err != nil {
+		log.Error("Unable to save config.json. There may be a permissions issue")
+		return err
+	}
+	return nil
 }
