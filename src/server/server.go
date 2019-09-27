@@ -33,6 +33,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"io/ioutil"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -84,15 +85,13 @@ func (s *Server) Setup() {
 
 	// Make sure our local node is setup and available
 	if exists := nodeExists(hostname); !exists {
-		log.Fatal(errors.New("cannot find local hostname in pulse cluster config"))
+		log.Error("cannot find local hostname in pulse cluster config")
 
-		if len(DB.Config.Nodes) == 0 {
-			// Create local node in config
-			if err := nodecreateLocal(); err != nil {
-				log.Errorf(err.Error())
-				return
-			}
+		if len(DB.Config.Nodes) > 0 {
+			// We have other members but our self... something's wrong
+			log.Error("Hanging config detected. Other nodes are defined but not the local member.")
 		}
+		os.Exit(1)
 	}
 	bindIP := utils.FormatIPv6(DB.Config.LocalNode().IP)
 	// Listen

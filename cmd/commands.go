@@ -82,6 +82,11 @@ func init() {
 				Ui: ui,
 			}, nil
 		},
+		"network": func() (cli.Command, error) {
+			return &commands.NetworkCommand{
+				Ui: ui,
+			}, nil
+		},
 		"version": func() (cli.Command, error) {
 			return &commands.VersionCommand{
 				Version: Version,

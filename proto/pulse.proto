@@ -167,6 +167,11 @@ message PulseToken {
     string message = 2;
     string token = 3;
 }
+message PulseNetwork {
+    bool success = 1;
+    string message = 2;
+    string action = 3;
+}
 message PulseLogs {
     enum Level {
         INFO = 0;
@@ -213,6 +218,8 @@ service CLI {
     rpc Config (PulseConfig) returns (PulseConfig);
     // Generate new cluster token
     rpc Token (PulseToken) returns (PulseToken);
+    // Perform network related actions
+    rpc Network (PulseNetwork) returns (PulseNetwork);
 }
 
 service Server {

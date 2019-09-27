@@ -22,14 +22,17 @@ import (
 	"github.com/Syleron/PulseHA/src/config"
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/labstack/gommon/log"
 )
 
 /**
 Create new local config node definition
 */
-func nodecreateLocal() error {
-	DB.Logging.Debug("create localhost node config definition")
+func nodeCreateLocal(ip string, port string) error {
+	log.Debug("create localhost node config definition")
 	newNode := &config.Node{
+		IP:       ip,
+		Port:     port,
 		IPGroups: make(map[string][]string, 0),
 	}
 	hostname, err := utils.GetHostname()
@@ -37,19 +40,24 @@ func nodecreateLocal() error {
 		return errors.New("cannot create cluster because unable to get hostname")
 	}
 	// Add the new node
-	nodeAdd(hostname, newNode)
+	if err := nodeAdd(hostname, newNode); err != nil {
+		return errors.New("unable to add local node to config")
+	}
 	// Create interface definitions each with their own group
-	// TODO: Probably move this to another function?
 	for _, ifaceName := range netUtils.GetInterfaceNames() {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
 			groupName := genGroupName()
 			DB.Config.Groups[groupName] = []string{}
-			groupAssign(groupName, hostname, ifaceName)
+			if err := groupAssign(groupName, hostname, ifaceName); err != nil {
+				log.Warnf("Unable to assign group to interface: %s", err.Error())
+			}
 		}
 	}
 	// Save to our config
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		return errors.New("write local node failed")
+	}
 	// return our results
 	return nil
 }

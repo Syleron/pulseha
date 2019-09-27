@@ -34,6 +34,10 @@ import (
 	"time"
 )
 
+var (
+	CLUSTER_REQUIRED_MESSAGE = "You must be in a configured cluster to complete this action."
+)
+
 /**
 Server struct type
 */
@@ -188,7 +192,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	if !DB.Config.ClusterCheck() {
 		return &proto.PulseLeave{
 			Success: false,
-			Message: "Unable to leave as no cluster was found",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 		}, nil
 	}
 	// Check to see if we are not the only one in the "cluster"
@@ -203,25 +207,27 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
+	// make oureselves passive
 	MakeLocalPassive()
-	// TODO: horrible way to do this but it will do for now.
-	oldNode := DB.Config.Nodes[hostname]
-	newNode := &config.Node{
-		IPGroups: oldNode.IPGroups,
-	}
-	// ---
-	nodesClearLocal()
-	// ewww
-	nodeAdd(hostname, newNode)
-	// ---
+	// reset our memberlist
 	DB.MemberList.Reset()
-	DB.Config.Save()
+	// Clear our config
+	nodesClearLocal()
+	groupClearLocal()
+	// Shutdown daemon server
 	s.Server.Shutdown()
+	// save
+	if err := DB.Config.Save(); err != nil {
+		return &proto.PulseLeave{
+			Success: false,
+			Message: "PulseHA successfully removed from cluster but could not update local config",
+		}, nil
+	}
 	// Remove our generated keys
 	if !utils.DeleteFolder(security.CertDir) {
 		log.Warn("Failed to remove certs directory. Please manually remove hanging certs.")
 	}
-	// bring down the ips
+	// yay?
 	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
 	if DB.Config.NodeCount() == 1 {
 		return &proto.PulseLeave{
@@ -244,7 +250,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 	if !DB.Config.ClusterCheck() {
 		return &proto.PulseRemove{
 			Success: false,
-			Message: "Unable to perform remove as no cluster was found",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 		}, nil
 	}
 	// make sure we are not removing our active node
@@ -279,6 +285,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 	// Check if I am the node being removed
 	if in.Hostname == localHostname {
 		nodesClearLocal()
+		groupClearLocal()
 		s.Server.Shutdown()
 		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
@@ -309,25 +316,19 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
 	if !DB.Config.ClusterCheck() {
+		// Get our local hostname
 		hostname := DB.Config.GetLocalNode()
-		//TODO: horrible way to do this but it will do for now.
-		// Store the old node section
-		oldNode := DB.Config.Nodes[hostname]
-		// some validation
-		if oldNode.IPGroups == nil {
-			oldNode.IPGroups = map[string][]string{}
+		// Remove any hanging nodes
+		nodesClearLocal()
+		groupClearLocal()
+		// Create a new local node config
+		if err := nodeCreateLocal(in.BindIp, in.BindPort); err != nil {
+			return &proto.PulseCreate{
+				Success: false,
+				Message: "Failed write local not to config",
+				Token: token,
+			}, nil
 		}
-		// Create a new node section and populate it using new details
-		// and old node details.
-		newNode := &config.Node{
-			IP:       in.BindIp,
-			Port:     in.BindPort,
-			IPGroups: oldNode.IPGroups,
-		}
-		// Remove the old instance
-		nodeDelete(hostname)
-		// Add the new node instance
-		nodeAdd(hostname, newNode)
 		// Generate new token
 		token = generateRandomString(20)
 		// Create a new hasher for sha 256
@@ -367,6 +368,12 @@ Add a new floating IP group
 func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*proto.PulseGroupNew, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupNew{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	groupName, err := groupNew(in.Name)
 	if err != nil {
 		return &proto.PulseGroupNew{
@@ -388,6 +395,12 @@ Delete floating IP group
 func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete) (*proto.PulseGroupDelete, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupDelete{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := groupDelete(in.Name)
 	if err != nil {
 		return &proto.PulseGroupDelete{
@@ -409,6 +422,12 @@ Add IP to group
 func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*proto.PulseGroupAdd, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := groupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &proto.PulseGroupAdd{
@@ -440,6 +459,12 @@ Remove IP from group
 func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemove) (*proto.PulseGroupRemove, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupRemove{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
 	if in.Ips == nil || in.Name == "" {
 		return &proto.PulseGroupRemove{
@@ -484,6 +509,12 @@ Assign group to interface
 func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign) (*proto.PulseGroupAssign, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupAssign{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := groupAssign(in.Group, in.Node, in.Interface)
 	if err != nil {
 		return &proto.PulseGroupAssign{
@@ -505,6 +536,12 @@ Unassign group from interface
 func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnassign) (*proto.PulseGroupUnassign, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseGroupUnassign{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := groupUnassign(in.Group, in.Node, in.Interface)
 	if err != nil {
 		return &proto.PulseGroupUnassign{
@@ -526,6 +563,12 @@ Show all groups
 func (s *CLIServer) GroupList(ctx context.Context, in *proto.GroupTable) (*proto.GroupTable, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.GroupTable{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	table := new(proto.GroupTable)
 	for name, ips := range DB.Config.Groups {
 		nodes, interfaces := getGroupNodes(name)
@@ -541,6 +584,12 @@ Return the status for each node within the cluster
 func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.PulseStatus, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseStatus{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	table := new(proto.PulseStatus)
 	for _, member := range DB.MemberList.Members {
 		details, _ := nodeGetByName(member.Hostname)
@@ -570,6 +619,12 @@ Handle CLI promote request
 func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.PulsePromote, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulsePromote{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := DB.MemberList.PromoteMember(in.Member)
 	if err != nil {
 		return &proto.PulsePromote{
@@ -589,6 +644,12 @@ Handle CLI promote request
 func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseCert, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseCert{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	err := security.GenTLSKeys(in.BindIp)
 	if err != nil {
 		return &proto.PulseCert{
@@ -606,6 +667,12 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.PulseConfig, error) {
 	s.Lock()
 	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseConfig{
+			Success: false,
+			Message: CLUSTER_REQUIRED_MESSAGE,
+		}, nil
+	}
 	// If the value is hostname, update our node in our nodes section as well
 	if in.Key == "local_node" {
 		return &proto.PulseConfig{
@@ -632,27 +699,27 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.PulseToken, error) {
 	s.Lock()
 	defer s.Unlock()
-
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseToken{
+			Success: false,
+			Message: "You must be in a configured cluster before completing this action.",
+		}, nil
+	}
 	// Generate new token
 	token := generateRandomString(20)
-
 	// Create a new hasher for sha 256
 	token_hash := security.GenerateSHA256Hash(token)
-
 	// Set our token in our config
 	DB.Config.Pulse.ClusterToken = token_hash
-
 	// Sync our config with the cluster
 	if err := DB.MemberList.SyncConfig(); err != nil {
 		return &proto.PulseToken{
 			Success: false,
-			Message: "PulseHA was unable to update the cluster with the new token. Failed.",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 		}, nil
 	}
-
 	// Save back to our config
 	DB.Config.Save()
-
 	// report back with success
 	return &proto.PulseToken{
 		Success: true,
