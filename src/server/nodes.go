@@ -23,7 +23,6 @@ import (
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/labstack/gommon/log"
-	"github.com/vishvananda/netlink"
 )
 
 /**
@@ -47,18 +46,11 @@ func nodeCreateLocal(ip string, port string) error {
 	// Create interface definitions each with their own group
 	for _, ifaceName := range netUtils.GetInterfaceNames() {
 		if ifaceName != "lo" {
-			// use netlink to get low-level network details
-			intface, err := netlink.LinkByName(ifaceName)
-			if err != nil {
-				return err
-			}
-			if intface.Attrs().Slave == nil {
-				newNode.IPGroups[ifaceName] = make([]string, 0)
-				groupName := genGroupName()
-				DB.Config.Groups[groupName] = []string{}
-				if err := groupAssign(groupName, hostname, ifaceName); err != nil {
-					log.Warnf("Unable to assign group to interface: %s", err.Error())
-				}
+			newNode.IPGroups[ifaceName] = make([]string, 0)
+			groupName := genGroupName()
+			DB.Config.Groups[groupName] = []string{}
+			if err := groupAssign(groupName, hostname, ifaceName); err != nil {
+				log.Warnf("Unable to assign group to interface: %s", err.Error())
 			}
 		}
 	}
@@ -67,6 +59,58 @@ func nodeCreateLocal(ip string, port string) error {
 		return errors.New("write local node failed")
 	}
 	// return our results
+	return nil
+}
+
+// nodeUpdateLocalInterfaces()
+func nodeUpdateLocalInterfaces() error {
+	localHostname, err := utils.GetHostname()
+	if err != nil {
+		return err
+	}
+	localNode, err := nodeGetByName(localHostname)
+	if err != nil {
+		return err
+	}
+	// Get our local interfaces
+	localifaces := 	DB.Config.Nodes[localHostname].IPGroups
+	// Get our current interfaces
+	ifaces := netUtils.GetInterfaceNames()
+	// Add missing interfaces
+	for _, b := range ifaces {
+		exist := false
+		for n := range localifaces {
+			if n == b {
+				exist = true
+				break
+			}
+		}
+		if !exist && b != "lo" {
+			localNode.IPGroups[b] = make([]string, 0)
+			groupName := genGroupName()
+			DB.Config.Groups[groupName] = []string{}
+			if err := groupAssign(groupName, localHostname, b); err != nil {
+				log.Warnf("Unable to assign group to interface: %s", err.Error())
+			}
+		}
+	}
+	// Delete missing interfaces
+	for b := range localifaces {
+		exist := false
+		for _, n := range ifaces {
+			if n == b {
+				exist = true
+				break
+			}
+		}
+		if !exist {
+			delete(DB.Config.Nodes[localHostname].IPGroups, b)
+		}
+	}
+	// Save to our config
+	if err := DB.Config.Save(); err != nil {
+		return errors.New("write local node failed")
+	}
 	return nil
 }
 

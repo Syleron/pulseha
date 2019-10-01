@@ -727,3 +727,31 @@ func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.Pul
 		Token: token,
 	}, nil
 }
+
+// Network -
+func (s *CLIServer) Network(ctx context.Context, in *proto.PulseNetwork) (*proto.PulseNetwork, error) {
+	s.Lock()
+	defer s.Unlock()
+	if !DB.Config.ClusterCheck() {
+		return &proto.PulseNetwork{
+			Success: false,
+			Message: "You must be in a configured cluster before completing this action.",
+		}, nil
+	}
+	switch(in.Action) {
+	case "resync":
+		if err := nodeUpdateLocalInterfaces(); err != nil {
+			return &proto.PulseNetwork{
+				Success: false,
+				Message: err.Error(),
+			}, nil
+		}
+		break
+	default:
+		break
+	}
+	return &proto.PulseNetwork{
+		Success: true,
+		Message: "Success! PulseHA config has been sync'd with local network interfaces",
+	}, nil
+}

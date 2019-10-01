@@ -22,6 +22,7 @@ import (
 	"errors"
 	log "github.com/Sirupsen/logrus"
 	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/vishvananda/netlink"
 	"net"
 	"os"
 	"os/exec"
@@ -200,7 +201,11 @@ func GetInterfaceNames() []string {
 	}
 	var interfaceNames []string
 	for _, iface := range ifaces {
-		interfaceNames = append(interfaceNames, iface.Name)
+		// use netlink to get low-level network details
+		intface, _ := netlink.LinkByName(iface.Name)
+		if intface.Attrs().Slave == nil {
+			interfaceNames = append(interfaceNames, iface.Name)
+		}
 	}
 	return interfaceNames
 }
