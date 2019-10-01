@@ -18,12 +18,10 @@
 package commands
 
 import (
-"context"
-"flag"
-"github.com/Syleron/PulseHA/proto"
-"github.com/mitchellh/cli"
-"google.golang.org/grpc"
-"strings"
+	"flag"
+	"github.com/mitchellh/cli"
+	"google.golang.org/grpc"
+	"strings"
 )
 
 type NetworkCommand struct {
@@ -65,25 +63,25 @@ func (c *NetworkCommand) Run(args []string) int {
 
 	defer connection.Close()
 
-	client := proto.NewCLIClient(connection)
+	//client := proto.NewCLIClient(connection)
 
 	// If no action is provided then just list our current config
 	if len(cmds) == 0 {
-		c.drawGroupsTable(client)
+		//c.drawGroupsTable(client)
 		return 0
 	}
 
 	switch cmds[0] {
 	case "resync":
-		return c.New(groupName, client)
+		//return c.New(groupName, client)
 	default:
 		c.Ui.Error("Unknown action provided.")
 		c.Ui.Error("")
 		c.Ui.Error(c.Help())
 		return 1
 	}
+	return 0
 }
-
 
 func resync() {
 

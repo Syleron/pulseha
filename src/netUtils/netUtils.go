@@ -200,7 +200,6 @@ func GetInterfaceNames() []string {
 	}
 	var interfaceNames []string
 	for _, iface := range ifaces {
-		log.Info(iface.Flags.String())
 		interfaceNames = append(interfaceNames, iface.Name)
 	}
 	return interfaceNames

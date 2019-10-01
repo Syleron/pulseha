@@ -23,6 +23,7 @@ import (
 	"github.com/Syleron/PulseHA/src/netUtils"
 	"github.com/Syleron/PulseHA/src/utils"
 	"github.com/labstack/gommon/log"
+	"github.com/vishvananda/netlink"
 )
 
 /**
@@ -46,11 +47,18 @@ func nodeCreateLocal(ip string, port string) error {
 	// Create interface definitions each with their own group
 	for _, ifaceName := range netUtils.GetInterfaceNames() {
 		if ifaceName != "lo" {
-			newNode.IPGroups[ifaceName] = make([]string, 0)
-			groupName := genGroupName()
-			DB.Config.Groups[groupName] = []string{}
-			if err := groupAssign(groupName, hostname, ifaceName); err != nil {
-				log.Warnf("Unable to assign group to interface: %s", err.Error())
+			// use netlink to get low-level network details
+			intface, err := netlink.LinkByName(ifaceName)
+			if err != nil {
+				return err
+			}
+			if intface.Attrs().Slave == nil {
+				newNode.IPGroups[ifaceName] = make([]string, 0)
+				groupName := genGroupName()
+				DB.Config.Groups[groupName] = []string{}
+				if err := groupAssign(groupName, hostname, ifaceName); err != nil {
+					log.Warnf("Unable to assign group to interface: %s", err.Error())
+				}
 			}
 		}
 	}
