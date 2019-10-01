@@ -19,5 +19,8 @@ jobs:
 #    - name: Test
 #      run: make test
 
+    - name: Dependencies
+      run: make get
+
     - name: Build
       run: make
