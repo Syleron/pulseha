@@ -85,10 +85,13 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Create new local node config to send
-		newNode := &config.Node{
-			IP:       in.BindIp,
-			Port:     in.BindPort,
-			IPGroups: make(map[string][]string, 0),
+		newNode, err := nodeCreateLocal(in.BindIp, in.BindPort, false)
+		if err != nil {
+			log.Errorf("Join() Unable to generate local node definition: %s", err)
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Join failure. Unable to generate local node definition",
+			}, nil
 		}
 		// Convert struct into byte array
 		buf, err := json.Marshal(newNode)
@@ -322,7 +325,8 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		nodesClearLocal()
 		groupClearLocal()
 		// Create a new local node config
-		if err := nodeCreateLocal(in.BindIp, in.BindPort); err != nil {
+		_, err := nodeCreateLocal(in.BindIp, in.BindPort, true)
+		if err != nil {
 			return &proto.PulseCreate{
 				Success: false,
 				Message: "Failed write local not to config",

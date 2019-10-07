@@ -28,7 +28,7 @@ import (
 /**
 Create new local config node definition
 */
-func nodeCreateLocal(ip string, port string) error {
+func nodeCreateLocal(ip string, port string, assignGroups bool) (*config.Node, error) {
 	log.Debug("create localhost node config definition")
 	newNode := &config.Node{
 		IP:       ip,
@@ -37,29 +37,27 @@ func nodeCreateLocal(ip string, port string) error {
 	}
 	hostname, err := utils.GetHostname()
 	if err != nil {
-		return errors.New("cannot create cluster because unable to get hostname")
+		return &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
 	}
 	// Add the new node
 	if err := nodeAdd(hostname, newNode); err != nil {
-		return errors.New("unable to add local node to config")
+		return &config.Node{}, errors.New("unable to add local node to config")
 	}
 	// Create interface definitions each with their own group
 	for _, ifaceName := range netUtils.GetInterfaceNames() {
 		if ifaceName != "lo" {
 			newNode.IPGroups[ifaceName] = make([]string, 0)
-			groupName := genGroupName()
-			DB.Config.Groups[groupName] = []string{}
-			if err := groupAssign(groupName, hostname, ifaceName); err != nil {
-				log.Warnf("Unable to assign group to interface: %s", err.Error())
+			if assignGroups {
+				groupName := genGroupName()
+				DB.Config.Groups[groupName] = []string{}
+				if err := groupAssign(groupName, hostname, ifaceName); err != nil {
+					log.Warnf("Unable to assign group to interface: %s", err.Error())
+				}
 			}
 		}
 	}
-	// Save to our config
-	if err := DB.Config.Save(); err != nil {
-		return errors.New("write local node failed")
-	}
 	// return our results
-	return nil
+	return newNode, nil
 }
 
 // nodeUpdateLocalInterfaces()
