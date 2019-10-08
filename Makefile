@@ -10,15 +10,12 @@ all: build cli
 
 build: get
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
-	 cp config.json ./bin/
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulse ./src/
 buildrace: get
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
-	 cp config.json ./bin/
 	 env GOOS=linux GOARCH=amd64 go build -race ${LDFLAGS} -v -o ./bin/pulse ./src/
 macbuild: get
 	if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
-	cp config.json ./bin/
 	env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulse ./src/
 get:
 	 go get -d ./src/
