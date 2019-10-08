@@ -47,6 +47,5 @@ endif
 	#chmod +x /etc/pulseha/pulse
 	if [ ! -d "/etc/pulseha/" ]; then mkdir /etc/pulseha/; fi
 	if [ ! -d "/usr/local/lib/pulseha" ]; then mkdir /usr/local/lib/pulseha; fi
-	cp config.json /etc/pulseha/
 	cp pulseha.service /etc/systemd/system/
 	systemctl daemon-reload
