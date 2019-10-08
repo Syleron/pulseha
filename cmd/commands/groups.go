@@ -20,7 +20,7 @@ package commands
 import (
 	"context"
 	"flag"
-	"github.com/Syleron/PulseHA/proto"
+	"github.com/syleron/pulseha/proto"
 	"github.com/mitchellh/cli"
 	"github.com/olekukonko/tablewriter"
 	"google.golang.org/grpc"

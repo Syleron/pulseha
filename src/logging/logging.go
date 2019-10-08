@@ -19,8 +19,8 @@ package logging
 
 import (
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/client"
+	"github.com/syleron/pulseha/proto"
+	"github.com/syleron/pulseha/src/client"
 	"os"
 )
 

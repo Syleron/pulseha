@@ -26,7 +26,7 @@ import (
 	"errors"
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/syleron/pulseha/src/utils"
 	"math/big"
 	"net"
 	"os"

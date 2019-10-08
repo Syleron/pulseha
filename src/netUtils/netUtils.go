@@ -21,7 +21,7 @@ import (
 	"bytes"
 	"errors"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/syleron/pulseha/src/utils"
 	"github.com/vishvananda/netlink"
 	"net"
 	"os"

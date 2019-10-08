@@ -18,8 +18,8 @@
 package server
 
 import (
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/logging"
+	"github.com/syleron/pulseha/src/config"
+	"github.com/syleron/pulseha/src/logging"
 )
 
 type Database struct {

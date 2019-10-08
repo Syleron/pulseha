@@ -19,9 +19,9 @@ package server
 
 import (
 	"errors"
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/netUtils"
-	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/syleron/pulseha/src/config"
+	"github.com/syleron/pulseha/src/netUtils"
+	"github.com/syleron/pulseha/src/utils"
 	"github.com/labstack/gommon/log"
 )
 

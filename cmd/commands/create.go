@@ -20,8 +20,8 @@ package commands
 import (
 	"context"
 	"flag"
-	"github.com/Syleron/PulseHA/proto"
-	"github.com/Syleron/PulseHA/src/utils"
+	"github.com/syleron/pulseha/proto"
+	"github.com/syleron/pulseha/src/utils"
 	"github.com/mitchellh/cli"
 	"google.golang.org/grpc"
 	"strings"

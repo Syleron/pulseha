@@ -20,9 +20,9 @@ package main
 import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/src/config"
-	"github.com/Syleron/PulseHA/src/logging"
-	"github.com/Syleron/PulseHA/src/server"
+	"github.com/syleron/pulseha/src/config"
+	"github.com/syleron/pulseha/src/logging"
+	"github.com/syleron/pulseha/src/server"
 	"os"
 	"os/signal"
 	"strings"

@@ -18,7 +18,7 @@
 package main
 
 import (
-	"github.com/Syleron/PulseHA/cmd/commands"
+	"github.com/syleron/pulseha/cmd/commands"
 	"github.com/mitchellh/cli"
 	"os"
 )

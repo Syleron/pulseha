@@ -22,7 +22,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	log "github.com/Sirupsen/logrus"
-	"github.com/Syleron/PulseHA/proto"
+	"github.com/syleron/pulseha/proto"
 	"google.golang.org/grpc/peer"
 	"net"
 	"runtime"
