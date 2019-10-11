@@ -80,22 +80,6 @@ func (c *Config) GetLocalNode() string {
 }
 
 /**
-Instantiate, setup and return our Config
-*/
-func GetConfig() *Config {
-	cfg := Config{}
-	if err := cfg.Load(); err != nil {
-		// Create a default config
-		if err := SaveDefaultLocalConfig(); err != nil {
-			log.Fatalf("unable to load PulseHA config")
-			os.Exit(1)
-		}
-		cfg.Reload()
-	}
-	return &cfg
-}
-
-/**
  * Function used to load the config
  */
 func (c *Config) Load() error {
@@ -106,18 +90,22 @@ func (c *Config) Load() error {
 		b, err := ioutil.ReadFile(CONFIG_LOCATION)
 		if err != nil {
 			log.Fatalf("Error reading config file: %s", err)
-			os.Exit(1)
+			return err
 		}
 		if err = json.Unmarshal([]byte(b), &c); err != nil {
 			log.Fatalf("Unable to unmarshal config: %s", err)
-			os.Exit(1)
+			return err
 		}
 		if !c.Validate() {
 			log.Fatalf("invalid PulseHA config")
 			os.Exit(1)
 		}
 	} else {
-		return errors.New("missing configuration file")
+		// Create a default config
+		if err := c.SaveDefaultLocalConfig(); err != nil {
+			log.Fatalf("unable to load PulseHA config")
+			os.Exit(1)
+		}
 	}
 	return nil
 }
@@ -262,6 +250,15 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 }
 
 /**
+Instantiate, setup and return our Config
+*/
+func GetConfig() *Config {
+	cfg := Config{}
+	cfg.Load()
+	return &cfg
+}
+
+/**
 Returns the hostname for a node based of it's IP address
 */
 func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
@@ -286,7 +283,7 @@ func (c *Config) UpdateValue(key string, value string) error {
 }
 
 // DefaultLocalConfig - Generate a default config to write
-func SaveDefaultLocalConfig() error {
+func (c *Config) SaveDefaultLocalConfig() error {
 	hostname, err := os.Hostname()
 	if err != nil {
 		panic(err)
@@ -308,6 +305,10 @@ func SaveDefaultLocalConfig() error {
 	if err != nil {
 		return err
 	}
+	// Set our config in memory
+	c.Pulse = defaultConfig.Pulse
+	c.Groups = defaultConfig.Groups
+	c.Nodes = defaultConfig.Nodes
 	// Save back to file
 	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
 	// Check for errors
