@@ -154,10 +154,6 @@ func (c *Config) Validate() bool {
 		log.Fatal("Unable to get local hostname")
 		return false
 	}
-	if c.Pulse.LoggingLevel == "" {
-		log.Warn("No logging level set. Defaulting to 'info'")
-		c.Pulse.LoggingLevel = "info"
-	}
 	// Make sure our groups section is valid
 	if c.Groups == nil {
 		log.Fatal("Unable to load Groups section of the config")
@@ -309,6 +305,10 @@ func (c *Config) SaveDefaultLocalConfig() error {
 	if err != nil {
 		return err
 	}
+	// Set our config in memory
+	c.Pulse = defaultConfig.Pulse
+	c.Groups = defaultConfig.Groups
+	c.Nodes = defaultConfig.Nodes
 	// Save back to file
 	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
 	// Check for errors
