@@ -82,6 +82,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
+				ErrorCode: 0,
 			}, nil
 		}
 		// Create new local node config to send
@@ -91,6 +92,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Join failure. Unable to generate local node definition",
+				ErrorCode: 1,
 			}, nil
 		}
 		// Convert struct into byte array
@@ -101,6 +103,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Join failure. Please check the logs for more information",
+				ErrorCode: 2,
 			}, nil
 		}
 		// Send our join request
@@ -112,6 +115,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			Config:   buf,
 			Hostname: hostname,
 			Token: in.Token,
+			ErrorCode: 3,
 		})
 		// Handle a failed request
 		if err != nil {
@@ -119,6 +123,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Join failure. Unable to connect to host.",
+				ErrorCode: 4,
 			}, nil
 		}
 		// Handle an unsuccessful request
@@ -127,6 +132,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: r.(*proto.PulseJoin).Message,
+				ErrorCode: 5,
 			}, nil
 		}
 		// write CA keys
@@ -139,6 +145,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: err.Error(),
+				ErrorCode: 6,
 			}, nil
 		}
 		// Update our local config
@@ -150,6 +157,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Unable to unmarshal config node.",
+				ErrorCode: 7,
 			}, nil
 		}
 		// !!!IMPORTANT!!!: Do not replace our local config
@@ -161,6 +169,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Failed to write config. Joined failed.",
+				ErrorCode: 8,
 			}, nil
 		}
 		// Reload config in memory
@@ -181,6 +190,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	return &proto.PulseJoin{
 		Success: false,
 		Message: "Unable to join as PulseHA is already in a cluster.",
+		ErrorCode: 9,
 	}, nil
 }
 
@@ -196,6 +206,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 		return &proto.PulseLeave{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	// Check to see if we are not the only one in the "cluster"
@@ -224,6 +235,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 		return &proto.PulseLeave{
 			Success: false,
 			Message: "PulseHA successfully removed from cluster but could not update local config",
+			ErrorCode: 2,
 		}, nil
 	}
 	// Remove our generated keys
@@ -254,6 +266,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 		return &proto.PulseRemove{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	// make sure we are not removing our active node
@@ -262,6 +275,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 		return &proto.PulseRemove{
 			Success: false,
 			Message: "Unable to remove active node. Please promote another node and try again",
+			ErrorCode: 2,
 		}, nil
 	}
 	localHostname, err := utils.GetHostname()
@@ -269,6 +283,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 		return &proto.PulseRemove{
 			Success: false,
 			Message: "Unable to perform remove as unable to get local hostname",
+			ErrorCode: 3,
 		}, nil
 	}
 	// Tell everyone else to do the same
@@ -300,6 +315,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 			return &proto.PulseRemove{
 				Success: false,
 				Message: err.Error(),
+				ErrorCode: 4,
 			}, nil
 		}
 	}
@@ -331,6 +347,7 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 				Success: false,
 				Message: "Failed write local not to config",
 				Token: token,
+				ErrorCode: 1,
 			}, nil
 		}
 		// Generate new token
@@ -362,6 +379,7 @@ pulseha join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + in
 			Success: false,
 			Message: "Pulse daemon is already in a configured cluster",
 			Token: token,
+			ErrorCode: 2,
 		}, nil
 	}
 }
@@ -376,6 +394,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 		return &proto.PulseGroupNew{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	groupName, err := groupNew(in.Name)
@@ -383,6 +402,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 		return &proto.PulseGroupNew{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	DB.Config.Save()
@@ -403,6 +423,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 		return &proto.PulseGroupDelete{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := groupDelete(in.Name)
@@ -410,6 +431,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 		return &proto.PulseGroupDelete{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	DB.Config.Save()
@@ -430,6 +452,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 		return &proto.PulseGroupAdd{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := groupIpAdd(in.Name, in.Ips)
@@ -437,6 +460,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 		return &proto.PulseGroupAdd{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	DB.Config.Save()
@@ -467,6 +491,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		return &proto.PulseGroupRemove{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
@@ -474,6 +499,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		return &proto.PulseGroupRemove{
 			Success: false,
 			Message: "Unable to process RPC call. Required parameters: Ips, Name",
+			ErrorCode: 2,
 		}, nil
 	}
 	_, activeMember := DB.MemberList.GetActiveMember()
@@ -481,6 +507,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		return &proto.PulseGroupRemove{
 			Success: false,
 			Message: "Unable to remove IP(s) to group as there no active node in the cluster.",
+			ErrorCode: 3,
 		}, nil
 	}
 	err := groupIpRemove(in.Name, in.Ips)
@@ -488,6 +515,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 		return &proto.PulseGroupRemove{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 4,
 		}, nil
 	}
 	DB.Config.Save()
@@ -517,6 +545,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 		return &proto.PulseGroupAssign{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := groupAssign(in.Group, in.Node, in.Interface)
@@ -524,6 +553,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 		return &proto.PulseGroupAssign{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	DB.Config.Save()
@@ -544,6 +574,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 		return &proto.PulseGroupUnassign{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := groupUnassign(in.Group, in.Node, in.Interface)
@@ -551,6 +582,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 		return &proto.PulseGroupUnassign{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	DB.Config.Save()
@@ -627,6 +659,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 		return &proto.PulsePromote{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := DB.MemberList.PromoteMember(in.Member)
@@ -634,6 +667,7 @@ func (s *CLIServer) Promote(ctx context.Context, in *proto.PulsePromote) (*proto
 		return &proto.PulsePromote{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	return &proto.PulsePromote{
@@ -652,6 +686,7 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 		return &proto.PulseCert{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	err := security.GenTLSKeys(in.BindIp)
@@ -659,6 +694,7 @@ func (s *CLIServer) TLS(ctx context.Context, in *proto.PulseCert) (*proto.PulseC
 		return &proto.PulseCert{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 2,
 		}, nil
 	}
 	return &proto.PulseCert{
@@ -675,6 +711,7 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 		return &proto.PulseConfig{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 1,
 		}, nil
 	}
 	// If the value is hostname, update our node in our nodes section as well
@@ -682,6 +719,7 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 		return &proto.PulseConfig{
 			Success: false,
 			Message: "Please restart the PulseHA daemon to update the local node hostname.",
+			ErrorCode: 2,
 		}, nil
 	}
 	// Update our key value
@@ -689,6 +727,7 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 		return &proto.PulseConfig{
 			Success: false,
 			Message: err.Error(),
+			ErrorCode: 3,
 		}, nil
 	}
 	DB.Config.Save()
@@ -707,6 +746,7 @@ func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.Pul
 		return &proto.PulseToken{
 			Success: false,
 			Message: "You must be in a configured cluster before completing this action.",
+			ErrorCode: 1,
 		}, nil
 	}
 	// Generate new token
@@ -720,6 +760,7 @@ func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.Pul
 		return &proto.PulseToken{
 			Success: false,
 			Message: CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 2,
 		}, nil
 	}
 	// Save back to our config
@@ -740,6 +781,7 @@ func (s *CLIServer) Network(ctx context.Context, in *proto.PulseNetwork) (*proto
 		return &proto.PulseNetwork{
 			Success: false,
 			Message: "You must be in a configured cluster before completing this action.",
+			ErrorCode: 1,
 		}, nil
 	}
 	switch(in.Action) {
@@ -748,6 +790,7 @@ func (s *CLIServer) Network(ctx context.Context, in *proto.PulseNetwork) (*proto
 			return &proto.PulseNetwork{
 				Success: false,
 				Message: err.Error(),
+				ErrorCode: 2,
 			}, nil
 		}
 		break

@@ -154,6 +154,10 @@ func (c *Config) Validate() bool {
 		log.Fatal("Unable to get local hostname")
 		return false
 	}
+	if c.Pulse.LoggingLevel == "" {
+		log.Warn("No logging level set. Defaulting to 'info'")
+		c.Pulse.LoggingLevel = "info"
+	}
 	// Make sure our groups section is valid
 	if c.Groups == nil {
 		log.Fatal("Unable to load Groups section of the config")
