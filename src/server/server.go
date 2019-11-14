@@ -84,7 +84,7 @@ func (s *Server) Setup() {
 	}
 
 	// Make sure our local node is setup and available
-	if exists := nodeExists(hostname); !exists {
+	if exists := nodeExistsByHostname(hostname); !exists {
 		log.Error("cannot find local hostname in pulse cluster config")
 
 		if len(DB.Config.Nodes) > 0 {
@@ -252,7 +252,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 			}, nil
 		}
 		// Make sure the node doesnt already exist
-		if nodeExists(in.Hostname) {
+		if nodeExistsByHostname(in.Hostname) {
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "unable to join cluster as a node with hostname " + in.Hostname + " already exists!",
@@ -268,7 +268,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 		// Save our new config to file
 		if err := DB.Config.Save(); err != nil {
-			if nodeExists(in.Hostname) {
+			if nodeExistsByHostname(in.Hostname) {
 				if err := nodeDelete(in.Hostname); err != nil {
 					return &proto.PulseJoin{
 						Success: false,

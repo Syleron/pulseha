@@ -53,6 +53,7 @@ type Nodes struct {
 }
 
 type Node struct {
+	Hostname string              `json:"hostname"`
 	IP       string              `json:"bind_address"`
 	Port     string              `json:"bind_port"`
 	IPGroups map[string][]string `json:"group_assignments"`
@@ -174,12 +175,17 @@ func (c *Config) Validate() bool {
 
 	// if we are in a cluster.. does our hostname exist?
 	if c.ClusterCheck() {
-		for range c.Nodes {
-			_, ok := c.Nodes[hostname]
-			if !ok {
-				log.Fatal("hostname mismatch. Local hostname does not exist in nodes section")
-				return false
+		var exists = func() bool {
+			for _, node := range c.Nodes {
+				if node.Hostname == hostname {
+					return true
+				}
 			}
+			return false
+		}
+		if !exists() {
+			log.Fatal("hostname mismatch. Local hostname does not exist in nodes section")
+			return false
 		}
 	}
 
@@ -206,7 +212,11 @@ func (c *Config) LocalNode() Node {
 	if err != nil {
 		return Node{}
 	}
-	return c.Nodes[hostname]
+	node, err :=  c.GetNodeByHostname(hostname)
+	if err != nil {
+		return Node{}
+	}
+	return node
 }
 
 /**
@@ -222,7 +232,11 @@ func (c *Config) ClusterCheck() bool {
 			if err != nil {
 				return false
 			}
-			if c.Nodes[hostname].IP == "" && c.Nodes[hostname].Port == "" {
+			node, err :=  c.GetNodeByHostname(hostname)
+			if err != nil {
+				return false
+			}
+			if node.IP == "" && node.Port == "" {
 				return false
 			}
 		}
@@ -262,12 +276,22 @@ func GetConfig() *Config {
 Returns the hostname for a node based of it's IP address
 */
 func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
-	for name, node := range c.Nodes {
+	for _, node := range c.Nodes {
 		if node.IP == address {
-			return name, nil
+			return node.Hostname, nil
 		}
 	}
 	return "", errors.New("unable to find node with IP address " + address)
+}
+
+// GetNodeByHostname - Get node by hostname
+func (c *Config) GetNodeByHostname(hostname string) (Node, error) {
+	for _, node := range c.Nodes {
+		if node.Hostname == hostname  {
+			return node, nil
+		}
+	}
+	return Node{}, errors.New("unable to find node with hostname " + hostname)
 }
 
 // UpdateValue - Update a key's value

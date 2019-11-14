@@ -19,10 +19,11 @@ package server
 
 import (
 	"errors"
+	"github.com/google/uuid"
+	"github.com/labstack/gommon/log"
 	"github.com/syleron/pulseha/src/config"
 	"github.com/syleron/pulseha/src/netUtils"
 	"github.com/syleron/pulseha/src/utils"
-	"github.com/labstack/gommon/log"
 )
 
 /**
@@ -30,14 +31,15 @@ Create new local config node definition
 */
 func nodeCreateLocal(ip string, port string, assignGroups bool) (*config.Node, error) {
 	log.Debug("create localhost node config definition")
+	hostname, err := utils.GetHostname()
+	if err != nil {
+		return &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
+	}
 	newNode := &config.Node{
 		IP:       ip,
 		Port:     port,
 		IPGroups: make(map[string][]string, 0),
-	}
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		return &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
+		Hostname: hostname,
 	}
 	// Add the new node
 	if err := nodeAdd(hostname, newNode); err != nil {
@@ -66,12 +68,12 @@ func nodeUpdateLocalInterfaces() error {
 	if err != nil {
 		return err
 	}
-	localNode, err := nodeGetByName(localHostname)
+	localNode, err := nodeGetByHostname(localHostname)
 	if err != nil {
 		return err
 	}
 	// Get our local interfaces
-	localifaces := 	DB.Config.Nodes[localHostname].IPGroups
+	localifaces := DB.Config.Nodes[localHostname].IPGroups
 	// Get our current interfaces
 	ifaces := netUtils.GetInterfaceNames()
 	// Add missing interfaces
@@ -117,9 +119,11 @@ func nodeUpdateLocalInterfaces() error {
  */
 func nodeAdd(hostname string, node *config.Node) error {
 	DB.Logging.Debug(hostname + " added to local cluster config")
-	if !nodeExists(hostname) {
+	if !nodeExistsByHostname(hostname) {
+		// Generate UUID
+		uuid := uuid.New()
 		DB.Config.Lock()
-		DB.Config.Nodes[hostname] = *node
+		DB.Config.Nodes[uuid.String()] = *node
 		DB.Config.Unlock()
 		return nil
 	}
@@ -129,11 +133,11 @@ func nodeAdd(hostname string, node *config.Node) error {
 /**
  * Remove a node from our config by hostname.
  */
-func nodeDelete(hostname string) error {
-	DB.Logging.Debug("Nodes:nodeDelete()" + hostname + " node removed.")
-	if nodeExists(hostname) {
+func nodeDelete(uuid string) error {
+	DB.Logging.Debug("Nodes:nodeDelete()" + uuid + " node removed.")
+	if nodeExistsByUUID(uuid) {
 		DB.Config.Lock()
-		delete(DB.Config.Nodes, hostname)
+		delete(DB.Config.Nodes, uuid)
 		DB.Config.Unlock()
 		return nil
 	}
@@ -154,9 +158,22 @@ func nodesClearLocal() {
 * Determines whether a Node already exists in a config based
   off the nodes hostname.
 */
-func nodeExists(hostname string) bool {
+func nodeExistsByHostname(hostname string) bool {
+	for _, node := range DB.Config.Nodes {
+		if node.Hostname == hostname {
+			return true
+		}
+	}
+	return false
+}
+
+/**
+* Determines whether a Node already exists in a config based
+  off the nodes UUID.
+*/
+func nodeExistsByUUID(uuid string) bool {
 	for key := range DB.Config.Nodes {
-		if key == hostname {
+		if key == uuid {
 			return true
 		}
 	}
@@ -166,9 +183,18 @@ func nodeExists(hostname string) bool {
 /**
 Get node by its hostname
 */
-func nodeGetByName(hostname string) (config.Node, error) {
+func nodeGetByUUID(uuid string) (config.Node, error) {
 	for key, node := range DB.Config.Nodes {
-		if key == hostname {
+		if key == uuid {
+			return node, nil
+		}
+	}
+	return config.Node{}, errors.New("unable to find node in config")
+}
+
+func nodeGetByHostname(hostname string) (config.Node, error) {
+	for _, node := range DB.Config.Nodes {
+		if node.Hostname == hostname {
 			return node, nil
 		}
 	}

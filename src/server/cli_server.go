@@ -628,7 +628,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	}
 	table := new(proto.PulseStatus)
 	for _, member := range DB.MemberList.Members {
-		details, _ := nodeGetByName(member.Hostname)
+		details, _ := nodeGetByHostname(member.Hostname)
 		tym := member.GetLastHCResponse()
 		var tymFormat string
 		if tym == (time.Time{}) {

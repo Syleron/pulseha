@@ -170,9 +170,9 @@ func (m *MemberList) Setup() {
 load the nodes in our config into our memberlist
 */
 func (m *MemberList) LoadMembers() {
-	for key := range DB.Config.Nodes {
+	for _, node := range DB.Config.Nodes {
 		newClient := &client.Client{}
-		m.AddMember(key, newClient)
+		m.AddMember(node.Hostname, newClient)
 	}
 }
 
