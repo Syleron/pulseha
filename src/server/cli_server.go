@@ -719,26 +719,19 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 		return &proto.PulseConfig{
 			Success: false,
 			Message: err.Error(),
-			ErrorCode: 3,
+			ErrorCode: 2,
 		}, nil
 	}
 	// If the value is hostname, update our node in our nodes section as well
 	if in.Key == "local_node" {
 		// Set our local value
-		err := DB.Config.UpdateHostname(in.Value)
-		if err != nil {
-			return &proto.PulseConfig{
-				Success: false,
-				Message: err.Error(),
-				ErrorCode: 2,
-			}, nil
-		}
+		DB.Config.UpdateHostname(in.Value)
 		// Resync the config
 		if err := DB.MemberList.SyncConfig(); err != nil {
 			return &proto.PulseConfig{
 				Success: false,
 				Message: err.Error(),
-				ErrorCode: 2,
+				ErrorCode: 3,
 			}, nil
 		}
 	}

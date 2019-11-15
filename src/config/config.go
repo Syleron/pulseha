@@ -294,7 +294,7 @@ func (c *Config) UpdateValue(key string, value string) error {
 }
 
 // UpdateHostname - Changes our local node hostname and the hostname in our node section
-func (c *Config) UpdateHostname(newHostname string) error {
+func (c *Config) UpdateHostname(newHostname string) {
 	hostname := c.GetLocalNode()
 	// Update our local node hostname
 	c.Pulse.LocalNode = newHostname
@@ -302,7 +302,6 @@ func (c *Config) UpdateHostname(newHostname string) error {
 	for _, node := range c.Nodes {
 		if node.Hostname == hostname  {
 			node.Hostname = newHostname
-			return nil
 		}
 	}
 }
