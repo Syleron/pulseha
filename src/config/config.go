@@ -60,29 +60,30 @@ type Node struct {
 }
 
 /**
- * Returns a copy of the config
- */
+Instantiate, setup and return our Config
+*/
+func GetConfig() *Config {
+	cfg := Config{}
+	cfg.Load()
+	return &cfg
+}
+
+// GetConfig - Returns a copy of the config
 func (c *Config) GetConfig() Config {
 	return *c
 }
 
-/**
-
- */
+// NodeCount - Returns the total number of nodes in the configured cluster
 func (c *Config) NodeCount() int {
 	return len(c.Nodes)
 }
 
-/**
- * Return the local node name
- */
+// GetLocalNode - Return the local node hostname
 func (c *Config) GetLocalNode() string {
 	return c.Pulse.LocalNode
 }
 
-/**
- * Function used to load the config
- */
+// Load - Used to load the config into memory
 func (c *Config) Load() error {
 	c.Lock()
 	defer c.Unlock()
@@ -169,8 +170,7 @@ func (c *Config) Validate() bool {
 
 	// Make sure our local_node hostname matches our hostname
 	if c.Pulse.LocalNode != hostname {
-		log.Fatal("hostname mismatch. 'local_node' config value does not match system hostname")
-		return false
+		log.Warn("hostname mismatch. 'local_node' config value does not match system hostname")
 	}
 
 	// if we are in a cluster.. does our hostname exist?
@@ -204,9 +204,7 @@ func (c *Config) Validate() bool {
 	return true
 }
 
-/**
- *
- */
+// LocalNode - Get the local node object
 func (c *Config) LocalNode() Node {
 	hostname, err := utils.GetHostname()
 	if err != nil {
@@ -219,9 +217,7 @@ func (c *Config) LocalNode() Node {
 	return node
 }
 
-/**
- * Private - Check to see if we are in a configured cluster or not.
- */
+// ClusterCheck - Check to see if wea re in a configured cluster or not.
 func (c *Config) ClusterCheck() bool {
 	total := len(c.Nodes)
 	if total > 0 {
@@ -264,15 +260,6 @@ func (c *Config) GetGroupIface(node string, groupName string) string {
 }
 
 /**
-Instantiate, setup and return our Config
-*/
-func GetConfig() *Config {
-	cfg := Config{}
-	cfg.Load()
-	return &cfg
-}
-
-/**
 Returns the hostname for a node based of it's IP address
 */
 func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
@@ -304,6 +291,20 @@ func (c *Config) UpdateValue(key string, value string) error {
 		return err
 	}
 	return nil
+}
+
+// UpdateHostname - Changes our local node hostname and the hostname in our node section
+func (c *Config) UpdateHostname(newHostname string) error {
+	hostname := c.GetLocalNode()
+	// Update our local node hostname
+	c.Pulse.LocalNode = newHostname
+	// Update the node section hostname
+	for _, node := range c.Nodes {
+		if node.Hostname == hostname  {
+			node.Hostname = newHostname
+			return nil
+		}
+	}
 }
 
 // DefaultLocalConfig - Generate a default config to write

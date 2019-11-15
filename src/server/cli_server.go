@@ -714,14 +714,6 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			ErrorCode: 1,
 		}, nil
 	}
-	// If the value is hostname, update our node in our nodes section as well
-	if in.Key == "local_node" {
-		return &proto.PulseConfig{
-			Success: false,
-			Message: "Please restart the PulseHA daemon to update the local node hostname.",
-			ErrorCode: 2,
-		}, nil
-	}
 	// Update our key value
 	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
 		return &proto.PulseConfig{
@@ -729,6 +721,26 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			Message: err.Error(),
 			ErrorCode: 3,
 		}, nil
+	}
+	// If the value is hostname, update our node in our nodes section as well
+	if in.Key == "local_node" {
+		// Set our local value
+		err := DB.Config.UpdateHostname(in.Value)
+		if err != nil {
+			return &proto.PulseConfig{
+				Success: false,
+				Message: err.Error(),
+				ErrorCode: 2,
+			}, nil
+		}
+		// Resync the config
+		if err := DB.MemberList.SyncConfig(); err != nil {
+			return &proto.PulseConfig{
+				Success: false,
+				Message: err.Error(),
+				ErrorCode: 2,
+			}, nil
+		}
 	}
 	DB.Config.Save()
 	DB.Config.Reload()
