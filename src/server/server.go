@@ -70,19 +70,12 @@ func (s *Server) Setup() {
 		log.Info("PulseHA is currently un-configured.")
 		return
 	}
-
 	// Get our hostname
 	hostname, err := utils.GetHostname()
 	if err != nil {
 		log.Error("cannot setup server because unable to get local hostname")
 		return
 	}
-	// Check to make sure that our hostname matches with the one in the config
-	if DB.Config.Pulse.LocalNode != hostname {
-		log.Fatal(errors.New("pulse config 'localnode' does not match system hostname"))
-		return
-	}
-
 	// Make sure our local node is setup and available
 	if exists := nodeExistsByHostname(hostname); !exists {
 		log.Error("cannot find local hostname in pulse cluster config")
@@ -98,7 +91,6 @@ func (s *Server) Setup() {
 	s.Listener, err = net.Listen("tcp", bindIP+":"+DB.Config.LocalNode().Port)
 	if err != nil {
 		panic(err)
-		// TODO: Note: Should we exit here?
 		return
 	}
 	// load member cert/key
@@ -196,8 +188,9 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		return nil, errors.New("unauthorized")
 	}
 	activeHostname, _ := DB.MemberList.GetActiveMember()
-	if activeHostname != DB.Config.GetLocalNode() {
-		localMember := DB.MemberList.GetMemberByHostname(DB.Config.GetLocalNode())
+	localNode := DB.Config.GetLocalNode()
+	if activeHostname != localNode.Hostname {
+		localMember := DB.MemberList.GetMemberByHostname(localNode.Hostname)
 		// make passive to reset the networking
 		if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
 			DB.Logging.Info("Local node is passive")
@@ -209,7 +202,7 @@ func (s *Server) HealthCheck(ctx context.Context, in *proto.PulseHealthCheck) (*
 		DB.Logging.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
-		if hostname != DB.Config.GetLocalNode() {
+		if hostname != localNode.Hostname {
 			member, _ := DB.MemberList.GetLocalMember()
 			member.MakePassive()
 		} else {
@@ -260,7 +253,7 @@ func (s *Server) Join(ctx context.Context, in *proto.PulseJoin) (*proto.PulseJoi
 		}
 		// TODO: Node validation?
 		// Add node to config
-		if err := nodeAdd(in.Hostname, originNode); err != nil {
+		if err = nodeAdd(in.Uid, in.Hostname, originNode); err != nil {
 			return &proto.PulseJoin{
 				Success: false,
 				Message: "Failed to add new node to membership list",
@@ -346,7 +339,7 @@ func (s *Server) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.PulseL
 		return nil, errors.New("unauthorized")
 	}
 	// Remove from our memberlist
-	DB.MemberList.MemberRemoveByName(in.Hostname)
+	DB.MemberList.MemberRemoveByHostname(in.Hostname)
 	// Remove from our config
 	err := nodeDelete(in.Hostname)
 	if err != nil {
@@ -389,7 +382,7 @@ func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.Puls
 		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
-		DB.MemberList.MemberRemoveByName(in.Hostname)
+		DB.MemberList.MemberRemoveByHostname(in.Hostname)
 		// Remove from our config
 		err := nodeDelete(in.Hostname)
 		if err != nil {
@@ -455,7 +448,8 @@ func (s *Server) Promote(ctx context.Context, in *proto.PulsePromote) (*proto.Pu
 	if !CanCommunicate(ctx) {
 		return nil, errors.New("unauthorized")
 	}
-	if in.Member != DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	if in.Member != localNode.Hostname {
 		return &proto.PulsePromote{
 			Success: false,
 		}, nil
@@ -483,7 +477,8 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 	if !CanCommunicate(ctx) {
 		return nil, errors.New("unauthorized")
 	}
-	if in.Member != DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	if in.Member != localNode.Hostname {
 		return &proto.PulsePromote{
 			Success: false,
 		}, nil
@@ -494,10 +489,10 @@ func (s *Server) MakePassive(ctx context.Context, in *proto.PulsePromote) (*prot
 			Success: false,
 		}, nil
 	}
-	success := member.MakePassive()
+	err := member.MakePassive()
 	DB.Logging.Info(in.Member + " has been demoted to passive")
 	return &proto.PulsePromote{
-		Success: success,
+		Success: err == nil,
 	}, nil
 }
 

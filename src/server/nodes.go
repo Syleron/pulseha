@@ -29,12 +29,13 @@ import (
 /**
 Create new local config node definition
 */
-func nodeCreateLocal(ip string, port string, assignGroups bool) (*config.Node, error) {
+func nodeCreateLocal(ip string, port string, assignGroups bool) (string, *config.Node, error) {
 	log.Debug("create localhost node config definition")
 	hostname, err := utils.GetHostname()
 	if err != nil {
-		return &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
+		return "", &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
 	}
+	// Define new node object
 	newNode := &config.Node{
 		IP:       ip,
 		Port:     port,
@@ -42,8 +43,17 @@ func nodeCreateLocal(ip string, port string, assignGroups bool) (*config.Node, e
 		Hostname: hostname,
 	}
 	// Add the new node
-	if err := nodeAdd(hostname, newNode); err != nil {
-		return &config.Node{}, errors.New("unable to add local node to config")
+	uid := uuid.New()
+	if err := nodeAdd(uid.String(), hostname, newNode); err != nil {
+		return "", &config.Node{}, errors.New("unable to add local node to config")
+	}
+	// Set our local node UUID
+	if err := DB.Config.UpdateValue("local_node", uid.String()); err != nil {
+		return "", &config.Node{}, err
+	}
+	// Save our config as we have added our local node
+	if err := DB.Config.Save(); err != nil {
+		return "", &config.Node{}, err
 	}
 	// Create interface definitions each with their own group
 	for _, ifaceName := range netUtils.GetInterfaceNames() {
@@ -52,14 +62,14 @@ func nodeCreateLocal(ip string, port string, assignGroups bool) (*config.Node, e
 			if assignGroups {
 				groupName := genGroupName()
 				DB.Config.Groups[groupName] = []string{}
-				if err := groupAssign(groupName, hostname, ifaceName); err != nil {
+				if err := groupAssign(groupName, uid.String(), ifaceName); err != nil {
 					log.Warnf("Unable to assign group to interface: %s", err.Error())
 				}
 			}
 		}
 	}
 	// return our results
-	return newNode, nil
+	return uid.String(), newNode, nil
 }
 
 // nodeUpdateLocalInterfaces()
@@ -68,7 +78,7 @@ func nodeUpdateLocalInterfaces() error {
 	if err != nil {
 		return err
 	}
-	localNode, err := nodeGetByHostname(localHostname)
+	_, localNode, err := nodeGetByHostname(localHostname)
 	if err != nil {
 		return err
 	}
@@ -117,13 +127,11 @@ func nodeUpdateLocalInterfaces() error {
 /**
  * Add a node type Node to our config.
  */
-func nodeAdd(hostname string, node *config.Node) error {
+func nodeAdd(uid string, hostname string, node *config.Node) error {
 	DB.Logging.Debug(hostname + " added to local cluster config")
 	if !nodeExistsByHostname(hostname) {
-		// Generate UUID
-		uuid := uuid.New()
 		DB.Config.Lock()
-		DB.Config.Nodes[uuid.String()] = *node
+		DB.Config.Nodes[uid] = *node
 		DB.Config.Unlock()
 		return nil
 	}
@@ -133,11 +141,11 @@ func nodeAdd(hostname string, node *config.Node) error {
 /**
  * Remove a node from our config by hostname.
  */
-func nodeDelete(uuid string) error {
-	DB.Logging.Debug("Nodes:nodeDelete()" + uuid + " node removed.")
-	if nodeExistsByUUID(uuid) {
+func nodeDelete(uid string) error {
+	DB.Logging.Debug("Nodes:nodeDelete()" + uid + " node removed.")
+	if nodeExistsByUUID(uid) {
 		DB.Config.Lock()
-		delete(DB.Config.Nodes, uuid)
+		delete(DB.Config.Nodes, uid)
 		DB.Config.Unlock()
 		return nil
 	}
@@ -171,9 +179,9 @@ func nodeExistsByHostname(hostname string) bool {
 * Determines whether a Node already exists in a config based
   off the nodes UUID.
 */
-func nodeExistsByUUID(uuid string) bool {
+func nodeExistsByUUID(uid string) bool {
 	for key := range DB.Config.Nodes {
-		if key == uuid {
+		if key == uid {
 			return true
 		}
 	}
@@ -183,22 +191,23 @@ func nodeExistsByUUID(uuid string) bool {
 /**
 Get node by its hostname
 */
-func nodeGetByUUID(uuid string) (config.Node, error) {
+func nodeGetByUUID(uid string) (config.Node, error) {
 	for key, node := range DB.Config.Nodes {
-		if key == uuid {
+		if key == uid {
 			return node, nil
 		}
 	}
 	return config.Node{}, errors.New("unable to find node in config")
 }
 
-func nodeGetByHostname(hostname string) (config.Node, error) {
-	for _, node := range DB.Config.Nodes {
+//
+func nodeGetByHostname(hostname string) (string, config.Node, error) {
+	for uid, node := range DB.Config.Nodes {
 		if node.Hostname == hostname {
-			return node, nil
+			return uid, node, nil
 		}
 	}
-	return config.Node{}, errors.New("unable to find node in config")
+	return "", config.Node{}, errors.New("unable to find node in config")
 }
 
 /**
@@ -222,8 +231,8 @@ func nodeAssignedToInterface(group string) bool {
  * Checks to see if a floating IP group has already been assigned to a node's interface.
  * Returns bool - exists/not & int - slice index
  */
-func nodeInterfaceGroupExists(node, iface, group string) (bool, int) {
-	for index, existingGroup := range DB.Config.Nodes[node].IPGroups[iface] {
+func nodeInterfaceGroupExists(uid, iface, group string) (bool, int) {
+	for index, existingGroup := range DB.Config.Nodes[uid].IPGroups[iface] {
 		if existingGroup == group {
 			return true, index
 		}

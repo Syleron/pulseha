@@ -178,7 +178,7 @@ Note: Hostname is required for TLS as the certs are named after the hostname.
 */
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
-		nodeDetails, _ := nodeGetByHostname(m.Hostname)
+		_, nodeDetails, _ := nodeGetByHostname(m.Hostname)
 		DB.Logging.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
 		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, true)
 		if err != nil {
@@ -231,8 +231,9 @@ func (m *Member) RoutineHC(data *proto.PulseHealthCheck) {
 */
 func (m *Member) MakeActive() bool {
 	DB.Logging.Debug("Member:makeActive() Making " + m.GetHostname() + " active")
+	localNode := DB.Config.GetLocalNode()
 	// Make ourself active if we are referring to ourself
-	if m.GetHostname() == DB.Config.GetLocalNode() {
+	if m.GetHostname() == localNode.Hostname {
 		// Reset vars
 		m.SetLatency("")
 		m.SetLastHCResponse(time.Time{})
@@ -272,9 +273,10 @@ func (m *Member) MakeActive() bool {
 /**
 Make the node passive (take down its groups)
 */
-func (m *Member) MakePassive() bool {
+func (m *Member) MakePassive() error {
 	DB.Logging.Debug("Member:makePassive() Making " + m.GetHostname() + " passive")
-	if m.GetHostname() == DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	if m.GetHostname() == localNode.Hostname {
 		// do this regardless to make sure we dont have any groups up
 		MakeLocalPassive()
 		// Update member variables
@@ -291,19 +293,21 @@ func (m *Member) MakePassive() bool {
 		}
 	} else {
 		// TODO: Handle the closing of this connection
-		m.Connect()
+		if err := m.Connect(); err != nil {
+			log.Error(err)
+			return err
+		}
 		_, err := m.Send(
 			client.SendMakePassive,
 			&proto.PulsePromote{
 				Member: m.GetHostname(),
 			})
 		if err != nil {
-			log.Error(err)
 			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
-			return false
+			return err
 		}
 	}
-	return true
+	return nil
 }
 
 /**
@@ -313,7 +317,8 @@ bring it up on.
 */
 func (m *Member) BringUpIPs(ips []string, group string) bool {
 	iface := DB.Config.GetGroupIface(m.Hostname, group)
-	if m.Hostname == DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	if m.Hostname == localNode.Hostname {
 		DB.Logging.Debug("member is local node bringing up IP's")
 		BringUpIPs(iface, ips)
 	} else {
@@ -381,7 +386,8 @@ func (m *Member) MonitorReceivedHCs() bool {
 				return true
 			}
 			// If we are not the new member just return
-			if member.GetHostname() != DB.Config.GetLocalNode() {
+			localNode := DB.Config.GetLocalNode()
+			if member.GetHostname() != localNode.Hostname {
 				DB.Logging.Info("Waiting on " + member.GetHostname() + " to become active")
 				m.SetLastHCResponse(time.Now())
 				return false
