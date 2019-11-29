@@ -62,9 +62,11 @@ type Node struct {
 /**
 Instantiate, setup and return our Config
 */
-func GetConfig() *Config {
+func New() *Config {
 	cfg := Config{}
-	cfg.Load()
+	if err := cfg.Load(); err != nil {
+		log.Fatal(err)
+	}
 	return &cfg
 }
 
@@ -79,8 +81,16 @@ func (c *Config) NodeCount() int {
 }
 
 // GetLocalNode - Return the local node hostname
-func (c *Config) GetLocalNode() string {
+func (c *Config) GetLocalNodeUUID() string {
 	return c.Pulse.LocalNode
+}
+
+//
+func (c *Config) GetLocalNode() Node {
+	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
+		return node
+	}
+	panic("Local node does not exist in local config.")
 }
 
 // Load - Used to load the config into memory
@@ -166,11 +176,6 @@ func (c *Config) Validate() bool {
 	if c.Nodes == nil {
 		log.Fatal("Unable to load Nodes section of the config")
 		return false
-	}
-
-	// Make sure our local_node hostname matches our hostname
-	if c.Pulse.LocalNode != hostname {
-		log.Warn("hostname mismatch. 'local_node' config value does not match system hostname")
 	}
 
 	// if we are in a cluster.. does our hostname exist?
@@ -295,12 +300,12 @@ func (c *Config) UpdateValue(key string, value string) error {
 
 // UpdateHostname - Changes our local node hostname and the hostname in our node section
 func (c *Config) UpdateHostname(newHostname string) {
-	hostname := c.GetLocalNode()
+	localNode := c.GetLocalNode()
 	// Update our local node hostname
 	c.Pulse.LocalNode = newHostname
 	// Update the node section hostname
 	for _, node := range c.Nodes {
-		if node.Hostname == hostname  {
+		if node.Hostname == localNode.Hostname {
 			node.Hostname = newHostname
 		}
 	}
@@ -308,16 +313,12 @@ func (c *Config) UpdateHostname(newHostname string) {
 
 // DefaultLocalConfig - Generate a default config to write
 func (c *Config) SaveDefaultLocalConfig() error {
-	hostname, err := os.Hostname()
-	if err != nil {
-		panic(err)
-	}
 	defaultConfig := &Config{
 		Pulse: Local{
 			HealthCheckInterval: 1000,
 			FailOverInterval:    5000,
 			FailOverLimit:       10000,
-			LocalNode:           hostname,
+			LocalNode:           "",
 			ClusterToken:        "",
 			LoggingLevel:        "info",
 		},

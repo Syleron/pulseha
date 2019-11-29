@@ -34,8 +34,9 @@ Networking - Bring up the groups on the current node
 */
 func MakeLocalActive() error {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
-	for name, node := range DB.Config.Nodes {
-		if name == DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	for _, node := range DB.Config.Nodes {
+		if node.Hostname == localNode.Hostname {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupActive(iface, groupName)
@@ -51,8 +52,9 @@ Networking - Bring down the ip groups on the current node
 */
 func MakeLocalPassive() {
 	DB.Logging.Debug("Utils:MakeMemberPassive() Making local node passive")
-	for name, node := range DB.Config.Nodes {
-		if name == DB.Config.GetLocalNode() {
+	localNode := DB.Config.GetLocalNode()
+	for _, node := range DB.Config.Nodes {
+		if node.Hostname == localNode.Hostname {
 			for iface, groups := range node.IPGroups {
 				for _, groupName := range groups {
 					makeGroupPassive(iface, groupName)

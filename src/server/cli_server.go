@@ -86,7 +86,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 			}, nil
 		}
 		// Create new local node config to send
-		newNode, err := nodeCreateLocal(in.BindIp, in.BindPort, false)
+		uid, newNode, err := nodeCreateLocal(in.BindIp, in.BindPort, false)
 		if err != nil {
 			log.Errorf("Join() Unable to generate local node definition: %s", err)
 			return &proto.PulseJoin{
@@ -114,6 +114,7 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 		r, err := c.Send(client.SendJoin, &proto.PulseJoin{
 			Config:   buf,
 			Hostname: hostname,
+			Uid: uid,
 			Token: in.Token,
 			ErrorCode: 3,
 		})
@@ -211,13 +212,13 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 	}
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
-	hostname := DB.Config.GetLocalNode()
+	node := DB.Config.GetLocalNode()
 	if DB.Config.NodeCount() > 1 {
 		DB.MemberList.Broadcast(
 			client.SendLeave,
 			&proto.PulseLeave{
 				Replicated: true,
-				Hostname:   hostname,
+				Hostname:   node.Hostname,
 			},
 		)
 	}
@@ -308,7 +309,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
-		DB.MemberList.MemberRemoveByName(in.Hostname)
+		DB.MemberList.MemberRemoveByHostname(in.Hostname)
 		// Remove from our config
 		err := nodeDelete(in.Hostname)
 		if err != nil {
@@ -319,7 +320,9 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 			}, nil
 		}
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	return &proto.PulseRemove{
 		Success: true,
 		Message: "Successfully left from cluster",
@@ -336,12 +339,15 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	// Make sure we are not in a cluster before creating one.
 	if !DB.Config.ClusterCheck() {
 		// Get our local hostname
-		hostname := DB.Config.GetLocalNode()
+		hostname, err := utils.GetHostname()
+		if err != nil {
+			panic(err)
+		}
 		// Remove any hanging nodes
 		nodesClearLocal()
 		groupClearLocal()
 		// Create a new local node config
-		_, err := nodeCreateLocal(in.BindIp, in.BindPort, true)
+		_, _, err = nodeCreateLocal(in.BindIp, in.BindPort, true)
 		if err != nil {
 			return &proto.PulseCreate{
 				Success: false,
@@ -357,11 +363,15 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 		// Set our token in our config
 		DB.Config.Pulse.ClusterToken = token_hash
 		// Save back to our config
-		DB.Config.Save()
+		if err := DB.Config.Save(); err != nil {
+			panic(err)
+		}
 		// Cert stuff
 		security.GenerateCACert(in.BindIp)
 		// Generate client server keys if tls is enabled
-		security.GenTLSKeys(in.BindIp)
+		if err := security.GenTLSKeys(in.BindIp); err != nil {
+			panic(err)
+		}
 		// Setup our pulse server
 		go s.Server.Setup()
 		// Save our newly generated token
@@ -405,7 +415,9 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *proto.PulseGroupNew) (*pro
 			ErrorCode: 2,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupNew{
 		Success: true,
@@ -434,7 +446,9 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *proto.PulseGroupDelete)
 			ErrorCode: 2,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupDelete{
 		Success: true,
@@ -463,7 +477,9 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 			ErrorCode: 2,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	// bring up the ip on the active appliance
 	activeHostname, activeMember := DB.MemberList.GetActiveMember()
@@ -518,7 +534,9 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 			ErrorCode: 4,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	// bring down the ip on the active appliance
 	activeHostname, activeMember := DB.MemberList.GetActiveMember()
@@ -548,7 +566,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 			ErrorCode: 1,
 		}, nil
 	}
-	err := groupAssign(in.Group, in.Node, in.Interface)
+	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
 		return &proto.PulseGroupAssign{
 			Success: false,
@@ -556,7 +574,16 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *proto.PulseGroupAssign)
 			ErrorCode: 2,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := groupAssign(in.Group, uid, in.Interface); err != nil {
+		return &proto.PulseGroupAssign{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 3,
+		}, nil
+	}
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupAssign{
 		Success: true,
@@ -577,7 +604,7 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 			ErrorCode: 1,
 		}, nil
 	}
-	err := groupUnassign(in.Group, in.Node, in.Interface)
+	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
 		return &proto.PulseGroupUnassign{
 			Success: false,
@@ -585,7 +612,16 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *proto.PulseGroupUnass
 			ErrorCode: 2,
 		}, nil
 	}
-	DB.Config.Save()
+	if err := groupUnassign(in.Group, uid, in.Interface); err != nil {
+		return &proto.PulseGroupUnassign{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 3,
+		}, nil
+	}
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.MemberList.SyncConfig()
 	return &proto.PulseGroupUnassign{
 		Success: true,
@@ -628,7 +664,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 	}
 	table := new(proto.PulseStatus)
 	for _, member := range DB.MemberList.Members {
-		details, _ := nodeGetByHostname(member.Hostname)
+		_, node, _ := nodeGetByHostname(member.Hostname)
 		tym := member.GetLastHCResponse()
 		var tymFormat string
 		if tym == (time.Time{}) {
@@ -638,7 +674,7 @@ func (s *CLIServer) Status(ctx context.Context, in *proto.PulseStatus) (*proto.P
 		}
 		row := &proto.StatusRow{
 			Hostname:     member.GetHostname(),
-			Ip:           details.IP,
+			Ip:           node.IP,
 			Latency:      member.GetLatency(),
 			Status:       member.GetStatus(),
 			LastReceived: tymFormat,
@@ -735,7 +771,9 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			}, nil
 		}
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	DB.Config.Reload()
 	return &proto.PulseConfig{
 		Success: true,
@@ -769,7 +807,9 @@ func (s *CLIServer) Token(ctx context.Context, in *proto.PulseToken) (*proto.Pul
 		}, nil
 	}
 	// Save back to our config
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
 	// report back with success
 	return &proto.PulseToken{
 		Success: true,

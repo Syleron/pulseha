@@ -118,19 +118,20 @@ func groupIpRemove(groupName string, ips []string) error {
 /**
 Assign a group to a node's interface
 */
-func groupAssign(groupName, node, iface string) error {
+func groupAssign(groupName, uid, iface string) error {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
 	if !groupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
 	if netUtils.InterfaceExist(iface) {
-		if exists, _ := nodeInterfaceGroupExists(node, iface, groupName); !exists {
+		if exists, _ := nodeInterfaceGroupExists(uid, iface, groupName); !exists {
 			// Add the group
-			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface], groupName)
+			DB.Config.Nodes[uid].IPGroups[iface] = append(DB.Config.Nodes[uid].IPGroups[iface], groupName)
 			// make the group active
 			hostname, _ := DB.MemberList.GetActiveMember()
-			if hostname == DB.Config.GetLocalNode() {
+			localNode := DB.Config.GetLocalNode()
+			if hostname == localNode.Hostname {
 				makeGroupActive(iface, groupName)
 			}
 		} else {
@@ -144,17 +145,17 @@ func groupAssign(groupName, node, iface string) error {
 /**
 Unassign a group from a node's interface
 */
-func groupUnassign(groupName, node, iface string) error {
+func groupUnassign(groupName, uid, iface string) error {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
 	if netUtils.InterfaceExist(iface) {
-		if exists, i := nodeInterfaceGroupExists(node, iface, groupName); exists {
+		if exists, i := nodeInterfaceGroupExists(uid, iface, groupName); exists {
 			// make the group passive before removing it
 			makeGroupPassive(iface, groupName)
 			// Remove it
-			DB.Config.Nodes[node].IPGroups[iface] = append(DB.Config.Nodes[node].IPGroups[iface][:i], DB.Config.Nodes[node].IPGroups[iface][i+1:]...)
+			DB.Config.Nodes[uid].IPGroups[iface] = append(DB.Config.Nodes[uid].IPGroups[iface][:i], DB.Config.Nodes[uid].IPGroups[iface][i+1:]...)
 		} else {
-			DB.Logging.Warn(groupName + " does not exist in node " + node + ".. skipping.")
+			DB.Logging.Warn(groupName + " does not exist in node " + uid + ".. skipping.")
 		}
 		return nil
 	}
@@ -218,11 +219,11 @@ func getGroupNodes(group string) ([]string, []string) {
 	var hosts []string
 	var interfaces []string
 	var found = false
-	for name, node := range DB.Config.Nodes {
+	for _, node := range DB.Config.Nodes {
 		for iface, groupNameSlice := range node.IPGroups {
 			for _, groupName := range groupNameSlice {
 				if group == groupName {
-					hosts = append(hosts, name)
+					hosts = append(hosts, node.Hostname)
 					interfaces = append(interfaces, iface)
 					found = true
 				}

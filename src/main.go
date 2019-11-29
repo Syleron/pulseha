@@ -129,7 +129,7 @@ func main() {
 	// Set our pulse logger
 	pulse.DB.Logging = pulseLogger
 	// Load the config
-	pulse.DB.Config = config.GetConfig()
+	pulse.DB.Config = config.New()
 	// Set the logging level
 	setLogLevel(pulse.DB.Config.Pulse.LoggingLevel)
 	// Setup wait group

@@ -55,6 +55,7 @@ message PulseJoin {
     string ca_crt = 11;
     string ca_key = 12;
     int32 error_code = 13;
+    string uid = 14;
 }
 message PulseLeave {
     bool success = 1;
