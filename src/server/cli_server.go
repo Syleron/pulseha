@@ -300,9 +300,9 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 	member.SetStatus(proto.MemberStatus_LEAVING)
 	// Check if I am the node being removed
 	if in.Hostname == localHostname {
+		s.Server.Shutdown()
 		nodesClearLocal()
 		groupClearLocal()
-		s.Server.Shutdown()
 		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
