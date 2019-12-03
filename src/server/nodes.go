@@ -78,12 +78,12 @@ func nodeUpdateLocalInterfaces() error {
 	if err != nil {
 		return err
 	}
-	_, localNode, err := nodeGetByHostname(localHostname)
+	uid, localNode, err := nodeGetByHostname(localHostname)
 	if err != nil {
 		return err
 	}
 	// Get our local interfaces
-	localifaces := DB.Config.Nodes[localHostname].IPGroups
+	localifaces := DB.Config.Nodes[uid].IPGroups // TODO: Should be a config getter
 	// Get our current interfaces
 	ifaces := netUtils.GetInterfaceNames()
 	// Add missing interfaces
@@ -99,7 +99,7 @@ func nodeUpdateLocalInterfaces() error {
 			localNode.IPGroups[b] = make([]string, 0)
 			groupName := genGroupName()
 			DB.Config.Groups[groupName] = []string{}
-			if err := groupAssign(groupName, localHostname, b); err != nil {
+			if err := groupAssign(groupName, uid, b); err != nil {
 				log.Warnf("Unable to assign group to interface: %s", err.Error())
 			}
 		}
@@ -114,7 +114,7 @@ func nodeUpdateLocalInterfaces() error {
 			}
 		}
 		if !exist {
-			delete(DB.Config.Nodes[localHostname].IPGroups, b)
+			delete(DB.Config.Nodes[uid].IPGroups, b)
 		}
 	}
 	// Save to our config

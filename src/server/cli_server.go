@@ -222,15 +222,12 @@ func (s *CLIServer) Leave(ctx context.Context, in *proto.PulseLeave) (*proto.Pul
 			},
 		)
 	}
-	// make oureselves passive
-	MakeLocalPassive()
-	// reset our memberlist
-	DB.MemberList.Reset()
+	// Shutdown daemon server
+	// Note: Shutdown makes ourselves passive and reset our memberlist
+	s.Server.Shutdown()
 	// Clear our config
 	nodesClearLocal()
 	groupClearLocal()
-	// Shutdown daemon server
-	s.Server.Shutdown()
 	// save
 	if err := DB.Config.Save(); err != nil {
 		return &proto.PulseLeave{

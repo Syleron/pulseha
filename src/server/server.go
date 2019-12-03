@@ -431,7 +431,7 @@ func (s *Server) ConfigSync(ctx context.Context, in *proto.PulseConfigSync) (*pr
 	// Update our member list
 	DB.MemberList.Reload()
 	// Let the logs know
-	DB.Logging.Info("Successfully r-synced local config")
+	DB.Logging.Debug("Successfully r-synced local config")
 	// Return with yay
 	return &proto.PulseConfigSync{
 		Success: true,

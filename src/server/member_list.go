@@ -20,7 +20,6 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	log "github.com/Sirupsen/logrus"
 	p "github.com/syleron/pulseha/proto"
 	"github.com/syleron/pulseha/src/client"
@@ -156,7 +155,6 @@ func (m *MemberList) Setup() {
 			m.PromoteMember(localNode.Hostname)
 		} else {
 			// come up passive and monitoring health checks
-			fmt.Println(localNode.Hostname)
 			localMember := m.GetMemberByHostname(localNode.Hostname)
 			localMember.SetLastHCResponse(time.Now())
 			localMember.SetStatus(p.MemberStatus_PASSIVE)
