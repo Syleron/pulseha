@@ -480,16 +480,42 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *proto.PulseGroupAdd) (*p
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
-	DB.MemberList.SyncConfig()
+	if err := DB.MemberList.SyncConfig(); err != nil {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 5,
+		}, nil
+	}
 	// bring up the ip on the active appliance
 	activeHostname, activeMember := DB.MemberList.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
-	activeMember.Connect()
-	iface := DB.Config.GetGroupIface(activeHostname, in.Name)
-	activeMember.Send(client.SendBringUpIP, &proto.PulseBringIP{
+	if err := activeMember.Connect(); err != nil {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 3,
+		}, nil
+	}
+	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
+	if err != nil {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 6,
+		}, nil
+	}
+	_, err = activeMember.Send(client.SendBringUpIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips:   in.Ips,
 	})
+	if err != nil {
+		return &proto.PulseGroupAdd{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 4,
+		}, nil
+	}
 	// respond
 	return &proto.PulseGroupAdd{
 		Success: true,
@@ -542,7 +568,14 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *proto.PulseGroupRemov
 	activeHostname, activeMember := DB.MemberList.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	activeMember.Connect()
-	iface := DB.Config.GetGroupIface(activeHostname, in.Name)
+	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
+	if err != nil {
+		return &proto.PulseGroupRemove{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 5,
+		}, nil
+	}
 	activeMember.Send(client.SendBringDownIP, &proto.PulseBringIP{
 		Iface: iface,
 		Ips:   in.Ips,
@@ -846,4 +879,8 @@ func (s *CLIServer) Network(ctx context.Context, in *proto.PulseNetwork) (*proto
 		Success: true,
 		Message: "Success! PulseHA config has been sync'd with local network interfaces",
 	}, nil
+}
+
+func (s *CLIServer) Describe(ctx context.Context, in *proto.PulseDescribe) (*proto.PulseDescribe, error) {
+	return &proto.PulseDescribe{}, nil
 }

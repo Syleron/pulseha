@@ -54,7 +54,7 @@ message PulseJoin {
     string token = 10;
     string ca_crt = 11;
     string ca_key = 12;
-    int32 error_code = 13;
+    int32 errorCode = 13;
     string uid = 14;
 }
 message PulseLeave {
@@ -62,14 +62,14 @@ message PulseLeave {
     string message = 2;
     string hostname = 3;
     bool replicated = 4;
-    int32 error_code = 5;
+    int32 errorCode = 5;
 }
 message PulseRemove {
     bool success = 1;
     string message = 2;
     string hostname = 3;
     bool replicated = 4;
-    int32 error_code = 5;
+    int32 errorCode = 5;
 }
 message PulseCreate {
     bool success = 1;
@@ -77,40 +77,40 @@ message PulseCreate {
     string bind_ip = 3;
     string bind_port = 4;
     string token = 5;
-    int32 error_code = 6;
+    int32 errorCode = 6;
 }
 message PulseCert {
     bool success = 1;
     string message = 2;
     string bind_ip = 3;
-    int32 error_code = 7;
+    int32 errorCode = 7;
 }
 // Pulse Group Messages
 message PulseGroupNew {
     bool success = 1;
     string message = 2;
     string name = 3;
-    int32 error_code = 4;
+    int32 errorCode = 4;
 }
 message PulseGroupDelete {
     bool success = 1;
     string message = 2;
     string name = 3;
-    int32 error_code = 4;
+    int32 errorCode = 4;
 }
 message PulseGroupAdd {
     bool success = 1;
     string message = 2;
     string name = 3;
     repeated string ips = 4;
-    int32 error_code = 5;
+    int32 errorCode = 5;
 }
 message PulseGroupRemove {
     bool success = 1;
     string message = 2;
     string name = 3;
     repeated string ips = 4;
-    int32 error_code = 5;
+    int32 errorCode = 5;
 }
 message PulseGroupAssign {
     bool success = 1;
@@ -118,7 +118,7 @@ message PulseGroupAssign {
     string group = 3;
     string interface = 4;
     string node = 5;
-    int32 error_code = 6;
+    int32 errorCode = 6;
 }
 message PulseGroupUnassign {
     bool success = 1;
@@ -126,7 +126,7 @@ message PulseGroupUnassign {
     string group = 3;
     string interface = 4;
     string node = 5;
-    int32 error_code = 6;
+    int32 errorCode = 6;
 }
 message PulseStatus {
     bool success = 1;
@@ -161,7 +161,7 @@ message PulsePromote {
     bool success =1;
     string message = 2;
     string member = 3;
-    int32 error_code = 4;
+    int32 errorCode = 4;
 }
 message PulseBringIP {
     bool success = 1;
@@ -174,19 +174,19 @@ message PulseConfig {
     string message = 2;
     string key = 3;
     string value = 4;
-    int32 error_code = 5;
+    int32 errorCode = 5;
 }
 message PulseToken {
     bool success = 1;
     string message = 2;
     string token = 3;
-    int32 error_code = 4;
+    int32 errorCode = 4;
 }
 message PulseNetwork {
     bool success = 1;
     string message = 2;
     string action = 3;
-    int32 error_code = 4;
+    int32 errorCode = 4;
 }
 message PulseLogs {
     enum Level {
@@ -198,6 +198,21 @@ message PulseLogs {
     string message = 1;
     string node = 2;
     Level level = 3;
+}
+
+message PulseDescribe {
+    bool success = 1;
+    string message = 2;
+    int32 cpuUsage = 3;
+    int32 memUsage = 4;
+    string uid = 5;
+    int32 diskUsage = 6;
+    string uptime = 7;
+    string status = 8;
+    string latency = 9;
+    string hostname = 10;
+    string bindAddress = 11;
+    string lastReceived = 12;
 }
 
 // Services
@@ -236,6 +251,8 @@ service CLI {
     rpc Token (PulseToken) returns (PulseToken);
     // Perform network related actions
     rpc Network (PulseNetwork) returns (PulseNetwork);
+    // Get detailed information for a particular node
+    rpc Describe (PulseDescribe) returns (PulseDescribe);
 }
 
 service Server {
@@ -259,6 +276,8 @@ service Server {
     rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
     // Bring down IP
     rpc Logs (PulseLogs) returns (PulseLogs);
+    // Get detailed information for a particular node
+    rpc Describe (PulseDescribe) returns (PulseDescribe);
 }
 
 

@@ -251,19 +251,19 @@ func (c *Config) ClusterCheck() bool {
 /**
 Returns the interface the group is assigned to
 */
-func (c *Config) GetGroupIface(node string, groupName string) string {
-	for nodeName, n := range c.Nodes {
-		if nodeName == node {
+func (c *Config) GetGroupIface(hostname string, groupName string) (ifaceName string, err error) {
+	for _, n := range c.Nodes {
+		if n.Hostname == hostname {
 			for iface, groups := range n.IPGroups {
 				for _, group := range groups {
 					if group == groupName {
-						return iface
+						return iface, nil
 					}
 				}
 			}
 		}
 	}
-	return ""
+	return "", errors.New("cannot find interface assignment for group")
 }
 
 /**

@@ -27,7 +27,7 @@ cli: get
 maccli: get 
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	 env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulseha ./cmd/
-protos: get
+protos:
 	 protoc ./proto/pulse.proto --go_out=plugins=grpc:.
 test:
 	 go test -timeout 10s -v ./src/...

@@ -506,11 +506,10 @@ func (s *Server) BringUpIP(ctx context.Context, in *proto.PulseBringIP) (*proto.
 	if !CanCommunicate(ctx) {
 		return nil, errors.New("unauthorized")
 	}
-	err := BringUpIPs(in.Iface, in.Ips)
-	success := false
+	success := true
 	msg := "success"
-	if err != nil {
-		success = true
+	if err := BringUpIPs(in.Iface, in.Ips); err != nil {
+		success = false
 		msg = err.Error()
 	}
 	return &proto.PulseBringIP{Success: success, Message: msg}, nil
@@ -526,11 +525,10 @@ func (s *Server) BringDownIP(ctx context.Context, in *proto.PulseBringIP) (*prot
 	if !CanCommunicate(ctx) {
 		return nil, errors.New("unauthorized")
 	}
-	err := BringDownIPs(in.Iface, in.Ips)
-	success := false
+	success := true
 	msg := "success"
-	if err != nil {
-		success = true
+	if err := BringDownIPs(in.Iface, in.Ips); err != nil {
+		success = false
 		msg = err.Error()
 	}
 	return &proto.PulseBringIP{Success: success, Message: msg}, nil
@@ -557,4 +555,8 @@ func (s *Server) Logs(ctx context.Context, in *proto.PulseLogs) (*proto.PulseLog
 		break
 	}
 	return &proto.PulseLogs{}, nil
+}
+
+func (s *Server) Describe(ctx context.Context, in *proto.PulseDescribe) (*proto.PulseDescribe, error) {
+	return &proto.PulseDescribe{}, nil
 }

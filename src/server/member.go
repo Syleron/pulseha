@@ -314,9 +314,13 @@ func (m *Member) MakePassive() error {
 Used to bring up a single IP on member
 Note: We need to know the group to work out what interface to
 bring it up on.
+TODO: Return an error instead of a boolean
 */
 func (m *Member) BringUpIPs(ips []string, group string) bool {
-	iface := DB.Config.GetGroupIface(m.Hostname, group)
+	iface, err := DB.Config.GetGroupIface(m.Hostname, group)
+	if err != nil {
+		return false
+	}
 	localNode := DB.Config.GetLocalNode()
 	if m.Hostname == localNode.Hostname {
 		DB.Logging.Debug("member is local node bringing up IP's")
