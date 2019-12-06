@@ -810,7 +810,7 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 	DB.Config.Reload()
 	return &proto.PulseConfig{
 		Success: true,
-		Message: "Successfully updated pulseha config",
+		Message: "Successfully updated PulseHA config",
 	}, nil
 }
 
