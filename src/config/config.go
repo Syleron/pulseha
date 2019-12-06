@@ -154,7 +154,9 @@ func (c *Config) Save() error {
  */
 func (c *Config) Reload() {
 	log.Info("Reloading PulseHA config")
-	c.Load()
+	if err := c.Load(); err != nil {
+		panic(err)
+	}
 }
 
 /**
@@ -215,7 +217,7 @@ func (c *Config) LocalNode() Node {
 	if err != nil {
 		return Node{}
 	}
-	node, err :=  c.GetNodeByHostname(hostname)
+	_, node, err :=  c.GetNodeByHostname(hostname)
 	if err != nil {
 		return Node{}
 	}
@@ -233,7 +235,7 @@ func (c *Config) ClusterCheck() bool {
 			if err != nil {
 				return false
 			}
-			node, err :=  c.GetNodeByHostname(hostname)
+			_, node, err :=  c.GetNodeByHostname(hostname)
 			if err != nil {
 				return false
 			}
@@ -277,13 +279,13 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 }
 
 // GetNodeByHostname - Get node by hostname
-func (c *Config) GetNodeByHostname(hostname string) (Node, error) {
-	for _, node := range c.Nodes {
+func (c *Config) GetNodeByHostname(hostname string) (uid string, node Node, err error) {
+	for uid, node := range c.Nodes {
 		if node.Hostname == hostname  {
-			return node, nil
+			return uid, node, nil
 		}
 	}
-	return Node{}, errors.New("unable to find node with hostname " + hostname)
+	return "", Node{}, errors.New("unable to find node with hostname " + hostname)
 }
 
 // UpdateValue - Update a key's value

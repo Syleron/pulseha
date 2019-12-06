@@ -34,6 +34,7 @@ import (
  */
 type MemberList struct {
 	Members []*Member
+	StopChan chan bool
 	sync.Mutex
 }
 
@@ -276,6 +277,11 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	monitors the connections states for each member
 */
 func (m *MemberList) MonitorClientConns() bool {
+	// Clear routine
+	if !DB.Config.ClusterCheck() {
+		log.Debug("MonitorClientConns() routine cleared")
+		return true
+	}
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {
@@ -308,6 +314,11 @@ func (m *MemberList) MonitorClientConns() bool {
 Send health checks to users who have a healthy connection
 */
 func (m *MemberList) AddHealthCheckHandler() bool {
+	// Clear routine
+	if !DB.Config.ClusterCheck() {
+		log.Debug("AddHealthCheckHandler() routine cleared")
+		return true
+	}
 	// make sure we are still the active appliance
 	member, err := m.GetLocalMember()
 	if err != nil {

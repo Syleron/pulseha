@@ -342,6 +342,11 @@ func (m *Member) BringUpIPs(ips []string, group string) bool {
 Monitor the last time we received a health check and or failover
 */
 func (m *Member) MonitorReceivedHCs() bool {
+	// Clear routine
+	if !DB.Config.ClusterCheck() {
+		log.Debug("MonitorReceivedHCs() routine cleared")
+		return true
+	}
 	// make sure we are still the active appliance
 	member, err := DB.MemberList.GetLocalMember()
 	if err != nil {

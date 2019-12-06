@@ -276,16 +276,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 			ErrorCode: 2,
 		}, nil
 	}
-	localHostname, err := utils.GetHostname()
-	if err != nil {
-		return &proto.PulseRemove{
-			Success: false,
-			Message: "Unable to perform remove as unable to get local hostname",
-			ErrorCode: 3,
-		}, nil
-	}
 	// Tell everyone else to do the same
-	// TODO: This must come first otherwise the node we remove later wont be included in the request
+	// Note: This must come first otherwise the node we remove later wont be included in the request
 	if DB.Config.NodeCount() > 1 {
 		DB.MemberList.Broadcast(
 			client.SendRemove,
@@ -295,11 +287,22 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 			},
 		)
 	}
+	// Get our local node
+	localNode := DB.Config.GetLocalNode()
+	// Get our node we are removing
+	uid, _, err := DB.Config.GetNodeByHostname(in.Hostname)
+	if err != nil {
+		return &proto.PulseRemove{
+			Success: false,
+			Message: "Unable to retrieve " + in.Hostname + " from local configuration",
+			ErrorCode: 3,
+		}, nil
+	}
 	// Set our member status
 	member := DB.MemberList.GetMemberByHostname(in.Hostname)
 	member.SetStatus(proto.MemberStatus_LEAVING)
 	// Check if I am the node being removed
-	if in.Hostname == localHostname {
+	if in.Hostname == localNode.Hostname {
 		s.Server.Shutdown()
 		nodesClearLocal()
 		groupClearLocal()
@@ -308,7 +311,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.P
 		// Remove from our memberlist
 		DB.MemberList.MemberRemoveByHostname(in.Hostname)
 		// Remove from our config
-		err := nodeDelete(in.Hostname)
+		err := nodeDelete(uid)
 		if err != nil {
 			return &proto.PulseRemove{
 				Success: false,

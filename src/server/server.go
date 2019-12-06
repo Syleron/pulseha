@@ -377,8 +377,8 @@ func (s *Server) Remove(ctx context.Context, in *proto.PulseRemove) (*proto.Puls
 	member := DB.MemberList.GetMemberByHostname(in.Hostname)
 	member.SetStatus(proto.MemberStatus_LEAVING)
 	if in.Hostname == localHostname {
-		nodesClearLocal()
 		s.Shutdown()
+		nodesClearLocal()
 		log.Info("Successfully removed " + in.Hostname + " from cluster. PulseHA no longer listening..")
 	} else {
 		// Remove from our memberlist
