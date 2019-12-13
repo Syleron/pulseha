@@ -20,6 +20,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"github.com/syleron/pulseha/src/jsonHelper"
 	"github.com/syleron/pulseha/src/utils"
@@ -35,7 +36,7 @@ var (
 type Config struct {
 	Pulse  Local               `json:"pulseha"`
 	Groups map[string][]string `json:"floating_ip_groups"`
-	Nodes  map[string]Node     `json:"nodes"`
+	Nodes  map[string]*Node     `json:"nodes"`
 	sync.Mutex
 }
 
@@ -46,10 +47,6 @@ type Local struct {
 	LocalNode           string `json:"local_node"`
 	ClusterToken        string `json:"cluster_token"`
 	LoggingLevel        string `json:"logging_level"`
-}
-
-type Nodes struct {
-	Nodes map[string]Node
 }
 
 type Node struct {
@@ -80,7 +77,7 @@ func (c *Config) NodeCount() int {
 	return len(c.Nodes)
 }
 
-// GetLocalNode - Return the local node hostname
+// GetLocalNode - Return the local node UID
 func (c *Config) GetLocalNodeUUID() string {
 	return c.Pulse.LocalNode
 }
@@ -88,7 +85,7 @@ func (c *Config) GetLocalNodeUUID() string {
 //
 func (c *Config) GetLocalNode() Node {
 	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
-		return node
+		return *node
 	}
 	panic("Local node does not exist in local config.")
 }
@@ -108,8 +105,8 @@ func (c *Config) Load() error {
 			log.Fatalf("Unable to unmarshal config: %s", err)
 			return err
 		}
-		if !c.Validate() {
-			log.Fatalf("invalid PulseHA config")
+		if err := c.Validate(); err != nil {
+			log.Fatalf(err.Error())
 			os.Exit(1)
 		}
 	} else {
@@ -130,8 +127,8 @@ func (c *Config) Save() error {
 	c.Lock()
 	defer c.Unlock()
 	// Validate before we save
-	if !c.Validate() {
-		return errors.New("unable to save config. value mismatch")
+	if err := c.Validate(); err != nil {
+		return errors.New(err.Error())
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(c, "", "    ")
@@ -162,22 +159,20 @@ func (c *Config) Reload() {
 /**
  *
  */
-func (c *Config) Validate() bool {
+func (c *Config) Validate() error {
 	hostname, err := utils.GetHostname()
 	if err != nil {
-		log.Fatal("Unable to get local hostname")
-		return false
+		return errors.New("unable to get local hostname")
 	}
+
 	// Make sure our groups section is valid
 	if c.Groups == nil {
-		log.Fatal("Unable to load Groups section of the config")
-		return false
+		return errors.New("unable to load groups section of the config")
 	}
 
 	// Make sure our nodes section is valid
 	if c.Nodes == nil {
-		log.Fatal("Unable to load Nodes section of the config")
-		return false
+		return errors.New("unable to load nodes section of the config")
 	}
 
 	// if we are in a cluster.. does our hostname exist?
@@ -191,24 +186,19 @@ func (c *Config) Validate() bool {
 			return false
 		}
 		if !exists() {
-			log.Fatal("hostname mismatch. Local hostname does not exist in nodes section")
-			return false
+			return errors.New("hostname mismatch. Local hostname does not exist in nodes section")
 		}
 	}
 
 	if c.Pulse.FailOverInterval < 1000 || c.Pulse.FailOverLimit < 1000 || c.Pulse.HealthCheckInterval < 1000 {
-		log.Fatal("Please make sure the interval and limit values in your config are valid millisecond values of at least 1 second")
-		return false
+		return errors.New("please make sure the interval and limit values in your config are valid millisecond values of at least one second")
 	}
 
 	if c.Pulse.FailOverLimit < c.Pulse.FailOverInterval {
-		log.Fatal("The fos_interval value must be a smaller value then your fo_limit")
-		return false
+		return errors.New("the fos_interval value must be a smaller value then your fo_limit")
 	}
 
-	// TODO: Check if we have valid network interface names
-
-	return true
+	return nil
 }
 
 // LocalNode - Get the local node object
@@ -282,7 +272,7 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 func (c *Config) GetNodeByHostname(hostname string) (uid string, node Node, err error) {
 	for uid, node := range c.Nodes {
 		if node.Hostname == hostname  {
-			return uid, node, nil
+			return uid, *node, nil
 		}
 	}
 	return "", Node{}, errors.New("unable to find node with hostname " + hostname)
@@ -293,6 +283,9 @@ func (c *Config) UpdateValue(key string, value string) error {
 	if err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse); err != nil {
 		return err
 	}
+	if err := c.Validate(); err != nil {
+		return errors.New("invalid configuration value")
+	}
 	// Save our config with the updated info
 	if err := c.Save(); err != nil {
 		return err
@@ -302,15 +295,10 @@ func (c *Config) UpdateValue(key string, value string) error {
 
 // UpdateHostname - Changes our local node hostname and the hostname in our node section
 func (c *Config) UpdateHostname(newHostname string) {
-	localNode := c.GetLocalNode()
-	// Update our local node hostname
-	c.Pulse.LocalNode = newHostname
-	// Update the node section hostname
-	for _, node := range c.Nodes {
-		if node.Hostname == localNode.Hostname {
-			node.Hostname = newHostname
-		}
-	}
+	log.Debug("Config:UpdateHostname() Change local hostname to " + newHostname)
+	node := c.Nodes[c.GetLocalNodeUUID()]
+	node.Hostname = newHostname
+	fmt.Println(c)
 }
 
 // DefaultLocalConfig - Generate a default config to write
@@ -325,7 +313,7 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			LoggingLevel:        "info",
 		},
 		Groups: map[string][]string{},
-		Nodes:  map[string]Node{},
+		Nodes:  map[string]*Node{},
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")

@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -73,6 +74,15 @@ func (s *CLIServer) Join(ctx context.Context, in *proto.PulseJoin) (*proto.Pulse
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
+		// Validate our IP & Port
+		i, _ := strconv.Atoi(in.BindPort)
+		if i == 0 && i > 65535 {
+			return &proto.PulseJoin{
+				Success: false,
+				Message: "Invalid port range",
+				ErrorCode: 9,
+			}, nil
+		}
 		// Create a new client
 		c := &client.Client{}
 		// Attempt to connect
@@ -338,6 +348,16 @@ func (s *CLIServer) Create(ctx context.Context, in *proto.PulseCreate) (*proto.P
 	defer s.Unlock()
 	// Make sure we are not in a cluster before creating one.
 	if !DB.Config.ClusterCheck() {
+		// Validate our IP & Port
+		i, _ := strconv.Atoi(in.BindPort)
+		if i == 0 && i > 65535 {
+			return &proto.PulseCreate{
+				Success: false,
+				Message: "Invalid port range",
+				Token: token,
+				ErrorCode: 3,
+			}, nil
+		}
 		// Get our local hostname
 		hostname, err := utils.GetHostname()
 		if err != nil {
@@ -783,6 +803,20 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			ErrorCode: 1,
 		}, nil
 	}
+	// If the value is hostname, update our node in our nodes section as well
+	if in.Key == "hostname" {
+		if err := nodeUpdateLocalHostname(in.Value); err != nil {
+			return &proto.PulseConfig{
+				Success: false,
+				Message: err.Error(),
+				ErrorCode: 3,
+			}, nil
+		}
+		return &proto.PulseConfig{
+			Success: true,
+			Message: "Successfully updated PulseHA config",
+		}, nil
+	}
 	// Update our key value
 	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
 		return &proto.PulseConfig{
@@ -790,19 +824,6 @@ func (s *CLIServer) Config(ctx context.Context, in *proto.PulseConfig) (*proto.P
 			Message: err.Error(),
 			ErrorCode: 2,
 		}, nil
-	}
-	// If the value is hostname, update our node in our nodes section as well
-	if in.Key == "local_node" {
-		// Set our local value
-		DB.Config.UpdateHostname(in.Value)
-		// Resync the config
-		if err := DB.MemberList.SyncConfig(); err != nil {
-			return &proto.PulseConfig{
-				Success: false,
-				Message: err.Error(),
-				ErrorCode: 3,
-			}, nil
-		}
 	}
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")

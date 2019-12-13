@@ -131,7 +131,7 @@ func nodeAdd(uid string, hostname string, node *config.Node) error {
 	DB.Logging.Debug(hostname + " added to local cluster config")
 	if !nodeExistsByHostname(hostname) {
 		DB.Config.Lock()
-		DB.Config.Nodes[uid] = *node
+		DB.Config.Nodes[uid] = node
 		DB.Config.Unlock()
 		return nil
 	}
@@ -158,7 +158,7 @@ func nodeDelete(uid string) error {
 func nodesClearLocal() {
 	DB.Logging.Debug("All nodes cleared from local config")
 	DB.Config.Lock()
-	DB.Config.Nodes = map[string]config.Node{}
+	DB.Config.Nodes = map[string]*config.Node{}
 	DB.Config.Unlock()
 }
 
@@ -194,7 +194,7 @@ Get node by its hostname
 func nodeGetByUUID(uid string) (config.Node, error) {
 	for key, node := range DB.Config.Nodes {
 		if key == uid {
-			return node, nil
+			return *node, nil
 		}
 	}
 	return config.Node{}, errors.New("unable to find node in config")
@@ -204,7 +204,7 @@ func nodeGetByUUID(uid string) (config.Node, error) {
 func nodeGetByHostname(hostname string) (string, config.Node, error) {
 	for uid, node := range DB.Config.Nodes {
 		if node.Hostname == hostname {
-			return uid, node, nil
+			return uid, *node, nil
 		}
 	}
 	return "", config.Node{}, errors.New("unable to find node in config")
@@ -238,4 +238,18 @@ func nodeInterfaceGroupExists(uid, iface, group string) (bool, int) {
 		}
 	}
 	return false, -1
+}
+
+func nodeUpdateLocalHostname(hostname string) error {
+	// Set our local value
+	DB.Config.UpdateHostname(hostname)
+	// Save our changes
+	if err := DB.Config.Save(); err != nil {
+		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+	}
+	// Resync the config
+	if err := DB.MemberList.SyncConfig(); err != nil {
+		return err
+	}
+	return nil
 }
