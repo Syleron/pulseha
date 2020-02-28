@@ -20,7 +20,7 @@ package server
 import (
 	"encoding/json"
 	"errors"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	p "github.com/syleron/pulseha/proto"
 	"github.com/syleron/pulseha/src/client"
 	"github.com/syleron/pulseha/src/utils"

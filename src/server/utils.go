@@ -21,7 +21,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/proto"
 	"google.golang.org/grpc/peer"
 	"net"

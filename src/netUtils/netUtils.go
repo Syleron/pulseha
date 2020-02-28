@@ -20,7 +20,7 @@ package netUtils
 import (
 	"bytes"
 	"errors"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/src/utils"
 	"github.com/vishvananda/netlink"
 	"net"

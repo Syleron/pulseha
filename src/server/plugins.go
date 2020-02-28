@@ -18,7 +18,7 @@
 package server
 
 import (
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"path"
 	"path/filepath"
 	"plugin"

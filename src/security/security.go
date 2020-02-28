@@ -25,7 +25,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/src/utils"
 	"math/big"
 	"net"

@@ -19,7 +19,7 @@ package utils
 
 import (
 	"errors"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"io/ioutil"
 	"net"
 	"os"

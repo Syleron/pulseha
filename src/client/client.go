@@ -22,7 +22,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	p "github.com/syleron/pulseha/proto"
 	"github.com/syleron/pulseha/src/security"
 	"google.golang.org/grpc"

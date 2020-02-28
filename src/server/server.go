@@ -23,7 +23,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/proto"
 	"github.com/syleron/pulseha/src/config"
 	"github.com/syleron/pulseha/src/security"
