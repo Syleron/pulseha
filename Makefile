@@ -18,8 +18,7 @@ macbuild: get
 	if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
 	env GOOS=darwin GOARCH=amd64 go build ${LDFLAGS} -v -o ./bin/pulse ./src/
 get:
-	 go get -d ./src/
-	 go get -d ./cmd/
+	 go mod download
 	 go get -u github.com/golang/protobuf/protoc-gen-go
 cli: get 
 	 if [ ! -d "./bin/" ]; then mkdir ./bin/; fi
@@ -33,7 +32,7 @@ test:
 	 go test -timeout 10s -v ./src/...
 	 go test -timeout 10s -v ./cmd/...
 clean:
-	go clean
+	go clean -modcache
 install: 
 ifneq ($(shell uname),Linux)
 	echo "Install only available on Linux"
