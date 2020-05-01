@@ -91,6 +91,27 @@ func BringDownIPs(iface string, ips []string) error {
 }
 
 /**
+Inform our plugins that our member list state has changed
+ */
+func InformMLSChange() {
+	plugins := DB.Plugins.GetGeneralPlugin()
+	if plugins == nil {
+		DB.Logging.Debug("Utils:InformMLSChange() No plugins found. Skipping member list state change inform.")
+		return
+	}
+
+	var safeMemberList []Member
+
+	for _, m := range DB.MemberList.Members {
+		safeMemberList = append(safeMemberList, *m)
+	}
+
+	for _, p := range plugins {
+		p.Plugin.(PluginGen).OnMemberListStatusChange(safeMemberList)
+	}
+}
+
+/**
 
  */
 func MyCaller() string {

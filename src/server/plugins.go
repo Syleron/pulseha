@@ -48,6 +48,7 @@ type PluginGen interface {
 	Name() string
 	Version() float64
 	Run(db *Database) error
+	OnMemberListStatusChange(members []Member)
 }
 
 /**

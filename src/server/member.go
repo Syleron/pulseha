@@ -162,6 +162,8 @@ func (m *Member) SetStatus(status proto.MemberStatus_Status) {
 	m.Lock()
 	defer m.Unlock()
 	m.Status = status
+	// Inform our plugin(s) of state change
+	InformMLSChange()
 }
 
 /**
