@@ -124,7 +124,8 @@ func groupAssign(groupName, uid, iface string) error {
 	if !groupExist(groupName) {
 		return errors.New("IP group does not exist")
 	}
-	if network.InterfaceExist(iface) {
+	exists, _ := network.InterfaceExist(iface)
+	if exists {
 		if exists, _ := nodeInterfaceGroupExists(uid, iface, groupName); !exists {
 			// Add the group
 			DB.Config.Nodes[uid].IPGroups[iface] = append(DB.Config.Nodes[uid].IPGroups[iface], groupName)
@@ -148,7 +149,8 @@ Unassign a group from a node's interface
 func groupUnassign(groupName, uid, iface string) error {
 	DB.Config.Lock()
 	defer DB.Config.Unlock()
-	if network.InterfaceExist(iface) {
+	exists, _ := network.InterfaceExist(iface)
+	if exists {
 		if exists, i := nodeInterfaceGroupExists(uid, iface, groupName); exists {
 			// make the group passive before removing it
 			makeGroupPassive(iface, groupName)
