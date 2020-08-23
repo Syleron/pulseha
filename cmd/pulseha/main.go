@@ -20,7 +20,7 @@ package main
 import (
 	"fmt"
 	"github.com/mitchellh/cli"
-	"github.com/syleron/pulseha/internal/pulseha"
+	"github.com/syleron/pulseha/src/pulseha"
 	"io/ioutil"
 	"log"
 	"os"
