@@ -91,6 +91,7 @@ func BringIPup(iface, ip string) error {
 	ipOb, _ := utils.GetCIDR(ip)
 	exists, eIface, err := CheckIfIPExists(ipOb.String())
 	if err != nil {
+		log.Debug("Network Package - BringIPup() Failed to check to see if IP exists. ", err)
 		return err
 	}
 	if exists {
@@ -98,9 +99,10 @@ func BringIPup(iface, ip string) error {
 			return errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
 		}
 	}
-	addr, err := netlink.ParseAddr(ipOb.String())
+	addr, err := netlink.ParseAddr(ip)
 	if err != nil {
-		return errors.New("unable to bring IP down because ip address couldn't be parsed")
+		log.Debug("Network Package - BringIPup() Failed to parse addr ", err)
+		return errors.New("unable to bring IP up because ip address couldn't be parsed")
 	}
 	if err := netlink.AddrAdd(link, addr); err != nil {
 		log.Debug("Network Package - BringIPup() ", err)
