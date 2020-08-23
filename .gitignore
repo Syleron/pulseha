@@ -39,3 +39,5 @@ cmake-build-debug/
 
 # Bin directory
 bin/
+cmd/pulse/bin/
+cmd/pulseha/bin/
