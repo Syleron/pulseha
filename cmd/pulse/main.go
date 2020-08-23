@@ -20,7 +20,7 @@ package main
 import (
 	"fmt"
 	log "github.com/sirupsen/logrus"
-	pulse2 "github.com/syleron/pulseha/internal/pulse"
+	pulse2 "github.com/syleron/pulseha/src/pulse"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/logging"
 	"os"
