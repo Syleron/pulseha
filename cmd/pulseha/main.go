@@ -19,129 +19,181 @@ package main
 
 import (
 	"fmt"
-	"github.com/mitchellh/cli"
+	log "github.com/sirupsen/logrus"
+	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/logging"
 	"github.com/syleron/pulseha/src/pulseha"
-	"io/ioutil"
-	"log"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+const (
+	PRE_SIGNAL = iota
+	POST_SIGNAL
 )
 
 var (
-	Commands map[string]cli.CommandFactory
-
-	Version string
-	Build   string
+	Version         string
+	Build           string
+	hookableSignals []os.Signal
 )
 
+var pulse *Pulse
+
 /**
- *
+ * Main Pulse struct type
+ */
+type Pulse struct {
+	DB          pulseha.Database
+	Server      *pulseha.Server
+	CLI         *pulseha.CLIServer
+	Sigs        chan os.Signal
+	SignalHooks map[int]map[os.Signal][]func()
+}
+
+type PulseLogFormat struct{}
+
+func (f *PulseLogFormat) Format(entry *log.Entry) ([]byte, error) {
+	time := "[" + entry.Time.Format(time.Stamp) + "]"
+	lvlOut := entry.Level.String()
+	switch entry.Level {
+	case log.ErrorLevel:
+	case log.FatalLevel:
+	case log.WarnLevel:
+		lvlOut = strings.ToUpper(lvlOut)
+	}
+	level := "[" + lvlOut + "] "
+	message := time + level + entry.Message
+	return append([]byte(message), '\n'), nil
+}
+
+/**
+ * Create a new instance of PulseHA
+ */
+func createPulse() *Pulse {
+	// Create the Pulse object
+	pulse := &Pulse{
+		Server: &pulseha.Server{},
+		CLI:    &pulseha.CLIServer{},
+	}
+	// Set our server variable
+	pulse.CLI.Server = pulse.Server
+	return pulse
+}
+
+func init() {
+	hookableSignals = []os.Signal{
+		syscall.SIGHUP,
+		syscall.SIGUSR1,
+		syscall.SIGUSR2,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGTSTP,
+	}
+}
+
+/**
+ * Essential Construct
  */
 func main() {
-	os.Exit(realMain())
-}
+	// Draw logo
+	fmt.Printf(`
+   ___       _                  _
+  / _ \_   _| |___  ___  /\  /\/_\
+ / /_)/ | | | / __|/ _ \/ /_/ //_\\
+/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
+\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
 
-/**
- *
- */
-func realMain() int {
-	log.SetOutput(ioutil.Discard)
-
-	args := os.Args[1:]
-	for _, arg := range args {
-		if arg == "-v" || arg == "--version" {
-			newArgs := make([]string, len(args)+1)
-			newArgs[0] = "version"
-			copy(newArgs[1:], args)
-			args = newArgs
-			break
-		}
+`, Version, Build[0:7])
+	log.SetFormatter(new(PulseLogFormat))
+	pulse = createPulse()
+	// listen for signals
+	pulse.Sigs = make(chan os.Signal)
+	signal.Notify(pulse.Sigs)
+	// Handle the signals
+	go handleSignals()
+	// load the config
+	pulse.DB = pulseha.Database{
+		Plugins:    &pulseha.Plugins{},
+		MemberList: &pulseha.MemberList{},
 	}
-
-	cli := &cli.CLI{
-		Name:         "pulseha",
-		Args:         args,
-		Commands:     Commands,
-		Autocomplete: true,
-		HelpFunc:     cli.BasicHelpFunc("pulseha"),
-	}
-
-	exitCode, err := cli.Run()
+	// Setup a new pulse Logger
+	pulseLogger, err := logging.NewLogger(pulse.DB.MemberList.Broadcast)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error executing CLI: %s\n", err.Error())
-		return 1
+		panic("unable to create pulseha distributed logger")
 	}
-
-	return exitCode
+	// Set our pulse logger
+	pulse.DB.Logging = pulseLogger
+	// Load the config
+	pulse.DB.Config = config.New()
+	// Set the logging level
+	setLogLevel(pulse.DB.Config.Pulse.LoggingLevel)
+	// Setup wait group
+	var wg sync.WaitGroup
+	wg.Add(1)
+	// Setup cli
+	go pulse.CLI.Setup()
+	// Setup server
+	go pulse.Server.Init(&pulse.DB)
+	wg.Wait()
 }
 
 /**
- *
- */
-func init() {
-	ui := &cli.BasicUi{Writer: os.Stdout}
 
-	Commands = map[string]cli.CommandFactory{
-		"join": func() (cli.Command, error) {
-			return &pulseha.JoinCommand{
-				Ui: ui,
-			}, nil
-		},
-		"create": func() (cli.Command, error) {
-			return &pulseha.CreateCommand{
-				Ui: ui,
-			}, nil
-		},
-		"groups": func() (cli.Command, error) {
-			return &pulseha.GroupsCommand{
-				Ui: ui,
-			}, nil
-		},
-		"leave": func() (cli.Command, error) {
-			return &pulseha.LeaveCommand{
-				Ui: ui,
-			}, nil
-		},
-		"remove": func() (cli.Command, error) {
-			return &pulseha.RemoveCommand{
-				Ui: ui,
-			}, nil
-		},
-		"status": func() (cli.Command, error) {
-			return &pulseha.StatusCommand{
-				Ui: ui,
-			}, nil
-		},
-		"promote": func() (cli.Command, error) {
-			return &pulseha.PromoteCommand{
-				Ui: ui,
-			}, nil
-		},
-		"cert": func() (cli.Command, error) {
-			return &pulseha.CertCommand{
-				Ui: ui,
-			}, nil
-		},
-		"token": func() (cli.Command, error) {
-			return &pulseha.TokenCommand{
-				Ui: ui,
-			}, nil
-		},
-		"config": func() (cli.Command, error) {
-			return &pulseha.ConfigCommand{
-				Ui: ui,
-			}, nil
-		},
-		"network": func() (cli.Command, error) {
-			return &pulseha.NetworkCommand{
-				Ui: ui,
-			}, nil
-		},
-		"version": func() (cli.Command, error) {
-			return &pulseha.VersionCommand{
-				Version: Version,
-				Build:   Build,
-				Ui:      ui,
-			}, nil
-		},
+ */
+func setLogLevel(level string) {
+	logLevel, err := log.ParseLevel(level)
+	if err != nil {
+		panic(err.Error())
 	}
+	log.SetLevel(logLevel)
+	if level == "debug" {
+		log.Info("**** DEBUG LOGGING ENABLED ****")
+	}
+}
+
+/**
+Handle OS signals
+*/
+func handleSignals() {
+	var sig os.Signal
+	signal.Notify(pulse.Sigs, hookableSignals...)
+	for {
+		sig = <-pulse.Sigs
+		signalHooks(PRE_SIGNAL, sig)
+		switch sig {
+		case syscall.SIGUSR2:
+			// Shutdown our server
+			pulse.Server.Shutdown()
+			// Reload our config
+			pulse.DB.Config.Reload()
+			// Start a new server
+			go pulse.Server.Setup()
+			break
+		case syscall.SIGINT:
+			fallthrough
+		case syscall.SIGTERM:
+			// Shutdown our service
+			pulse.Server.Shutdown()
+			os.Exit(0)
+		}
+		signalHooks(POST_SIGNAL, sig)
+	}
+}
+
+/**
+
+ */
+func signalHooks(ppFlag int, sig os.Signal) {
+	if _, notSet := pulse.SignalHooks[ppFlag][sig]; !notSet {
+		return
+	}
+	for _, f := range pulse.SignalHooks[ppFlag][sig] {
+		f()
+	}
+	return
 }

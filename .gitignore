@@ -39,6 +39,6 @@ cmake-build-debug/
 
 # Bin directory
 bin/
-cmd/pulse/bin/
 cmd/pulseha/bin/
+cmd/pulsectl/bin/
 plugins/netcore/bin/
