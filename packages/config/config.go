@@ -47,6 +47,7 @@ type Local struct {
 	LocalNode           string `json:"local_node"`
 	ClusterToken        string `json:"cluster_token"`
 	LoggingLevel        string `json:"logging_level"`
+	AutoFailback		bool   `json:"auto_failback"`
 }
 
 type Node struct {
@@ -308,6 +309,7 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			HealthCheckInterval: 1000,
 			FailOverInterval:    5000,
 			FailOverLimit:       10000,
+			AutoFailback:	     true,
 			LocalNode:           "",
 			ClusterToken:        "",
 			LoggingLevel:        "info",

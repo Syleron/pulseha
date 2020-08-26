@@ -21,8 +21,9 @@ package proto;
 
 // Pulse Cluster Messages
 message PulseHealthCheck {
-    bool success = 1;
-    repeated MemberlistMember memberlist = 2;
+    bool success = 1; // Whether our request was successful or not
+    repeated MemberlistMember memberlist = 2; // Our list of members
+    string ActiveTime = 3; // When the node went active
 }
 message MemberlistMember {
     string hostname = 1;
@@ -38,6 +39,7 @@ message MemberStatus {
         UNAVAILABLE = 3; // dead
         SUSPICIOUS = 4; // potentially dead but given the benefit of the doubt.
         MONITORING = 5; // Node is permanently passive and monitoring
+        UNCONFIGURED = 6; // Node is currently in an un-configured state
     }
     Status status = 1;
 }
