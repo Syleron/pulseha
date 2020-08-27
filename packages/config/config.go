@@ -48,6 +48,8 @@ type Local struct {
 	ClusterToken        string `json:"cluster_token"`
 	LoggingLevel        string `json:"logging_level"`
 	AutoFailback		bool   `json:"auto_failback"`
+	LogToFile			bool   `json:"log_to_file"`
+	LogFileLocation		string  `json:"log_file_location"`
 }
 
 type Node struct {
@@ -88,7 +90,8 @@ func (c *Config) GetLocalNode() Node {
 	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
 		return *node
 	}
-	panic("Local node does not exist in local config.")
+	log.Fatal("Local node does not exist in local config.")
+	return Node{}
 }
 
 // Load - Used to load the config into memory
@@ -313,6 +316,8 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			LocalNode:           "",
 			ClusterToken:        "",
 			LoggingLevel:        "info",
+			LogToFile:			 true,
+			LogFileLocation:     "/etc/pulseha/pulseha.log",
 		},
 		Groups: map[string][]string{},
 		Nodes:  map[string]*Node{},
