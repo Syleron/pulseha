@@ -803,6 +803,15 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 			ErrorCode: 1,
 		}, nil
 	}
+	// Validation
+	if in.Key == "local_node" ||
+		in.Key == "cluster_token" {
+		return &rpc.PulseConfig{
+			Success: false,
+			Message: "You are unable to use the config command to change the value of " + in.Key,
+			ErrorCode: 4,
+		}, nil
+	}
 	// If the value is hostname, update our node in our nodes section as well
 	if in.Key == "hostname" {
 		if err := nodeUpdateLocalHostname(in.Value); err != nil {
