@@ -836,8 +836,22 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 	}
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+		return &rpc.PulseConfig{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 5,
+		}, nil
 	}
+	// Reload our config
 	DB.Config.Reload()
+	// Sync it with our peers
+	if err := DB.MemberList.SyncConfig(); err != nil {
+		return &rpc.PulseConfig{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 6,
+		}, nil
+	}
 	return &rpc.PulseConfig{
 		Success: true,
 		Message: "Successfully updated PulseHA config",

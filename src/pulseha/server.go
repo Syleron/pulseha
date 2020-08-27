@@ -165,7 +165,9 @@ func (s *Server) serverInterceptor(ctx context.Context,
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
 	// Make passive
-	MakeLocalPassive()
+	if DB.Config.ClusterCheck() {
+		MakeLocalPassive()
+	}
 	// Clear our
 	DB.MemberList.Reset()
 	// Shutdown our RPC server
