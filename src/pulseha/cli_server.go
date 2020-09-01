@@ -796,13 +796,6 @@ func (s *CLIServer) TLS(ctx context.Context, in *rpc.PulseCert) (*rpc.PulseCert,
 func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.PulseConfig, error) {
 	s.Lock()
 	defer s.Unlock()
-	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseConfig{
-			Success:   false,
-			Message:   CLUSTER_REQUIRED_MESSAGE,
-			ErrorCode: 1,
-		}, nil
-	}
 	// Validation
 	if in.Key == "local_node" ||
 		in.Key == "cluster_token" {
@@ -865,7 +858,7 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.PulseToken) (*rpc.PulseTo
 	if !DB.Config.ClusterCheck() {
 		return &rpc.PulseToken{
 			Success: false,
-			Message: "You must be in a configured cluster before completing this action.",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}
@@ -902,7 +895,7 @@ func (s *CLIServer) Network(ctx context.Context, in *rpc.PulseNetwork) (*rpc.Pul
 	if !DB.Config.ClusterCheck() {
 		return &rpc.PulseNetwork{
 			Success: false,
-			Message: "You must be in a configured cluster before completing this action.",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}
