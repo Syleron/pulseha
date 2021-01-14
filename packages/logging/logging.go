@@ -19,12 +19,14 @@ package logging
 
 import (
 	log "github.com/sirupsen/logrus"
+	"github.com/ssgreg/journalhook"
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/rpc"
 	"os"
 )
 
 type Logging struct {
+	Logger *log.Logger
 	Level    rpc.PulseLogs_Level
 	Hostname string
 	Broadcast
@@ -40,10 +42,18 @@ func NewLogger(broadcast Broadcast) (Logging, error) {
 	}
 	// Set our memberlist
 	logging := Logging{
+		log.New(),
 		rpc.PulseLogs_INFO,
 		hostname,
 		broadcast,
 	}
+	// Setup journal
+	hook, err := journalhook.NewJournalHook()
+	if err != nil {
+		return Logging{}, err
+	}
+	// Attach our journal hook
+	logging.Logger.Hooks.Add(hook)
 	// Return with our logger
 	return logging, nil
 }
@@ -51,26 +61,26 @@ func NewLogger(broadcast Broadcast) (Logging, error) {
 // Debug Send a debug message to the cluster
 func (l *Logging) Debug(message string) {
 	if l.Level == rpc.PulseLogs_DEBUG {
-		log.Debugf("[%s] %s", l.Hostname, message)
+		l.Logger.Debugf("[%s] %s", l.Hostname, message)
 		l.send(message, rpc.PulseLogs_DEBUG)
 	}
 }
 
 // Warning Send a warning message to the cluster
 func (l *Logging) Warn(message string) {
-	log.Warnf("[%s] %s", l.Hostname, message)
+	l.Logger.Warnf("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_WARNING)
 }
 
 // Info Send an info message to the cluster
 func (l *Logging) Info(message string) {
-	log.Infof("[%s] %s", l.Hostname, message)
+	l.Logger.Infof("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_INFO)
 }
 
 // Info Send an error message to the cluster
 func (l *Logging) Error(message string) {
-	log.Errorf("[%s] %s", l.Hostname, message)
+	l.Logger.Errorf("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_ERROR)
 }
 
