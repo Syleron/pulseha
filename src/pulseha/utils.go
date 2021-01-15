@@ -32,7 +32,7 @@ import (
 /**
 Networking - Bring up the groups on the current node
 */
-func MakeLocalActive() error {
+func MakeLocalActive() {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
 	localNode := DB.Config.GetLocalNode()
 	for _, node := range DB.Config.Nodes {
@@ -44,7 +44,6 @@ func MakeLocalActive() error {
 			}
 		}
 	}
-	return nil
 }
 
 /**
@@ -133,14 +132,23 @@ func MyCaller() string {
 
 /**
 Determine who is the correct active node if more than one active is brought online
+TODO: Note: THIS ONLY WORKS WITH TWO NODES ATM
 */
 func GetFailOverCountWinner(members []*rpc.MemberlistMember) string {
-	// GO through our members
-	for _, member := range members {
+	// GO through our members, are we failing back or not?
+	for i, member := range members {
 		if member.Status != rpc.MemberStatus_UNAVAILABLE {
+
 			tym, _ := time.Parse(time.RFC1123, member.LastReceived)
-			if tym == (time.Time{}) {
+			if tym == (time.Time{}) && DB.Config.Pulse.AutoFailback {
 				return member.Hostname
+			} else {
+				// If we are the second member, get the previous node
+				if i > 1 {
+					return members[i-1].Hostname
+				}
+				// Otherwise get the second node
+				return members[i+1].Hostname
 			}
 		}
 	}

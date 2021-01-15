@@ -42,3 +42,6 @@ bin/
 cmd/pulseha/bin/
 cmd/pulsectl/bin/
 plugins/netcore/bin/
+.idea/
+
+go.sum

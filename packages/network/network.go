@@ -23,6 +23,7 @@ import (
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/vishvananda/netlink"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -53,16 +54,18 @@ func SendGARP(iface, ip string) bool {
 		log.Error("Unable to GARP as the network interface does not exist! Closing..")
 		os.Exit(1)
 	}
-	log.Debug("Sending gratuitous arp for " + ip + " on interface " + iface)
-	output, err := utils.Execute("arping", "-U", "-c", "5", "-I", iface, ip)
+	cidrIP, _, err := net.ParseCIDR(ip)
+	if err != nil{
+		log.Error("failed to GARP. Cannot parse CIDR")
+		return false
+	}
+	log.Debug("Sending gratuitous arp for " + cidrIP.String() + " on interface " + iface)
+	_, err = utils.Execute("arping", "-U", "-c", "5", "-I", iface, cidrIP.String())
 	if err != nil {
+		log.Error("failed to GARP. " + err.Error())
 		return false
 	}
-	if output == "" {
-		return true
-	} else {
-		return false
-	}
+	return true
 }
 
 /**
@@ -96,7 +99,7 @@ func BringIPup(iface, ip string) error {
 	}
 	if exists {
 		if err := BringIPdown(eIface, ip); err != nil {
-			return errors.New("Unable to bring up ip " + ip + " on interface " + iface + ". Perhaps it already exists?")
+			log.Debug("Attempted to bring down ip " + ipOb.String() + " however it appears it wasn't up")
 		}
 	}
 	addr, err := netlink.ParseAddr(ip)
@@ -118,13 +121,16 @@ func BringIPdown(iface, ip string) error {
 	log.Debug("Attempting to bring down IP address via network package")
 	exists, link := InterfaceExist(iface)
 	if !exists {
+		log.Debug("unable to bring IP down as the network interface does not exist")
 		return errors.New("unable to bring IP down as the network interface does not exist")
 	}
 	addr, err := netlink.ParseAddr(ip)
 	if err != nil {
+		log.Debug("unable to bring IP down because ip address couldn't be parsed")
 		return errors.New("unable to bring IP down because ip address couldn't be parsed")
 	}
 	if err := netlink.AddrDel(link, addr); err != nil {
+		log.Debug("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
 		return errors.New("Unable to bring down ip " + ip + " on interface " + iface + ". Perhaps it doesn't exist?")
 	}
 	return nil

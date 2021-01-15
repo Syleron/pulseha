@@ -225,27 +225,35 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	// Inform everyone in the cluster that a specific node is now the new active
 	// Demote if old active is no longer active. promote if the passive is the new active.
 	// get host is it active?
+
 	// Make sure the hostname member exists
-	member := m.GetMemberByHostname(hostname)
-	if member == nil {
+	newActive := m.GetMemberByHostname(hostname)
+
+	// Make sure we have a hostname
+	if newActive == nil {
 		DB.Logging.Warn("Unknown hostname " + hostname + " give in call to promoteMember")
 		return errors.New("the specified host does not exist in the configured cluster")
 	}
+
 	// if unavailable check it works or do nothing?
-	switch member.GetStatus() {
-	case rpc.MemberStatus_UNAVAILABLE:
-		//If we are the only node and just configured we will be unavailable
-		if DB.Config.NodeCount() > 1 {
-			DB.Logging.Warn("Unable to promote member " + member.GetHostname() + " because it is unavailable")
-			return errors.New("unable to promote member as it is unavailable")
-		}
-	case rpc.MemberStatus_ACTIVE:
-		DB.Logging.Warn("Unable to promote member " + member.GetHostname() + " as it is active")
-		return errors.New("unable to promote member as it is already active")
+	switch newActive.GetStatus() {
+		case rpc.MemberStatus_UNAVAILABLE:
+			// When we are attempting to promote a node who is unavailable
+			// If we are the only node and just configured we will be unavailable
+			if DB.Config.NodeCount() > 1 {
+				DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " because it is unavailable")
+				return errors.New("unable to promote member as it is unavailable")
+			}
+		case rpc.MemberStatus_ACTIVE:
+			// When we are attempting to promote the active appliance
+			DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " as it is active")
+			return errors.New("unable to promote member as it is already active")
 	}
+
 	// get the current active member
 	_, activeMember := m.GetActiveMember()
-	// handle if we do not have an active member
+
+	// If we do have an active member, make it passive
 	if activeMember != nil {
 		// Make the current Active appliance passive
 		if err:= activeMember.MakePassive(); err != nil {
@@ -255,11 +263,10 @@ func (m *MemberList) PromoteMember(hostname string) error {
 		// Update our local value for the active member
 		activeMember.SetStatus(rpc.MemberStatus_PASSIVE)
 	}
-	// make the hostname the new active
-	success := member.MakeActive()
-	// make new node active
-	if !success {
-		DB.Logging.Warn("Failed to promote " + member.GetHostname() + " to active. Falling back to " + activeMember.GetHostname())
+
+	// make the the new node active
+	if success := newActive.MakeActive(); !success {
+		DB.Logging.Warn("Failed to promote " + newActive.GetHostname() + " to active. Falling back to " + activeMember.GetHostname())
 		// Somethings gone wrong.. attempt to make the previous active - active again.
 		success := activeMember.MakeActive()
 		if !success {

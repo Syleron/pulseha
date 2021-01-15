@@ -165,7 +165,9 @@ func (s *Server) serverInterceptor(ctx context.Context,
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
 	// Make passive
-	MakeLocalPassive()
+	if DB.Config.ClusterCheck() {
+		MakeLocalPassive()
+	}
 	// Clear our
 	DB.MemberList.Reset()
 	// Shutdown our RPC server
@@ -192,10 +194,11 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.PulseHealthCheck) (*rp
 	if activeHostname != localNode.Hostname {
 		localMember := DB.MemberList.GetMemberByHostname(localNode.Hostname)
 		// make passive to reset the networking
-		if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
-			DB.Logging.Info("Local node is passive")
-			localMember.MakePassive()
-		}
+		// TODO: Figure out why I do this here
+		//if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
+		//	DB.Logging.Info("Local node is passive")
+		//	//localMember.MakePassive()
+		//}
 		localMember.SetLastHCResponse(time.Now())
 		DB.MemberList.Update(in.Memberlist)
 	} else {
@@ -423,7 +426,9 @@ func (s *Server) ConfigSync(ctx context.Context, in *rpc.PulseConfigSync) (*rpc.
 		}, nil
 	}
 	// !!!IMPORTANT!!!: Do not replace our local config
-	newConfig.Pulse = DB.Config.Pulse
+	newConfig.Pulse.ClusterToken = DB.Config.Pulse.ClusterToken
+	newConfig.Pulse.LocalNode = DB.Config.Pulse.LocalNode
+	newConfig.Pulse.LoggingLevel = DB.Config.Pulse.LoggingLevel
 	// Set our new config in memory
 	DB.SetConfig(newConfig)
 	// Save our config to file
@@ -527,6 +532,7 @@ func (s *Server) BringDownIP(ctx context.Context, in *rpc.PulseBringIP) (*rpc.Pu
 	}
 	success := true
 	msg := "success"
+
 	if err := BringDownIPs(in.Iface, in.Ips); err != nil {
 		success = false
 		msg = err.Error()

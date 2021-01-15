@@ -796,11 +796,13 @@ func (s *CLIServer) TLS(ctx context.Context, in *rpc.PulseCert) (*rpc.PulseCert,
 func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.PulseConfig, error) {
 	s.Lock()
 	defer s.Unlock()
-	if !DB.Config.ClusterCheck() {
+	// Validation
+	if in.Key == "local_node" ||
+		in.Key == "cluster_token" {
 		return &rpc.PulseConfig{
-			Success:   false,
-			Message:   CLUSTER_REQUIRED_MESSAGE,
-			ErrorCode: 1,
+			Success: false,
+			Message: "You are unable to use the config command to change the value of " + in.Key,
+			ErrorCode: 4,
 		}, nil
 	}
 	// If the value is hostname, update our node in our nodes section as well
@@ -827,8 +829,22 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 	}
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
+		return &rpc.PulseConfig{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 5,
+		}, nil
 	}
+	// Reload our config
 	DB.Config.Reload()
+	// Sync it with our peers
+	if err := DB.MemberList.SyncConfig(); err != nil {
+		return &rpc.PulseConfig{
+			Success: false,
+			Message: err.Error(),
+			ErrorCode: 6,
+		}, nil
+	}
 	return &rpc.PulseConfig{
 		Success: true,
 		Message: "Successfully updated PulseHA config",
@@ -842,7 +858,7 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.PulseToken) (*rpc.PulseTo
 	if !DB.Config.ClusterCheck() {
 		return &rpc.PulseToken{
 			Success: false,
-			Message: "You must be in a configured cluster before completing this action.",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}
@@ -879,7 +895,7 @@ func (s *CLIServer) Network(ctx context.Context, in *rpc.PulseNetwork) (*rpc.Pul
 	if !DB.Config.ClusterCheck() {
 		return &rpc.PulseNetwork{
 			Success: false,
-			Message: "You must be in a configured cluster before completing this action.",
+			Message: CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}

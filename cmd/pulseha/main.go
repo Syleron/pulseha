@@ -23,6 +23,7 @@ import (
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/logging"
 	"github.com/syleron/pulseha/src/pulseha"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -132,6 +133,15 @@ func main() {
 	pulse.DB.Config = config.New()
 	// Set the logging level
 	setLogLevel(pulse.DB.Config.Pulse.LoggingLevel)
+	// Set log to file
+	if pulse.DB.Config.Pulse.LogToFile {
+		f, err := os.OpenFile(pulse.DB.Config.Pulse.LogFileLocation, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0666)
+		if err != nil {
+			log.Fatal("failed to open log file. PulseHA failed to start")
+		}
+		mw := io.MultiWriter(os.Stdout, f)
+		log.SetOutput(mw)
+	}
 	// Setup wait group
 	var wg sync.WaitGroup
 	wg.Add(1)

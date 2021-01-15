@@ -18,7 +18,7 @@
 package main
 
 import (
-	"errors"
+	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 )
@@ -59,7 +59,7 @@ func (e PulseNetCore) BringUpIPs(iface string, ips []string) error {
 func (e PulseNetCore) BringDownIPs(iface string, ips []string) error {
 	for _, ip := range ips {
 		if err := network.BringIPdown(iface, ip); err != nil {
-			return errors.New("Failed to take down " + ip + " on interface " + iface)
+			log.Debug("failed to take down " + ip + " on interface " + iface + ". Perhaps it didn't exist on that interface?")
 		}
 	}
 	return nil
