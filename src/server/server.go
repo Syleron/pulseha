@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@linux.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -144,7 +144,7 @@ func (s *Server) Setup() {
 	// Setup our members
 	DB.MemberList.Setup()
 	// Setup service discovery
-	s.Discovery.Reset()
+	go s.Discovery.Reset()
 	go s.Discovery.Listen()
 	// Start PulseHA daemon server
 	log.Info("PulseHA initialised on " + DB.Config.LocalNode().IP + ":" + DB.Config.LocalNode().Port)

@@ -1,6 +1,6 @@
 /*
    PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2018  Andrew Zak <andrew@pulseha.com>
+   Copyright (C) 2017-2018  Andrew Zak <andrew@linux.com>
 
    This program is free software: you can redistribute it and/or modify
    it under the terms of the GNU Affero General Public License as published
@@ -157,6 +157,7 @@ func handleSignals() {
 		sig = <-pulse.Sigs
 		signalHooks(PRE_SIGNAL, sig)
 		switch sig {
+		// Interrupt or CMD+C
 		case syscall.SIGINT:
 			// Bring down our floating IPS
 			server.MakeLocalPassive()
@@ -169,7 +170,7 @@ func handleSignals() {
 		break
 		case syscall.SIGTERM:
 			// Bring down floating IPS
-			server.MakeLocalActive()
+			server.MakeLocalPassive()
 			// Shutdown our service
 			pulse.Server.Shutdown()
 			os.Exit(1)
