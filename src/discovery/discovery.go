@@ -4,6 +4,7 @@ import (
 	"fmt"
 	log "github.com/Sirupsen/logrus"
 	"golang.org/x/net/ipv4"
+	math_rand "math/rand"
 	"net"
 	"strconv"
 	"sync"
@@ -13,29 +14,30 @@ import (
 type IPVersion uint
 
 const (
-	IPv4 IPVersion = 4
-	IPv6 IPVersion = 6
-	MulticastAddress = "239.255.255.250"
-	TimeLimit = 10
+	IPv4             IPVersion = 4
+	IPv6             IPVersion = 6
+	MulticastAddress           = "239.255.255.250"
 )
 
 type DiscoverHandler interface {
 	DiscoveredHost(string)
 }
 
-type Service struct {}
+type Service struct{}
 
 type Registry struct {
 	Settings Settings
 	received map[string][]byte
 	stopChan chan bool
-	handler DiscoverHandler
+	handler  DiscoverHandler
 	sync.Mutex
 }
 
 type Settings struct {
-	Port string
+	Port    string
 	Payload []byte
+	Delay   time.Duration
+	Period  time.Duration
 
 	multicastAddressNumbers net.IP
 }
@@ -46,6 +48,7 @@ type Discovered struct {
 	// Payload is the associated payload from discovered peer.
 	Payload []byte
 }
+
 func (d Discovered) String() string {
 	return fmt.Sprintf("address: %s, payload: %s", d.Address, d.Payload)
 }
@@ -83,7 +86,7 @@ func (r *Registry) Discover() {
 		p2.(*ipv4.PacketConn).JoinGroup(&ifaces[i], &net.UDPAddr{IP: group, Port: portNum})
 	}
 
-	ticker := time.NewTicker(TimeLimit * time.Second)
+	ticker := time.NewTicker(r.Settings.Delay * time.Second)
 	defer ticker.Stop()
 	start := time.Now()
 
@@ -91,9 +94,15 @@ func (r *Registry) Discover() {
 		exit := false
 
 		select {
-			case <-r.stopChan:
+		case <-r.stopChan:
 			exit = true
-			default:
+		default:
+		}
+
+		// Check to see if we need to stop
+		if exit || r.Settings.Period*time.Second > 0 && t.Sub(start) > r.Settings.Period*time.Second {
+			log.Info("Discovery stopped broadcasting...")
+			break
 		}
 
 		// write to multicast
@@ -112,10 +121,6 @@ func (r *Registry) Discover() {
 			log.Info("discovery sending broadcast...")
 		}
 
-		if exit || TimeLimit * time.Second > 0 && t.Sub(start) > TimeLimit * time.Second {
-			log.Debug("Discovery stopped broadcasting...")
-			break
-		}
 	}
 }
 
@@ -197,11 +202,45 @@ func New(s Settings, h DiscoverHandler) *Registry {
 	log.Debug("Discovery:New() Created new discovery object")
 	r := new(Registry)
 	if len(s.Payload) == 0 {
-		s.Payload = []byte("We are aware only of the empty space in the forest, which only yesterday was filled with trees.")
+		s.Payload = []byte(randStringBytesMaskImprSrc(10))
+	}
+	if s.Period == 0 {
+		s.Period = 10
+	}
+	if s.Delay == 0 {
+		s.Delay = 1
 	}
 	r.Settings = s
 	r.Settings.multicastAddressNumbers = net.ParseIP(MulticastAddress)
 	r.stopChan = make(chan bool)
 	r.handler = h
 	return r
+}
+
+var src = math_rand.NewSource(time.Now().UnixNano())
+
+const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const (
+	letterIdxBits = 6                    // 6 bits to represent a letter index
+	letterIdxMask = 1<<letterIdxBits - 1 // All 1-bits, as many as letterIdxBits
+	letterIdxMax  = 63 / letterIdxBits   // # of letter indices fitting in 63 bits
+)
+
+// RandStringBytesMaskImprSrc prints a random string
+func randStringBytesMaskImprSrc(n int) string {
+	b := make([]byte, n)
+	// A src.Int63() generates 63 random bits, enough for letterIdxMax characters!
+	for i, cache, remain := n-1, src.Int63(), letterIdxMax; i >= 0; {
+		if remain == 0 {
+			cache, remain = src.Int63(), letterIdxMax
+		}
+		if idx := int(cache & letterIdxMask); idx < len(letterBytes) {
+			b[i] = letterBytes[idx]
+			i--
+		}
+		cache >>= letterIdxBits
+		remain--
+	}
+
+	return string(b)
 }

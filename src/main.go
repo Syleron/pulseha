@@ -127,7 +127,7 @@ func main() {
 	pulse.Server = server.New(&pulse.DB)
 	// Setup wait group
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(1)
 	// Setup cli
 	go pulse.CLI.Setup()
 	// Setup server

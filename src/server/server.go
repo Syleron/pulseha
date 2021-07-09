@@ -68,7 +68,7 @@ func New(db *Database) *Server {
 	// Create a new discovery listener
 	s.Discovery = discovery2.New(
 		discovery2.Settings{
-		Port: "65000",
+			Port: "1900",
 		},
 		&DiscoveryHandler{},
 	)
