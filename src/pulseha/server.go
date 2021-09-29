@@ -464,10 +464,14 @@ func (s *Server) Promote(ctx context.Context, in *rpc.PulsePromote) (*rpc.PulseP
 			Success: false,
 		}, nil
 	}
-	success := member.MakeActive()
+	if err := member.MakeActive(); err != nil {
+		return &rpc.PulsePromote{
+			Success: false,
+		}, nil
+	}
 	DB.Logging.Info(in.Member + " has been promoted to active")
 	return &rpc.PulsePromote{
-		Success: success,
+		Success: true,
 	}, nil
 }
 
