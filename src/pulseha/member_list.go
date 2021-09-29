@@ -28,32 +28,29 @@ import (
 	"time"
 )
 
-/**
- * MemberList struct type
- */
+// MemberList defines our member list object
 type MemberList struct {
+	// Our array of members
 	Members []*Member
+
+	// A channel to stop our routines
 	StopChan chan bool
+
+	// Our mutex to lock/unlock our object
 	sync.Mutex
 }
 
-/**
-
- */
+// Lock used to lock our member list object
 func (m *MemberList) Lock() {
 	m.Mutex.Lock()
 }
 
-/**
-
- */
+// Unlock used to unlock our member list object
 func (m *MemberList) Unlock() {
 	m.Mutex.Unlock()
 }
 
-/**
- * Add a member to the client list
- */
+// AddMember adds a member to our member list by hostname
 func (m *MemberList) AddMember(hostname string, client *client.Client) {
 	if !m.MemberExists(hostname) {
 		DB.Logging.Debug("MemberList:MemberAdd() " + hostname + " added to memberlist")
@@ -69,9 +66,7 @@ func (m *MemberList) AddMember(hostname string, client *client.Client) {
 	}
 }
 
-/**
- * Remove a member from the client list by hostname
- */
+// MemberRemoveByHostname removes a member by hostname from our member list
 func (m *MemberList) MemberRemoveByHostname(hostname string) {
 	DB.Logging.Debug("MemberList:MemberRemoveByName() " + hostname + " removed from the memberlist")
 	m.Lock()
@@ -83,9 +78,7 @@ func (m *MemberList) MemberRemoveByHostname(hostname string) {
 	}
 }
 
-/**
- * Return Member by hostname
- */
+// GetMemberByHostname returns a member object by hostname
 func (m *MemberList) GetMemberByHostname(hostname string) *Member {
 	m.Lock()
 	defer m.Unlock()
@@ -100,9 +93,7 @@ func (m *MemberList) GetMemberByHostname(hostname string) *Member {
 	return nil
 }
 
-/**
- * Return true/false whether a member exists or not.
- */
+// MemberExists check by hostname if member exists in our member list.
 func (m *MemberList) MemberExists(hostname string) bool {
 	m.Lock()
 	defer m.Unlock()
@@ -114,9 +105,7 @@ func (m *MemberList) MemberExists(hostname string) bool {
 	return false
 }
 
-/**
- * Attempt to broadcast a client function to other nodes (clients) within the memberlist
- */
+// Broadcast sends a RPC message to all members in our member list
 func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) {
 	DB.Logging.Debug("MemberList:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
@@ -137,9 +126,10 @@ func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) 
 	}
 }
 
-/**
-Setup process for the memberlist
-*/
+// Setup bootstraps our member list.
+// 1) Loads our member list from memory.
+// 2) Checks whether we are in a cluster or not.
+// 3) Determines if we are in a cluster of 1 and whether we should go active.
 func (m *MemberList) Setup() {
 	// Load members into our memberlist slice
 	m.LoadMembers()
@@ -167,9 +157,7 @@ func (m *MemberList) Setup() {
 	}
 }
 
-/**
-load the nodes in our config into our memberlist
-*/
+// LoadMembers loads our config members from memory into our member list
 func (m *MemberList) LoadMembers() {
 	for _, node := range DB.Config.Nodes {
 		newClient := &client.Client{}
@@ -177,9 +165,8 @@ func (m *MemberList) LoadMembers() {
 	}
 }
 
-/**
-Reload the memberlist
-*/
+// Reload resets our member list based on what's in our written config
+// Note: This will reload our config from file.
 func (m *MemberList) Reload() {
 	DB.Logging.Debug("MemberList:ReloadMembers() Reloading member nodes")
 	// Reload our config
@@ -188,9 +175,7 @@ func (m *MemberList) Reload() {
 	m.LoadMembers()
 }
 
-/**
-Get status of a specific member by hostname
-*/
+// MemberGetStatus returns the status for a member by hostname.
 func (m *MemberList) MemberGetStatus(hostname string) (rpc.MemberStatus_Status, error) {
 	m.Lock()
 	defer m.Unlock()
@@ -202,10 +187,8 @@ func (m *MemberList) MemberGetStatus(hostname string) (rpc.MemberStatus_Status, 
 	return rpc.MemberStatus_UNAVAILABLE, errors.New("unable to find member with hostname " + hostname)
 }
 
-/*
-	Return the hostname of the active member
-	or empty string if non are active
-*/
+// GetActiveMember returns the hostname of the active member within our cluster.
+// Note: This will return empty if no one is active.
 func (m *MemberList) GetActiveMember() (string, *Member) {
 	for _, member := range m.Members {
 		if member.GetStatus() == rpc.MemberStatus_ACTIVE {
@@ -215,10 +198,7 @@ func (m *MemberList) GetActiveMember() (string, *Member) {
 	return "", nil
 }
 
-/**
-Promote a member within the memberlist to become the active
-node
-*/
+// PromoteMember promotes a member as active within our member list.
 func (m *MemberList) PromoteMember(hostname string) error {
 	DB.Logging.Debug("MemberList:PromoteMember() MemberList promoting " + hostname + " as active member..")
 	// Inform everyone in the cluster that a specific node is now the new active
@@ -276,12 +256,8 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	return nil
 }
 
-/**
-	Function is only to be run on the active appliance
-	Note: THis is not the final function name.. or not sure if this is
-          where this logic will stay.. just playing around at this point.
-	monitors the connections states for each member
-*/
+// MonitorClientConns ensures the state for each node is correct based on health check responses.
+// Type: Active node scheduled function
 func (m *MemberList) MonitorClientConns() bool {
 	// Clear routine
 	if !DB.Config.ClusterCheck() {
@@ -316,9 +292,8 @@ func (m *MemberList) MonitorClientConns() bool {
 	return false
 }
 
-/**
-Send health checks to users who have a healthy connection
-*/
+// AddHealthCheckHandler sends GRPC health check messages to our member cluster.
+// Type: Active node scheduled function
 func (m *MemberList) AddHealthCheckHandler() bool {
 	// Clear routine
 	if !DB.Config.ClusterCheck() {
@@ -357,9 +332,7 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 	return false
 }
 
-/**
-Sync local config with each member in the cluster.
-*/
+// SyncConfig syncs our local config with each member in the cluster.
 func (m *MemberList) SyncConfig() error {
 	DB.Logging.Debug("MemberList:SyncConfig() Syncing config with peers..")
 	// Return with our new updated config
@@ -375,9 +348,8 @@ func (m *MemberList) SyncConfig() error {
 	return nil
 }
 
-/**
-Update the local memberlist statuses based on the proto memberlist message
-*/
+// Update updates the local member list.
+// E.g. updates the member list based on data from our proto member message.
 func (m *MemberList) Update(memberlist []*rpc.MemberlistMember) {
 	DB.Logging.Debug("MemberList:update() Updating memberlist")
 	m.Lock()
@@ -400,9 +372,8 @@ func (m *MemberList) Update(memberlist []*rpc.MemberlistMember) {
 	}
 }
 
-/**
-Calculate who's next to become active in the memberlist
-*/
+// GetNextActiveMember calculates who's next to become active in our member list
+// TODO: This needs improvements including the use of plugins. Also failback??
 func (m *MemberList) GetNextActiveMember() (*Member, error) {
 	for _, node := range DB.Config.Nodes {
 		member := m.GetMemberByHostname(node.Hostname)
@@ -417,9 +388,7 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 	return &Member{}, errors.New("MemberList:getNextActiveMember() No new active member found")
 }
 
-/**
- Get the local member node
- */
+// GetLocalMember returns the local member object.
 func (m *MemberList) GetLocalMember() (*Member, error) {
 	m.Lock()
 	defer m.Unlock()
@@ -432,9 +401,8 @@ func (m *MemberList) GetLocalMember() (*Member, error) {
 	return &Member{}, errors.New("cannot get local member. Perhaps we are no longer in a cluster")
 }
 
-/**
-Reset the memberlist when we are no longer in a cluster.
-*/
+// Reset the member list.
+// E.g. When we are no longer in a cluster.
 func (m *MemberList) Reset() {
 	m.Lock()
 	defer m.Unlock()

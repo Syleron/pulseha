@@ -200,9 +200,8 @@ func (m *Member) Close() {
 	m.Client.Close()
 }
 
-/**
-Active function - Send GRPC health check to current member
-*/
+// SendHealthCheck sends GRPC health check to current member
+// Type: Active node function
 func (m *Member) SendHealthCheck(data *rpc.PulseHealthCheck) (interface{}, error) {
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
