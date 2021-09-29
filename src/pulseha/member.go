@@ -192,9 +192,7 @@ func (m *Member) Connect() error {
 	return nil
 }
 
-/**
-Close the client connection
-*/
+// Close terminates the client connection
 func (m *Member) Close() {
 	DB.Logging.Debug("Member:Close() Connection closed")
 	m.Client.Close()
@@ -215,9 +213,8 @@ func (m *Member) SendHealthCheck(data *rpc.PulseHealthCheck) (interface{}, error
 	return r, err
 }
 
-/**
-Send health check via a go routine and mark the HC busy/not
-*/
+// RoutineHC used to periodically send RPC health check messages.
+// Type: Routine function
 func (m *Member) RoutineHC(data *rpc.PulseHealthCheck) {
 	m.SetHCBusy(true)
 	_, err := m.SendHealthCheck(data)

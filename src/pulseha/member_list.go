@@ -244,11 +244,10 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	}
 
 	// make the the new node active
-	if success := newActive.MakeActive(); !success {
+	if err := newActive.MakeActive(); err != nil {
 		DB.Logging.Warn("Failed to promote " + newActive.GetHostname() + " to active. Falling back to " + activeMember.GetHostname())
 		// Somethings gone wrong.. attempt to make the previous active - active again.
-		success := activeMember.MakeActive()
-		if !success {
+		if err := activeMember.MakeActive(); err != nil {
 			DB.Logging.Error("Failed to make reinstate the active node. Something is really wrong")
 		}
 		// Note: we don't need to update the active status as we should receive an updated memberlist from the active
