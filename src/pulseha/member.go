@@ -29,9 +29,7 @@ import (
 	"time"
 )
 
-/**
-Member struct type
-*/
+// Member defines our member object.
 type Member struct {
 	// The hostname of the repented node
 	Hostname string
@@ -51,9 +49,7 @@ type Member struct {
 	sync.Mutex
 }
 
-/**
-
- */
+// Lock locks our member object.
 func (m *Member) Lock() {
 	//_, _, no, _ := runtime.Caller(1)
 	//log.Debugf("Member:Lock() Lock set line: %d by %s", no, MyCaller())
@@ -63,91 +59,73 @@ func (m *Member) Lock() {
 /**
 
  */
+
+// Unlock unlocks our member object.
 func (m *Member) Unlock() {
 	//_, _, no, _ := runtime.Caller(1)
 	//log.Debugf("Member:Unlock() Unlock set line: %d by %s", no, MyCaller())
 	m.Mutex.Unlock()
 }
 
-/*
-	Getters and setters for Member which allow us to make them go routine safe
-*/
-
-/**
-
- */
+// SetHCBusy locks to make the member routine safe.
 func (m *Member) SetHCBusy(busy bool) {
 	m.Lock()
 	defer m.Unlock()
 	m.HCBusy = busy
 }
 
-/**
-
- */
+// GetHCBusy locks to make the member routine safe.
 func (m *Member) GetHCBusy() bool {
 	m.Lock()
 	defer m.Unlock()
 	return m.HCBusy
 }
 
-/**
-
- */
+// SetLatency updates the latency for this member.
+// Note: This is between this member and the active member.
 func (m *Member) SetLatency(latency string) {
 	m.Lock()
 	defer m.Unlock()
 	m.Latency = latency
 }
 
-/**
-
- */
+// GetLatency returns the latency for this member.
+// Note: This is between this member and the active member.
 func (m *Member) GetLatency() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.Latency
 }
 
-/**
-  Set the last time this member received a health check
-*/
+// SetLastHCResponse updates the last time this member recieved a health check.
 func (m *Member) SetLastHCResponse(time time.Time) {
 	m.Lock()
 	defer m.Unlock()
 	m.LastHCResponse = time
 }
 
-/**
-Get the last time this member received a health check
-*/
+// GetLastHCResponse returns the last time this member recieved a health check.
 func (m *Member) GetLastHCResponse() time.Time {
 	m.Lock()
 	defer m.Unlock()
 	return m.LastHCResponse
 }
 
-/**
-Get member hostname
-*/
+// GetHostname returns the hostname for a particular member.
 func (m *Member) GetHostname() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.Hostname
 }
 
-/**
-Set member hostname
-*/
+// SetHostname defines the hostname for a particular member
 func (m *Member) SetHostname(hostname string) {
 	m.Lock()
 	defer m.Unlock()
 	m.Hostname = hostname
 }
 
-/**
-Get member status
-*/
+// GetStatus returns the status for a particular member.
 func (m *Member) GetStatus() rpc.MemberStatus_Status {
 	//log.Debug("Member:getStatus() called by " + MyCaller())
 	m.Lock()
@@ -155,9 +133,7 @@ func (m *Member) GetStatus() rpc.MemberStatus_Status {
 	return m.Status
 }
 
-/**
-Set member status
-*/
+// SetStatus defines the status for a particular member
 func (m *Member) SetStatus(status rpc.MemberStatus_Status) {
 	DB.Logging.Debug("Member:setStatus() " + m.GetHostname() + " status set to " + status.String() + " called by " + MyCaller())
 	m.Lock()
@@ -167,18 +143,15 @@ func (m *Member) SetStatus(status rpc.MemberStatus_Status) {
 	InformMLSChange()
 }
 
-/**
-Set member Client GRPC
-*/
+// SetClient defines our client object for a member.
 func (m *Member) SetClient(client *client.Client) {
 	m.Lock()
 	defer m.Unlock()
 	m.Client = client
 }
 
-/**
-Note: Hostname is required for TLS as the certs are named after the hostname.
-*/
+// Connect establish a connection with a particular member.
+// Note: Member hostname is required for TLS reasons.
 func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		_, nodeDetails, _ := nodeGetByHostname(m.Hostname)
