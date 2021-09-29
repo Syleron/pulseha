@@ -1,23 +1,49 @@
-/*
-    PulseHA - HA Cluster Daemon
-    Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU Affero General Public License as published
-    by the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU Affero General Public License for more details.
-
-    You should have received a copy of the GNU Affero General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
- */
 syntax = "proto3";
 
 package proto;
+
+service Server {
+    // Perform GRPC Health Check
+    rpc HealthCheck (HealthCheckRequest) returns (HealthCheckResponse);
+    // Join Cluster
+    rpc Join (JoinRequest) returns (JoinResponse);
+    // Sync Config
+    rpc ConfigSync (ConfigSyncRequest) returns (ConfigSyncResponse);
+    // Leave Cluster
+    rpc Leave (LeaveRequest) returns (LeaveResponse);
+    // Remove from Cluster
+    rpc Remove (RemoveRequest) returns (RemoveResponse);
+    // Promote
+    rpc Promote (PromoteRequest) returns (PromoteResponse);
+    // demote
+    rpc MakePassive (MakePassiveRequest) returns (MakePassiveResponse);
+    // Bring up IP
+    rpc BringUpIP (UpIpRequest) returns (UpIpResponse);
+    // Bring down IP
+    rpc BringDownIP (DownIpRequest) returns (DownIpResponse);
+    // Bring down IP
+    rpc Logs (LogsRequest) returns (LogsResponse);
+    // Get detailed information for a particular node
+    rpc Describe (DescribeRequest) returns (DescribeResponse);
+    // Fail over vote
+    rpc Vote (VoteRequest) returns (VoteResponse);
+}
 
 // Pulse Cluster Messages
 message PulseHealthCheck {
@@ -25,12 +51,14 @@ message PulseHealthCheck {
     repeated MemberlistMember memberlist = 2; // Our list of members
     string ActiveTime = 3; // When the node went active
 }
+
 message MemberlistMember {
     string hostname = 1;
     MemberStatus.Status status = 2;
     string lastReceived = 3;
     string latency = 4;
 }
+
 message MemberStatus {
     enum Status {
         ACTIVE = 0; // We are active and responsible for live services
@@ -43,6 +71,7 @@ message MemberStatus {
     }
     Status status = 1;
 }
+
 message PulseJoin {
     bool success = 1;
     string message = 2;
@@ -59,6 +88,7 @@ message PulseJoin {
     int32 errorCode = 13;
     string uid = 14;
 }
+
 message PulseLeave {
     bool success = 1;
     string message = 2;
@@ -66,6 +96,7 @@ message PulseLeave {
     bool replicated = 4;
     int32 errorCode = 5;
 }
+
 message PulseRemove {
     bool success = 1;
     string message = 2;
@@ -73,6 +104,7 @@ message PulseRemove {
     bool replicated = 4;
     int32 errorCode = 5;
 }
+
 message PulseCreate {
     bool success = 1;
     string message = 2;
@@ -81,115 +113,28 @@ message PulseCreate {
     string token = 5;
     int32 errorCode = 6;
 }
-message PulseCert {
-    bool success = 1;
-    string message = 2;
-    string bind_ip = 3;
-    int32 errorCode = 7;
-}
-// Pulse Group Messages
-message PulseGroupNew {
-    bool success = 1;
-    string message = 2;
-    string name = 3;
-    int32 errorCode = 4;
-}
-message PulseGroupDelete {
-    bool success = 1;
-    string message = 2;
-    string name = 3;
-    int32 errorCode = 4;
-}
-message PulseGroupAdd {
-    bool success = 1;
-    string message = 2;
-    string name = 3;
-    repeated string ips = 4;
-    int32 errorCode = 5;
-}
-message PulseGroupRemove {
-    bool success = 1;
-    string message = 2;
-    string name = 3;
-    repeated string ips = 4;
-    int32 errorCode = 5;
-}
-message PulseGroupAssign {
-    bool success = 1;
-    string message = 2;
-    string group = 3;
-    string interface = 4;
-    string node = 5;
-    int32 errorCode = 6;
-}
-message PulseGroupUnassign {
-    bool success = 1;
-    string message = 2;
-    string group = 3;
-    string interface = 4;
-    string node = 5;
-    int32 errorCode = 6;
-}
-message PulseStatus {
-    bool success = 1;
-    string message = 2;
-    repeated StatusRow row = 3;
-}
-message StatusRow {
-    string hostname = 1;
-    string ip = 2;
-    string latency = 3;
-    MemberStatus.Status status = 4;
-    string lastReceived = 5;
-}
-message GroupTable {
-    bool success = 1;
-    string message = 2;
-    repeated GroupRow row = 3;
-}
-message GroupRow {
-    string name = 1;
-    repeated string ip = 2;
-    repeated string nodes = 3;
-    repeated string interfaces = 4;
-}
+
 message PulseConfigSync {
     bool success = 1;
     string message = 2;
     bytes config = 3;
     bool replicated = 4;
 }
+
 message PulsePromote {
     bool success =1;
     string message = 2;
     string member = 3;
     int32 errorCode = 4;
 }
+
 message PulseBringIP {
     bool success = 1;
     string message = 2;
     string iface = 3;
     repeated string ips = 4;
 }
-message PulseConfig {
-    bool success = 1;
-    string message = 2;
-    string key = 3;
-    string value = 4;
-    int32 errorCode = 5;
-}
-message PulseToken {
-    bool success = 1;
-    string message = 2;
-    string token = 3;
-    int32 errorCode = 4;
-}
-message PulseNetwork {
-    bool success = 1;
-    string message = 2;
-    string action = 3;
-    int32 errorCode = 4;
-}
+
 message PulseLogs {
     enum Level {
         INFO = 0;
@@ -215,71 +160,6 @@ message PulseDescribe {
     string hostname = 10;
     string bindAddress = 11;
     string lastReceived = 12;
-}
-
-// Services
-service CLI {
-    // Join Cluster
-    rpc Join (PulseJoin) returns (PulseJoin);
-    // Leave Cluster
-    rpc Leave (PulseLeave) returns (PulseLeave);
-    // Remove from cluster
-    rpc Remove (PulseRemove) returns (PulseRemove);
-    // Create Cluster
-    rpc Create (PulseCreate) returns (PulseCreate);
-    // Create Certs
-    rpc TLS (PulseCert) returns (PulseCert);
-    // Create floating ip group
-    rpc NewGroup (PulseGroupNew) returns (PulseGroupNew);
-    // Delete floating ip group
-    rpc DeleteGroup (PulseGroupDelete) returns (PulseGroupDelete);
-    // Add floating IP
-    rpc GroupIPAdd (PulseGroupAdd) returns (PulseGroupAdd);
-    // Remove floating IP
-    rpc GroupIPRemove (PulseGroupRemove) returns (PulseGroupRemove);
-    // Assign a group
-    rpc GroupAssign (PulseGroupAssign) returns (PulseGroupAssign);
-    // Unassign a group
-    rpc GroupUnassign (PulseGroupUnassign) returns (PulseGroupUnassign);
-    // Get group list
-    rpc GroupList (GroupTable) returns (GroupTable);
-    // Pulse Status
-    rpc Status (PulseStatus) returns (PulseStatus);
-    // Promote a member
-    rpc Promote (PulsePromote) returns (PulsePromote);
-    // Promote a member
-    rpc Config (PulseConfig) returns (PulseConfig);
-    // Generate new cluster token
-    rpc Token (PulseToken) returns (PulseToken);
-    // Perform network related actions
-    rpc Network (PulseNetwork) returns (PulseNetwork);
-    // Get detailed information for a particular node
-    rpc Describe (PulseDescribe) returns (PulseDescribe);
-}
-
-service Server {
-    // Perform GRPC Health Check
-    rpc HealthCheck (PulseHealthCheck) returns (PulseHealthCheck);
-    // Join Cluster
-    rpc Join (PulseJoin) returns (PulseJoin);
-    // Sync Config
-    rpc ConfigSync (PulseConfigSync) returns (PulseConfigSync);
-    // Leave Cluster
-    rpc Leave (PulseLeave) returns (PulseLeave);
-    // Remove from Cluster
-    rpc Remove (PulseRemove) returns (PulseRemove);
-    // Promote
-    rpc Promote (PulsePromote) returns (PulsePromote);
-    // demote
-    rpc MakePassive (PulsePromote) returns (PulsePromote);
-    // Bring up IP
-    rpc BringUpIP (PulseBringIP) returns (PulseBringIP);
-    // Bring down IP
-    rpc BringDownIP (PulseBringIP) returns (PulseBringIP);
-    // Bring down IP
-    rpc Logs (PulseLogs) returns (PulseLogs);
-    // Get detailed information for a particular node
-    rpc Describe (PulseDescribe) returns (PulseDescribe);
 }
 
 

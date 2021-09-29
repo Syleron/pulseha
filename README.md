@@ -30,6 +30,10 @@ PulseHA attempts to solve high availability with a more simple approach but with
 * Go v1.9 or later
 * Protoc v3.4 or later
 
+## System Requirements
+
+* Centos 7+
+
 ## Build & Install
 
 First you will need to clone this repository into `$GOPATH/src/github.com/Syleron/PulseHA` and execute the following command(s):
@@ -47,6 +51,8 @@ $ sudo make install
 ...
 ```
 
+## Commands
+
 ## Acknowledgments
 
 Thank you to all authors who have and continue to contribute to this project.
@@ -56,4 +62,4 @@ Thank you to all authors who have and continue to contribute to this project.
 ## License
 PulseHA source code is available under the AGPL License which can be found in the LICENSE file.
 
-Copyright (c) 2017-2019 Andrew Zak <<andrew@linux.com>>
+Copyright (c) 2017-2021 Andrew Zak <andrew@linux.com>
