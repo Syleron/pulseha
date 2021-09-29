@@ -33,7 +33,7 @@ type Logging struct {
 
 type Broadcast func(funcName client.ProtoFunction, data interface{})
 
-// NewLogger Returns a new distributes logging object
+// NewLogger returns a new distributes logging object
 func NewLogger(broadcast Broadcast) (Logging, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -65,25 +65,25 @@ func (l *Logging) Debug(message string) {
 	}
 }
 
-// Warning Send a warning message to the cluster
+// Warn sends a warning message to the cluster
 func (l *Logging) Warn(message string) {
 	l.Logger.Warnf("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_WARNING)
 }
 
-// Info Send an info message to the cluster
+// Info sends a info message to the cluster
 func (l *Logging) Info(message string) {
 	l.Logger.Infof("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_INFO)
 }
 
-// Info Send an error message to the cluster
+// Info sends a error message to the cluster
 func (l *Logging) Error(message string) {
 	l.Logger.Errorf("[%s] %s", l.Hostname, message)
 	l.send(message, rpc.PulseLogs_ERROR)
 }
 
-// Send a message to the cluster
+// send sends a message to the cluster
 func (l *Logging) send(message string, level rpc.PulseLogs_Level) {
 	l.Broadcast(client.SendLogs, &rpc.PulseLogs{
 		Message: message,

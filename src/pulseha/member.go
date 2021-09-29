@@ -228,13 +228,14 @@ func (m *Member) RoutineHC(data *rpc.PulseHealthCheck) {
 	m.SetHCBusy(false)
 }
 
-/*
-	Make the node active (bring up its groups)
-*/
-func (m *Member) MakeActive() bool {
+// MakeActive promotes a particular member to become active.
+func (m *Member) MakeActive() error {
 	DB.Logging.Debug("Member:makeActive() Making " + m.GetHostname() + " active")
+
+	// Get our local node object
 	localNode := DB.Config.GetLocalNode()
-	// Make ourself active if we are referring to ourself
+
+	// Are we making ourself active?
 	if m.GetHostname() == localNode.Hostname {
 		// Reset vars
 		m.SetLatency("")
@@ -243,41 +244,49 @@ func (m *Member) MakeActive() bool {
 		m.SetStatus(rpc.MemberStatus_ACTIVE)
 		// Bring up our addresses if we have any
 		MakeLocalActive()
-		// Start performing health checks
+		// Start monitoring our member list
 		DB.Logging.Debug("Member:PromoteMember() Starting client connections monitor")
 		go utils.Scheduler(
 			DB.MemberList.MonitorClientConns,
 			time.Duration(DB.Config.Pulse.HealthCheckInterval)*time.Millisecond,
 		)
+		// Start performing health checks
 		DB.Logging.Debug("Member:PromoteMember() Starting health check handler")
 		go utils.Scheduler(
 			DB.MemberList.AddHealthCheckHandler,
 			time.Duration(DB.Config.Pulse.HealthCheckInterval)*time.Millisecond,
 		)
-	} else {
-		// TODO: Handle the closing of this connection
-		m.Connect()
-		_, err := m.Send(
-			client.SendPromote,
-			&rpc.PulsePromote{
-				Member: m.GetHostname(),
-			})
-		// Handle if we have an error
-		if err != nil {
-			log.Error(err)
-			log.Errorf("Error making %s active. Error: %s", m.GetHostname(), err.Error())
-			return false
-		}
+		return nil
 	}
-	return true
+
+	// Make sure we are connected to our member
+	if err := m.Connect(); err != nil {
+		log.Error(err.Error())
+		return err
+	}
+	// Inform member to become active.
+	_, err := m.Send(
+		client.SendPromote,
+		&rpc.PulsePromote{
+			Member: m.GetHostname(),
+		})
+	// Handle if we have an error
+	if err != nil {
+		log.Errorf("Error making %s active. Error: %s", m.GetHostname(), err.Error())
+		return err
+	}
+
+	return nil
 }
 
-/**
-Make the node passive (take down its groups)
-*/
+// MakePassive demotes a particular member to become passive.
 func (m *Member) MakePassive() error {
 	DB.Logging.Debug("Member:makePassive() Making " + m.GetHostname() + " passive")
+
+	// Get our local node object
 	localNode := DB.Config.GetLocalNode()
+
+	// Are we making ourself passive?
 	if m.GetHostname() == localNode.Hostname {
 		// do this regardless to make sure we dont have any groups up
 		MakeLocalPassive()
@@ -293,22 +302,26 @@ func (m *Member) MakePassive() error {
 				time.Duration(DB.Config.Pulse.FailOverInterval)*time.Millisecond,
 			)
 		}
-	} else {
-		// TODO: Handle the closing of this connection
-		if err := m.Connect(); err != nil {
-			log.Error(err)
-			return err
-		}
-		_, err := m.Send(
-			client.SendMakePassive,
-			&rpc.PulsePromote{
-				Member: m.GetHostname(),
-			})
-		if err != nil {
-			log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
-			return err
-		}
+		return nil
 	}
+
+	// Make sure we are connected to our member
+	if err := m.Connect(); err != nil {
+		log.Error(err)
+		return err
+	}
+	// Inform member to become passive.
+	_, err := m.Send(
+		client.SendMakePassive,
+		&rpc.PulsePromote{
+			Member: m.GetHostname(),
+		})
+	// Handle if we have an error
+	if err != nil {
+		log.Errorf("Error making %s passive. Error: %s", m.GetHostname(), err.Error())
+		return err
+	}
+
 	return nil
 }
 
