@@ -140,7 +140,7 @@ func GetFailOverCountWinner(members []*rpc.MemberlistMember) string {
 	return ""
 }
 
-// CanCommunicate used to determine if a connection is coming in as a member of our config.
+// CanCommunicate used to determine if a connection is a member of our config.
 func CanCommunicate(ctx context.Context) bool {
 	pr, ok := peer.FromContext(ctx)
 	if !ok {
