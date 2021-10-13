@@ -21,7 +21,7 @@ import (
 	"github.com/syleron/pulseha/packages/logging"
 )
 
-// Database defines our database object
+// Database defines our database object.
 type Database struct {
 	Config        *config.Config
 	Plugins       *Plugins
@@ -31,7 +31,7 @@ type Database struct {
 	StartInterval int
 }
 
-// SetConfig replaces our current in memory config with another
+// SetConfig replaces our current in memory config with another.
 func (d *Database) SetConfig(config *config.Config) {
 	d.Config.Lock()
 	defer d.Config.Unlock()

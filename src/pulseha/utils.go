@@ -28,9 +28,7 @@ import (
 	"time"
 )
 
-/**
-Networking - Bring up the groups on the current node
-*/
+// MakeLocalActive brings up the assigned floating ip groups on the current node.
 func MakeLocalActive() {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
 	localNode := DB.Config.GetLocalNode()
@@ -45,9 +43,7 @@ func MakeLocalActive() {
 	}
 }
 
-/**
-Networking - Bring down the ip groups on the current node
-*/
+// MakeLocalPassive brings down the assigned active floating ip groups on the current node.
 func MakeLocalPassive() {
 	DB.Logging.Debug("Utils:MakeMemberPassive() Making local node passive")
 	localNode := DB.Config.GetLocalNode()
@@ -62,9 +58,7 @@ func MakeLocalPassive() {
 	}
 }
 
-/**
-Bring up an []ips for a specific interface
-*/
+// BringUpIPs brings up an array of ips on a particular network interface.
 func BringUpIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
@@ -75,9 +69,7 @@ func BringUpIPs(iface string, ips []string) error {
 	return err
 }
 
-/**
-Bring down an []ips for a specific interface
-*/
+// BringDownIPs brings down an array of ips from a particular network interface.
 func BringDownIPs(iface string, ips []string) error {
 	plugin := DB.Plugins.GetNetworkingPlugin()
 	if plugin == nil {
@@ -88,9 +80,7 @@ func BringDownIPs(iface string, ips []string) error {
 	return err
 }
 
-/**
-Inform our plugins that our member list state has changed
- */
+// InformMLSChange is used to inform our plugins that our member list state has changed.
 func InformMLSChange() {
 	plugins := DB.Plugins.GetGeneralPlugin()
 	if plugins == nil {
@@ -109,9 +99,7 @@ func InformMLSChange() {
 	}
 }
 
-/**
-
- */
+// MyCaller is used to determine who called a particular function
 func MyCaller() string {
 	// we get the callers as uintptrs - but we just need 1
 	fpcs := make([]uintptr, 1)
@@ -129,10 +117,8 @@ func MyCaller() string {
 	return fun.Name()
 }
 
-/**
-Determine who is the correct active node if more than one active is brought online
-TODO: Note: THIS ONLY WORKS WITH TWO NODES ATM
-*/
+// GetFailOverCountWinner determines who is the correct active node if in a split-brain scneario.
+// Note: This only works with two nodes atm.
 func GetFailOverCountWinner(members []*rpc.MemberlistMember) string {
 	// GO through our members, are we failing back or not?
 	for i, member := range members {
@@ -154,9 +140,7 @@ func GetFailOverCountWinner(members []*rpc.MemberlistMember) string {
 	return ""
 }
 
-/**
-Determine if a connection is coming in is a member of our config
-*/
+// CanCommunicate used to determine if a connection is coming in as a member of our config.
 func CanCommunicate(ctx context.Context) bool {
 	pr, ok := peer.FromContext(ctx)
 	if !ok {

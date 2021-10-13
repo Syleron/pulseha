@@ -566,6 +566,7 @@ func (s *Server) Logs(ctx context.Context, in *rpc.PulseLogs) (*rpc.PulseLogs, e
 	return &rpc.PulseLogs{}, nil
 }
 
+
 func (s *Server) Describe(ctx context.Context, in *rpc.PulseDescribe) (*rpc.PulseDescribe, error) {
 	return &rpc.PulseDescribe{}, nil
 }
