@@ -21,18 +21,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/gommon/log"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/language"
 	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 )
 
-/**
-Create new local config node definition
-*/
+// nodeCreateLocal Create a new node definition in the config.
 func nodeCreateLocal(ip string, port string, assignGroups bool) (string, *config.Node, error) {
 	log.Debug("create localhost node config definition")
 	hostname, err := utils.GetHostname()
 	if err != nil {
-		return "", &config.Node{}, errors.New("cannot create cluster because unable to get hostname")
+		return "", &config.Node{}, errors.New(language.CLUSTER_CREATE_FAIL_HOSTNAME)
 	}
 	// Define new node object
 	newNode := &config.Node{
@@ -44,7 +43,7 @@ func nodeCreateLocal(ip string, port string, assignGroups bool) (string, *config
 	// Add the new node
 	uid := uuid.New()
 	if err := nodeAdd(uid.String(), hostname, newNode); err != nil {
-		return "", &config.Node{}, errors.New("unable to add local node to config")
+		return "", &config.Node{}, errors.New(language.CLUSTER_NODE_ADD_FAIL)
 	}
 	// Set our local node UUID
 	if err := DB.Config.UpdateValue("local_node", uid.String()); err != nil {
@@ -71,7 +70,9 @@ func nodeCreateLocal(ip string, port string, assignGroups bool) (string, *config
 	return uid.String(), newNode, nil
 }
 
-// nodeUpdateLocalInterfaces()
+// nodeUpdateLocalInterfaces rewrites the available network interfaces to the config
+// Note: This is used when additional interfaces have been added and need to be accounted
+//        for.
 func nodeUpdateLocalInterfaces() error {
 	localHostname, err := utils.GetHostname()
 	if err != nil {
@@ -118,14 +119,12 @@ func nodeUpdateLocalInterfaces() error {
 	}
 	// Save to our config
 	if err := DB.Config.Save(); err != nil {
-		return errors.New("write local node failed")
+		return errors.New(language.CLUSTER_CONFIG_FAIL)
 	}
 	return nil
 }
 
-/**
- * Add a node type Node to our config.
- */
+// nodeAdd Add a new node to our config.
 func nodeAdd(uid string, hostname string, node *config.Node) error {
 	DB.Logging.Debug(hostname + " added to local cluster config")
 	if !nodeExistsByHostname(hostname) {
@@ -134,12 +133,10 @@ func nodeAdd(uid string, hostname string, node *config.Node) error {
 		DB.Config.Unlock()
 		return nil
 	}
-	return errors.New("unable to add node as it already exists")
+	return errors.New(language.CLUSTER_NODE_EXISTS)
 }
 
-/**
- * Remove a node from our config by hostname.
- */
+// nodeDelete Remove a node from our config by hostname.
 func nodeDelete(uid string) error {
 	DB.Logging.Debug("Nodes:nodeDelete()" + uid + " node removed.")
 	if nodeExistsByUUID(uid) {
@@ -148,12 +145,10 @@ func nodeDelete(uid string) error {
 		DB.Config.Unlock()
 		return nil
 	}
-	return errors.New("unable to delete node as it doesn't exist")
+	return errors.New(language.CLUSTER_NODE_NOTFOUND)
 }
 
-/**
- * Clear out local Nodes section of config.
- */
+// nodesClearLocal Clear out local nodes section from the config.
 func nodesClearLocal() {
 	DB.Logging.Debug("All nodes cleared from local config")
 	DB.Config.Lock()
@@ -161,10 +156,7 @@ func nodesClearLocal() {
 	DB.Config.Unlock()
 }
 
-/**
-* Determines whether a Node already exists in a config based
-  off the nodes hostname.
-*/
+// nodeExistsByHostname Determines whether a node already exists in our config by hostname.
 func nodeExistsByHostname(hostname string) bool {
 	for _, node := range DB.Config.Nodes {
 		if node.Hostname == hostname {
@@ -178,6 +170,8 @@ func nodeExistsByHostname(hostname string) bool {
 * Determines whether a Node already exists in a config based
   off the nodes UUID.
 */
+
+// nodeExistsByUUID
 func nodeExistsByUUID(uid string) bool {
 	for key := range DB.Config.Nodes {
 		if key == uid {
@@ -190,29 +184,28 @@ func nodeExistsByUUID(uid string) bool {
 /**
 Get node by its hostname
 */
+
+// nodeGetbyUUID
 func nodeGetByUUID(uid string) (config.Node, error) {
 	for key, node := range DB.Config.Nodes {
 		if key == uid {
 			return *node, nil
 		}
 	}
-	return config.Node{}, errors.New("unable to find node in config")
+	return config.Node{}, errors.New(language.CLUSTER_NODE_NOTFOUND)
 }
 
-//
+// nodeGetHostname Get node object by hostnam
 func nodeGetByHostname(hostname string) (string, config.Node, error) {
 	for uid, node := range DB.Config.Nodes {
 		if node.Hostname == hostname {
 			return uid, *node, nil
 		}
 	}
-	return "", config.Node{}, errors.New("unable to find node in config")
+	return "", config.Node{}, errors.New(language.CLUSTER_NODE_NOTFOUND)
 }
 
-/**
- * Checks to see if a node has any interface assignments.
- * Note: Eww three for loops.
- */
+// nodeAssignedToInterface Checks to see if a node has any interface assignments.
 func nodeAssignedToInterface(group string) bool {
 	for _, node := range DB.Config.Nodes { // :-|
 		for _, groups := range node.IPGroups { // :-s
@@ -226,10 +219,8 @@ func nodeAssignedToInterface(group string) bool {
 	return false
 }
 
-/**
- * Checks to see if a floating IP group has already been assigned to a node's interface.
- * Returns bool - exists/not & int - slice index
- */
+// nodeInterfaceGroupExists Checks to see if a floating IP group has already been assigned
+//                          to a node's interface.
 func nodeInterfaceGroupExists(uid, iface, group string) (bool, int) {
 	for index, existingGroup := range DB.Config.Nodes[uid].IPGroups[iface] {
 		if existingGroup == group {
@@ -239,6 +230,8 @@ func nodeInterfaceGroupExists(uid, iface, group string) (bool, int) {
 	return false, -1
 }
 
+// nodeUpdateLocalHostname update our node hostname in our config
+// Note: This will resync the config.
 func nodeUpdateLocalHostname(hostname string) error {
 	// Set our local value
 	DB.Config.UpdateHostname(hostname)

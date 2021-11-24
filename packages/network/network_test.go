@@ -13,3 +13,9 @@ func TestCheckIfIPExists(t *testing.T) {
 		t.Error("unable to find localhost on lo interface")
 	}
 }
+
+func TestICMPv4(t *testing.T) {
+	if err := ICMPv4("127.0.0.1/24"); err != nil {
+		t.Error(err)
+	}
+}
