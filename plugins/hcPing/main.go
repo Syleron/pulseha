@@ -7,6 +7,8 @@ type PulseHCPing bool
 const PluginName = "PingHC"
 const PluginVersion = 1.0
 
+const PluginWeight = 0
+
 
 // TODO: What metrics and thresholds do we want to consider?
 // TODO: Only works with IPv4 at the moment.

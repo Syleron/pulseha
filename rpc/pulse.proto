@@ -45,12 +45,119 @@ service Server {
     rpc Vote (VoteRequest) returns (VoteResponse);
 }
 
-// Pulse Cluster Messages
-message PulseHealthCheck {
-    bool success = 1; // Whether our request was successful or not
-    repeated MemberlistMember memberlist = 2; // Our list of members
-    string ActiveTime = 3; // When the node went active
+message HealthCheckRequest {
+    // Our List of Members
+    repeated MemberlistMember memberlist = 1;
+    // When the node went active
+    string ActiveTime = 2;
 }
+message HealthCheckResponse {}
+
+message JoinRequest {
+    string message = 1;
+    string bind_ip = 2;
+    string bind_port = 3;
+    string ip = 4;
+    string port = 5;
+    string hostname = 6;
+    bool replicated = 7;
+    bytes config = 8;
+    string token = 9;
+    string ca_crt = 10;
+    string ca_key = 11;
+    int32 errorCode = 12;
+    string uid = 13;
+}
+message JoinResponse {}
+
+message ConfigSyncRequest {
+    string message = 1;
+    bytes config = 2;
+    bool replicated = 3;
+}
+message ConfigSyncResponse {}
+
+message LeaveRequest {
+    string message = 1;
+    string hostname = 2;
+    bool replicated = 3;
+    int32 errorCode = 4;
+}
+message LeaveResponse {}
+
+message RemoveRequest {
+    string message = 1;
+    string hostname = 2;
+    bool replicated = 3;
+    int32 errorCode = 4;
+}
+message RemoveResponse {}
+
+message PromoteRequest {
+    string message = 1;
+    string member = 2;
+    int32 errorCode = 3;
+}
+message PromoteResponse {}
+
+message MakePassiveRequest {
+    string message = 1;
+    string member = 2;
+    int32 errorCode = 3;
+}
+message MakePassiveResponse {}
+
+message UpIpRequest {
+    string message = 1;
+    string iface = 2;
+    repeated string ips = 3;
+}
+message UpIpResponse {}
+
+message BringIpRequest {
+    string message = 1;
+    string iface = 2;
+    repeated string ips = 3;
+}
+message BringIpResponse {}
+
+message DownIpRequest {
+    string message = 1;
+    string iface = 2;
+    repeated string ips = 3;
+}
+message DownIpResponse {}
+
+message LogsRequest {
+    enum Level {
+        INFO = 0;
+        WARNING = 1;
+        ERROR = 2;
+        DEBUG = 3;
+    }
+    string message = 1;
+    string node = 2;
+    Level level = 3;
+}
+message LogsResponse {}
+
+message DescribeRequest {
+    string message = 1;
+    int32 cpuUsage = 2;
+    int32 memUsage = 3;
+    string uid = 4;
+    int32 diskUsage = 5;
+    string uptime = 6;
+    string status = 7;
+    string latency = 8;
+    string hostname = 9;
+    string bindAddress = 10;
+    string lastReceived = 11;
+}
+message DescribeResponse {}
+
+message VoteRequest {}
+message VoteResponse {}
 
 message MemberlistMember {
     string hostname = 1;
@@ -71,95 +178,3 @@ message MemberStatus {
     }
     Status status = 1;
 }
-
-message PulseJoin {
-    bool success = 1;
-    string message = 2;
-    string bind_ip = 3;
-    string bind_port = 4;
-    string ip = 5;
-    string port = 6;
-    string hostname = 7;
-    bool replicated = 8;
-    bytes config = 9;
-    string token = 10;
-    string ca_crt = 11;
-    string ca_key = 12;
-    int32 errorCode = 13;
-    string uid = 14;
-}
-
-message PulseLeave {
-    bool success = 1;
-    string message = 2;
-    string hostname = 3;
-    bool replicated = 4;
-    int32 errorCode = 5;
-}
-
-message PulseRemove {
-    bool success = 1;
-    string message = 2;
-    string hostname = 3;
-    bool replicated = 4;
-    int32 errorCode = 5;
-}
-
-message PulseCreate {
-    bool success = 1;
-    string message = 2;
-    string bind_ip = 3;
-    string bind_port = 4;
-    string token = 5;
-    int32 errorCode = 6;
-}
-
-message PulseConfigSync {
-    bool success = 1;
-    string message = 2;
-    bytes config = 3;
-    bool replicated = 4;
-}
-
-message PulsePromote {
-    bool success =1;
-    string message = 2;
-    string member = 3;
-    int32 errorCode = 4;
-}
-
-message PulseBringIP {
-    bool success = 1;
-    string message = 2;
-    string iface = 3;
-    repeated string ips = 4;
-}
-
-message PulseLogs {
-    enum Level {
-        INFO = 0;
-        WARNING = 1;
-        ERROR = 2;
-        DEBUG = 3;
-    }
-    string message = 1;
-    string node = 2;
-    Level level = 3;
-}
-
-message PulseDescribe {
-    bool success = 1;
-    string message = 2;
-    int32 cpuUsage = 3;
-    int32 memUsage = 4;
-    string uid = 5;
-    int32 diskUsage = 6;
-    string uptime = 7;
-    string status = 8;
-    string latency = 9;
-    string hostname = 10;
-    string bindAddress = 11;
-    string lastReceived = 12;
-}
-
-
