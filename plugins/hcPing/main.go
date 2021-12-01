@@ -7,7 +7,7 @@ type PulseHCPing bool
 const PluginName = "PingHC"
 const PluginVersion = 1.0
 
-const PluginWeight = 0
+const PluginWeight = 10
 
 
 // TODO: What metrics and thresholds do we want to consider?
@@ -21,11 +21,15 @@ func (e PulseHCPing) Version() float64 {
 	return PluginVersion
 }
 
-func (e PulseHCPing) Send() (bool, bool) {
-	if err := network.ICMPv4(""); err != nil {
+func (e PulseHCPing) Weight() int64 {
+	return PluginWeight
+}
+
+func (e PulseHCPing) Send() error {
+	if err := network.ICMPv4("12.0.0.1"); err != nil {
 		// TODO: Do something when the ICMP check fails.
 	}
-	return false, false
+	return nil
 }
 
 var PluginHC PulseHCPing

@@ -131,11 +131,17 @@ func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) 
 // 2) Checks whether we are in a cluster or not.
 // 3) Determines if we are in a cluster of 1 and whether we should go active.
 func (m *MemberList) Setup() {
-	// Load members into our memberlist slice
+	// Load members into our member list slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
 	localNode := DB.Config.GetLocalNode()
 	if DB.Config.ClusterCheck() {
+		// Start out health check scheduler
+		hcs := HealthChecks{}
+		go utils.Scheduler(
+			hcs.ProcessHCs,
+			time.Duration(DB.Config.Pulse.FailOverInterval)*time.Millisecond,
+		)
 		// Are we the only member in the cluster?
 		if DB.Config.NodeCount() == 1 {
 			// Disable start up delay
@@ -400,8 +406,7 @@ func (m *MemberList) GetLocalMember() (*Member, error) {
 	return &Member{}, errors.New("cannot get local member. Perhaps we are no longer in a cluster")
 }
 
-// Reset the member list.
-// E.g. When we are no longer in a cluster.
+// Reset clears the member list.
 func (m *MemberList) Reset() {
 	m.Lock()
 	defer m.Unlock()

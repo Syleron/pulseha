@@ -14,6 +14,9 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// TODO: Create a method to update the score.
+
+
 package pulseha
 
 import (
@@ -95,6 +98,20 @@ func (m *Member) GetLatency() string {
 	m.Lock()
 	defer m.Unlock()
 	return m.Latency
+}
+
+// SetScore update the health check total score for a member.
+func (m *Member) SetScore(score int) {
+	m.Lock()
+	defer m.Unlock()
+	m.Score = score
+}
+
+// GetScore Return the health check score for a particular member
+func (m *Member) GetScore() int {
+	m.Lock()
+	defer m.Unlock()
+	return m.Score
 }
 
 // SetLastHCResponse updates the last time this member recieved a health check.
@@ -295,12 +312,10 @@ func (m *Member) MakePassive() error {
 	return nil
 }
 
-/**
-Used to bring up a single IP on member
-Note: We need to know the group to work out what interface to
-bring it up on.
-TODO: Return an error instead of a boolean
-*/
+// BringUpIPs used to bring up a particular floating address on a member.
+// Note: We need to know the group to work out what interface to
+//       bring it up on.
+// TODO: Return an error instead of a boolean
 func (m *Member) BringUpIPs(ips []string, group string) bool {
 	iface, err := DB.Config.GetGroupIface(m.Hostname, group)
 	if err != nil {
@@ -327,9 +342,7 @@ func (m *Member) BringUpIPs(ips []string, group string) bool {
 	return true
 }
 
-/**
-Monitor the last time we received a health check and or failover
-*/
+// MonitorReceivedHCs monitor the last time we recieved a health check and or fail over.
 func (m *Member) MonitorReceivedHCs() bool {
 	// Clear routine
 	if !DB.Config.ClusterCheck() {

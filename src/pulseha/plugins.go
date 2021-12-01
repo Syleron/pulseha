@@ -28,7 +28,8 @@ import (
 type PluginHC interface {
 	Name() string
 	Version() float64
-	Send() (bool, bool)
+	Weight() int64
+	Send() error
 }
 
 // PluginNet is the network plugin object structure
