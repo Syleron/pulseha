@@ -16,7 +16,48 @@
 
 syntax = "proto3";
 
+option go_package = "rpc/";
+
 package proto;
+
+service CLI {
+    // Join Cluster
+    rpc Join (JoinRequest) returns (JoinResponse);
+    // Leave Cluster
+    rpc Leave (LeaveRequest) returns (LeaveResponse);
+    // Remove from cluster
+    rpc Remove (RemoveRequest) returns (RemoveResponse);
+    // Create Cluster
+    rpc Create (CreateRequest) returns (CreateResponse);
+    // Create Certs
+    rpc TLS (CertRequest) returns (CertResponse);
+    // Create floating ip group
+    rpc NewGroup (GroupNewRequest) returns (GroupNewResponse);
+    // Delete floating ip group
+    rpc DeleteGroup (GroupDeleteRequest) returns (GroupDeleteResponse);
+    // Add floating IP
+    rpc GroupIPAdd (GroupAddRequest) returns (GroupAddResponse);
+    // Remove floating IP
+    rpc GroupIPRemove (GroupRemoveRequest) returns (GroupRemoveResponse);
+    // Assign a group
+    rpc GroupAssign (GroupAssignRequest) returns (GroupAssignResponse);
+    // Unassign a group
+    rpc GroupUnassign (GroupUnassignRequest) returns (GroupUnassignResponse);
+    // Get group list
+    rpc GroupList (GroupTableRequest) returns (GroupTableResponse);
+    // Pulse Status
+    rpc Status (StatusRequest) returns (StatusResponse);
+    // Promote a member
+    rpc Promote (PromoteRequest) returns (PromoteResponse);
+    // Promote a member
+    rpc Config (ConfigRequest) returns (ConfigResponse);
+    // Generate new cluster token
+    rpc Token (TokenRequest) returns (TokenResponse);
+    // Perform network related actions
+    rpc Network (PulseNetwork) returns (PulseNetwork);
+    // Get detailed information for a particular node
+    rpc Describe (DescribeRequest) returns (DescribeResponse);
+}
 
 service Server {
     // Perform GRPC Health Check
@@ -42,7 +83,7 @@ service Server {
     // Get detailed information for a particular node
     rpc Describe (DescribeRequest) returns (DescribeResponse);
     // Fail over vote
-    rpc Vote (VoteRequest) returns (VoteResponse);
+//    rpc Vote (VoteRequest) returns (VoteResponse);
 }
 
 message HealthCheckRequest {
@@ -51,7 +92,10 @@ message HealthCheckRequest {
     // When the node went active
     string ActiveTime = 2;
 }
-message HealthCheckResponse {}
+
+message HealthCheckResponse {
+    int64 score = 1;
+}
 
 message JoinRequest {
     string message = 1;
@@ -68,22 +112,39 @@ message JoinRequest {
     int32 errorCode = 12;
     string uid = 13;
 }
-message JoinResponse {}
+
+message JoinResponse {
+    bool success = 1;
+    string message = 2;
+    bytes config = 3;
+    string ca_crt = 4;
+    string ca_key = 5;
+    int32 errorCode = 6;
+}
 
 message ConfigSyncRequest {
     string message = 1;
     bytes config = 2;
     bool replicated = 3;
 }
-message ConfigSyncResponse {}
+
+message ConfigSyncResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message LeaveRequest {
     string message = 1;
-    string hostname = 2;
-    bool replicated = 3;
-    int32 errorCode = 4;
+    bool replicated = 2;
+    string hostname = 3;
 }
-message LeaveResponse {}
+
+message LeaveResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message RemoveRequest {
     string message = 1;
@@ -91,42 +152,61 @@ message RemoveRequest {
     bool replicated = 3;
     int32 errorCode = 4;
 }
-message RemoveResponse {}
+
+message RemoveResponse {
+    bool success = 1;
+    string message = 2;
+    string hostname = 3;
+    int32 errorCode = 4;
+}
 
 message PromoteRequest {
     string message = 1;
     string member = 2;
     int32 errorCode = 3;
 }
-message PromoteResponse {}
+
+message PromoteResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message MakePassiveRequest {
     string message = 1;
     string member = 2;
     int32 errorCode = 3;
 }
-message MakePassiveResponse {}
+
+message MakePassiveResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message UpIpRequest {
     string message = 1;
     string iface = 2;
     repeated string ips = 3;
 }
-message UpIpResponse {}
 
-message BringIpRequest {
-    string message = 1;
-    string iface = 2;
-    repeated string ips = 3;
+message UpIpResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
 }
-message BringIpResponse {}
 
 message DownIpRequest {
     string message = 1;
     string iface = 2;
     repeated string ips = 3;
 }
-message DownIpResponse {}
+
+message DownIpResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message LogsRequest {
     enum Level {
@@ -139,7 +219,12 @@ message LogsRequest {
     string node = 2;
     Level level = 3;
 }
-message LogsResponse {}
+
+message LogsResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message DescribeRequest {
     string message = 1;
@@ -154,10 +239,23 @@ message DescribeRequest {
     string bindAddress = 10;
     string lastReceived = 11;
 }
-message DescribeResponse {}
 
-message VoteRequest {}
-message VoteResponse {}
+message DescribeResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message VoteRequest {
+    bool success = 1;
+    string message = 2;
+}
+
+message VoteResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
 
 message MemberlistMember {
     string hostname = 1;
@@ -177,4 +275,150 @@ message MemberStatus {
         UNCONFIGURED = 6; // Node is currently in an un-configured state
     }
     Status status = 1;
+}
+
+message CreateRequest {
+    string bind_ip = 1;
+    string bind_port = 2;
+}
+
+message CreateResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+    string token = 4;
+}
+
+message CertRequest {
+    string bind_ip = 3;
+}
+
+message CertResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupNewRequest {
+    string name = 1;
+}
+
+message GroupNewResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupDeleteRequest {
+    string name = 1;
+}
+
+message GroupDeleteResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupAddRequest {
+    string name = 1;
+    repeated string ips = 2;
+}
+
+message GroupAddResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupRemoveRequest {
+    string name = 1;
+    repeated string ips = 2;
+}
+
+message GroupRemoveResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupAssignRequest {
+    string group = 1;
+    string interface = 2;
+    string node = 3;
+}
+
+message GroupAssignResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupUnassignRequest {
+    string group = 1;
+    string interface = 2;
+    string node = 3;
+}
+
+message GroupUnassignResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message GroupTableRequest {}
+
+message GroupTableResponse {
+    bool success = 1;
+    string message = 2;
+    repeated GroupRow row = 3;
+}
+
+message GroupRow {
+    string name = 1;
+    repeated string ip = 2;
+    repeated string nodes = 3;
+    repeated string interfaces = 4;
+}
+
+message StatusRequest {}
+
+message StatusResponse {
+    bool success = 1;
+    string message = 2;
+    repeated StatusRow row = 3;
+}
+
+message StatusRow {
+    string hostname = 1;
+    string ip = 2;
+    string latency = 3;
+    MemberStatus.Status status = 4;
+    string lastReceived = 5;
+}
+
+message ConfigRequest {
+    string key = 1;
+    string value = 2;
+}
+
+message ConfigResponse {
+    bool success = 1;
+    string message = 2;
+    int32 errorCode = 3;
+}
+
+message TokenRequest {}
+
+message TokenResponse {
+    bool success = 1;
+    string message = 2;
+    string token = 3;
+    int32 errorCode = 4;
+}
+
+message PulseNetwork {
+    bool success = 1;
+    string message = 2;
+    string action = 3;
+    int32 errorCode = 4;
 }

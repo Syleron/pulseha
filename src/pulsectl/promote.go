@@ -65,7 +65,7 @@ func (c *PromoteCommand) Run(args []string) int {
 	defer connection.Close()
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Promote(context.Background(), &rpc.PulsePromote{
+	r, err := client.Promote(context.Background(), &rpc.PromoteRequest{
 		Member: addr[0],
 	})
 	if err != nil {

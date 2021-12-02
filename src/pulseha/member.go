@@ -190,7 +190,8 @@ func (m *Member) Close() {
 
 // SendHealthCheck sends GRPC health check to current member
 // Type: Active node function
-func (m *Member) SendHealthCheck(data *rpc.PulseHealthCheck) (interface{}, error) {
+// Note: Consider sending this periodically instead of the base health check
+func (m *Member) SendHealthCheck(data *rpc.HealthCheckRequest) (interface{}, error) {
 	if m.Connection == nil {
 		return nil, errors.New("unable to send health check as member connection has not been initiated")
 	}
@@ -205,7 +206,7 @@ func (m *Member) SendHealthCheck(data *rpc.PulseHealthCheck) (interface{}, error
 
 // RoutineHC used to periodically send RPC health check messages.
 // Type: Routine function
-func (m *Member) RoutineHC(data *rpc.PulseHealthCheck) {
+func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 	m.SetHCBusy(true)
 	_, err := m.SendHealthCheck(data)
 	if err != nil {
@@ -254,7 +255,7 @@ func (m *Member) MakeActive() error {
 	// Inform member to become active.
 	_, err := m.Send(
 		client.SendPromote,
-		&rpc.PulsePromote{
+		&rpc.PromoteRequest{
 			Member: m.GetHostname(),
 		})
 	// Handle if we have an error
@@ -300,7 +301,7 @@ func (m *Member) MakePassive() error {
 	// Inform member to become passive.
 	_, err := m.Send(
 		client.SendMakePassive,
-		&rpc.PulsePromote{
+		&rpc.MakePassiveRequest{
 			Member: m.GetHostname(),
 		})
 	// Handle if we have an error
@@ -329,7 +330,7 @@ func (m *Member) BringUpIPs(ips []string, group string) bool {
 		DB.Logging.Debug("member is not local node making grpc call")
 		_, err := m.Send(
 			client.SendBringUpIP,
-			&rpc.PulseBringIP{
+			&rpc.UpIpRequest{
 				Iface: iface,
 				Ips:   ips,
 			})

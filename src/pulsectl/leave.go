@@ -65,7 +65,7 @@ func (c *LeaveCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Leave(context.Background(), &rpc.PulseLeave{})
+	r, err := client.Leave(context.Background(), &rpc.LeaveRequest{})
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")

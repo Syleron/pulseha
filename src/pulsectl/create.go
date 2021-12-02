@@ -94,7 +94,7 @@ func (c *CreateCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Create(context.Background(), &rpc.PulseCreate{
+	r, err := client.Create(context.Background(), &rpc.CreateRequest{
 		BindIp:   bindIP,
 		BindPort: bindPort,
 	})

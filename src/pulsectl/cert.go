@@ -86,7 +86,7 @@ func (c *CertCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.TLS(context.Background(), &rpc.PulseCert{
+	r, err := client.TLS(context.Background(), &rpc.CertRequest{
 		BindIp: bindIP,
 	})
 

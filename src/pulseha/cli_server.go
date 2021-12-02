@@ -57,7 +57,7 @@ func (s *CLIServer) Setup() {
 }
 
 // Join command is used to join an already established PulseHA cluster.
-func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, error) {
+func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinResponse, error) {
 	//log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
@@ -65,7 +65,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		// Validate our IP & Port
 		i, _ := strconv.Atoi(in.BindPort)
 		if i == 0 && i > 65535 {
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Invalid port range",
 				ErrorCode: 9,
@@ -77,7 +77,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		err := c.Connect(in.Ip, in.Port, in.Hostname, false)
 		// Handle a client connection error
 		if err != nil {
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: err.Error(),
 				ErrorCode: 0,
@@ -87,7 +87,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		uid, newNode, err := nodeCreateLocal(in.BindIp, in.BindPort, false)
 		if err != nil {
 			log.Errorf("Join() Unable to generate local node definition: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Join failure. Unable to generate local node definition",
 				ErrorCode: 1,
@@ -98,7 +98,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		// Handle failure to marshal config
 		if err != nil {
 			log.Errorf("Join() Unable to marshal config: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Join failure. Please check the logs for more information",
 				ErrorCode: 2,
@@ -109,7 +109,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		if err != nil {
 			return nil, errors.New("cannot to join because unable to get hostname")
 		}
-		r, err := c.Send(client.SendJoin, &rpc.PulseJoin{
+		r, err := c.Send(client.SendJoin, &rpc.JoinRequest{
 			Config:   buf,
 			Hostname: hostname,
 			Uid: uid,
@@ -119,29 +119,29 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		// Handle a failed request
 		if err != nil {
 			log.Errorf("Join() Request error: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Join failure. Unable to connect to host.",
 				ErrorCode: 4,
 			}, nil
 		}
 		// Handle an unsuccessful request
-		if !r.(*rpc.PulseJoin).Success {
+		if !r.(*rpc.JoinResponse).Success {
 			log.Errorf("Join() Peer error: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
-				Message: r.(*rpc.PulseJoin).Message,
+				Message: r.(*rpc.JoinResponse).Message,
 				ErrorCode: 5,
 			}, nil
 		}
 		// write CA keys
 		utils.CreateFolder(security.CertDir)
-		security.WriteCertFile("ca", []byte(r.(*rpc.PulseJoin).CaCrt))
-		security.WriteKeyFile("ca", []byte(r.(*rpc.PulseJoin).CaKey))
+		security.WriteCertFile("ca", []byte(r.(*rpc.JoinResponse).CaCrt))
+		security.WriteKeyFile("ca", []byte(r.(*rpc.JoinResponse).CaKey))
 		// Generate our new keys
 		if err := security.GenTLSKeys(in.BindIp); err != nil {
 			log.Errorf("Join() Unable to generate TLS keys: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: err.Error(),
 				ErrorCode: 6,
@@ -149,11 +149,11 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		}
 		// Update our local config
 		peerConfig := &config.Config{}
-		err = json.Unmarshal(r.(*rpc.PulseJoin).Config, peerConfig)
+		err = json.Unmarshal(r.(*rpc.JoinResponse).Config, peerConfig)
 		// handle errors
 		if err != nil {
 			log.Error("Unable to unmarshal config node.")
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Unable to unmarshal config node.",
 				ErrorCode: 7,
@@ -165,7 +165,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		DB.SetConfig(peerConfig)
 		// Save the config
 		if err := DB.Config.Save(); err != nil {
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Failed to write config. Joined failed.",
 				ErrorCode: 8,
@@ -181,12 +181,12 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 		// Close the connection
 		c.Close()
 		log.Info("Successfully joined cluster with " + in.Ip)
-		return &rpc.PulseJoin{
+		return &rpc.JoinResponse{
 			Success: true,
 			Message: "Successfully joined cluster",
 		}, nil
 	}
-	return &rpc.PulseJoin{
+	return &rpc.JoinResponse{
 		Success: false,
 		Message: "Unable to join as PulseHA is already in a cluster.",
 		ErrorCode: 9,
@@ -195,12 +195,12 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin
 
 // Leave command is used to leave from the configured PulseHA cluster.
 // TODO: Remember to reassign active role on leave.
-func (s *CLIServer) Leave(ctx context.Context, in *rpc.PulseLeave) (*rpc.PulseLeave, error) {
+func (s *CLIServer) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveResponse, error) {
 	log.Debug("CLIServer:Leave() - Leave Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseLeave{
+		return &rpc.LeaveResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -212,7 +212,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *rpc.PulseLeave) (*rpc.PulseLe
 	if DB.Config.NodeCount() > 1 {
 		DB.MemberList.Broadcast(
 			client.SendLeave,
-			&rpc.PulseLeave{
+			&rpc.LeaveRequest{
 				Replicated: true,
 				Hostname:   node.Hostname,
 			},
@@ -226,7 +226,7 @@ func (s *CLIServer) Leave(ctx context.Context, in *rpc.PulseLeave) (*rpc.PulseLe
 	groupClearLocal()
 	// save
 	if err := DB.Config.Save(); err != nil {
-		return &rpc.PulseLeave{
+		return &rpc.LeaveResponse{
 			Success: false,
 			Message: "PulseHA successfully removed from cluster but could not update local config",
 			ErrorCode: 2,
@@ -239,25 +239,25 @@ func (s *CLIServer) Leave(ctx context.Context, in *rpc.PulseLeave) (*rpc.PulseLe
 	// yay?
 	log.Info("Successfully left configured cluster. PulseHA no longer listening..")
 	if DB.Config.NodeCount() == 1 {
-		return &rpc.PulseLeave{
+		return &rpc.LeaveResponse{
 			Success: true,
 			Message: "Successfully dismantled cluster",
 		}, nil
 	}
-	return &rpc.PulseLeave{
+	return &rpc.LeaveResponse{
 		Success: true,
 		Message: "Successfully left from cluster",
 	}, nil
 }
 
 // Remove command is used to remove a node from a PulseHA cluster.
-func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.PulseRemove, error) {
+func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.RemoveResponse, error) {
 	log.Debug("CLIServer:Leave() - Remove node from Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	// make sure we are in a cluster
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseRemove{
+		return &rpc.RemoveResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -266,7 +266,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.Pulse
 	// make sure we are not removing our active node
 	activeHostname, _ := DB.MemberList.GetActiveMember()
 	if in.Hostname == activeHostname {
-		return &rpc.PulseRemove{
+		return &rpc.RemoveResponse{
 			Success: false,
 			Message: "Unable to remove active node. Please promote another node and try again",
 			ErrorCode: 2,
@@ -277,7 +277,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.Pulse
 	if DB.Config.NodeCount() > 1 {
 		DB.MemberList.Broadcast(
 			client.SendRemove,
-			&rpc.PulseRemove{
+			&rpc.RemoveRequest{
 				Replicated: true,
 				Hostname:   in.Hostname,
 			},
@@ -288,7 +288,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.Pulse
 	// Get our node we are removing
 	uid, _, err := DB.Config.GetNodeByHostname(in.Hostname)
 	if err != nil {
-		return &rpc.PulseRemove{
+		return &rpc.RemoveResponse{
 			Success: false,
 			Message: "Unable to retrieve " + in.Hostname + " from local configuration",
 			ErrorCode: 3,
@@ -309,7 +309,7 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.Pulse
 		// Remove from our config
 		err := nodeDelete(uid)
 		if err != nil {
-			return &rpc.PulseRemove{
+			return &rpc.RemoveResponse{
 				Success: false,
 				Message: err.Error(),
 				ErrorCode: 4,
@@ -319,14 +319,14 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.Pulse
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
-	return &rpc.PulseRemove{
+	return &rpc.RemoveResponse{
 		Success: true,
 		Message: "Successfully left from cluster",
 	}, nil
 }
 
 // Create command is used to create a new PulseHA cluster.
-func (s *CLIServer) Create(ctx context.Context, in *rpc.PulseCreate) (*rpc.PulseCreate, error) {
+func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.CreateResponse, error) {
 	var token string
 	s.Lock()
 	defer s.Unlock()
@@ -335,7 +335,7 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.PulseCreate) (*rpc.Pulse
 		// Validate our IP & Port
 		i, _ := strconv.Atoi(in.BindPort)
 		if i == 0 && i > 65535 {
-			return &rpc.PulseCreate{
+			return &rpc.CreateResponse{
 				Success: false,
 				Message: "Invalid port range",
 				Token: token,
@@ -353,7 +353,7 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.PulseCreate) (*rpc.Pulse
 		// Create a new local node config
 		_, _, err = nodeCreateLocal(in.BindIp, in.BindPort, true)
 		if err != nil {
-			return &rpc.PulseCreate{
+			return &rpc.CreateResponse{
 				Success: false,
 				Message: "Failed write local not to config",
 				Token: token,
@@ -379,7 +379,7 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.PulseCreate) (*rpc.Pulse
 		// Setup our pulse server
 		go s.Server.Setup()
 		// Save our newly generated token
-		return &rpc.PulseCreate{
+		return &rpc.CreateResponse{
 			Success: true,
 			Message: `Pulse cluster successfully created!
 	
@@ -389,7 +389,7 @@ pulsectl join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + i
 			`,
 		}, nil
 	} else {
-		return &rpc.PulseCreate{
+		return &rpc.CreateResponse{
 			Success: false,
 			Message: "Pulse daemon is already in a configured cluster",
 			Token: token,
@@ -399,11 +399,11 @@ pulsectl join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + i
 }
 
 // NewGroup command is used to create a new floating IP group.
-func (s *CLIServer) NewGroup(ctx context.Context, in *rpc.PulseGroupNew) (*rpc.PulseGroupNew, error) {
+func (s *CLIServer) NewGroup(ctx context.Context, in *rpc.GroupNewRequest) (*rpc.GroupNewResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupNew{
+		return &rpc.GroupNewResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -411,7 +411,7 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *rpc.PulseGroupNew) (*rpc.P
 	}
 	groupName, err := groupNew(in.Name)
 	if err != nil {
-		return &rpc.PulseGroupNew{
+		return &rpc.GroupNewResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
@@ -421,18 +421,18 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *rpc.PulseGroupNew) (*rpc.P
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	DB.MemberList.SyncConfig()
-	return &rpc.PulseGroupNew{
+	return &rpc.GroupNewResponse{
 		Success: true,
 		Message: groupName + " successfully added.",
 	}, nil
 }
 
 // DeleteGroup command is used to delete a floating IP group.
-func (s *CLIServer) DeleteGroup(ctx context.Context, in *rpc.PulseGroupDelete) (*rpc.PulseGroupDelete, error) {
+func (s *CLIServer) DeleteGroup(ctx context.Context, in *rpc.GroupDeleteRequest) (*rpc.GroupDeleteResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupDelete{
+		return &rpc.GroupDeleteResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -440,7 +440,7 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *rpc.PulseGroupDelete) (
 	}
 	err := groupDelete(in.Name)
 	if err != nil {
-		return &rpc.PulseGroupDelete{
+		return &rpc.GroupDeleteResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
@@ -450,18 +450,18 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *rpc.PulseGroupDelete) (
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	DB.MemberList.SyncConfig()
-	return &rpc.PulseGroupDelete{
+	return &rpc.GroupDeleteResponse{
 		Success: true,
 		Message: in.Name + " successfully deleted.",
 	}, nil
 }
 
 // GroupIPAdd command is used to add a floating ip to an ip group.
-func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.PulseGroupAdd) (*rpc.PulseGroupAdd, error) {
+func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.GroupAddRequest) (*rpc.GroupAddResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -469,7 +469,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.PulseGroupAdd) (*rpc
 	}
 	err := groupIpAdd(in.Name, in.Ips)
 	if err != nil {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
@@ -479,7 +479,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.PulseGroupAdd) (*rpc
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	if err := DB.MemberList.SyncConfig(); err != nil {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 5,
@@ -489,7 +489,7 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.PulseGroupAdd) (*rpc
 	activeHostname, activeMember := DB.MemberList.GetActiveMember()
 	// Connect first just in case.. otherwise we could seg fault
 	if err := activeMember.Connect(); err != nil {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 3,
@@ -497,36 +497,36 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.PulseGroupAdd) (*rpc
 	}
 	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
 	if err != nil {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 6,
 		}, nil
 	}
-	_, err = activeMember.Send(client.SendBringUpIP, &rpc.PulseBringIP{
+	_, err = activeMember.Send(client.SendBringUpIP, &rpc.UpIpRequest{
 		Iface: iface,
 		Ips:   in.Ips,
 	})
 	if err != nil {
-		return &rpc.PulseGroupAdd{
+		return &rpc.GroupAddResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 4,
 		}, nil
 	}
 	// respond
-	return &rpc.PulseGroupAdd{
+	return &rpc.GroupAddResponse{
 		Success: true,
 		Message: "IP address(es) successfully added to " + in.Name,
 	}, nil
 }
 
 // GroupIPRemove command is used to remove a floating ip from a ip group.
-func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove) (*rpc.PulseGroupRemove, error) {
+func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.GroupRemoveRequest) (*rpc.GroupRemoveResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupRemove{
+		return &rpc.GroupRemoveResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -534,7 +534,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove)
 	}
 	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
 	if in.Ips == nil || in.Name == "" {
-		return &rpc.PulseGroupRemove{
+		return &rpc.GroupRemoveResponse{
 			Success: false,
 			Message: "Unable to process RPC call. Required parameters: Ips, Name",
 			ErrorCode: 2,
@@ -542,7 +542,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove)
 	}
 	_, activeMember := DB.MemberList.GetActiveMember()
 	if activeMember == nil {
-		return &rpc.PulseGroupRemove{
+		return &rpc.GroupRemoveResponse{
 			Success: false,
 			Message: "Unable to remove IP(s) to group as there no active node in the cluster.",
 			ErrorCode: 3,
@@ -550,7 +550,7 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove)
 	}
 	err := groupIpRemove(in.Name, in.Ips)
 	if err != nil {
-		return &rpc.PulseGroupRemove{
+		return &rpc.GroupRemoveResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 4,
@@ -566,17 +566,17 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove)
 	activeMember.Connect()
 	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
 	if err != nil {
-		return &rpc.PulseGroupRemove{
+		return &rpc.GroupRemoveResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 5,
 		}, nil
 	}
-	activeMember.Send(client.SendBringDownIP, &rpc.PulseBringIP{
+	activeMember.Send(client.SendBringDownIP, &rpc.DownIpRequest{
 		Iface: iface,
 		Ips:   in.Ips,
 	})
-	return &rpc.PulseGroupRemove{
+	return &rpc.GroupRemoveResponse{
 		Success: true,
 		Message: "IP address(es) successfully removed from " + in.Name,
 	}, nil
@@ -584,11 +584,11 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.PulseGroupRemove)
 
 // GroupAssign command is used to assign a floating ip group to a network interface
 // on the current node.
-func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.PulseGroupAssign) (*rpc.PulseGroupAssign, error) {
+func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.GroupAssignRequest) (*rpc.GroupAssignResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupAssign{
+		return &rpc.GroupAssignResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -596,14 +596,14 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.PulseGroupAssign) (
 	}
 	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
-		return &rpc.PulseGroupAssign{
+		return &rpc.GroupAssignResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
 	if err := groupAssign(in.Group, uid, in.Interface); err != nil {
-		return &rpc.PulseGroupAssign{
+		return &rpc.GroupAssignResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 3,
@@ -613,7 +613,7 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.PulseGroupAssign) (
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	DB.MemberList.SyncConfig()
-	return &rpc.PulseGroupAssign{
+	return &rpc.GroupAssignResponse{
 		Success: true,
 		Message: in.Group + " assigned to interface " + in.Interface + " on node " + in.Node,
 	}, nil
@@ -621,11 +621,11 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.PulseGroupAssign) (
 
 // GroupUnassign command is used to unassign a floating ip group from a network interface.
 // on the current node.
-func (s *CLIServer) GroupUnassign(ctx context.Context, in *rpc.PulseGroupUnassign) (*rpc.PulseGroupUnassign, error) {
+func (s *CLIServer) GroupUnassign(ctx context.Context, in *rpc.GroupUnassignRequest) (*rpc.GroupUnassignResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseGroupUnassign{
+		return &rpc.GroupUnassignResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -633,14 +633,14 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *rpc.PulseGroupUnassig
 	}
 	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
-		return &rpc.PulseGroupUnassign{
+		return &rpc.GroupUnassignResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
 	if err := groupUnassign(in.Group, uid, in.Interface); err != nil {
-		return &rpc.PulseGroupUnassign{
+		return &rpc.GroupUnassignResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 3,
@@ -650,23 +650,23 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *rpc.PulseGroupUnassig
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	DB.MemberList.SyncConfig()
-	return &rpc.PulseGroupUnassign{
+	return &rpc.GroupUnassignResponse{
 		Success: true,
 		Message: in.Group + " unassigned from interface " + in.Interface + " on node " + in.Node,
 	}, nil
 }
 
 // GroupList command is used to list the available floating ip groups on the current node.
-func (s *CLIServer) GroupList(ctx context.Context, in *rpc.GroupTable) (*rpc.GroupTable, error) {
+func (s *CLIServer) GroupList(ctx context.Context, in *rpc.GroupTableRequest) (*rpc.GroupTableResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.GroupTable{
+		return &rpc.GroupTableResponse{
 			Success: false,
 			Message: language.CLUSTER_REQUIRED_MESSAGE,
 		}, nil
 	}
-	table := new(rpc.GroupTable)
+	table := new(rpc.GroupTableResponse)
 	for name, ips := range DB.Config.Groups {
 		nodes, interfaces := getGroupNodes(name)
 		row := &rpc.GroupRow{Name: name, Ip: ips, Nodes: nodes, Interfaces: interfaces}
@@ -676,16 +676,16 @@ func (s *CLIServer) GroupList(ctx context.Context, in *rpc.GroupTable) (*rpc.Gro
 }
 
 // Status command is used to return an object of node statuses
-func (s *CLIServer) Status(ctx context.Context, in *rpc.PulseStatus) (*rpc.PulseStatus, error) {
+func (s *CLIServer) Status(ctx context.Context, in *rpc.StatusRequest) (*rpc.StatusResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseStatus{
+		return &rpc.StatusResponse{
 			Success: false,
 			Message: language.CLUSTER_REQUIRED_MESSAGE,
 		}, nil
 	}
-	table := new(rpc.PulseStatus)
+	table := new(rpc.StatusResponse)
 	for _, member := range DB.MemberList.Members {
 		_, node, _ := nodeGetByHostname(member.Hostname)
 		tym := member.GetLastHCResponse()
@@ -709,11 +709,11 @@ func (s *CLIServer) Status(ctx context.Context, in *rpc.PulseStatus) (*rpc.Pulse
 }
 
 // Promote command is used to make a particular node active
-func (s *CLIServer) Promote(ctx context.Context, in *rpc.PulsePromote) (*rpc.PulsePromote, error) {
+func (s *CLIServer) Promote(ctx context.Context, in *rpc.PromoteRequest) (*rpc.PromoteResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulsePromote{
+		return &rpc.PromoteResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -721,24 +721,24 @@ func (s *CLIServer) Promote(ctx context.Context, in *rpc.PulsePromote) (*rpc.Pul
 	}
 	err := DB.MemberList.PromoteMember(in.Member)
 	if err != nil {
-		return &rpc.PulsePromote{
+		return &rpc.PromoteResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
-	return &rpc.PulsePromote{
+	return &rpc.PromoteResponse{
 		Success: true,
 		Message: "Successfully promoted member " + in.Member,
 	}, nil
 }
 
 // TLS command is used to generate and manage tls keys.
-func (s *CLIServer) TLS(ctx context.Context, in *rpc.PulseCert) (*rpc.PulseCert, error) {
+func (s *CLIServer) TLS(ctx context.Context, in *rpc.CertRequest) (*rpc.CertResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseCert{
+		return &rpc.CertResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -746,26 +746,26 @@ func (s *CLIServer) TLS(ctx context.Context, in *rpc.PulseCert) (*rpc.PulseCert,
 	}
 	err := security.GenTLSKeys(in.BindIp)
 	if err != nil {
-		return &rpc.PulseCert{
+		return &rpc.CertResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
-	return &rpc.PulseCert{
+	return &rpc.CertResponse{
 		Success: true,
 		Message: "Successfully generated new TLS certificates",
 	}, nil
 }
 
 // Config command is used to update any key value in the pulseha config.
-func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.PulseConfig, error) {
+func (s *CLIServer) Config(ctx context.Context, in *rpc.ConfigRequest) (*rpc.ConfigResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	// Validation
 	if in.Key == "local_node" ||
 		in.Key == "cluster_token" {
-		return &rpc.PulseConfig{
+		return &rpc.ConfigResponse{
 			Success: false,
 			Message: "You are unable to use the config command to change the value of " + in.Key,
 			ErrorCode: 4,
@@ -774,20 +774,20 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 	// If the value is hostname, update our node in our nodes section as well
 	if in.Key == "hostname" {
 		if err := nodeUpdateLocalHostname(in.Value); err != nil {
-			return &rpc.PulseConfig{
+			return &rpc.ConfigResponse{
 				Success: false,
 				Message: err.Error(),
 				ErrorCode: 3,
 			}, nil
 		}
-		return &rpc.PulseConfig{
+		return &rpc.ConfigResponse{
 			Success: true,
 			Message: "Successfully updated PulseHA config",
 		}, nil
 	}
 	// Update our key value
 	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
-		return &rpc.PulseConfig{
+		return &rpc.ConfigResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 2,
@@ -795,7 +795,7 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 	}
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
-		return &rpc.PulseConfig{
+		return &rpc.ConfigResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 5,
@@ -805,24 +805,24 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.PulseConfig) (*rpc.Pulse
 	DB.Config.Reload()
 	// Sync it with our peers
 	if err := DB.MemberList.SyncConfig(); err != nil {
-		return &rpc.PulseConfig{
+		return &rpc.ConfigResponse{
 			Success: false,
 			Message: err.Error(),
 			ErrorCode: 6,
 		}, nil
 	}
-	return &rpc.PulseConfig{
+	return &rpc.ConfigResponse{
 		Success: true,
 		Message: "Successfully updated PulseHA config",
 	}, nil
 }
 
 // Token - Generate a new cluster token
-func (s *CLIServer) Token(ctx context.Context, in *rpc.PulseToken) (*rpc.PulseToken, error) {
+func (s *CLIServer) Token(ctx context.Context, in *rpc.TokenRequest) (*rpc.TokenResponse, error) {
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
-		return &rpc.PulseToken{
+		return &rpc.TokenResponse{
 			Success: false,
 			Message: language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
@@ -836,7 +836,7 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.PulseToken) (*rpc.PulseTo
 	DB.Config.Pulse.ClusterToken = token_hash
 	// Sync our config with the cluster
 	if err := DB.MemberList.SyncConfig(); err != nil {
-		return &rpc.PulseToken{
+		return &rpc.TokenResponse{
 			Success:   false,
 			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 2,
@@ -847,7 +847,7 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.PulseToken) (*rpc.PulseTo
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 	}
 	// report back with success
-	return &rpc.PulseToken{
+	return &rpc.TokenResponse{
 		Success: true,
 		Message: "Success! Your new cluster token is " + token,
 		Token: token,
@@ -885,6 +885,6 @@ func (s *CLIServer) Network(ctx context.Context, in *rpc.PulseNetwork) (*rpc.Pul
 }
 
 // Describe command to return current node details.
-func (s *CLIServer) Describe(ctx context.Context, in *rpc.PulseDescribe) (*rpc.PulseDescribe, error) {
-	return &rpc.PulseDescribe{}, nil
+func (s *CLIServer) Describe(ctx context.Context, in *rpc.DescribeRequest) (*rpc.DescribeResponse, error) {
+	return &rpc.DescribeResponse{}, nil
 }

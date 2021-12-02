@@ -321,7 +321,7 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 			continue
 		}
 		if !member.GetHCBusy() && member.GetStatus() == rpc.MemberStatus_PASSIVE {
-			memberlist := new(rpc.PulseHealthCheck)
+			memberlist := new(rpc.HealthCheckRequest)
 			for _, member := range m.Members {
 				newMember := &rpc.MemberlistMember{
 					Hostname:     member.GetHostname(),
@@ -346,7 +346,7 @@ func (m *MemberList) SyncConfig() error {
 	if err != nil {
 		return errors.New("unable to sync config " + err.Error())
 	}
-	m.Broadcast(client.SendConfigSync, &rpc.PulseConfigSync{
+	m.Broadcast(client.SendConfigSync, &rpc.ConfigSyncRequest{
 		Replicated: true,
 		Config:     buf,
 	})

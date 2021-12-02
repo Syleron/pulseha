@@ -79,7 +79,7 @@ func (c *ConfigCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Config(context.Background(), &rpc.PulseConfig{
+	r, err := client.Config(context.Background(), &rpc.ConfigRequest{
 		Key: cmds[0],
 		Value: cmds[1],
 	})

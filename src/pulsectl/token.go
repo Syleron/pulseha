@@ -64,7 +64,7 @@ func (c *TokenCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Token(context.Background(), &rpc.PulseToken{})
+	r, err := client.Token(context.Background(), &rpc.TokenRequest{})
 
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error. Is the PulseHA service running?")

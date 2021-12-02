@@ -73,7 +73,7 @@ func (c *RemoveCommand) Run(args []string) int {
 
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Remove(context.Background(), &rpc.PulseRemove{
+	r, err := client.Remove(context.Background(), &rpc.RemoveRequest{
 		Hostname: cmds[0],
 	})
 

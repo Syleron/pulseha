@@ -26,7 +26,7 @@ import (
 
 type Logging struct {
 	Logger *log.Logger
-	Level    rpc.PulseLogs_Level
+	Level    rpc.LogsRequest_Level
 	Hostname string
 	Broadcast
 }
@@ -42,7 +42,7 @@ func NewLogger(broadcast Broadcast) (Logging, error) {
 	// Set our memberlist
 	logging := Logging{
 		log.New(),
-		rpc.PulseLogs_INFO,
+		rpc.LogsRequest_INFO,
 		hostname,
 		broadcast,
 	}
@@ -59,33 +59,33 @@ func NewLogger(broadcast Broadcast) (Logging, error) {
 
 // Debug Send a debug message to the cluster
 func (l *Logging) Debug(message string) {
-	if l.Level == rpc.PulseLogs_DEBUG {
+	if l.Level == rpc.LogsRequest_DEBUG {
 		l.Logger.Debugf("[%s] %s", l.Hostname, message)
-		l.send(message, rpc.PulseLogs_DEBUG)
+		l.send(message, rpc.LogsRequest_DEBUG)
 	}
 }
 
 // Warn sends a warning message to the cluster
 func (l *Logging) Warn(message string) {
 	l.Logger.Warnf("[%s] %s", l.Hostname, message)
-	l.send(message, rpc.PulseLogs_WARNING)
+	l.send(message, rpc.LogsRequest_WARNING)
 }
 
 // Info sends a info message to the cluster
 func (l *Logging) Info(message string) {
 	l.Logger.Infof("[%s] %s", l.Hostname, message)
-	l.send(message, rpc.PulseLogs_INFO)
+	l.send(message, rpc.LogsRequest_INFO)
 }
 
 // Info sends a error message to the cluster
 func (l *Logging) Error(message string) {
 	l.Logger.Errorf("[%s] %s", l.Hostname, message)
-	l.send(message, rpc.PulseLogs_ERROR)
+	l.send(message, rpc.LogsRequest_ERROR)
 }
 
-// send sends a message to the cluster
-func (l *Logging) send(message string, level rpc.PulseLogs_Level) {
-	l.Broadcast(client.SendLogs, &rpc.PulseLogs{
+// send broadcast a log message to the cluster
+func (l *Logging) send(message string, level rpc.LogsRequest_Level) {
+	l.Broadcast(client.SendLogs, &rpc.LogsRequest{
 		Message: message,
 		Node:    l.Hostname,
 		Level:   level,

@@ -148,7 +148,7 @@ func (c *JoinCommand) Run(args []string) int {
 	// setup new RPC client
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Join(context.Background(), &rpc.PulseJoin{
+	r, err := client.Join(context.Background(), &rpc.JoinRequest{
 		Ip:       joinIP,
 		Port:     joinPort,
 		BindIp:   *bindIP,

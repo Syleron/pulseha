@@ -35,7 +35,7 @@ type Client struct {
 	Requester  rpc.ServerClient
 }
 
-// This should probably go into an enums folder
+// TODO: This should probably go into an enums folder
 type ProtoFunction int
 
 const (
@@ -68,57 +68,47 @@ func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 
-// -----
+// New creates a new instance of our Client
+func (c *Client) New () {}
 
-/**
- Create new PulseHA client
- */
-func (c *Client) New () {
-
-}
-
-/**
-
- */
+// GetProtoFuncList defines the available RPC commands to send.
 func (c *Client) GetProtoFuncList() map[string]interface{} {
 	funcList := map[string]interface{}{
 		"ConfigSync": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.ConfigSync(ctx, data.(*rpc.PulseConfigSync))
+			return c.Requester.ConfigSync(ctx, data.(*rpc.ConfigSyncRequest))
 		},
 		"Join": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Join(ctx, data.(*rpc.PulseJoin))
+			return c.Requester.Join(ctx, data.(*rpc.JoinRequest))
 		},
 		"Leave": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Leave(ctx, data.(*rpc.PulseLeave))
+			return c.Requester.Leave(ctx, data.(*rpc.LeaveRequest))
 		},
 		"MakePassive": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.MakePassive(ctx, data.(*rpc.PulsePromote))
+			return c.Requester.MakePassive(ctx, data.(*rpc.MakePassiveRequest))
 		},
 		"BringUpIP": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.BringUpIP(ctx, data.(*rpc.PulseBringIP))
+			return c.Requester.BringUpIP(ctx, data.(*rpc.UpIpRequest))
 		},
 		"BringDownIP": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.BringDownIP(ctx, data.(*rpc.PulseBringIP))
+			return c.Requester.BringDownIP(ctx, data.(*rpc.DownIpRequest))
 		},
 		"HealthCheck": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.HealthCheck(ctx, data.(*rpc.PulseHealthCheck))
+			return c.Requester.HealthCheck(ctx, data.(*rpc.HealthCheckRequest))
 		},
 		"Promote": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Promote(ctx, data.(*rpc.PulsePromote))
+			return c.Requester.Promote(ctx, data.(*rpc.PromoteRequest))
 		},
 		"Logs": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Logs(ctx, data.(*rpc.PulseLogs))
+			return c.Requester.Logs(ctx, data.(*rpc.LogsRequest))
 		},
 		"Remove": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Remove(ctx, data.(*rpc.PulseRemove))
+			return c.Requester.Remove(ctx, data.(*rpc.RemoveRequest))
 		},
 	}
 	return funcList
 }
 
-/**
-Note: Hostname is required for TLS as the certs are named after the hostname.
-*/
+// Connect creates a new client connection and request hostname for TLS verification.
 func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	var err error
 	if tlsEnabled {
@@ -160,9 +150,7 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	return nil
 }
 
-/**
-Close the client connection
-*/
+// Close terminates the client connection.
 func (c *Client) Close() {
 	log.Debug("Client:Close() Connection closed")
 	// Make sure we have a connection before trying to close it
@@ -171,9 +159,7 @@ func (c *Client) Close() {
 	}
 }
 
-/**
-Send a specific GRPC call
-*/
+// Send sends an RPC command over the client connection.
 func (c *Client) Send(funcName ProtoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()

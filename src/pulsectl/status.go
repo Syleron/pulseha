@@ -66,7 +66,7 @@ func (c *StatusCommand) Run(args []string) int {
  *
  */
 func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
-	r, err := client.Status(context.Background(), &rpc.PulseStatus{})
+	r, err := client.Status(context.Background(), &rpc.StatusRequest{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())
