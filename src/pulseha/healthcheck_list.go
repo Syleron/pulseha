@@ -1,10 +1,13 @@
 package pulseha
 
-import "sync"
+import (
+	log "github.com/sirupsen/logrus"
+	"sync"
+)
 
 type HealthChecks struct {
 	// Plugins our array of health check plugins
-	Plugins []PluginHC
+	Plugins []*Plugin
 	// sync.Mutex lock for our object
 	sync.Mutex
 }
@@ -12,17 +15,17 @@ type HealthChecks struct {
 
 // ProcessHCs send all loaded health checks to calculate a score
 func (hcs *HealthChecks) ProcessHCs() bool {
-	DB.Logging.Debug("Running health check scheduler")
+	log.Debug("Running health check scheduler total: ", len(hcs.Plugins))
 	score := 0
 	// Go through our health checks and make an attempt
 	for _, hc := range hcs.Plugins  {
-		DB.Logging.Debug("Sending health check: " + hc.Name())
-		if err := hc.Send(); err != nil {
+		DB.Logging.Debug("Sending health check: " + hc.Name)
+		if err := hc.Plugin.(PluginHC).Send(); err != nil {
 			// TODO: Do something on error
 			continue
 		}
 		// Success, add our weight to the score.
-		score += int(hc.Weight())
+		score += int(hc.Plugin.(PluginHC).Weight())
 	}
 	// Update our member score.
 	localMember, err := DB.MemberList.GetLocalMember()

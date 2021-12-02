@@ -139,9 +139,11 @@ func (m *MemberList) Setup() {
 	if DB.Config.ClusterCheck() {
 		// Start out health check scheduler
 		hcs := HealthChecks{}
+		// TODO: Better way of doing this
+		hcs.Plugins = DB.Plugins.GetHealthCheckPlugins()
 		go utils.Scheduler(
 			hcs.ProcessHCs,
-			time.Duration(DB.Config.Pulse.FailOverInterval)*time.Millisecond,
+			time.Duration(1)*time.Second,
 		)
 		// Are we the only member in the cluster?
 		if DB.Config.NodeCount() == 1 {
