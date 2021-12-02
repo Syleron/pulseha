@@ -193,7 +193,7 @@ func (m *Member) Close() {
 // Note: Consider sending this periodically instead of the base health check
 func (m *Member) SendHealthCheck(data *rpc.HealthCheckRequest) (interface{}, error) {
 	if m.Connection == nil {
-		return nil, errors.New("unable to send health check as member connection has not been initiated")
+		return rpc.HealthCheckResponse{}, errors.New("unable to send health check as member connection has not been initiated")
 	}
 	startTime := time.Now()
 	r, err := m.Send(client.SendHealthCheck, data)
@@ -208,11 +208,14 @@ func (m *Member) SendHealthCheck(data *rpc.HealthCheckRequest) (interface{}, err
 // Type: Routine function
 func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 	m.SetHCBusy(true)
-	_, err := m.SendHealthCheck(data)
+	response, err := m.SendHealthCheck(data)
 	if err != nil {
 		m.Close()
 		m.SetStatus(rpc.MemberStatus_UNAVAILABLE) // This may not be required
 	}
+	member := DB.MemberList.GetMemberByHostname(m.GetHostname())
+	// Update the member score
+	member.Score = int(response.(*rpc.HealthCheckResponse).Score)
 	m.SetHCBusy(false)
 }
 

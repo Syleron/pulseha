@@ -94,7 +94,7 @@ message HealthCheckRequest {
 }
 
 message HealthCheckResponse {
-    int64 score = 1;
+    int32 score = 1;
 }
 
 message JoinRequest {

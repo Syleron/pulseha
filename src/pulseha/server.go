@@ -187,6 +187,7 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*
 	}
 	activeHostname, _ := DB.MemberList.GetActiveMember()
 	localNode := DB.Config.GetLocalNode()
+	localMember, _ := DB.MemberList.GetLocalMember()
 	if activeHostname != localNode.Hostname {
 		localMember := DB.MemberList.GetMemberByHostname(localNode.Hostname)
 		// make passive to reset the networking
@@ -202,14 +203,14 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != localNode.Hostname {
-			member, _ := DB.MemberList.GetLocalMember()
-			member.MakePassive()
+			localMember.MakePassive()
 		} else {
-			localMember, _ := DB.MemberList.GetLocalMember()
 			localMember.SetLastHCResponse(time.Time{})
 		}
 	}
-	return &rpc.HealthCheckResponse{}, nil
+	return &rpc.HealthCheckResponse{
+		Score: int32(localMember.Score),
+	}, nil
 }
 
 // Join command used to join a configured cluster.

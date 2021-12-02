@@ -15,6 +15,10 @@ type HealthChecks struct {
 
 // ProcessHCs send all loaded health checks to calculate a score
 func (hcs *HealthChecks) ProcessHCs() bool {
+	// Check to see if we have booted up before we start checking the health checks
+	if DB.StartDelay {
+		return false
+	}
 	log.Debug("Running health check scheduler total: ", len(hcs.Plugins))
 	score := 0
 	// Go through our health checks and make an attempt
