@@ -701,6 +701,7 @@ func (s *CLIServer) Status(ctx context.Context, in *rpc.StatusRequest) (*rpc.Sta
 			Latency:      member.GetLatency(),
 			Status:       member.GetStatus(),
 			LastReceived: tymFormat,
+			Score: int32(member.GetScore()),
 		}
 		table.Row = append(table.Row, row)
 	}

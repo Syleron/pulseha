@@ -321,7 +321,7 @@ func (c *Config) SaveDefaultLocalConfig() error {
 		},
 		Groups: map[string][]string{},
 		Nodes:  map[string]*Node{},
-		Plugins: nil,
+		Plugins: []interface{}{},
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")

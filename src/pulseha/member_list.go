@@ -59,6 +59,7 @@ func (m *MemberList) AddMember(hostname string, client *client.Client) {
 		newMember.SetHostname(hostname)
 		newMember.SetStatus(rpc.MemberStatus_UNAVAILABLE)
 		newMember.SetClient(client)
+		newMember.SetScore(0)
 		m.Members = append(m.Members, newMember)
 		m.Unlock()
 	} else {

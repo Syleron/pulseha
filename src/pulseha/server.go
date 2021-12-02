@@ -87,7 +87,7 @@ func (s *Server) Setup() {
 	// Listen
 	s.Listener, err = net.Listen("tcp", bindIP+":"+DB.Config.LocalNode().Port)
 	if err != nil {
-		panic(err)
+		log.Fatal(err.Error())
 		return
 	}
 	// load member cert/key

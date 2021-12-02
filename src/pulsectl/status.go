@@ -24,6 +24,7 @@ import (
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -81,6 +82,7 @@ func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
 					node.Ip,
 					node.Latency,
 					node.Status.String(),
+					strconv.Itoa(int(node.Score)),
 					node.LastReceived,
 				})
 		}
@@ -90,6 +92,7 @@ func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
 			"Bind Address",
 			"Latency",
 			"Status",
+			"Score",
 			"Last Received",
 		})
 		table.SetCenterSeparator("-")

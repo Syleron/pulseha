@@ -394,6 +394,7 @@ message StatusRow {
     string latency = 3;
     MemberStatus.Status status = 4;
     string lastReceived = 5;
+    int32 score = 6;
 }
 
 message ConfigRequest {
