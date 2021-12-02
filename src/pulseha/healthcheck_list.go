@@ -12,6 +12,7 @@ type HealthChecks struct {
 
 // ProcessHCs send all loaded health checks to calculate a score
 func (hcs *HealthChecks) ProcessHCs() bool {
+	DB.Logging.Debug("Running health check scheduler")
 	score := 0
 	// Go through our health checks and make an attempt
 	for _, hc := range hcs.Plugins  {

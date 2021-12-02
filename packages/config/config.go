@@ -33,9 +33,10 @@ var (
 )
 
 type Config struct {
-	Pulse  Local               `json:"pulseha"`
-	Groups map[string][]string `json:"floating_ip_groups"`
-	Nodes  map[string]*Node    `json:"nodes"`
+	Pulse   Local               `json:"pulseha"`
+	Groups  map[string][]string `json:"floating_ip_groups"`
+	Nodes   map[string]*Node    `json:"nodes"`
+	Plugins []interface{}       `json:"plugins"`
 	sync.Mutex
 }
 
@@ -46,9 +47,9 @@ type Local struct {
 	LocalNode           string `json:"local_node"`
 	ClusterToken        string `json:"cluster_token"`
 	LoggingLevel        string `json:"logging_level"`
-	AutoFailback		bool   `json:"auto_failback"`
-	LogToFile			bool   `json:"log_to_file"`
-	LogFileLocation		string  `json:"log_file_location"`
+	AutoFailback        bool   `json:"auto_failback"`
+	LogToFile           bool   `json:"log_to_file"`
+	LogFileLocation     string `json:"log_file_location"`
 }
 
 type Node struct {
@@ -210,7 +211,7 @@ func (c *Config) LocalNode() Node {
 	if err != nil {
 		return Node{}
 	}
-	_, node, err :=  c.GetNodeByHostname(hostname)
+	_, node, err := c.GetNodeByHostname(hostname)
 	if err != nil {
 		return Node{}
 	}
@@ -228,7 +229,7 @@ func (c *Config) ClusterCheck() bool {
 			if err != nil {
 				return false
 			}
-			_, node, err :=  c.GetNodeByHostname(hostname)
+			_, node, err := c.GetNodeByHostname(hostname)
 			if err != nil {
 				return false
 			}
@@ -274,7 +275,7 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 // GetNodeByHostname - Get node by hostname
 func (c *Config) GetNodeByHostname(hostname string) (uid string, node Node, err error) {
 	for uid, node := range c.Nodes {
-		if node.Hostname == hostname  {
+		if node.Hostname == hostname {
 			return uid, *node, nil
 		}
 	}
@@ -311,15 +312,16 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			HealthCheckInterval: 1000,
 			FailOverInterval:    5000,
 			FailOverLimit:       10000,
-			AutoFailback:	     true,
+			AutoFailback:        true,
 			LocalNode:           "",
 			ClusterToken:        "",
 			LoggingLevel:        "info",
-			LogToFile:			 true,
+			LogToFile:           true,
 			LogFileLocation:     "/etc/pulseha/pulseha.log",
 		},
 		Groups: map[string][]string{},
 		Nodes:  map[string]*Node{},
+		Plugins: nil,
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")
