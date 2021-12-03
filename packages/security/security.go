@@ -36,9 +36,6 @@ import (
 
 const CertDir = "/etc/pulseha/certs/"
 
-/**
-Generate TLS keys if they don't already exist
-*/
 func GenTLSKeys(ip string) error {
 	utils.CreateFolder(CertDir)
 	log.Warning("TLS keys are missing! Generating..")
@@ -83,9 +80,6 @@ func GenTLSKeys(ip string) error {
 	return nil
 }
 
-/**
-
- */
 func GenerateCACert(ip string) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -113,7 +107,6 @@ func GenerateCACert(ip string) {
 	WriteKeyFileFromRSAKey("ca", rootKey)
 }
 
-// Generate certs
 func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -145,9 +138,6 @@ func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	WriteKeyFileFromRSAKey(hostname, servKey)
 }
 
-/**
-
- */
 func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -173,9 +163,6 @@ func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateK
 	WriteKeyFileFromRSAKey("server", servKey)
 }
 
-/**
-
- */
 func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -200,9 +187,6 @@ func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	WriteKeyFileFromRSAKey("client", clientKey)
 }
 
-/**
-
- */
 func certTemplate() (*x509.Certificate, error) {
 	// generate a random serial number
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
@@ -210,15 +194,10 @@ func certTemplate() (*x509.Certificate, error) {
 	if err != nil {
 		return nil, errors.New("failed to generate serial number: " + err.Error())
 	}
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		return nil, errors.New("unable to generate cert template because unable to get hostname")
-	}
 	tmpl := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"PulseHA"},
-			CommonName:   hostname,
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(time.Duration(730) * time.Hour * 24),
@@ -227,9 +206,6 @@ func certTemplate() (*x509.Certificate, error) {
 	return &tmpl, nil
 }
 
-/**
-
- */
 func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv interface{}) (cert *x509.Certificate, certPEM []byte, err error) {
 	certDER, err := x509.CreateCertificate(rand.Reader, template, parent, pub, parentPriv)
 	if err != nil {
@@ -246,9 +222,6 @@ func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv 
 	return
 }
 
-/**
-TODO: Use Utils functions
-*/
 func WriteCertFile(fileName string, cert []byte) {
 	// Write the cert to file
 	certOut, err := os.Create(CertDir + "/" + fileName + ".crt")
@@ -260,7 +233,6 @@ func WriteCertFile(fileName string, cert []byte) {
 	certOut.Close()
 }
 
-//
 func WriteKeyFile(fileName string, key []byte) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(CertDir+fileName+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
@@ -272,9 +244,6 @@ func WriteKeyFile(fileName string, key []byte) {
 	keyOut.Close()
 }
 
-/**
-TODO: Use Utils functions
-*/
 func WriteKeyFileFromRSAKey(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(CertDir+"/"+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)

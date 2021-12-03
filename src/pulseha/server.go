@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/language"
@@ -183,13 +184,12 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New(language.CLUSTER_UNATHORIZED)
+		return &rpc.HealthCheckResponse{}, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	activeHostname, _ := DB.MemberList.GetActiveMember()
-	localNode := DB.Config.GetLocalNode()
 	localMember, _ := DB.MemberList.GetLocalMember()
-	if activeHostname != localNode.Hostname {
-		localMember := DB.MemberList.GetMemberByHostname(localNode.Hostname)
+	if activeHostname != localMember.Hostname {
+		localMember := DB.MemberList.GetMemberByHostname(localMember.Hostname)
 		// make passive to reset the networking
 		// TODO: Figure out why I do this here
 		//if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
@@ -202,7 +202,7 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*
 		DB.Logging.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
-		if hostname != localNode.Hostname {
+		if hostname != localMember.Hostname {
 			localMember.MakePassive()
 		} else {
 			localMember.SetLastHCResponse(time.Time{})
@@ -222,7 +222,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 	if DB.Config.ClusterCheck() {
 		// Validate our cluster token
 		if !security.SHA256StringValidation(in.Token, DB.Config.Pulse.ClusterToken) {
-			DB.Logging.Warn(in.Hostname + " attempted to join with an invalid cluster token")
+			DB.Logging.Warn(in.Uid + " attempted to join with an invalid cluster token")
 			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Invalid cluster token",
@@ -241,15 +241,15 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 			}, nil
 		}
 		// Make sure the node doesnt already exist
-		if nodeExistsByHostname(in.Hostname) {
+		if nodeExistsByUUID(in.Uid ) {
 			return &rpc.JoinResponse{
 				Success: false,
-				Message: "unable to join cluster as a node with hostname " + in.Hostname + " already exists!",
+				Message: "unable to join cluster as a node with id " + in.Uid + " already exists!",
 			}, nil
 		}
 		// TODO: Node validation?
 		// Add node to config
-		if err = nodeAdd(in.Uid, in.Hostname, originNode); err != nil {
+		if err = nodeAdd(in.Uid, originNode); err != nil {
 			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Failed to add new node to membership list",
@@ -257,8 +257,8 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 		}
 		// Save our new config to file
 		if err := DB.Config.Save(); err != nil {
-			if nodeExistsByHostname(in.Hostname) {
-				if err := nodeDelete(in.Hostname); err != nil {
+			if nodeExistsByUUID(in.Uid) {
+				if err := nodeDelete(in.Uid); err != nil {
 					return &rpc.JoinResponse{
 						Success: false,
 						Message: "Failed to clean up after a failed join attempt",
@@ -309,7 +309,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 				Message: err.Error(),
 			}, nil
 		}
-		DB.Logging.Info(in.Hostname + " has joined the cluster")
+		DB.Logging.Info(in.Uid + " has joined the cluster")
 		return &rpc.JoinResponse{
 			Success: true,
 			Message: "Successfully added ",
@@ -324,7 +324,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 	}, nil
 }
 
-// Leave commaand used to leave from the current configured cluster.
+// Leave command used to leave from the current configured cluster.
 func (s *Server) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveResponse, error) {
 	DB.Logging.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
@@ -332,7 +332,7 @@ func (s *Server) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveRes
 	if !CanCommunicate(ctx) {
 		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	// Remove from our memberlist
+	// Remove from our member list
 	DB.MemberList.MemberRemoveByHostname(in.Hostname)
 	// Remove from our config
 	err := nodeDelete(in.Hostname)
@@ -342,7 +342,10 @@ func (s *Server) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveRes
 			Message: err.Error(),
 		}, nil
 	}
-	DB.Config.Save()
+	fmt.Println(DB.Config)
+	if err := DB.Config.Save(); err != nil {
+		log.Fatal(err)
+	}
 	DB.Logging.Info("Successfully removed " + in.Hostname + " from the cluster")
 	return &rpc.LeaveResponse{
 		Success: true,
@@ -440,7 +443,12 @@ func (s *Server) Promote(ctx context.Context, in *rpc.PromoteRequest) (*rpc.Prom
 	if !CanCommunicate(ctx) {
 		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.PromoteResponse{
+			Success: false,
+		}, nil
+	}
 	if in.Member != localNode.Hostname {
 		return &rpc.PromoteResponse{
 			Success: false,
@@ -471,7 +479,12 @@ func (s *Server) MakePassive(ctx context.Context, in *rpc.MakePassiveRequest) (*
 	if !CanCommunicate(ctx) {
 		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.MakePassiveResponse{
+			Success: false,
+		}, nil
+	}
 	if in.Member != localNode.Hostname {
 		return &rpc.MakePassiveResponse{
 			Success: false,
@@ -483,7 +496,7 @@ func (s *Server) MakePassive(ctx context.Context, in *rpc.MakePassiveRequest) (*
 			Success: false,
 		}, nil
 	}
-	err := member.MakePassive()
+	err = member.MakePassive()
 	DB.Logging.Info(in.Member + " has been demoted to passive")
 	return &rpc.MakePassiveResponse{
 		Success: err == nil,

@@ -109,7 +109,7 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 }
 
 // Connect creates a new client connection and request hostname for TLS verification.
-func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
+func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 	var err error
 	if tlsEnabled {
 		// Load member cert/key

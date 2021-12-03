@@ -107,24 +107,35 @@ func (m *MemberList) MemberExists(hostname string) bool {
 }
 
 // Broadcast sends a RPC message to all members in our member list
-func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) {
+func (m *MemberList) Broadcast(funcName client.ProtoFunction, data interface{}) []error {
 	DB.Logging.Debug("MemberList:Broadcast() Broadcasting " + funcName.String())
 	m.Lock()
 	defer m.Unlock()
+	var errs []error
 	for _, member := range m.Members {
 		// We don't want to broadcast to our self!
 		hostname, err := utils.GetHostname()
 		if err != nil {
 			log.Error("cannot broadcast as unable to get local hostname")
-			return
+			errs = append(errs, errors.New("unable to broadcast as unable to get local hostname"))
+			continue
 		}
 		if member.GetHostname() == hostname {
 			continue
 		}
 		DB.Logging.Debug("Broadcast: " + funcName.String() + " to member " + member.GetHostname())
-		member.Connect()
-		member.Send(funcName, data)
+		if err := member.Connect(); err != nil {
+			log.Error("Broadcast() ", err)
+			errs = append(errs, err)
+			continue
+		}
+		if _, err := member.Send(funcName, data); err != nil {
+			log.Error("Broadcast()", err)
+			errs = append(errs, err)
+			continue
+		}
 	}
+	return errs
 }
 
 // Setup bootstraps our member list.
@@ -135,7 +146,11 @@ func (m *MemberList) Setup() {
 	// Load members into our member list slice
 	m.LoadMembers()
 	// Check to see if we are in a cluster
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	// We cannot setup as we don't have a local node.
+	if err != nil {
+		log.Fatal(err)
+	}
 	if DB.Config.ClusterCheck() {
 		// Start out health check scheduler
 		hcs := HealthChecks{}
@@ -273,21 +288,23 @@ func (m *MemberList) MonitorClientConns() bool {
 		return true
 	}
 	// make sure we are still the active appliance
-	member, err := m.GetLocalMember()
+	localMember, err := m.GetLocalMember()
 	if err != nil {
 		DB.Logging.Debug("MemberList:monitorClientConns() Client monitoring has stopped as it seems we are no longer in a cluster")
 		return true
 	}
-	if member.GetStatus() == rpc.MemberStatus_PASSIVE {
+	if localMember.GetStatus() == rpc.MemberStatus_PASSIVE {
 		DB.Logging.Debug("MemberList:monitorClientConns() Client monitoring has stopped as we are no longer active")
 		return true
 	}
-	localNode := DB.Config.GetLocalNode()
 	for _, member := range m.Members {
-		if member.GetHostname() == localNode.Hostname {
+		if member.GetHostname() == localMember.Hostname {
 			continue
 		}
-		member.Connect()
+		if err := member.Connect(); err != nil {
+			DB.Logging.Error(err.Error())
+			return false
+		}
 		DB.Logging.Debug("MemberList:MonitorClientConns() " + member.Hostname + " connection status is " + member.Connection.GetState().String())
 		switch member.Connection.GetState() {
 		case connectivity.Idle:
@@ -309,18 +326,17 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 		return true
 	}
 	// make sure we are still the active appliance
-	member, err := m.GetLocalMember()
+	localMember, err := m.GetLocalMember()
 	if err != nil {
 		DB.Logging.Debug("MemberList:addHealthCheckhandler() Health check handler has stopped as it seems we are no longer in a cluster")
 		return true
 	}
-	if member.GetStatus() == rpc.MemberStatus_PASSIVE {
+	if localMember.GetStatus() == rpc.MemberStatus_PASSIVE {
 		DB.Logging.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
-	localNode := DB.Config.GetLocalNode()
 	for _, member := range m.Members {
-		if member.GetHostname() == localNode.Hostname {
+		if member.GetHostname() == localMember.Hostname {
 			continue
 		}
 		if !member.GetHCBusy() && member.GetStatus() == rpc.MemberStatus_PASSIVE {
@@ -362,7 +378,11 @@ func (m *MemberList) Update(memberlist []*rpc.MemberlistMember) {
 	DB.Logging.Debug("MemberList:update() Updating memberlist")
 	m.Lock()
 	defer m.Unlock()
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		DB.Logging.Error("MemberList:update() Failed to find local node. Update failed.")
+		return
+	}
 	//do not update the memberlist if we are active
 	for _, member := range memberlist {
 		for _, localMember := range m.Members {
@@ -400,7 +420,10 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 func (m *MemberList) GetLocalMember() (*Member, error) {
 	m.Lock()
 	defer m.Unlock()
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &Member{}, err
+	}
 	for _, member := range m.Members {
 		if member.GetHostname() == localNode.Hostname {
 			return member, nil

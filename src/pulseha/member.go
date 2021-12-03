@@ -173,7 +173,7 @@ func (m *Member) Connect() error {
 	if (m.Connection == nil) || (m.Connection != nil && m.Connection.GetState() == connectivity.Shutdown) {
 		_, nodeDetails, _ := nodeGetByHostname(m.Hostname)
 		DB.Logging.Debug("Member:Connect() Attempting to connect with node " + m.Hostname + " " + nodeDetails.IP + ":" + nodeDetails.Port)
-		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, m.Hostname, true)
+		err := m.Client.Connect(nodeDetails.IP, nodeDetails.Port, true)
 		if err != nil {
 			log.Error("Member:Connect() " + err.Error())
 			return err
@@ -224,7 +224,10 @@ func (m *Member) MakeActive() error {
 	DB.Logging.Debug("Member:makeActive() Making " + m.GetHostname() + " active")
 
 	// Get our local node object
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return errors.New("unable to retrieve local node configuration")
+	}
 
 	// Are we making ourself active?
 	if m.GetHostname() == localNode.Hostname {
@@ -256,7 +259,7 @@ func (m *Member) MakeActive() error {
 		return err
 	}
 	// Inform member to become active.
-	_, err := m.Send(
+	_, err = m.Send(
 		client.SendPromote,
 		&rpc.PromoteRequest{
 			Member: m.GetHostname(),
@@ -275,7 +278,10 @@ func (m *Member) MakePassive() error {
 	DB.Logging.Debug("Member:makePassive() Making " + m.GetHostname() + " passive")
 
 	// Get our local node object
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return errors.New("unable to retrieve local node configuration")
+	}
 
 	// Are we making ourself passive?
 	if m.GetHostname() == localNode.Hostname {
@@ -302,7 +308,7 @@ func (m *Member) MakePassive() error {
 		return err
 	}
 	// Inform member to become passive.
-	_, err := m.Send(
+	_, err = m.Send(
 		client.SendMakePassive,
 		&rpc.MakePassiveRequest{
 			Member: m.GetHostname(),
@@ -325,7 +331,11 @@ func (m *Member) BringUpIPs(ips []string, group string) bool {
 	if err != nil {
 		return false
 	}
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		DB.Logging.Error("BringUpIPs() unable to retrieve local node configuration")
+		return false
+	}
 	if m.Hostname == localNode.Hostname {
 		DB.Logging.Debug("member is local node bringing up IP's")
 		BringUpIPs(iface, ips)
@@ -397,7 +407,11 @@ func (m *Member) MonitorReceivedHCs() bool {
 				return true
 			}
 			// If we are not the new member just return
-			localNode := DB.Config.GetLocalNode()
+			localNode, err := DB.Config.GetLocalNode()
+			if err != nil {
+				DB.Logging.Error("unable to retrieve local node configuration")
+				return false
+			}
 			if member.GetHostname() != localNode.Hostname {
 				DB.Logging.Info("Waiting on " + member.GetHostname() + " to become active")
 				m.SetLastHCResponse(time.Now())

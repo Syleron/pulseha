@@ -31,7 +31,7 @@ type Logging struct {
 	Broadcast
 }
 
-type Broadcast func(funcName client.ProtoFunction, data interface{})
+type Broadcast func(funcName client.ProtoFunction, data interface{}) []error
 
 // NewLogger returns a new distributes logging object
 func NewLogger(broadcast Broadcast) (Logging, error) {

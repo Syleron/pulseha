@@ -19,7 +19,6 @@ package pulseha
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/packages/config"
@@ -74,7 +73,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		// Create a new client
 		c := &client.Client{}
 		// Attempt to connect
-		err := c.Connect(in.Ip, in.Port, in.Hostname, false)
+		err := c.Connect(in.Ip, in.Port, false)
 		// Handle a client connection error
 		if err != nil {
 			return &rpc.JoinResponse{
@@ -121,14 +120,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 				ErrorCode: 2,
 			}, nil
 		}
-		// Send our join request
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			return nil, errors.New("cannot to join because unable to get hostname")
-		}
 		r, err := c.Send(client.SendJoin, &rpc.JoinRequest{
 			Config:   buf,
-			Hostname: hostname,
 			Uid: uid,
 			Token: in.Token,
 			ErrorCode: 3,
@@ -226,13 +219,20 @@ func (s *CLIServer) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.Leave
 	}
 	// Check to see if we are not the only one in the "cluster"
 	// Let everyone else know that we are leaving the cluster
-	node := DB.Config.GetLocalNode()
+	node, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.LeaveResponse{
+			Success:   false,
+			Message:   language.CLUSTER_REQUIRED_MESSAGE,
+			ErrorCode: 3,
+		}, nil
+	}
 	if DB.Config.NodeCount() > 1 {
 		DB.MemberList.Broadcast(
 			client.SendLeave,
 			&rpc.LeaveRequest{
 				Replicated: true,
-				Hostname:   node.Hostname,
+				Hostname:   node.Hostname, // TODO: Change this to UUID
 			},
 		)
 	}
@@ -302,7 +302,14 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.Rem
 		)
 	}
 	// Get our local node
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.RemoveResponse{
+			Success: false,
+			Message: "Unable to retrieve local node from configuration",
+			ErrorCode: 5,
+		}, nil
+	}
 	// Get our node we are removing
 	uid, _, err := DB.Config.GetNodeByHostname(in.Hostname)
 	if err != nil {
@@ -360,16 +367,11 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.Cre
 				ErrorCode: 3,
 			}, nil
 		}
-		// Get our local hostname
-		hostname, err := utils.GetHostname()
-		if err != nil {
-			panic(err)
-		}
 		// Remove any hanging nodes
 		nodesClearLocal()
 		groupClearLocal()
 		// Create a new local node config
-		_, _, err = nodeCreateLocal(in.BindIp, in.BindPort, true)
+		_, _, err := nodeCreateLocal(in.BindIp, in.BindPort, true)
 		if err != nil {
 			return &rpc.CreateResponse{
 				Success: false,
@@ -403,7 +405,7 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.Cre
 	
 You can now join any number of machines by running the following on each node:
 
-pulsectl join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + in.BindIp + ` ` + in.BindPort + ` ` + hostname + `
+pulsectl join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + in.BindIp + ` ` + in.BindPort + `
 			`,
 		}, nil
 	} else {

@@ -103,14 +103,13 @@ message JoinRequest {
     string bind_port = 3;
     string ip = 4;
     string port = 5;
-    string hostname = 6;
-    bool replicated = 7;
-    bytes config = 8;
-    string token = 9;
-    string ca_crt = 10;
-    string ca_key = 11;
-    int32 errorCode = 12;
-    string uid = 13;
+    bool replicated = 6;
+    bytes config = 7;
+    string token = 8;
+    string ca_crt = 9;
+    string ca_key = 10;
+    int32 errorCode = 11;
+    string uid = 12;
 }
 
 message JoinResponse {

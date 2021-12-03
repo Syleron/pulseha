@@ -16,10 +16,14 @@ type HealthChecks struct {
 // ProcessHCs send all loaded health checks to calculate a score
 func (hcs *HealthChecks) ProcessHCs() bool {
 	// Check to see if we have booted up before we start checking the health checks
-	if DB.StartDelay {
+	if DB.StartDelay || !DB.Config.ClusterCheck() {
+		if !DB.Config.ClusterCheck(){
+			log.Debug("ProcessHCs() routine cleared")
+			return true
+		}
 		return false
 	}
-	log.Debug("Running health check scheduler total: ", len(hcs.Plugins))
+	//log.Debug("Running health check scheduler total: ", len(hcs.Plugins))
 	score := 0
 	// Go through our health checks and make an attempt
 	for _, hc := range hcs.Plugins  {
@@ -41,6 +45,3 @@ func (hcs *HealthChecks) ProcessHCs() bool {
 	localMember.SetScore(score)
 	return false
 }
-
-// TODO: Store the loaded health checks
-// TODO: Routinely send health checks

@@ -31,7 +31,13 @@ import (
 // MakeLocalActive brings up the assigned floating ip groups on the current node.
 func MakeLocalActive() {
 	log.Debug("Utils:MakeMemberActive() Local node now active")
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		if err != nil {
+			DB.Logging.Error("local node not found in config. Failed to make active.")
+			return
+		}
+	}
 	for _, node := range DB.Config.Nodes {
 		if node.Hostname == localNode.Hostname {
 			for iface, groups := range node.IPGroups {
@@ -46,7 +52,11 @@ func MakeLocalActive() {
 // MakeLocalPassive brings down the assigned active floating ip groups on the current node.
 func MakeLocalPassive() {
 	DB.Logging.Debug("Utils:MakeMemberPassive() Making local node passive")
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		DB.Logging.Error("local node not found in config. Failed to make passive.")
+		return
+	}
 	for _, node := range DB.Config.Nodes {
 		if node.Hostname == localNode.Hostname {
 			for iface, groups := range node.IPGroups {

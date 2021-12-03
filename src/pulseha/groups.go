@@ -130,7 +130,10 @@ func groupAssign(groupName, uid, iface string) error {
 			DB.Config.Nodes[uid].IPGroups[iface] = append(DB.Config.Nodes[uid].IPGroups[iface], groupName)
 			// make the group active
 			hostname, _ := DB.MemberList.GetActiveMember()
-			localNode := DB.Config.GetLocalNode()
+			localNode, err := DB.Config.GetLocalNode()
+			if err != nil {
+				return errors.New("unable to retrieve local node configuration")
+			}
 			if hostname == localNode.Hostname {
 				makeGroupActive(iface, groupName)
 			}

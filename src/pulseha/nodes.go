@@ -42,7 +42,7 @@ func nodeCreateLocal(ip string, port string, assignGroups bool) (string, *config
 	}
 	// Add the new node
 	uid := uuid.New()
-	if err := nodeAdd(uid.String(), hostname, newNode); err != nil {
+	if err := nodeAdd(uid.String(), newNode); err != nil {
 		return "", &config.Node{}, errors.New(language.CLUSTER_NODE_ADD_FAIL)
 	}
 	// Set our local node UUID
@@ -125,9 +125,9 @@ func nodeUpdateLocalInterfaces() error {
 }
 
 // nodeAdd Add a new node to our config.
-func nodeAdd(uid string, hostname string, node *config.Node) error {
-	DB.Logging.Debug(hostname + " added to local cluster config")
-	if !nodeExistsByHostname(hostname) {
+func nodeAdd(uid string, node *config.Node) error {
+	DB.Logging.Debug(uid + " added to local cluster config")
+	if !nodeExistsByUUID(uid) {
 		DB.Config.Lock()
 		DB.Config.Nodes[uid] = node
 		DB.Config.Unlock()

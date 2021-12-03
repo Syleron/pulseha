@@ -19,12 +19,12 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/jsonHelper"
 	"github.com/syleron/pulseha/packages/utils"
 	"io/ioutil"
 	"os"
+	"runtime"
 	"sync"
 )
 
@@ -85,13 +85,31 @@ func (c *Config) GetLocalNodeUUID() string {
 	return c.Pulse.LocalNode
 }
 
-//
-func (c *Config) GetLocalNode() Node {
-	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
-		return *node
+// GetLocalNode attempt to get local node defintion in our config.
+func (c *Config) GetLocalNode() (Node, error) {
+	if !c.ClusterCheck() {
+		return Node{}, errors.New("cluster check failed")
 	}
-	log.Fatal("Local node does not exist in local config.")
-	return Node{}
+	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
+		return *node, nil
+	}
+	return Node{}, errors.New("local node not found in config")
+}
+func MyCaller() string {
+	// we get the callers as uintptrs - but we just need 1
+	fpcs := make([]uintptr, 1)
+	// skip 3 levels to get to the caller of whoever called Caller()
+	n := runtime.Callers(3, fpcs)
+	if n == 0 {
+		return "n/a" // proper error her would be better
+	}
+	// get the info of the actual function that's in the pointer
+	fun := runtime.FuncForPC(fpcs[0] - 1)
+	if fun == nil {
+		return "n/a"
+	}
+	// return its name
+	return fun.Name()
 }
 
 // Load - Used to load the config into memory
@@ -223,22 +241,22 @@ func (c *Config) ClusterCheck() bool {
 	total := len(c.Nodes)
 	if total > 0 {
 		// if there is only one node we can assume it's ours
-		if total == 1 {
-			// make sure we have a bind IP/Port or we are not in a cluster
-			//hostname, err := utils.GetHostname()
-			//if err != nil {
-			//	return false
-			//}
-			//_, node, err := c.GetNodeByHostname(hostname)
-			//if err != nil {
-			//	return false
-			//}
-			//fmt.Println(node)
-			//if node.IP == "" && node.Port == "" {
-			//	return false
-			//}
-			return false
-		}
+		//if total == 1 {
+		//	// make sure we have a bind IP/Port or we are not in a cluster
+		//	hostname, err := utils.GetHostname()
+		//	if err != nil {
+		//		return false
+		//	}
+		//	_, node, err := c.GetNodeByHostname(hostname)
+		//	if err != nil {
+		//		return false
+		//	}
+		//	fmt.Println(node)
+		//	if node.IP == "" && node.Port == "" {
+		//		return false
+		//	}
+		//	//return false
+		//}
 		return true
 	}
 	return false
@@ -304,7 +322,6 @@ func (c *Config) UpdateHostname(newHostname string) {
 	log.Debug("Config:UpdateHostname() Change local hostname to " + newHostname)
 	node := c.Nodes[c.GetLocalNodeUUID()]
 	node.Hostname = newHostname
-	fmt.Println(c)
 }
 
 // DefaultLocalConfig - Generate a default config to write
