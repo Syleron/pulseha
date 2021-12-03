@@ -1,7 +1,6 @@
 package main
 
 import (
-	"github.com/labstack/gommon/log"
 	"github.com/syleron/pulseha/packages/network"
 )
 
@@ -29,13 +28,13 @@ func (e PulseHCPing) Weight() int64 {
 }
 
 func (e PulseHCPing) Send() error {
-	log.Info("sending ping to 127.0.0.1")
+	//log.Info("sending ping to 127.0.0.1")
 	if err := network.ICMPv4("12.0.0.1/24"); err != nil {
 		// TODO: Do something when the ICMP check fails.
-		log.Info("ping failed", err)
+		//log.Info("ping failed", err)
 		return err
 	}
-	log.Info("ping passed")
+	//log.Info("ping passed")
 	return nil
 }
 

@@ -58,7 +58,7 @@ func (s *CLIServer) Setup() {
 
 // Join command is used to join an already established PulseHA cluster.
 func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinResponse, error) {
-	//log.Debug("CLIServer:Join() Join Pulse cluster")
+	log.Debug("CLIServer:Join() Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
@@ -83,15 +83,32 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 				ErrorCode: 0,
 			}, nil
 		}
-		// Create new local node config to send
-		uid, newNode, err := nodeCreateLocal(in.BindIp, in.BindPort, false)
+		// Check to see if we have a local node definition
+		localHostname, err := utils.GetHostname()
 		if err != nil {
-			log.Errorf("Join() Unable to generate local node definition: %s", err)
 			return &rpc.JoinResponse{
 				Success: false,
-				Message: "Join failure. Unable to generate local node definition",
-				ErrorCode: 1,
+				Message: err.Error(),
+				ErrorCode: 10,
 			}, nil
+		}
+		uid, node, err := nodeGetByHostname(localHostname)
+		var newNode *config.Node
+		// If our local node doesn't exist.. create a new local definition.
+		if err != nil {
+			// Create new local node config to send
+			uid, newNode, err = nodeCreateLocal(in.BindIp, in.BindPort, false)
+			if err != nil {
+				log.Errorf("Join() Unable to generate local node definition: %s", err)
+				return &rpc.JoinResponse{
+					Success: false,
+					Message: "Join failure. Unable to generate local node definition",
+					ErrorCode: 1,
+				}, nil
+			}
+		} else {
+			// Set our
+			newNode = &node
 		}
 		// Convert struct into byte array
 		buf, err := json.Marshal(newNode)
@@ -119,6 +136,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		// Handle a failed request
 		if err != nil {
 			log.Errorf("Join() Request error: %s", err)
+			// Return
 			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Join failure. Unable to connect to host.",

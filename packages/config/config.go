@@ -225,17 +225,19 @@ func (c *Config) ClusterCheck() bool {
 		// if there is only one node we can assume it's ours
 		if total == 1 {
 			// make sure we have a bind IP/Port or we are not in a cluster
-			hostname, err := utils.GetHostname()
-			if err != nil {
-				return false
-			}
-			_, node, err := c.GetNodeByHostname(hostname)
-			if err != nil {
-				return false
-			}
-			if node.IP == "" && node.Port == "" {
-				return false
-			}
+			//hostname, err := utils.GetHostname()
+			//if err != nil {
+			//	return false
+			//}
+			//_, node, err := c.GetNodeByHostname(hostname)
+			//if err != nil {
+			//	return false
+			//}
+			//fmt.Println(node)
+			//if node.IP == "" && node.Port == "" {
+			//	return false
+			//}
+			return false
 		}
 		return true
 	}
