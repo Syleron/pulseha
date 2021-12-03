@@ -213,9 +213,14 @@ func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 		m.Close()
 		m.SetStatus(rpc.MemberStatus_UNAVAILABLE) // This may not be required
 	}
-	member := DB.MemberList.GetMemberByHostname(m.GetHostname())
-	// Update the member score
-	member.Score = int(response.(*rpc.HealthCheckResponse).Score)
+	// Make sure we have a response
+	if response != nil {
+		fmt.Println(response)
+		// Get our member to update
+		member := DB.MemberList.GetMemberByHostname(m.GetHostname())
+		// Update the member score
+		member.Score = int(response.(*rpc.HealthCheckResponse).Score)
+	}
 	m.SetHCBusy(false)
 }
 

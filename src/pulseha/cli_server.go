@@ -65,8 +65,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		i, _ := strconv.Atoi(in.BindPort)
 		if i == 0 && i > 65535 {
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: "Invalid port range",
+				Success:   false,
+				Message:   "Invalid port range",
 				ErrorCode: 9,
 			}, nil
 		}
@@ -77,8 +77,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		// Handle a client connection error
 		if err != nil {
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 0,
 			}, nil
 		}
@@ -86,22 +86,22 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		localHostname, err := utils.GetHostname()
 		if err != nil {
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 10,
 			}, nil
 		}
 		uid, node, err := nodeGetByHostname(localHostname)
 		var newNode *config.Node
-		// If our local node doesn't exist.. create a new local definition.
+		// If our local node doesn't exist... create a new local definition.
 		if err != nil {
 			// Create new local node config to send
 			uid, newNode, err = nodeCreateLocal(in.BindIp, in.BindPort, false)
 			if err != nil {
 				log.Errorf("Join() Unable to generate local node definition: %s", err)
 				return &rpc.JoinResponse{
-					Success: false,
-					Message: "Join failure. Unable to generate local node definition",
+					Success:   false,
+					Message:   "Join failure. Unable to generate local node definition",
 					ErrorCode: 1,
 				}, nil
 			}
@@ -115,24 +115,23 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		if err != nil {
 			log.Errorf("Join() Unable to marshal config: %s", err)
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: "Join failure. Please check the logs for more information",
+				Success:   false,
+				Message:   "Join failure. Please check the logs for more information",
 				ErrorCode: 2,
 			}, nil
 		}
 		r, err := c.Send(client.SendJoin, &rpc.JoinRequest{
-			Config:   buf,
-			Uid: uid,
-			Token: in.Token,
-			ErrorCode: 3,
+			Config:    buf,
+			Uid:       uid,
+			Token:     in.Token,
 		})
 		// Handle a failed request
 		if err != nil {
 			log.Errorf("Join() Request error: %s", err)
 			// Return
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: "Join failure. Unable to connect to host.",
+				Success:   false,
+				Message:   "Join failure. Unable to connect to host.",
 				ErrorCode: 4,
 			}, nil
 		}
@@ -140,8 +139,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		if !r.(*rpc.JoinResponse).Success {
 			log.Errorf("Join() Peer error: %s", err)
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: r.(*rpc.JoinResponse).Message,
+				Success:   false,
+				Message:   r.(*rpc.JoinResponse).Message,
 				ErrorCode: 5,
 			}, nil
 		}
@@ -153,8 +152,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		if err := security.GenTLSKeys(in.BindIp); err != nil {
 			log.Errorf("Join() Unable to generate TLS keys: %s", err)
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 6,
 			}, nil
 		}
@@ -165,8 +164,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		if err != nil {
 			log.Error("Unable to unmarshal config node.")
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: "Unable to unmarshal config node.",
+				Success:   false,
+				Message:   "Unable to unmarshal config node.",
 				ErrorCode: 7,
 			}, nil
 		}
@@ -177,8 +176,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		// Save the config
 		if err := DB.Config.Save(); err != nil {
 			return &rpc.JoinResponse{
-				Success: false,
-				Message: "Failed to write config. Joined failed.",
+				Success:   false,
+				Message:   "Failed to write config. Joined failed.",
 				ErrorCode: 8,
 			}, nil
 		}
@@ -198,8 +197,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		}, nil
 	}
 	return &rpc.JoinResponse{
-		Success: false,
-		Message: "Unable to join as PulseHA is already in a cluster.",
+		Success:   false,
+		Message:   "Unable to join as PulseHA is already in a cluster.",
 		ErrorCode: 9,
 	}, nil
 }
@@ -245,8 +244,8 @@ func (s *CLIServer) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.Leave
 	// save
 	if err := DB.Config.Save(); err != nil {
 		return &rpc.LeaveResponse{
-			Success: false,
-			Message: "PulseHA successfully removed from cluster but could not update local config",
+			Success:   false,
+			Message:   "PulseHA successfully removed from cluster but could not update local config",
 			ErrorCode: 2,
 		}, nil
 	}
@@ -285,8 +284,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.Rem
 	activeHostname, _ := DB.MemberList.GetActiveMember()
 	if in.Hostname == activeHostname {
 		return &rpc.RemoveResponse{
-			Success: false,
-			Message: "Unable to remove active node. Please promote another node and try again",
+			Success:   false,
+			Message:   "Unable to remove active node. Please promote another node and try again",
 			ErrorCode: 2,
 		}, nil
 	}
@@ -305,8 +304,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.Rem
 	localNode, err := DB.Config.GetLocalNode()
 	if err != nil {
 		return &rpc.RemoveResponse{
-			Success: false,
-			Message: "Unable to retrieve local node from configuration",
+			Success:   false,
+			Message:   "Unable to retrieve local node from configuration",
 			ErrorCode: 5,
 		}, nil
 	}
@@ -314,8 +313,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.Rem
 	uid, _, err := DB.Config.GetNodeByHostname(in.Hostname)
 	if err != nil {
 		return &rpc.RemoveResponse{
-			Success: false,
-			Message: "Unable to retrieve " + in.Hostname + " from local configuration",
+			Success:   false,
+			Message:   "Unable to retrieve " + in.Hostname + " from local configuration",
 			ErrorCode: 3,
 		}, nil
 	}
@@ -335,8 +334,8 @@ func (s *CLIServer) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.Rem
 		err := nodeDelete(uid)
 		if err != nil {
 			return &rpc.RemoveResponse{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 4,
 			}, nil
 		}
@@ -361,9 +360,9 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.Cre
 		i, _ := strconv.Atoi(in.BindPort)
 		if i == 0 && i > 65535 {
 			return &rpc.CreateResponse{
-				Success: false,
-				Message: "Invalid port range",
-				Token: token,
+				Success:   false,
+				Message:   "Invalid port range",
+				Token:     token,
 				ErrorCode: 3,
 			}, nil
 		}
@@ -374,9 +373,9 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.Cre
 		_, _, err := nodeCreateLocal(in.BindIp, in.BindPort, true)
 		if err != nil {
 			return &rpc.CreateResponse{
-				Success: false,
-				Message: "Failed write local not to config",
-				Token: token,
+				Success:   false,
+				Message:   "Failed write local not to config",
+				Token:     token,
 				ErrorCode: 1,
 			}, nil
 		}
@@ -410,9 +409,9 @@ pulsectl join -bind-ip=<IP_ADDRESS> -bind-port=<PORT> -token=` + token + ` ` + i
 		}, nil
 	} else {
 		return &rpc.CreateResponse{
-			Success: false,
-			Message: "Pulse daemon is already in a configured cluster",
-			Token: token,
+			Success:   false,
+			Message:   "Pulse daemon is already in a configured cluster",
+			Token:     token,
 			ErrorCode: 2,
 		}, nil
 	}
@@ -432,8 +431,8 @@ func (s *CLIServer) NewGroup(ctx context.Context, in *rpc.GroupNewRequest) (*rpc
 	groupName, err := groupNew(in.Name)
 	if err != nil {
 		return &rpc.GroupNewResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
@@ -461,8 +460,8 @@ func (s *CLIServer) DeleteGroup(ctx context.Context, in *rpc.GroupDeleteRequest)
 	err := groupDelete(in.Name)
 	if err != nil {
 		return &rpc.GroupDeleteResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
@@ -490,8 +489,8 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.GroupAddRequest) (*r
 	err := groupIpAdd(in.Name, in.Ips)
 	if err != nil {
 		return &rpc.GroupAddResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
@@ -500,8 +499,8 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.GroupAddRequest) (*r
 	}
 	if err := DB.MemberList.SyncConfig(); err != nil {
 		return &rpc.GroupAddResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 5,
 		}, nil
 	}
@@ -510,16 +509,16 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.GroupAddRequest) (*r
 	// Connect first just in case.. otherwise we could seg fault
 	if err := activeMember.Connect(); err != nil {
 		return &rpc.GroupAddResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 3,
 		}, nil
 	}
 	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
 	if err != nil {
 		return &rpc.GroupAddResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 6,
 		}, nil
 	}
@@ -529,8 +528,8 @@ func (s *CLIServer) GroupIPAdd(ctx context.Context, in *rpc.GroupAddRequest) (*r
 	})
 	if err != nil {
 		return &rpc.GroupAddResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 4,
 		}, nil
 	}
@@ -555,24 +554,24 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.GroupRemoveReques
 	// TODO: Note: Validation! IMPORTANT otherwise someone could DOS by seg faulting.
 	if in.Ips == nil || in.Name == "" {
 		return &rpc.GroupRemoveResponse{
-			Success: false,
-			Message: "Unable to process RPC call. Required parameters: Ips, Name",
+			Success:   false,
+			Message:   "Unable to process RPC call. Required parameters: Ips, Name",
 			ErrorCode: 2,
 		}, nil
 	}
 	_, activeMember := DB.MemberList.GetActiveMember()
 	if activeMember == nil {
 		return &rpc.GroupRemoveResponse{
-			Success: false,
-			Message: "Unable to remove IP(s) to group as there no active node in the cluster.",
+			Success:   false,
+			Message:   "Unable to remove IP(s) to group as there no active node in the cluster.",
 			ErrorCode: 3,
 		}, nil
 	}
 	err := groupIpRemove(in.Name, in.Ips)
 	if err != nil {
 		return &rpc.GroupRemoveResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 4,
 		}, nil
 	}
@@ -587,8 +586,8 @@ func (s *CLIServer) GroupIPRemove(ctx context.Context, in *rpc.GroupRemoveReques
 	iface, err := DB.Config.GetGroupIface(activeHostname, in.Name)
 	if err != nil {
 		return &rpc.GroupRemoveResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 5,
 		}, nil
 	}
@@ -617,15 +616,15 @@ func (s *CLIServer) GroupAssign(ctx context.Context, in *rpc.GroupAssignRequest)
 	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
 		return &rpc.GroupAssignResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
 	if err := groupAssign(in.Group, uid, in.Interface); err != nil {
 		return &rpc.GroupAssignResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 3,
 		}, nil
 	}
@@ -654,15 +653,15 @@ func (s *CLIServer) GroupUnassign(ctx context.Context, in *rpc.GroupUnassignRequ
 	uid, _, err := nodeGetByHostname(in.Node)
 	if err != nil {
 		return &rpc.GroupUnassignResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
 	if err := groupUnassign(in.Group, uid, in.Interface); err != nil {
 		return &rpc.GroupUnassignResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 3,
 		}, nil
 	}
@@ -721,7 +720,7 @@ func (s *CLIServer) Status(ctx context.Context, in *rpc.StatusRequest) (*rpc.Sta
 			Latency:      member.GetLatency(),
 			Status:       member.GetStatus(),
 			LastReceived: tymFormat,
-			Score: int32(member.GetScore()),
+			Score:        int32(member.GetScore()),
 		}
 		table.Row = append(table.Row, row)
 	}
@@ -743,8 +742,8 @@ func (s *CLIServer) Promote(ctx context.Context, in *rpc.PromoteRequest) (*rpc.P
 	err := DB.MemberList.PromoteMember(in.Member)
 	if err != nil {
 		return &rpc.PromoteResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
@@ -768,8 +767,8 @@ func (s *CLIServer) TLS(ctx context.Context, in *rpc.CertRequest) (*rpc.CertResp
 	err := security.GenTLSKeys(in.BindIp)
 	if err != nil {
 		return &rpc.CertResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
@@ -787,8 +786,8 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.ConfigRequest) (*rpc.Con
 	if in.Key == "local_node" ||
 		in.Key == "cluster_token" {
 		return &rpc.ConfigResponse{
-			Success: false,
-			Message: "You are unable to use the config command to change the value of " + in.Key,
+			Success:   false,
+			Message:   "You are unable to use the config command to change the value of " + in.Key,
 			ErrorCode: 4,
 		}, nil
 	}
@@ -796,8 +795,8 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.ConfigRequest) (*rpc.Con
 	if in.Key == "hostname" {
 		if err := nodeUpdateLocalHostname(in.Value); err != nil {
 			return &rpc.ConfigResponse{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 3,
 			}, nil
 		}
@@ -809,16 +808,16 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.ConfigRequest) (*rpc.Con
 	// Update our key value
 	if err := DB.Config.UpdateValue(in.Key, in.Value); err != nil {
 		return &rpc.ConfigResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 2,
 		}, nil
 	}
 	if err := DB.Config.Save(); err != nil {
 		log.Error("Unable to save local config. This likely means the local config is now out of date.")
 		return &rpc.ConfigResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 5,
 		}, nil
 	}
@@ -827,8 +826,8 @@ func (s *CLIServer) Config(ctx context.Context, in *rpc.ConfigRequest) (*rpc.Con
 	// Sync it with our peers
 	if err := DB.MemberList.SyncConfig(); err != nil {
 		return &rpc.ConfigResponse{
-			Success: false,
-			Message: err.Error(),
+			Success:   false,
+			Message:   err.Error(),
 			ErrorCode: 6,
 		}, nil
 	}
@@ -844,8 +843,8 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.TokenRequest) (*rpc.Token
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
 		return &rpc.TokenResponse{
-			Success: false,
-			Message: language.CLUSTER_REQUIRED_MESSAGE,
+			Success:   false,
+			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}
@@ -871,7 +870,7 @@ func (s *CLIServer) Token(ctx context.Context, in *rpc.TokenRequest) (*rpc.Token
 	return &rpc.TokenResponse{
 		Success: true,
 		Message: "Success! Your new cluster token is " + token,
-		Token: token,
+		Token:   token,
 	}, nil
 }
 
@@ -881,17 +880,17 @@ func (s *CLIServer) Network(ctx context.Context, in *rpc.PulseNetwork) (*rpc.Pul
 	defer s.Unlock()
 	if !DB.Config.ClusterCheck() {
 		return &rpc.PulseNetwork{
-			Success: false,
-			Message: language.CLUSTER_REQUIRED_MESSAGE,
+			Success:   false,
+			Message:   language.CLUSTER_REQUIRED_MESSAGE,
 			ErrorCode: 1,
 		}, nil
 	}
-	switch(in.Action) {
+	switch in.Action {
 	case "resync":
 		if err := nodeUpdateLocalInterfaces(); err != nil {
 			return &rpc.PulseNetwork{
-				Success: false,
-				Message: err.Error(),
+				Success:   false,
+				Message:   err.Error(),
 				ErrorCode: 2,
 			}, nil
 		}

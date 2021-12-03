@@ -112,7 +112,6 @@ func (s *Server) Setup() {
 	creds := credentials.NewTLS(&tls.Config{
 		Certificates: []tls.Certificate{peerCert},
 		ClientCAs:    caCertPool,
-		ClientAuth:   tls.VerifyClientCertIfGiven,
 	})
 	s.Server = grpc.NewServer(
 		grpc.Creds(creds),
@@ -139,7 +138,7 @@ func (s *Server) serverInterceptor(ctx context.Context,
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler) (interface{}, error) {
 
-	log.Debugf("Request - Method:%s", info.FullMethod)
+	log.Debugf("Request received - Method: %s", info.FullMethod)
 
 	// Skip authorize when join is requested
 	if info.FullMethod != "/proto.Server/Join" {
@@ -241,7 +240,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 			}, nil
 		}
 		// Make sure the node doesnt already exist
-		if nodeExistsByUUID(in.Uid ) {
+		if nodeExistsByUUID(in.Uid) {
 			return &rpc.JoinResponse{
 				Success: false,
 				Message: "unable to join cluster as a node with id " + in.Uid + " already exists!",

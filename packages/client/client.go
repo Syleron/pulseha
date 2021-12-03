@@ -130,7 +130,6 @@ func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 			return errors.New("failed to append ca certs")
 		}
 		creds := credentials.NewTLS(&tls.Config{
-			ServerName: ip,
 			Certificates: []tls.Certificate{peerCert},
 			RootCAs:      caCertPool,
 		})

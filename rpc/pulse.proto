@@ -108,7 +108,6 @@ message JoinRequest {
     string token = 8;
     string ca_crt = 9;
     string ca_key = 10;
-    int32 errorCode = 11;
     string uid = 12;
 }
 
