@@ -53,6 +53,19 @@ $ sudo make install
 
 ## Commands
 
+- Create cluster
+- Remove from cluster
+- Leave from cluster
+- Add fip group
+- Remove fip group
+- Assign fip group
+- Add fip
+- Remove Fip
+- Assign fip
+- config command
+- network command
+
+
 ## Acknowledgments
 
 Thank you to all authors who have and continue to contribute to this project.
