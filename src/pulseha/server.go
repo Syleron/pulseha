@@ -291,8 +291,8 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 			}, nil
 		}
 		// Make sure our CA cert files exist
-		if !utils.CheckFileExists(security.CertDir+ "ca.crt") ||
-			!utils.CheckFileExists(security.CertDir+ "ca.key") {
+		if !utils.CheckFileExists(security.CertDir+"ca.crt") ||
+			!utils.CheckFileExists(security.CertDir+"ca.key") {
 			log.Fatal("ca.crt and or ca.key does not exists")
 			return &rpc.JoinResponse{
 				Success: false,
