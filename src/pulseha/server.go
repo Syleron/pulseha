@@ -22,7 +22,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/language"
@@ -92,7 +91,7 @@ func (s *Server) Setup() {
 		return
 	}
 	// load member cert/key
-	peerCert, err := tls.LoadX509KeyPair(security.CertDir+"server.crt", security.CertDir+"server.key")
+	peerCert, err := tls.LoadX509KeyPair(security.CertDir+"pulseha.crt", security.CertDir+"pulseha.key")
 	if err != nil {
 		log.Fatalf("load peer cert/key error:%v", err)
 		return
@@ -110,8 +109,9 @@ func (s *Server) Setup() {
 		return
 	}
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{peerCert},
-		ClientCAs:    caCertPool,
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{peerCert},
+		ClientCAs:          caCertPool,
 	})
 	s.Server = grpc.NewServer(
 		grpc.Creds(creds),
@@ -145,8 +145,7 @@ func (s *Server) serverInterceptor(ctx context.Context,
 		peer, ok := peer.FromContext(ctx)
 		if ok {
 			tlsInfo := peer.AuthInfo.(credentials.TLSInfo)
-			v := tlsInfo.State.PeerCertificates
-			if len(v) <= 0 {
+			if tlsInfo.SecurityLevel != credentials.PrivacyAndIntegrity {
 				return nil, errors.New("invalid permissions")
 			}
 		}
@@ -177,7 +176,7 @@ func (s *Server) Shutdown() {
 	}
 }
 
-// HealthCheck command used to recieve the main RPC health check.
+// HealthCheck command used to receive the main RPC health check.
 func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*rpc.HealthCheckResponse, error) {
 	DB.Logging.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
@@ -202,7 +201,9 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
 		if hostname != localMember.Hostname {
-			localMember.MakePassive()
+			if err := localMember.MakePassive(); err != nil {
+				DB.Logging.Error(err.Error())
+			}
 		} else {
 			localMember.SetLastHCResponse(time.Time{})
 		}
@@ -239,7 +240,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRespon
 				Message: "Unable to unmarshal config node.",
 			}, nil
 		}
-		// Make sure the node doesnt already exist
+		// Make sure the node doesn't already exist
 		if nodeExistsByUUID(in.Uid) {
 			return &rpc.JoinResponse{
 				Success: false,
@@ -331,17 +332,17 @@ func (s *Server) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveRes
 	if !CanCommunicate(ctx) {
 		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
+	// Get node by hostname
+	id, _, _ := DB.Config.GetNodeByHostname(in.Hostname)
 	// Remove from our member list
 	DB.MemberList.MemberRemoveByHostname(in.Hostname)
 	// Remove from our config
-	err := nodeDelete(in.Hostname)
-	if err != nil {
+	if err := nodeDelete(id); err != nil {
 		return &rpc.LeaveResponse{
 			Success: false,
 			Message: err.Error(),
 		}, nil
 	}
-	fmt.Println(DB.Config)
 	if err := DB.Config.Save(); err != nil {
 		log.Fatal(err)
 	}
@@ -417,9 +418,9 @@ func (s *Server) ConfigSync(ctx context.Context, in *rpc.ConfigSyncRequest) (*rp
 		}, nil
 	}
 	// !!!IMPORTANT!!!: Do not replace our local config
-	newConfig.Pulse.ClusterToken = DB.Config.Pulse.ClusterToken
-	newConfig.Pulse.LocalNode = DB.Config.Pulse.LocalNode
-	newConfig.Pulse.LoggingLevel = DB.Config.Pulse.LoggingLevel
+	newConfig.Pulse = DB.Config.Pulse
+	// !!!IMPORTANT!!!: Do not replace our plugins config
+	newConfig.Plugins = DB.Config.Plugins
 	// Set our new config in memory
 	DB.SetConfig(newConfig)
 	// Save our config to file

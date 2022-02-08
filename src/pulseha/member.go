@@ -16,7 +16,6 @@
 
 // TODO: Create a method to update the score.
 
-
 package pulseha
 
 import (
@@ -205,6 +204,7 @@ func (m *Member) SendHealthCheck(data *rpc.HealthCheckRequest) (interface{}, err
 }
 
 // RoutineHC used to periodically send RPC health check messages.
+// @data *rpc.HealthCheckRequest The data we are sending with each HC
 // Type: Routine function
 func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 	m.SetHCBusy(true)
@@ -215,11 +215,8 @@ func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 	}
 	// Make sure we have a response
 	if response != nil {
-		fmt.Println(response)
-		// Get our member to update
-		member := DB.MemberList.GetMemberByHostname(m.GetHostname())
-		// Update the member score
-		member.Score = int(response.(*rpc.HealthCheckResponse).Score)
+		// Update our score
+		m.SetScore(int(response.(*rpc.HealthCheckResponse).Score))
 	}
 	m.SetHCBusy(false)
 }
@@ -227,6 +224,11 @@ func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 // MakeActive promotes a particular member to become active.
 func (m *Member) MakeActive() error {
 	DB.Logging.Debug("Member:makeActive() Making " + m.GetHostname() + " active")
+
+	// Inform our plugins
+	for _, p := range DB.Plugins.GetGeneralPlugins() {
+		go p.Plugin.(PluginGen).OnMemberFailover(*m)
+	}
 
 	// Get our local node object
 	localNode, err := DB.Config.GetLocalNode()
@@ -361,7 +363,7 @@ func (m *Member) BringUpIPs(ips []string, group string) bool {
 	return true
 }
 
-// MonitorReceivedHCs monitor the last time we recieved a health check and or fail over.
+// MonitorReceivedHCs monitor the last time we received a health check and or fail over.
 func (m *Member) MonitorReceivedHCs() bool {
 	// Clear routine
 	if !DB.Config.ClusterCheck() {
@@ -398,45 +400,39 @@ func (m *Member) MonitorReceivedHCs() bool {
 		DB.StartDelay = false
 	}
 	if int(elapsed) >= (foLimit / 1000) {
-		DB.Logging.Debug("Member:monitorReceivedHCs() Performing Failover..")
-		var addHCSuccess bool = false
-		// TODO: Perform additional health checks plugin stuff HERE
-		if !addHCSuccess {
-			// Nothing has worked.. assume the master has failed. Fail over.
-			member, err := DB.MemberList.GetNextActiveMember()
-			// no new active appliance was found
-			if err != nil {
-				DB.Logging.Warn("unable to find new active member.. we are now the active")
-				// make ourself active as no new active can be found apparently
-				m.MakeActive()
-				return true
-			}
-			// If we are not the new member just return
-			localNode, err := DB.Config.GetLocalNode()
-			if err != nil {
-				DB.Logging.Error("unable to retrieve local node configuration")
-				return false
-			}
-			if member.GetHostname() != localNode.Hostname {
-				DB.Logging.Info("Waiting on " + member.GetHostname() + " to become active")
-				m.SetLastHCResponse(time.Now())
-				return false
-			}
-			// get our current active member
-			_, activeMember := DB.MemberList.GetActiveMember()
-			// If we have an active appliance mark it unavailable
-			if activeMember != nil {
-				activeMember.SetStatus(rpc.MemberStatus_UNAVAILABLE)
-			}
-			// lets go active
-			member.MakeActive()
-			// Set the FO priority
-			member.SetLastHCResponse(time.Time{})
-			DB.Logging.Info("Local node is now active")
+		DB.Logging.Debug("Member:monitorReceivedHCs() Performing Fail-over..")
+		// Nothing has worked.. assume the master has failed. Fail over.
+		member, err := DB.MemberList.GetNextActiveMember()
+		// no new active appliance was found
+		if err != nil {
+			DB.Logging.Warn("unable to find new active member.. we are now the active")
+			// make ourselves active as no new active can be found apparently
+			m.MakeActive()
 			return true
-		} else {
-			m.SetLastHCResponse(time.Now())
 		}
+		// If we are not the new member just return
+		localNode, err := DB.Config.GetLocalNode()
+		if err != nil {
+			DB.Logging.Error("unable to retrieve local node configuration")
+			return false
+		}
+		if member.GetHostname() != localNode.Hostname {
+			DB.Logging.Info("Waiting on " + member.GetHostname() + " to become active")
+			m.SetLastHCResponse(time.Now())
+			return false
+		}
+		// get our current active member
+		_, activeMember := DB.MemberList.GetActiveMember()
+		// If we have an active appliance mark it unavailable
+		if activeMember != nil {
+			activeMember.SetStatus(rpc.MemberStatus_UNAVAILABLE)
+		}
+		// lets go active
+		member.MakeActive()
+		// Set the FO priority
+		member.SetLastHCResponse(time.Time{})
+		DB.Logging.Info("Local node is now active")
+		return true
 	}
 	return false
 }

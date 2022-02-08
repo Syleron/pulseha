@@ -121,9 +121,9 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 			}, nil
 		}
 		r, err := c.Send(client.SendJoin, &rpc.JoinRequest{
-			Config:    buf,
-			Uid:       uid,
-			Token:     in.Token,
+			Config: buf,
+			Uid:    uid,
+			Token:  in.Token,
 		})
 		// Handle a failed request
 		if err != nil {
@@ -171,6 +171,8 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 		}
 		// !!!IMPORTANT!!!: Do not replace our local config
 		peerConfig.Pulse = DB.Config.Pulse
+		// !!!IMPORTANT!!!: Do not replace our plugins config
+		peerConfig.Plugins = DB.Config.Plugins
 		// Set the config
 		DB.SetConfig(peerConfig)
 		// Save the config

@@ -7,7 +7,7 @@ type Config struct {
 	Groups map[string][]Group
 	// Health check weight for failover calculations
 	Weight int32
-	// How many times a failure can occur before considering down.t t
+	// How many times a failure can occur before considering down.
 	Threshold int32
 }
 
@@ -18,4 +18,12 @@ type Group struct {
 // Validate that our config is of the proper structure and data.
 func (c *Config) Validate() error {
 	return nil
+}
+
+func (c *Config) GenerateDefaultConfig() *Config {
+	return &Config{
+		Groups:    make(map[string][]Group),
+		Weight:    10,
+		Threshold: 2,
+	}
 }

@@ -69,7 +69,7 @@ func (p ProtoFunction) String() string {
 }
 
 // New creates a new instance of our Client
-func (c *Client) New () {}
+func (c *Client) New() {}
 
 // GetProtoFuncList defines the available RPC commands to send.
 func (c *Client) GetProtoFuncList() map[string]interface{} {
@@ -114,8 +114,8 @@ func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 	if tlsEnabled {
 		// Load member cert/key
 		peerCert, err := tls.LoadX509KeyPair(
-			security.CertDir+"client.crt",
-			security.CertDir+"client.key",
+			security.CertDir+"pulseha.crt",
+			security.CertDir+"pulseha.key",
 		)
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
@@ -130,8 +130,9 @@ func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 			return errors.New("failed to append ca certs")
 		}
 		creds := credentials.NewTLS(&tls.Config{
-			Certificates: []tls.Certificate{peerCert},
-			RootCAs:      caCertPool,
+			InsecureSkipVerify: true,
+			Certificates:       []tls.Certificate{peerCert},
+			RootCAs:            caCertPool,
 		})
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {

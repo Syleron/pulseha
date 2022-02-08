@@ -34,13 +34,20 @@ import (
 	"time"
 )
 
-const CertDir = "/etc/pulseha/certs/"
+const (
+	CertDir  = "/etc/pulseha/certs/"
+	CertName = "pulseha"
+)
 
 func GenTLSKeys(ip string) error {
+	// Make sure we have the cert directory
 	utils.CreateFolder(CertDir)
+	// Log our action
 	log.Warning("TLS keys are missing! Generating..")
+	// Check to see if we have a ca crt/key already
 	if !utils.CheckFileExists(CertDir+"/ca.crt") ||
 		!utils.CheckFileExists(CertDir+"/ca.key") {
+		// Error saying we need a ca first before generating the keys
 		return errors.New("unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
@@ -73,10 +80,8 @@ func GenTLSKeys(ip string) error {
 		fmt.Println("parsekey:", e.Error())
 		os.Exit(1)
 	}
-	// Generate Server certs
-	GenerateServerCert(ip, cert, key)
-	// Generate Client certs
-	GenerateClientCert(cert, key)
+	// Generate our certificate
+	GenerateCerts(ip, cert, key)
 	return nil
 }
 
@@ -129,62 +134,8 @@ func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		log.Error("unable to generate cert because unable to get hostname")
-		return
-	}
-	WriteCertFile(hostname, servCertPEM)
-	WriteKeyFileFromRSAKey(hostname, servKey)
-}
-
-func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder(CertDir)
-	// Generate new key pair
-	servKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Fatalf("generating random key: %v", err)
-	}
-	// Generate Cert template
-	servCertTmpl, err := certTemplate()
-	if err != nil {
-		log.Fatalf("creating cert template: %v", err)
-	}
-	// Populate cert template
-	servCertTmpl.KeyUsage = x509.KeyUsageDigitalSignature
-	servCertTmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-	servCertTmpl.IPAddresses = []net.IP{net.ParseIP(ip)}
-	// Generate cert from template and sign
-	_, servCertPEM, err := createCert(servCertTmpl, caCert, &servKey.PublicKey, caKey)
-	if err != nil {
-		log.Fatalf("error creating cert: %v", err)
-	}
-	WriteCertFile("server", servCertPEM)
-	WriteKeyFileFromRSAKey("server", servKey)
-}
-
-func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder(CertDir)
-	// Generate new key pair
-	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Fatalf("generating random key: %v", err)
-	}
-	// Generate Cert Template
-	clientCertTmpl, err := certTemplate()
-	if err != nil {
-		log.Fatalf("creating cert template: %v", err)
-	}
-	// Populate cert template
-	clientCertTmpl.KeyUsage = x509.KeyUsageDigitalSignature
-	clientCertTmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-	// the root cert signs the cert by again providing its private key
-	_, clientCertPEM, err := createCert(clientCertTmpl, caCert, &clientKey.PublicKey, caKey)
-	if err != nil {
-		log.Fatalf("error creating cert: %v", err)
-	}
-	WriteCertFile("client", clientCertPEM)
-	WriteKeyFileFromRSAKey("client", clientKey)
+	WriteCertFile(CertName, servCertPEM)
+	WriteKeyFileFromRSAKey(CertName, servKey)
 }
 
 func certTemplate() (*x509.Certificate, error) {

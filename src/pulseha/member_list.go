@@ -158,8 +158,9 @@ func (m *MemberList) Setup() {
 		hcs.Plugins = DB.Plugins.GetHealthCheckPlugins()
 		go utils.Scheduler(
 			hcs.ProcessHCs,
-			time.Duration(1)*time.Second,
+			time.Duration(5)*time.Second,
 		)
+		//fmt.Println(">>>>> ", <-hcs.ScoreChan)
 		// Are we the only member in the cluster?
 		if DB.Config.NodeCount() == 1 {
 			// Disable start up delay
@@ -240,17 +241,17 @@ func (m *MemberList) PromoteMember(hostname string) error {
 
 	// if unavailable check it works or do nothing?
 	switch newActive.GetStatus() {
-		case rpc.MemberStatus_UNAVAILABLE:
-			// When we are attempting to promote a node who is unavailable
-			// If we are the only node and just configured we will be unavailable
-			if DB.Config.NodeCount() > 1 {
-				DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " because it is unavailable")
-				return errors.New("unable to promote member as it is unavailable")
-			}
-		case rpc.MemberStatus_ACTIVE:
-			// When we are attempting to promote the active appliance
-			DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " as it is active")
-			return errors.New("unable to promote member as it is already active")
+	case rpc.MemberStatus_UNAVAILABLE:
+		// When we are attempting to promote a node who is unavailable
+		// If we are the only node and just configured we will be unavailable
+		if DB.Config.NodeCount() > 1 {
+			DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " because it is unavailable")
+			return errors.New("unable to promote member as it is unavailable")
+		}
+	case rpc.MemberStatus_ACTIVE:
+		// When we are attempting to promote the active appliance
+		DB.Logging.Warn("Unable to promote member " + newActive.GetHostname() + " as it is active")
+		return errors.New("unable to promote member as it is already active")
 	}
 
 	// get the current active member
@@ -259,7 +260,7 @@ func (m *MemberList) PromoteMember(hostname string) error {
 	// If we do have an active member, make it passive
 	if activeMember != nil {
 		// Make the current Active appliance passive
-		if err:= activeMember.MakePassive(); err != nil {
+		if err := activeMember.MakePassive(); err != nil {
 			DB.Logging.Warn("Failed to make " + activeMember.GetHostname() + " passive, continuing")
 		}
 		// TODO: Note: Do we need this?
@@ -347,6 +348,7 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 					Status:       member.GetStatus(),
 					Latency:      member.GetLatency(),
 					LastReceived: member.GetLastHCResponse().Format(time.RFC1123),
+					Score:        int32(member.Score),
 				}
 				memberlist.Memberlist = append(memberlist.Memberlist, newMember)
 			}
@@ -389,6 +391,10 @@ func (m *MemberList) Update(memberlist []*rpc.MemberlistMember) {
 			if member.GetHostname() == localMember.GetHostname() {
 				localMember.SetStatus(member.Status)
 				localMember.SetLatency(member.Latency)
+				// Don't replace our local score through the hc updates
+				if localMember.GetHostname() != localNode.Hostname {
+					localMember.SetScore(int(member.Score))
+				}
 				// our local last received has priority
 				if member.GetHostname() != localNode.Hostname {
 					tym, _ := time.Parse(time.RFC1123, member.LastReceived)
@@ -414,6 +420,21 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 		}
 	}
 	return &Member{}, errors.New("MemberList:getNextActiveMember() No new active member found")
+}
+
+func (m *MemberList) GetHighestScoreMember() *Member {
+	var score int = -1
+	var winningMember *Member
+	for _, node := range DB.Config.Nodes {
+		member := m.GetMemberByHostname(node.Hostname)
+		if member == nil {
+			panic("MemberList:getNextActiveMember() Cannot get member by hostname " + node.Hostname)
+		}
+		if member.Score > score && member.GetStatus() == rpc.MemberStatus_PASSIVE {
+			winningMember = member
+		}
+	}
+	return winningMember
 }
 
 // GetLocalMember returns the local member object.

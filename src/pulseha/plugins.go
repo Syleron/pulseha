@@ -29,6 +29,7 @@ type PluginHC interface {
 	Name() string
 	Version() float64
 	Weight() int64
+	Run(db *Database) error
 	Send() error
 }
 
@@ -46,6 +47,7 @@ type PluginGen interface {
 	Version() float64
 	Run(db *Database) error
 	OnMemberListStatusChange(members []Member)
+	OnMemberFailover(member Member)
 }
 
 // Plugins object structure which stores our plugins
@@ -166,6 +168,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
+			go e.Run(DB)
 		case PluginNetworking:
 			// Make sure we are not loading another networking plugin.
 			// Only one networking plugin can be loaded at one time.
@@ -215,8 +218,8 @@ func (p *Plugins) GetNetworkingPlugin() *Plugin {
 	return nil
 }
 
-// GetGeneralPlugin is used to gather a slice of general plugins
-func (p *Plugins) GetGeneralPlugin() []*Plugin {
+// GetGeneralPlugins is used to gather a slice of general plugins
+func (p *Plugins) GetGeneralPlugins() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginGeneral {

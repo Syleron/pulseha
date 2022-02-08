@@ -92,7 +92,7 @@ func BringDownIPs(iface string, ips []string) error {
 
 // InformMLSChange is used to inform our plugins that our member list state has changed.
 func InformMLSChange() {
-	plugins := DB.Plugins.GetGeneralPlugin()
+	plugins := DB.Plugins.GetGeneralPlugins()
 	if plugins == nil {
 		DB.Logging.Debug("Utils:InformMLSChange() No plugins found. Skipping member list state change inform.")
 		return
@@ -127,8 +127,8 @@ func MyCaller() string {
 	return fun.Name()
 }
 
-// GetFailOverCountWinner determines who is the correct active node if in a split-brain scneario.
-// Note: This only works with two nodes atm.
+// GetFailOverCountWinner determines who is the correct active node if in a split-brain scenario.
+// TODO: IMPORTANT: Note: This only works with two nodes atm.
 func GetFailOverCountWinner(members []*rpc.MemberlistMember) string {
 	// GO through our members, are we failing back or not?
 	for i, member := range members {

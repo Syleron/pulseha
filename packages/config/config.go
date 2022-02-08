@@ -33,10 +33,10 @@ var (
 )
 
 type Config struct {
-	Pulse   Local               `json:"pulseha"`
-	Groups  map[string][]string `json:"floating_ip_groups"`
-	Nodes   map[string]*Node    `json:"nodes"`
-	Plugins []interface{}       `json:"plugins"`
+	Pulse   Local                  `json:"pulseha"`
+	Groups  map[string][]string    `json:"floating_ip_groups"`
+	Nodes   map[string]*Node       `json:"nodes"`
+	Plugins map[string]interface{} `json:"plugins"`
 	sync.Mutex
 }
 
@@ -59,9 +59,7 @@ type Node struct {
 	IPGroups map[string][]string `json:"group_assignments"`
 }
 
-/**
-Instantiate, setup and return our Config
-*/
+// New instantiates and setups up our config object
 func New() *Config {
 	cfg := Config{}
 	if err := cfg.Load(); err != nil {
@@ -95,6 +93,7 @@ func (c *Config) GetLocalNode() (Node, error) {
 	}
 	return Node{}, errors.New("local node not found in config")
 }
+
 func MyCaller() string {
 	// we get the callers as uintptrs - but we just need 1
 	fpcs := make([]uintptr, 1)
@@ -338,9 +337,9 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			LogToFile:           true,
 			LogFileLocation:     "/etc/pulseha/pulseha.log",
 		},
-		Groups: map[string][]string{},
-		Nodes:  map[string]*Node{},
-		Plugins: []interface{}{},
+		Groups:  map[string][]string{},
+		Nodes:   map[string]*Node{},
+		Plugins: map[string]interface{}{},
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")
@@ -351,6 +350,7 @@ func (c *Config) SaveDefaultLocalConfig() error {
 	c.Pulse = defaultConfig.Pulse
 	c.Groups = defaultConfig.Groups
 	c.Nodes = defaultConfig.Nodes
+	c.Plugins = make(map[string]interface{})
 	// Save back to file
 	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
 	// Check for errors
@@ -358,5 +358,26 @@ func (c *Config) SaveDefaultLocalConfig() error {
 		log.Error("Unable to save config.json. There may be a permissions issue")
 		return err
 	}
+	return nil
+}
+
+func (c *Config) GetPluginConfig(pName string) (interface{}, error) {
+	log.Debug("Config:GetPluginConfig() Getting plugin config.. ", pName)
+	pluginConfig := c.Plugins[pName]
+	if pluginConfig != nil {
+		return c.Plugins[pName], nil
+	}
+	return nil, errors.New("plugin does not exist in config")
+}
+
+func (c *Config) SetPluginConfig(pName string, data interface{}) error {
+	log.Debug("Config:SetPluginConfig() Setting plugin config.. ", pName)
+	_, err := c.GetPluginConfig(pName)
+	if err != nil {
+		c.Lock()
+		c.Plugins[pName] = data
+		c.Unlock()
+	}
+	c.Save()
 	return nil
 }
