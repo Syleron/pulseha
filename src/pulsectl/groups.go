@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package pulsectl
 
 import (
@@ -117,7 +116,7 @@ func (c *GroupsCommand) Synopsis() string {
  *
  */
 func (c *GroupsCommand) drawGroupsTable(client rpc.CLIClient) {
-	r, err := client.GroupList(context.Background(), &rpc.GroupTable{})
+	r, err := client.GroupList(context.Background(), &rpc.GroupTableRequest{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())
@@ -154,7 +153,7 @@ func (c *GroupsCommand) drawGroupsTable(client rpc.CLIClient) {
  *
  */
 func (c *GroupsCommand) New(groupName *string, client rpc.CLIClient) int {
-	r, err := client.NewGroup(context.Background(), &rpc.PulseGroupNew{
+	r, err := client.NewGroup(context.Background(), &rpc.GroupNewRequest{
 		Name: *groupName,
 	})
 	if err != nil {
@@ -181,7 +180,7 @@ func (c *GroupsCommand) Delete(groupName *string, client rpc.CLIClient) int {
 		c.Ui.Error(c.Help())
 		return 1
 	}
-	r, err := client.DeleteGroup(context.Background(), &rpc.PulseGroupDelete{
+	r, err := client.DeleteGroup(context.Background(), &rpc.GroupDeleteRequest{
 		Name: *groupName,
 	})
 	if err != nil {
@@ -215,7 +214,7 @@ func (c *GroupsCommand) Add(groupName, fIPs *string, client rpc.CLIClient) int {
 		return 1
 	}
 	IPslice := strings.Split(*fIPs, ",")
-	r, err := client.GroupIPAdd(context.Background(), &rpc.PulseGroupAdd{
+	r, err := client.GroupIPAdd(context.Background(), &rpc.GroupAddRequest{
 		Name: *groupName,
 		Ips:  IPslice,
 	})
@@ -250,7 +249,7 @@ func (c *GroupsCommand) Remove(groupName, fIPs *string, client rpc.CLIClient) in
 		return 1
 	}
 	IPslice := strings.Split(*fIPs, ",")
-	r, err := client.GroupIPRemove(context.Background(), &rpc.PulseGroupRemove{
+	r, err := client.GroupIPRemove(context.Background(), &rpc.GroupRemoveRequest{
 		Name: *groupName,
 		Ips:  IPslice,
 	})
@@ -290,7 +289,7 @@ func (c *GroupsCommand) Assign(groupName, nodeHostname, nodeIface *string, clien
 		c.Ui.Error(c.Help())
 		return 1
 	}
-	r, err := client.GroupAssign(context.Background(), &rpc.PulseGroupAssign{
+	r, err := client.GroupAssign(context.Background(), &rpc.GroupAssignRequest{
 		Group:     *groupName,
 		Interface: *nodeIface,
 		Node:      *nodeHostname,
@@ -331,7 +330,7 @@ func (c *GroupsCommand) Unassign(groupName, nodeHostname, nodeIface *string, cli
 		c.Ui.Error(c.Help())
 		return 1
 	}
-	r, err := client.GroupUnassign(context.Background(), &rpc.PulseGroupUnassign{
+	r, err := client.GroupUnassign(context.Background(), &rpc.GroupUnassignRequest{
 		Group:     *groupName,
 		Interface: *nodeIface,
 		Node:      *nodeHostname,

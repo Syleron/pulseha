@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package network
 
 import (
@@ -156,11 +155,10 @@ func Curl(httpRequestURL string) bool {
 /**
 
  */
-func ICMPv4(Ipv4Addr string) bool {
+func ICMPv4(Ipv4Addr string) error {
 	// Validate the IP address to ensure it's an IPv4 addr.
 	if err := utils.ValidIPAddress(Ipv4Addr); err != nil {
-		//log.Error("Invalid IPv4 address for ICMP check..")
-		return false
+		return errors.New("invalid UPv4 address for ICMP check")
 	}
 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
 	cmd := exec.Command("bash", "-c", cmds)
@@ -170,13 +168,12 @@ func ICMPv4(Ipv4Addr string) bool {
 	err := cmd.Run()
 	if err != nil {
 		//log.Error("ICMP request failed.")
-		return false
+		return err
 	}
 	if strings.Contains(out.String(), "0") {
-		return true
-	} else {
-		return false
+		return errors.New("failed to reach host")
 	}
+	return nil
 }
 
 /**

@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package pulsectl
 
 import (
@@ -25,6 +24,7 @@ import (
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -67,7 +67,7 @@ func (c *StatusCommand) Run(args []string) int {
  *
  */
 func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
-	r, err := client.Status(context.Background(), &rpc.PulseStatus{})
+	r, err := client.Status(context.Background(), &rpc.StatusRequest{})
 	if err != nil {
 		c.Ui.Output("PulseHA CLI connection error")
 		c.Ui.Output(err.Error())
@@ -82,6 +82,7 @@ func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
 					node.Ip,
 					node.Latency,
 					node.Status.String(),
+					strconv.Itoa(int(node.Score)),
 					node.LastReceived,
 				})
 		}
@@ -91,6 +92,7 @@ func (c *StatusCommand) drawStatusTable(client rpc.CLIClient) {
 			"Bind Address",
 			"Latency",
 			"Status",
+			"Score",
 			"Last Received",
 		})
 		table.SetCenterSeparator("-")

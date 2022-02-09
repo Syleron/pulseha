@@ -1,20 +1,21 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
+// TODO: This package needs some cleaning up.
 
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package security
 
 import (
@@ -33,16 +34,20 @@ import (
 	"time"
 )
 
-const CertDir = "/etc/pulseha/certs/"
+const (
+	CertDir  = "/etc/pulseha/certs/"
+	CertName = "pulseha"
+)
 
-/**
-Generate TLS keys if they don't already exist
-*/
 func GenTLSKeys(ip string) error {
+	// Make sure we have the cert directory
 	utils.CreateFolder(CertDir)
+	// Log our action
 	log.Warning("TLS keys are missing! Generating..")
+	// Check to see if we have a ca crt/key already
 	if !utils.CheckFileExists(CertDir+"/ca.crt") ||
 		!utils.CheckFileExists(CertDir+"/ca.key") {
+		// Error saying we need a ca first before generating the keys
 		return errors.New("unable to generate TLS keys as ca.crt/ca.key are missing")
 	}
 	// Load the CA
@@ -75,16 +80,11 @@ func GenTLSKeys(ip string) error {
 		fmt.Println("parsekey:", e.Error())
 		os.Exit(1)
 	}
-	// Generate Server certs
-	GenerateServerCert(ip, cert, key)
-	// Generate Client certs
-	GenerateClientCert(cert, key)
+	// Generate our certificate
+	GenerateCerts(ip, cert, key)
 	return nil
 }
 
-/**
-
- */
 func GenerateCACert(ip string) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -112,7 +112,6 @@ func GenerateCACert(ip string) {
 	WriteKeyFileFromRSAKey("ca", rootKey)
 }
 
-// Generate certs
 func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 	utils.CreateFolder(CertDir)
 	// Generate new key pair
@@ -135,73 +134,10 @@ func GenerateCerts(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
 		log.Fatalf("error creating cert: %v", err)
 	}
 	// write keys
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		log.Error("unable to generate cert because unable to get hostname")
-		return
-	}
-	WriteCertFile(hostname, servCertPEM)
-	WriteKeyFileFromRSAKey(hostname, servKey)
+	WriteCertFile(CertName, servCertPEM)
+	WriteKeyFileFromRSAKey(CertName, servKey)
 }
 
-/**
-
- */
-func GenerateServerCert(ip string, caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder(CertDir)
-	// Generate new key pair
-	servKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Fatalf("generating random key: %v", err)
-	}
-	// Generate Cert template
-	servCertTmpl, err := certTemplate()
-	if err != nil {
-		log.Fatalf("creating cert template: %v", err)
-	}
-	// Populate cert template
-	servCertTmpl.KeyUsage = x509.KeyUsageDigitalSignature
-	servCertTmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
-	servCertTmpl.IPAddresses = []net.IP{net.ParseIP(ip)}
-	// Generate cert from template and sign
-	_, servCertPEM, err := createCert(servCertTmpl, caCert, &servKey.PublicKey, caKey)
-	if err != nil {
-		log.Fatalf("error creating cert: %v", err)
-	}
-	WriteCertFile("server", servCertPEM)
-	WriteKeyFileFromRSAKey("server", servKey)
-}
-
-/**
-
- */
-func GenerateClientCert(caCert *x509.Certificate, caKey *rsa.PrivateKey) {
-	utils.CreateFolder(CertDir)
-	// Generate new key pair
-	clientKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		log.Fatalf("generating random key: %v", err)
-	}
-	// Generate Cert Template
-	clientCertTmpl, err := certTemplate()
-	if err != nil {
-		log.Fatalf("creating cert template: %v", err)
-	}
-	// Populate cert template
-	clientCertTmpl.KeyUsage = x509.KeyUsageDigitalSignature
-	clientCertTmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
-	// the root cert signs the cert by again providing its private key
-	_, clientCertPEM, err := createCert(clientCertTmpl, caCert, &clientKey.PublicKey, caKey)
-	if err != nil {
-		log.Fatalf("error creating cert: %v", err)
-	}
-	WriteCertFile("client", clientCertPEM)
-	WriteKeyFileFromRSAKey("client", clientKey)
-}
-
-/**
-
- */
 func certTemplate() (*x509.Certificate, error) {
 	// generate a random serial number
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
@@ -209,15 +145,10 @@ func certTemplate() (*x509.Certificate, error) {
 	if err != nil {
 		return nil, errors.New("failed to generate serial number: " + err.Error())
 	}
-	hostname, err := utils.GetHostname()
-	if err != nil {
-		return nil, errors.New("unable to generate cert template because unable to get hostname")
-	}
 	tmpl := x509.Certificate{
 		SerialNumber: serialNumber,
 		Subject: pkix.Name{
 			Organization: []string{"PulseHA"},
-			CommonName:   hostname,
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(time.Duration(730) * time.Hour * 24),
@@ -226,9 +157,6 @@ func certTemplate() (*x509.Certificate, error) {
 	return &tmpl, nil
 }
 
-/**
-
- */
 func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv interface{}) (cert *x509.Certificate, certPEM []byte, err error) {
 	certDER, err := x509.CreateCertificate(rand.Reader, template, parent, pub, parentPriv)
 	if err != nil {
@@ -245,9 +173,6 @@ func createCert(template, parent *x509.Certificate, pub interface{}, parentPriv 
 	return
 }
 
-/**
-TODO: Use Utils functions
-*/
 func WriteCertFile(fileName string, cert []byte) {
 	// Write the cert to file
 	certOut, err := os.Create(CertDir + "/" + fileName + ".crt")
@@ -259,7 +184,6 @@ func WriteCertFile(fileName string, cert []byte) {
 	certOut.Close()
 }
 
-//
 func WriteKeyFile(fileName string, key []byte) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(CertDir+fileName+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
@@ -271,9 +195,6 @@ func WriteKeyFile(fileName string, key []byte) {
 	keyOut.Close()
 }
 
-/**
-TODO: Use Utils functions
-*/
 func WriteKeyFileFromRSAKey(filename string, key *rsa.PrivateKey) {
 	// Write the key to file
 	keyOut, err := os.OpenFile(CertDir+"/"+filename+".key", os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)

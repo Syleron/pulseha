@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package pulsectl
 
 import (
@@ -36,7 +35,7 @@ type JoinCommand struct {
  */
 func (c *JoinCommand) Help() string {
 	helpText := `
-Usage: pulsectl join [bind-ip] [bind-port] [token] <destination IP> <destination port> <destination hostname>
+Usage: pulsectl join [bind-ip] [bind-port] [token] <destination IP> <destination port>
   Tells a running PulseHA agent to join the cluster
   by specifying at least one existing member.
 Options:
@@ -68,8 +67,8 @@ func (c *JoinCommand) Run(args []string) int {
 	cmds := cmdFlags.Args()
 
 	// Make sure that the join address and port is set
-	if len(cmds) < 3 {
-		c.Ui.Error("Please specify an address, port and hostname to join")
+	if len(cmds) < 2 {
+		c.Ui.Error("Please specify an address, port to join")
 		c.Ui.Error("")
 		c.Ui.Error(c.Help())
 		return 1
@@ -116,7 +115,6 @@ func (c *JoinCommand) Run(args []string) int {
 	// validate the join address
 	joinIP := cmds[0]
 	joinPort := cmds[1]
-	hostname := cmds[2]
 
 	if utils.IsIPv6(joinIP) {
 		joinIP = utils.SanitizeIPv6(joinIP)
@@ -149,12 +147,11 @@ func (c *JoinCommand) Run(args []string) int {
 	// setup new RPC client
 	client := rpc.NewCLIClient(connection)
 
-	r, err := client.Join(context.Background(), &rpc.PulseJoin{
+	r, err := client.Join(context.Background(), &rpc.JoinRequest{
 		Ip:       joinIP,
 		Port:     joinPort,
 		BindIp:   *bindIP,
 		BindPort: *bindPort,
-		Hostname: hostname,
 		Token: *clusterToken,
 	})
 
