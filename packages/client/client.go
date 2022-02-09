@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package client
 
 import (
@@ -36,7 +35,7 @@ type Client struct {
 	Requester  rpc.ServerClient
 }
 
-// This should probably go into an enums folder
+// TODO: This should probably go into an enums folder
 type ProtoFunction int
 
 const (
@@ -69,64 +68,54 @@ func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 
-// -----
+// New creates a new instance of our Client
+func (c *Client) New() {}
 
-/**
- Create new PulseHA client
- */
-func (c *Client) New () {
-
-}
-
-/**
-
- */
+// GetProtoFuncList defines the available RPC commands to send.
 func (c *Client) GetProtoFuncList() map[string]interface{} {
 	funcList := map[string]interface{}{
 		"ConfigSync": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.ConfigSync(ctx, data.(*rpc.PulseConfigSync))
+			return c.Requester.ConfigSync(ctx, data.(*rpc.ConfigSyncRequest))
 		},
 		"Join": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Join(ctx, data.(*rpc.PulseJoin))
+			return c.Requester.Join(ctx, data.(*rpc.JoinRequest))
 		},
 		"Leave": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Leave(ctx, data.(*rpc.PulseLeave))
+			return c.Requester.Leave(ctx, data.(*rpc.LeaveRequest))
 		},
 		"MakePassive": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.MakePassive(ctx, data.(*rpc.PulsePromote))
+			return c.Requester.MakePassive(ctx, data.(*rpc.MakePassiveRequest))
 		},
 		"BringUpIP": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.BringUpIP(ctx, data.(*rpc.PulseBringIP))
+			return c.Requester.BringUpIP(ctx, data.(*rpc.UpIpRequest))
 		},
 		"BringDownIP": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.BringDownIP(ctx, data.(*rpc.PulseBringIP))
+			return c.Requester.BringDownIP(ctx, data.(*rpc.DownIpRequest))
 		},
 		"HealthCheck": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.HealthCheck(ctx, data.(*rpc.PulseHealthCheck))
+			return c.Requester.HealthCheck(ctx, data.(*rpc.HealthCheckRequest))
 		},
 		"Promote": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Promote(ctx, data.(*rpc.PulsePromote))
+			return c.Requester.Promote(ctx, data.(*rpc.PromoteRequest))
 		},
 		"Logs": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Logs(ctx, data.(*rpc.PulseLogs))
+			return c.Requester.Logs(ctx, data.(*rpc.LogsRequest))
 		},
 		"Remove": func(ctx context.Context, data interface{}) (interface{}, error) {
-			return c.Requester.Remove(ctx, data.(*rpc.PulseRemove))
+			return c.Requester.Remove(ctx, data.(*rpc.RemoveRequest))
 		},
 	}
 	return funcList
 }
 
-/**
-Note: Hostname is required for TLS as the certs are named after the hostname.
-*/
-func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
+// Connect creates a new client connection and request hostname for TLS verification.
+func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 	var err error
 	if tlsEnabled {
 		// Load member cert/key
 		peerCert, err := tls.LoadX509KeyPair(
-			security.CertDir+"client.crt",
-			security.CertDir+"client.key",
+			security.CertDir+"pulseha.crt",
+			security.CertDir+"pulseha.key",
 		)
 		if err != nil {
 			return errors.New("Could not connect to host: " + err.Error())
@@ -141,9 +130,9 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 			return errors.New("failed to append ca certs")
 		}
 		creds := credentials.NewTLS(&tls.Config{
-			ServerName: ip,
-			Certificates: []tls.Certificate{peerCert},
-			RootCAs:      caCertPool,
+			InsecureSkipVerify: true,
+			Certificates:       []tls.Certificate{peerCert},
+			RootCAs:            caCertPool,
 		})
 		c.Connection, err = grpc.Dial(ip+":"+port, grpc.WithTransportCredentials(creds))
 	} else {
@@ -161,9 +150,7 @@ func (c *Client) Connect(ip, port, hostname string, tlsEnabled bool) error {
 	return nil
 }
 
-/**
-Close the client connection
-*/
+// Close terminates the client connection.
 func (c *Client) Close() {
 	log.Debug("Client:Close() Connection closed")
 	// Make sure we have a connection before trying to close it
@@ -172,9 +159,7 @@ func (c *Client) Close() {
 	}
 }
 
-/**
-Send a specific GRPC call
-*/
+// Send sends an RPC command over the client connection.
 func (c *Client) Send(funcName ProtoFunction, data interface{}) (interface{}, error) {
 	log.Debug("Client:Send() Sending " + funcName.String())
 	funcList := c.GetProtoFuncList()

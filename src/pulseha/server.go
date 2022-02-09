@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package pulseha
 
 import (
@@ -25,6 +24,7 @@ import (
 	"errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/language"
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/syleron/pulseha/rpc"
@@ -43,9 +43,7 @@ var (
 	DB *Database
 )
 
-/**
- * Server struct type
- */
+// Server defines our PulseHA server object.
 type Server struct {
 	sync.Mutex
 	Server      *grpc.Server
@@ -53,6 +51,7 @@ type Server struct {
 	HCScheduler func()
 }
 
+// Init used to start the bootstrap process
 func (s *Server) Init(db *Database) {
 	// Set our config
 	DB = db
@@ -62,9 +61,7 @@ func (s *Server) Init(db *Database) {
 	s.Setup()
 }
 
-/**
- * Setup pulse server type
- */
+// Setup used to bootstrap the PulseHA server object.
 func (s *Server) Setup() {
 	if !DB.Config.ClusterCheck() {
 		log.Info("PulseHA is currently un-configured.")
@@ -90,11 +87,11 @@ func (s *Server) Setup() {
 	// Listen
 	s.Listener, err = net.Listen("tcp", bindIP+":"+DB.Config.LocalNode().Port)
 	if err != nil {
-		panic(err)
+		log.Fatal(err.Error())
 		return
 	}
 	// load member cert/key
-	peerCert, err := tls.LoadX509KeyPair(security.CertDir+"server.crt", security.CertDir+"server.key")
+	peerCert, err := tls.LoadX509KeyPair(security.CertDir+"pulseha.crt", security.CertDir+"pulseha.key")
 	if err != nil {
 		log.Fatalf("load peer cert/key error:%v", err)
 		return
@@ -112,9 +109,9 @@ func (s *Server) Setup() {
 		return
 	}
 	creds := credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{peerCert},
-		ClientCAs:    caCertPool,
-		ClientAuth:   tls.VerifyClientCertIfGiven,
+		InsecureSkipVerify: true,
+		Certificates:       []tls.Certificate{peerCert},
+		ClientCAs:          caCertPool,
 	})
 	s.Server = grpc.NewServer(
 		grpc.Creds(creds),
@@ -133,21 +130,22 @@ func (s *Server) Setup() {
 	}
 }
 
-// serverInterceptor - Intercept each request to ensure only Join can be used without a verified cert
+// serverInterceptor used to intercept each request.
+// Note: We check to make sure we have a valid cert for each request
+//       except the Join request.
 func (s *Server) serverInterceptor(ctx context.Context,
 	req interface{},
 	info *grpc.UnaryServerInfo,
 	handler grpc.UnaryHandler) (interface{}, error) {
 
-	log.Debugf("Request - Method:%s", info.FullMethod)
+	log.Debugf("Request received - Method: %s", info.FullMethod)
 
 	// Skip authorize when join is requested
 	if info.FullMethod != "/proto.Server/Join" {
 		peer, ok := peer.FromContext(ctx)
 		if ok {
 			tlsInfo := peer.AuthInfo.(credentials.TLSInfo)
-			v := tlsInfo.State.PeerCertificates
-			if len(v) <= 0 {
+			if tlsInfo.SecurityLevel != credentials.PrivacyAndIntegrity {
 				return nil, errors.New("invalid permissions")
 			}
 		}
@@ -159,9 +157,8 @@ func (s *Server) serverInterceptor(ctx context.Context,
 	return h, err
 }
 
-/**
- * Shutdown pulse server (not cli/cmd)
- */
+// Shutdown used to shutdown the PulseHA server listener.
+// Note: This is not the CLI/CMD server listener.
 func (s *Server) Shutdown() {
 	log.Info("Shutting down PulseHA daemon")
 	// Make passive
@@ -179,20 +176,18 @@ func (s *Server) Shutdown() {
 	}
 }
 
-/**
-Perform appr. health checks
-*/
-func (s *Server) HealthCheck(ctx context.Context, in *rpc.PulseHealthCheck) (*rpc.PulseHealthCheck, error) {
+// HealthCheck command used to receive the main RPC health check.
+func (s *Server) HealthCheck(ctx context.Context, in *rpc.HealthCheckRequest) (*rpc.HealthCheckResponse, error) {
 	DB.Logging.Debug("Server:HealthCheck() Receiving health check")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return &rpc.HealthCheckResponse{}, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	activeHostname, _ := DB.MemberList.GetActiveMember()
-	localNode := DB.Config.GetLocalNode()
-	if activeHostname != localNode.Hostname {
-		localMember := DB.MemberList.GetMemberByHostname(localNode.Hostname)
+	localMember, _ := DB.MemberList.GetLocalMember()
+	if activeHostname != localMember.Hostname {
+		localMember := DB.MemberList.GetMemberByHostname(localMember.Hostname)
 		// make passive to reset the networking
 		// TODO: Figure out why I do this here
 		//if _, activeMember := DB.MemberList.GetActiveMember(); activeMember == nil {
@@ -205,23 +200,21 @@ func (s *Server) HealthCheck(ctx context.Context, in *rpc.PulseHealthCheck) (*rp
 		DB.Logging.Warn("Active node mismatch")
 		hostname := GetFailOverCountWinner(in.Memberlist)
 		DB.Logging.Info("Member " + hostname + " has been determined as the correct active node.")
-		if hostname != localNode.Hostname {
-			member, _ := DB.MemberList.GetLocalMember()
-			member.MakePassive()
+		if hostname != localMember.Hostname {
+			if err := localMember.MakePassive(); err != nil {
+				DB.Logging.Error(err.Error())
+			}
 		} else {
-			localMember, _ := DB.MemberList.GetLocalMember()
 			localMember.SetLastHCResponse(time.Time{})
 		}
 	}
-	return &rpc.PulseHealthCheck{
-		Success: true,
+	return &rpc.HealthCheckResponse{
+		Score: int32(localMember.Score),
 	}, nil
 }
 
-/**
-Join request for a configured cluster
-*/
-func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, error) {
+// Join command used to join a configured cluster.
+func (s *Server) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinResponse, error) {
 	DB.Logging.Debug("Server:Join() " + strconv.FormatBool(in.Replicated) + " - Join Pulse cluster")
 	s.Lock()
 	defer s.Unlock()
@@ -229,8 +222,8 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 	if DB.Config.ClusterCheck() {
 		// Validate our cluster token
 		if !security.SHA256StringValidation(in.Token, DB.Config.Pulse.ClusterToken) {
-			DB.Logging.Warn(in.Hostname + " attempted to join with an invalid cluster token")
-			return &rpc.PulseJoin{
+			DB.Logging.Warn(in.Uid + " attempted to join with an invalid cluster token")
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Invalid cluster token",
 			}, nil
@@ -242,31 +235,31 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 		// handle errors
 		if err != nil {
 			log.Error("Unable to unmarshal config node.")
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Unable to unmarshal config node.",
 			}, nil
 		}
-		// Make sure the node doesnt already exist
-		if nodeExistsByHostname(in.Hostname) {
-			return &rpc.PulseJoin{
+		// Make sure the node doesn't already exist
+		if nodeExistsByUUID(in.Uid) {
+			return &rpc.JoinResponse{
 				Success: false,
-				Message: "unable to join cluster as a node with hostname " + in.Hostname + " already exists!",
+				Message: "unable to join cluster as a node with id " + in.Uid + " already exists!",
 			}, nil
 		}
 		// TODO: Node validation?
 		// Add node to config
-		if err = nodeAdd(in.Uid, in.Hostname, originNode); err != nil {
-			return &rpc.PulseJoin{
+		if err = nodeAdd(in.Uid, originNode); err != nil {
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Failed to add new node to membership list",
 			}, nil
 		}
 		// Save our new config to file
 		if err := DB.Config.Save(); err != nil {
-			if nodeExistsByHostname(in.Hostname) {
-				if err := nodeDelete(in.Hostname); err != nil {
-					return &rpc.PulseJoin{
+			if nodeExistsByUUID(in.Uid) {
+				if err := nodeDelete(in.Uid); err != nil {
+					return &rpc.JoinResponse{
 						Success: false,
 						Message: "Failed to clean up after a failed join attempt",
 					}, nil
@@ -284,7 +277,7 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 		// Handle failure to marshal config
 		if err != nil {
 			log.Fatalf("Unable to marshal config: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: err.Error(),
 			}, nil
@@ -293,16 +286,16 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
 		if err != nil {
 			log.Fatalf("Unable to load ca.crt: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: err.Error(),
 			}, nil
 		}
 		// Make sure our CA cert files exist
-		if !utils.CheckFileExists(security.CertDir+ "ca.crt") ||
-			!utils.CheckFileExists(security.CertDir+ "ca.key") {
+		if !utils.CheckFileExists(security.CertDir+"ca.crt") ||
+			!utils.CheckFileExists(security.CertDir+"ca.key") {
 			log.Fatal("ca.crt and or ca.key does not exists")
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: "Unable to gather TLS details to join the cluster",
 			}, nil
@@ -311,13 +304,13 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 		caKey, err := ioutil.ReadFile(security.CertDir + "ca.key")
 		if err != nil {
 			log.Fatalf("Unable to load ca.key: %s", err)
-			return &rpc.PulseJoin{
+			return &rpc.JoinResponse{
 				Success: false,
 				Message: err.Error(),
 			}, nil
 		}
-		DB.Logging.Info(in.Hostname + " has joined the cluster")
-		return &rpc.PulseJoin{
+		DB.Logging.Info(in.Uid + " has joined the cluster")
+		return &rpc.JoinResponse{
 			Success: true,
 			Message: "Successfully added ",
 			Config:  buf,
@@ -325,53 +318,54 @@ func (s *Server) Join(ctx context.Context, in *rpc.PulseJoin) (*rpc.PulseJoin, e
 			CaKey:   string(caKey),
 		}, nil
 	}
-	return &rpc.PulseJoin{
+	return &rpc.JoinResponse{
 		Success: false,
 		Message: "This node is not in a configured cluster.",
 	}, nil
 }
 
-/**
-Update our local config from a Resync request
-*/
-func (s *Server) Leave(ctx context.Context, in *rpc.PulseLeave) (*rpc.PulseLeave, error) {
+// Leave command used to leave from the current configured cluster.
+func (s *Server) Leave(ctx context.Context, in *rpc.LeaveRequest) (*rpc.LeaveResponse, error) {
 	DB.Logging.Debug("Server:Leave() " + strconv.FormatBool(in.Replicated) + " - Node leave cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	// Remove from our memberlist
+	// Get node by hostname
+	id, _, _ := DB.Config.GetNodeByHostname(in.Hostname)
+	// Remove from our member list
 	DB.MemberList.MemberRemoveByHostname(in.Hostname)
 	// Remove from our config
-	err := nodeDelete(in.Hostname)
-	if err != nil {
-		return &rpc.PulseLeave{
+	if err := nodeDelete(id); err != nil {
+		return &rpc.LeaveResponse{
 			Success: false,
 			Message: err.Error(),
 		}, nil
 	}
-	DB.Config.Save()
+	if err := DB.Config.Save(); err != nil {
+		log.Fatal(err)
+	}
 	DB.Logging.Info("Successfully removed " + in.Hostname + " from the cluster")
-	return &rpc.PulseLeave{
+	return &rpc.LeaveResponse{
 		Success: true,
 		Message: "Successfully removed node from local config",
 	}, nil
 }
 
-// Remove - Remove node from cluster by hostname
-func (s *Server) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.PulseRemove, error) {
+// Remove command used to remove node from cluster by hostname.
+func (s *Server) Remove(ctx context.Context, in *rpc.RemoveRequest) (*rpc.RemoveResponse, error) {
 	DB.Logging.Debug("Server:Remove() " + strconv.FormatBool(in.Replicated) + " - Remove " + in.Hostname + "from cluster")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	// Make sure we can get our own hostname
 	localHostname, err := utils.GetHostname()
 	if err != nil {
 		DB.Logging.Debug("Server:Remove() Fail. Unable to get local hostname to remove node from cluster")
-		return &rpc.PulseRemove{
+		return &rpc.RemoveResponse{
 			Success: false,
 			Message: "Unable to perform remove as unable to get local hostname",
 		}, nil
@@ -389,7 +383,7 @@ func (s *Server) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.PulseRem
 		// Remove from our config
 		err := nodeDelete(in.Hostname)
 		if err != nil {
-			return &rpc.PulseRemove{
+			return &rpc.RemoveResponse{
 				Success: false,
 				Message: err.Error(),
 			}, nil
@@ -397,21 +391,19 @@ func (s *Server) Remove(ctx context.Context, in *rpc.PulseRemove) (*rpc.PulseRem
 	}
 	DB.Config.Save()
 	DB.Logging.Info("Successfully removed node " + in.Hostname + " from the cluster")
-	return &rpc.PulseRemove{
+	return &rpc.RemoveResponse{
 		Success: true,
 		Message: "Successfully removed node from local config",
 	}, nil
 }
 
-/**
-Update our local config from a Resync request
-*/
-func (s *Server) ConfigSync(ctx context.Context, in *rpc.PulseConfigSync) (*rpc.PulseConfigSync, error) {
+// ConfigSync command used to take a config copy and update local.
+func (s *Server) ConfigSync(ctx context.Context, in *rpc.ConfigSyncRequest) (*rpc.ConfigSyncResponse, error) {
 	DB.Logging.Debug("Server:ConfigSync() " + strconv.FormatBool(in.Replicated) + " - Sync cluster config")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	// Define new node
 	newConfig := &config.Config{}
@@ -420,15 +412,15 @@ func (s *Server) ConfigSync(ctx context.Context, in *rpc.PulseConfigSync) (*rpc.
 	// Handle failure to marshal config
 	if err != nil {
 		log.Fatalf("Unable to marshal config: %s", err)
-		return &rpc.PulseConfigSync{
+		return &rpc.ConfigSyncResponse{
 			Success: false,
 			Message: err.Error(),
 		}, nil
 	}
 	// !!!IMPORTANT!!!: Do not replace our local config
-	newConfig.Pulse.ClusterToken = DB.Config.Pulse.ClusterToken
-	newConfig.Pulse.LocalNode = DB.Config.Pulse.LocalNode
-	newConfig.Pulse.LoggingLevel = DB.Config.Pulse.LoggingLevel
+	newConfig.Pulse = DB.Config.Pulse
+	// !!!IMPORTANT!!!: Do not replace our plugins config
+	newConfig.Plugins = DB.Config.Plugins
 	// Set our new config in memory
 	DB.SetConfig(newConfig)
 	// Save our config to file
@@ -438,78 +430,86 @@ func (s *Server) ConfigSync(ctx context.Context, in *rpc.PulseConfigSync) (*rpc.
 	// Let the logs know
 	DB.Logging.Debug("Successfully r-synced local config")
 	// Return with yay
-	return &rpc.PulseConfigSync{
+	return &rpc.ConfigSyncResponse{
 		Success: true,
 	}, nil
 }
 
-/**
-Network action functions
-*/
-func (s *Server) Promote(ctx context.Context, in *rpc.PulsePromote) (*rpc.PulsePromote, error) {
+// Promote command used to make the local node active.
+func (s *Server) Promote(ctx context.Context, in *rpc.PromoteRequest) (*rpc.PromoteResponse, error) {
 	DB.Logging.Debug("Server:MakeActive() Making node active")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.PromoteResponse{
+			Success: false,
+		}, nil
+	}
 	if in.Member != localNode.Hostname {
-		return &rpc.PulsePromote{
+		return &rpc.PromoteResponse{
 			Success: false,
 		}, nil
 	}
 	member := DB.MemberList.GetMemberByHostname(in.Member)
 	if member == nil {
-		return &rpc.PulsePromote{
+		return &rpc.PromoteResponse{
 			Success: false,
 		}, nil
 	}
-	success := member.MakeActive()
+	if err := member.MakeActive(); err != nil {
+		return &rpc.PromoteResponse{
+			Success: false,
+		}, nil
+	}
 	DB.Logging.Info(in.Member + " has been promoted to active")
-	return &rpc.PulsePromote{
-		Success: success,
+	return &rpc.PromoteResponse{
+		Success: true,
 	}, nil
 }
 
-/**
-Make a member passive
-*/
-func (s *Server) MakePassive(ctx context.Context, in *rpc.PulsePromote) (*rpc.PulsePromote, error) {
+// MakePassive command used to attempt to make the local node passive.
+func (s *Server) MakePassive(ctx context.Context, in *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error) {
 	DB.Logging.Debug("Server:MakePassive() Making node passive")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
-	localNode := DB.Config.GetLocalNode()
+	localNode, err := DB.Config.GetLocalNode()
+	if err != nil {
+		return &rpc.MakePassiveResponse{
+			Success: false,
+		}, nil
+	}
 	if in.Member != localNode.Hostname {
-		return &rpc.PulsePromote{
+		return &rpc.MakePassiveResponse{
 			Success: false,
 		}, nil
 	}
 	member := DB.MemberList.GetMemberByHostname(in.Member)
 	if member == nil {
-		return &rpc.PulsePromote{
+		return &rpc.MakePassiveResponse{
 			Success: false,
 		}, nil
 	}
-	err := member.MakePassive()
+	err = member.MakePassive()
 	DB.Logging.Info(in.Member + " has been demoted to passive")
-	return &rpc.PulsePromote{
+	return &rpc.MakePassiveResponse{
 		Success: err == nil,
 	}, nil
 }
 
-/**
-
- */
-func (s *Server) BringUpIP(ctx context.Context, in *rpc.PulseBringIP) (*rpc.PulseBringIP, error) {
+// BringUpIP command to bring up any number of floating ips.
+func (s *Server) BringUpIP(ctx context.Context, in *rpc.UpIpRequest) (*rpc.UpIpResponse, error) {
 	DB.Logging.Debug("Server:BringUpIP() Bringing up IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	success := true
 	msg := "success"
@@ -517,18 +517,16 @@ func (s *Server) BringUpIP(ctx context.Context, in *rpc.PulseBringIP) (*rpc.Puls
 		success = false
 		msg = err.Error()
 	}
-	return &rpc.PulseBringIP{Success: success, Message: msg}, nil
+	return &rpc.UpIpResponse{Success: success, Message: msg}, nil
 }
 
-/**
-
- */
-func (s *Server) BringDownIP(ctx context.Context, in *rpc.PulseBringIP) (*rpc.PulseBringIP, error) {
+// BringDownIP command to bring down any number of floating ips.
+func (s *Server) BringDownIP(ctx context.Context, in *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
 	DB.Logging.Debug("Server:BringDownIP() Bringing down IP(s)")
 	s.Lock()
 	defer s.Unlock()
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	success := true
 	msg := "success"
@@ -537,32 +535,33 @@ func (s *Server) BringDownIP(ctx context.Context, in *rpc.PulseBringIP) (*rpc.Pu
 		success = false
 		msg = err.Error()
 	}
-	return &rpc.PulseBringIP{Success: success, Message: msg}, nil
+	return &rpc.DownIpResponse{Success: success, Message: msg}, nil
 }
 
 // Logs Listens for new log entries and displays them in journal
-func (s *Server) Logs(ctx context.Context, in *rpc.PulseLogs) (*rpc.PulseLogs, error) {
+func (s *Server) Logs(ctx context.Context, in *rpc.LogsRequest) (*rpc.LogsResponse, error) {
 	if !CanCommunicate(ctx) {
-		return nil, errors.New("unauthorized")
+		return nil, errors.New(language.CLUSTER_UNATHORIZED)
 	}
 	// Log the incoming errors
 	switch in.Level {
-	case rpc.PulseLogs_DEBUG:
+	case rpc.LogsRequest_DEBUG:
 		log.Debugf("[%s] %s", in.Node, in.Message)
 		break
-	case rpc.PulseLogs_INFO:
+	case rpc.LogsRequest_INFO:
 		log.Infof("[%s] %s", in.Node, in.Message)
 		break
-	case rpc.PulseLogs_ERROR:
+	case rpc.LogsRequest_ERROR:
 		log.Errorf("[%s] %s", in.Node, in.Message)
 		break
-	case rpc.PulseLogs_WARNING:
+	case rpc.LogsRequest_WARNING:
 		log.Warnf("[%s] %s", in.Node, in.Message)
 		break
 	}
-	return &rpc.PulseLogs{}, nil
+	return &rpc.LogsResponse{}, nil
 }
 
-func (s *Server) Describe(ctx context.Context, in *rpc.PulseDescribe) (*rpc.PulseDescribe, error) {
-	return &rpc.PulseDescribe{}, nil
+// Describe command to return current node details
+func (s *Server) Describe(ctx context.Context, in *rpc.DescribeRequest) (*rpc.DescribeResponse, error) {
+	return &rpc.DescribeResponse{}, nil
 }

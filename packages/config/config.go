@@ -1,31 +1,30 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package config
 
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	log "github.com/sirupsen/logrus"
 	"github.com/syleron/pulseha/packages/jsonHelper"
 	"github.com/syleron/pulseha/packages/utils"
 	"io/ioutil"
 	"os"
+	"runtime"
 	"sync"
 )
 
@@ -34,9 +33,10 @@ var (
 )
 
 type Config struct {
-	Pulse  Local               `json:"pulseha"`
-	Groups map[string][]string `json:"floating_ip_groups"`
-	Nodes  map[string]*Node    `json:"nodes"`
+	Pulse   Local                  `json:"pulseha"`
+	Groups  map[string][]string    `json:"floating_ip_groups"`
+	Nodes   map[string]*Node       `json:"nodes"`
+	Plugins map[string]interface{} `json:"plugins"`
 	sync.Mutex
 }
 
@@ -47,9 +47,9 @@ type Local struct {
 	LocalNode           string `json:"local_node"`
 	ClusterToken        string `json:"cluster_token"`
 	LoggingLevel        string `json:"logging_level"`
-	AutoFailback		bool   `json:"auto_failback"`
-	LogToFile			bool   `json:"log_to_file"`
-	LogFileLocation		string  `json:"log_file_location"`
+	AutoFailback        bool   `json:"auto_failback"`
+	LogToFile           bool   `json:"log_to_file"`
+	LogFileLocation     string `json:"log_file_location"`
 }
 
 type Node struct {
@@ -59,9 +59,7 @@ type Node struct {
 	IPGroups map[string][]string `json:"group_assignments"`
 }
 
-/**
-Instantiate, setup and return our Config
-*/
+// New instantiates and setups up our config object
 func New() *Config {
 	cfg := Config{}
 	if err := cfg.Load(); err != nil {
@@ -85,13 +83,32 @@ func (c *Config) GetLocalNodeUUID() string {
 	return c.Pulse.LocalNode
 }
 
-//
-func (c *Config) GetLocalNode() Node {
-	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
-		return *node
+// GetLocalNode attempt to get local node defintion in our config.
+func (c *Config) GetLocalNode() (Node, error) {
+	if !c.ClusterCheck() {
+		return Node{}, errors.New("cluster check failed")
 	}
-	log.Fatal("Local node does not exist in local config.")
-	return Node{}
+	if node, ok := c.Nodes[c.Pulse.LocalNode]; ok {
+		return *node, nil
+	}
+	return Node{}, errors.New("local node not found in config")
+}
+
+func MyCaller() string {
+	// we get the callers as uintptrs - but we just need 1
+	fpcs := make([]uintptr, 1)
+	// skip 3 levels to get to the caller of whoever called Caller()
+	n := runtime.Callers(3, fpcs)
+	if n == 0 {
+		return "n/a" // proper error her would be better
+	}
+	// get the info of the actual function that's in the pointer
+	fun := runtime.FuncForPC(fpcs[0] - 1)
+	if fun == nil {
+		return "n/a"
+	}
+	// return its name
+	return fun.Name()
 }
 
 // Load - Used to load the config into memory
@@ -211,7 +228,7 @@ func (c *Config) LocalNode() Node {
 	if err != nil {
 		return Node{}
 	}
-	_, node, err :=  c.GetNodeByHostname(hostname)
+	_, node, err := c.GetNodeByHostname(hostname)
 	if err != nil {
 		return Node{}
 	}
@@ -223,20 +240,22 @@ func (c *Config) ClusterCheck() bool {
 	total := len(c.Nodes)
 	if total > 0 {
 		// if there is only one node we can assume it's ours
-		if total == 1 {
-			// make sure we have a bind IP/Port or we are not in a cluster
-			hostname, err := utils.GetHostname()
-			if err != nil {
-				return false
-			}
-			_, node, err :=  c.GetNodeByHostname(hostname)
-			if err != nil {
-				return false
-			}
-			if node.IP == "" && node.Port == "" {
-				return false
-			}
-		}
+		//if total == 1 {
+		//	// make sure we have a bind IP/Port or we are not in a cluster
+		//	hostname, err := utils.GetHostname()
+		//	if err != nil {
+		//		return false
+		//	}
+		//	_, node, err := c.GetNodeByHostname(hostname)
+		//	if err != nil {
+		//		return false
+		//	}
+		//	fmt.Println(node)
+		//	if node.IP == "" && node.Port == "" {
+		//		return false
+		//	}
+		//	//return false
+		//}
 		return true
 	}
 	return false
@@ -275,7 +294,7 @@ func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {
 // GetNodeByHostname - Get node by hostname
 func (c *Config) GetNodeByHostname(hostname string) (uid string, node Node, err error) {
 	for uid, node := range c.Nodes {
-		if node.Hostname == hostname  {
+		if node.Hostname == hostname {
 			return uid, *node, nil
 		}
 	}
@@ -302,7 +321,6 @@ func (c *Config) UpdateHostname(newHostname string) {
 	log.Debug("Config:UpdateHostname() Change local hostname to " + newHostname)
 	node := c.Nodes[c.GetLocalNodeUUID()]
 	node.Hostname = newHostname
-	fmt.Println(c)
 }
 
 // DefaultLocalConfig - Generate a default config to write
@@ -312,15 +330,16 @@ func (c *Config) SaveDefaultLocalConfig() error {
 			HealthCheckInterval: 1000,
 			FailOverInterval:    5000,
 			FailOverLimit:       10000,
-			AutoFailback:	     true,
+			AutoFailback:        true,
 			LocalNode:           "",
 			ClusterToken:        "",
 			LoggingLevel:        "info",
-			LogToFile:			 true,
+			LogToFile:           true,
 			LogFileLocation:     "/etc/pulseha/pulseha.log",
 		},
-		Groups: map[string][]string{},
-		Nodes:  map[string]*Node{},
+		Groups:  map[string][]string{},
+		Nodes:   map[string]*Node{},
+		Plugins: map[string]interface{}{},
 	}
 	// Convert struct back to JSON format
 	configJSON, err := json.MarshalIndent(defaultConfig, "", "    ")
@@ -331,6 +350,7 @@ func (c *Config) SaveDefaultLocalConfig() error {
 	c.Pulse = defaultConfig.Pulse
 	c.Groups = defaultConfig.Groups
 	c.Nodes = defaultConfig.Nodes
+	c.Plugins = make(map[string]interface{})
 	// Save back to file
 	err = ioutil.WriteFile(CONFIG_LOCATION, configJSON, 0644)
 	// Check for errors
@@ -338,5 +358,26 @@ func (c *Config) SaveDefaultLocalConfig() error {
 		log.Error("Unable to save config.json. There may be a permissions issue")
 		return err
 	}
+	return nil
+}
+
+func (c *Config) GetPluginConfig(pName string) (interface{}, error) {
+	log.Debug("Config:GetPluginConfig() Getting plugin config.. ", pName)
+	pluginConfig := c.Plugins[pName]
+	if pluginConfig != nil {
+		return c.Plugins[pName], nil
+	}
+	return nil, errors.New("plugin does not exist in config")
+}
+
+func (c *Config) SetPluginConfig(pName string, data interface{}) error {
+	log.Debug("Config:SetPluginConfig() Setting plugin config.. ", pName)
+	_, err := c.GetPluginConfig(pName)
+	if err != nil {
+		c.Lock()
+		c.Plugins[pName] = data
+		c.Unlock()
+	}
+	c.Save()
 	return nil
 }

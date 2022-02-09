@@ -1,20 +1,19 @@
-/*
-   PulseHA - HA Cluster Daemon
-   Copyright (C) 2017-2020  Andrew Zak <andrew@linux.com>
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-   This program is free software: you can redistribute it and/or modify
-   it under the terms of the GNU Affero General Public License as published
-   by the Free Software Foundation, either version 3 of the License, or
-   (at your option) any later version.
-
-   This program is distributed in the hope that it will be useful,
-   but WITHOUT ANY WARRANTY; without even the implied warranty of
-   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-   GNU Affero General Public License for more details.
-
-   You should have received a copy of the GNU Affero General Public License
-   along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*/
 package pulseha
 
 import (
@@ -25,18 +24,16 @@ import (
 	"strconv"
 )
 
-/**
-Health Check plugin type
-*/
+// PluginHC is the health check object structure
 type PluginHC interface {
 	Name() string
 	Version() float64
-	Send() (bool, bool)
+	Weight() int64
+	Run(db *Database) error
+	Send() error
 }
 
-/**
-Networking plugin type
-*/
+// PluginNet is the network plugin object structure
 type PluginNet interface {
 	Name() string
 	Version() float64
@@ -44,23 +41,21 @@ type PluginNet interface {
 	BringDownIPs(iface string, ips []string) error
 }
 
+// PluginGen is the general plugin object structure
 type PluginGen interface {
 	Name() string
 	Version() float64
 	Run(db *Database) error
 	OnMemberListStatusChange(members []Member)
+	OnMemberFailover(member Member)
 }
 
-/**
-Plugins struct
-*/
+// Plugins object structure which stores our plugins
 type Plugins struct {
 	modules []*Plugin
 }
 
-/**
-Struct for a specific plugin
-*/
+// Plugin Plugin object structure
 type Plugin struct {
 	Name    string
 	Version float64
@@ -86,9 +81,7 @@ func (p pluginType) String() string {
 	return pluginTypeNames[p-1]
 }
 
-/**
-Define each type of plugin to load
-*/
+// Setup defines each type of plugin to load
 func (p *Plugins) Setup() {
 	// Join any number of file paths into a single path
 	evtGlob := path.Join("/usr/local/lib/pulseha/", "/*.so")
@@ -122,9 +115,7 @@ func (p *Plugins) Setup() {
 	}
 }
 
-/**
-Validate that we have the required plugins
-*/
+// Validate ensures that minimal required plugins are loaded.
 func (p *Plugins) Validate() {
 	// make sure we have a networking plugin
 	if p.GetNetworkingPlugin() == nil {
@@ -132,10 +123,8 @@ func (p *Plugins) Validate() {
 	}
 }
 
-/**
-Load plugins of a specific type
-TODO: This needs to be cleaned up so code can be reused instead of repeated so much
-*/
+// Load is used to load a particular plugin type.
+// TODO: This needs to be cleaned up so code can be reused instead of repeated so much
 func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 	// TODO: Note: Unfortunately a switch statement must be used as you cannot dynamically typecast a variable.
 	for _, plugin := range pluginList {
@@ -179,6 +168,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 			}
 			// Add to the list of plugins
 			p.modules = append(p.modules, newPlugin)
+			go e.Run(DB)
 		case PluginNetworking:
 			// Make sure we are not loading another networking plugin.
 			// Only one networking plugin can be loaded at one time.
@@ -207,9 +197,7 @@ func (p *Plugins) Load(pluginType pluginType, pluginList []*plugin.Plugin) {
 	}
 }
 
-/**
-Returns a slice of health check plugins
-*/
+// GetHealthCheckPlugins is used to gather a slice of health check plugins.
 func (p *Plugins) GetHealthCheckPlugins() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
@@ -220,9 +208,7 @@ func (p *Plugins) GetHealthCheckPlugins() []*Plugin {
 	return modules
 }
 
-/**
-Returns a single networking plugin (as you should only ever have one loaded)
-*/
+// GetNetworkingPlugin is used to gather a slice of networking plugins
 func (p *Plugins) GetNetworkingPlugin() *Plugin {
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginNetworking {
@@ -232,10 +218,8 @@ func (p *Plugins) GetNetworkingPlugin() *Plugin {
 	return nil
 }
 
-/**
-Returns a slice of general plugins
-*/
-func (p *Plugins) GetGeneralPlugin() []*Plugin {
+// GetGeneralPlugins is used to gather a slice of general plugins
+func (p *Plugins) GetGeneralPlugins() []*Plugin {
 	modules := []*Plugin{}
 	for _, plgin := range p.modules {
 		if plgin.Type == PluginGeneral {
