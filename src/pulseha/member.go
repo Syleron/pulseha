@@ -214,7 +214,7 @@ func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 		m.SetStatus(rpc.MemberStatus_UNAVAILABLE) // This may not be required
 	}
 	// Make sure we have a response
-	if response != nil {
+	if response != nil && m != nil {
 		// Update our score
 		m.SetScore(int(response.(*rpc.HealthCheckResponse).Score))
 	}
