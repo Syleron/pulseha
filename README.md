@@ -175,15 +175,110 @@ $ pulsectl version
 
 ## Plugins
 
+PulseHA offers a plugin system to extend the built in functionality available.
+
+Each plugin with configurable options will be stored as part of the main PulseHA config.
+
+The following types of plugins are currently available:
+
+* Health Checks
+* Networking
+
 ### PulseHA-Netcore
 
+PulseHA requires a networking plugin for any floating address fencing.
 
+The default networking plugin can be built using the following command:
+
+```
+$ sudo make netcore
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-netcore
+...
+```
+
+There are no configurable options for this plugin.
 
 ### PulseHA-Email-Alerts
 
+The email alerts plugin offers email notifications upon failover.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make genemailalerts
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-genemailalerts
+...
+```
+
+The following are configurable options:
+
+* SmtpHost (Default: 127.0.0.1) - The network address for your SMTP host.
+* SmtpPort (Default: 587) - The network port for your SMTP host.
+* Username (Default: ) - Email credentials for sending via SMTP host.
+* Password (Default: ) - Email credentials for sending via SMTP host.
+* Email (Default: ) - The from address that will be used when sending an email via the SMTP host.
+
 ### PulseHA-Ping-Groups
 
+The Ping Groups plugin offers you to configure a single or group of network addresses as ICMP health checks.
+
+Note: Currently ONLY has IPv4 support.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make hcping
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-hcping
+...
+```
+
+The following are configurable options:
+
+* Groups (Default: []) - An array of group objects that contain a name string and network IP array.
+* Weight (Default: 10) - The PulseHA score weighting for this plugin if all checks pass.
+* Threshold (Default: 1) - The maximum number of address in a group that can fail before the health check fails.
+* FailureCount (Default: 1) - The maximum number of ICMP attempts per address before flagging the network IP as unavailable.
+
 ### PulseHA-Serial
+
+The Serial plugin offers serial as an additional method of communication.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make hcserial
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-hcserial
+...
+```
+
+The following are configurable options:
+
+* PortName (Default: /dev/ttyS0) - The name serial port on Linux.
+* BaudRate (Default: 9600) - The configured baud rate for the specified port.
 
 ## Acknowledgments
 

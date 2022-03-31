@@ -336,6 +336,13 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 		DB.Logging.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
+	// make sure we are still the highest scoring member
+	highScorer := m.GetHighestScoreMember()
+	if highScorer != localMember {
+		log.Debug("A different node has a higher score. Promoting...")
+		m.PromoteMember(highScorer.Hostname)
+		return true
+	}
 	for _, member := range m.Members {
 		if member.GetHostname() == localMember.Hostname {
 			continue
@@ -422,18 +429,46 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 	return &Member{}, errors.New("MemberList:getNextActiveMember() No new active member found")
 }
 
+// TODO: Check if everyone is the same
 func (m *MemberList) GetHighestScoreMember() *Member {
 	var score int = -1
 	var winningMember *Member
+	
+	// First check to see if we all have the same score
+	for _, node := range DB.Config.Nodes {
+		member := m.GetMemberByHostname(node.Hostname)
+		
+		// If this is the first round, set our score and move onto the next
+		if score < 0 {
+			score = member.Score
+			continue
+		} 
+		
+		// Check if our score is different
+		if score != member.Score {
+			// We are different, reset our score and break from the loop
+			score = -1
+			break
+		}
+		
+		// otherwise we are the same! return our current active node.
+		_, activeMember := m.GetActiveMember()
+		return activeMember
+	}
+	
+	// otherwise calculate who has the winning score
 	for _, node := range DB.Config.Nodes {
 		member := m.GetMemberByHostname(node.Hostname)
 		if member == nil {
 			panic("MemberList:getNextActiveMember() Cannot get member by hostname " + node.Hostname)
 		}
-		if member.Score > score && member.GetStatus() == rpc.MemberStatus_PASSIVE {
+		if member.Score > score {
+			score = member.Score
 			winningMember = member
 		}
 	}
+	
+	log.Debug("MemberList:GetHighestScoreMember() Winning member: ", winningMember)
 	return winningMember
 }
 
