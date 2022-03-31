@@ -4,7 +4,7 @@ package config
 
 type Config struct {
 	// An array of Ping groups
-	Groups map[string][]Group
+	Groups []Group
 	// Health check weight for failover calculations
 	Weight int32
 	// How many times a failure can occur before considering down.
@@ -12,6 +12,7 @@ type Config struct {
 }
 
 type Group struct {
+	Name string
 	Ips []string
 }
 
@@ -22,7 +23,7 @@ func (c *Config) Validate() error {
 
 func (c *Config) GenerateDefaultConfig() *Config {
 	return &Config{
-		Groups:    make(map[string][]Group),
+		Groups:    make([]Group, 0),
 		Weight:    10,
 		Threshold: 2,
 	}

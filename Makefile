@@ -44,3 +44,5 @@ endif
 	systemctl daemon-reload
 install-netcore:
 	 cp ./plugins/netcore/bin/networking.so /usr/local/lib/pulseha
+install-hcping:
+	 cp ./plugins/hcPing/bin/hcping.so /usr/local/lib/pulseha

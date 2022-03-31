@@ -175,15 +175,80 @@ $ pulsectl version
 
 ## Plugins
 
+PulseHA offers a plugin system to extend the built in functionality available.
+
+Each plugin with configurable options will be stored as part of the main PulseHA config.
+
+The following types of plugins are currently available:
+
+* Health Checks
+* Networking
+
 ### PulseHA-Netcore
 
+PulseHA requires a networking plugin for any floating address fencing.
 
+The default networking plugin can be built using the following command:
+
+```
+$ sudo make plugin-netcore
+...
+```
+
+The following are configurable options:
+
+* 
 
 ### PulseHA-Email-Alerts
 
+The email alerts plugin offers email notifications upon failover.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make plugin-email
+...
+```
+
+The following are configurable options:
+
+* SmtpHost - The network address for your SMTP host.
+* SmtpPort - The network port for your SMTP host.
+* Username - Email credentials for sending via SMTP host.
+* Password - Email credentials for sending via SMTP host.
+* Email - The from address that will be used when sending an email via the SMTP host.
+
 ### PulseHA-Ping-Groups
 
+The Ping Groups plugin offers you to configure a single or group of network addresses as ICMP health checks.
+
+Note: Currently ONLY has IPv4 support.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make plugin-hcping
+...
+```
+
+The following are configurable options:
+
+*
+
 ### PulseHA-Serial
+
+The Serial plugin offers serial as an additional method of communication.
+
+Use the following command to build this plugin:
+
+```
+$ sudo make plugin-hcserial
+...
+```
+
+The following are configurable options:
+
+*
 
 ## Acknowledgments
 

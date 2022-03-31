@@ -28,6 +28,7 @@ func (hcs *HealthChecks) ProcessHCs() bool {
 	for _, hc := range hcs.Plugins {
 		log.Debug("Sending health check: " + hc.Name)
 		if err := hc.Plugin.(PluginHC).Send(); err != nil {
+			log.Debug("health check error: ", err)
 			// TODO: Do something on error
 			continue
 		}
