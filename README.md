@@ -195,9 +195,7 @@ $ sudo make plugin-netcore
 ...
 ```
 
-The following are configurable options:
-
-* 
+There are no configurable options for this plugin.
 
 ### PulseHA-Email-Alerts
 
@@ -212,11 +210,11 @@ $ sudo make plugin-email
 
 The following are configurable options:
 
-* SmtpHost - The network address for your SMTP host.
-* SmtpPort - The network port for your SMTP host.
-* Username - Email credentials for sending via SMTP host.
-* Password - Email credentials for sending via SMTP host.
-* Email - The from address that will be used when sending an email via the SMTP host.
+* SmtpHost (Default: 127.0.0.1) - The network address for your SMTP host.
+* SmtpPort (Default: 587) - The network port for your SMTP host.
+* Username (Default: ) - Email credentials for sending via SMTP host.
+* Password (Default: ) - Email credentials for sending via SMTP host.
+* Email (Default: ) - The from address that will be used when sending an email via the SMTP host.
 
 ### PulseHA-Ping-Groups
 
@@ -233,7 +231,10 @@ $ sudo make plugin-hcping
 
 The following are configurable options:
 
-*
+* Groups (Default: []) - An array of group objects that contain a name string and network IP array.
+* Weight (Default: 10) - The PulseHA score weighting for this plugin if all checks pass.
+* Threshold (Default: 1) - The maximum number of address in a group that can fail before the health check fails.
+* FailureCount (Default: 1) - The maximum number of ICMP attempts per address before flagging the network IP as unavailable.
 
 ### PulseHA-Serial
 
