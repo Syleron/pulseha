@@ -16,6 +16,8 @@ netcore: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/netcore/bin/networking.so ./plugins/netcore
 hcping: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/hcPing/bin/hcping.so ./plugins/hcPing
+hcserial: get
+	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/hcSerial/bin/hcserial.so ./plugins/hcSerial
 genemailalerts: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
@@ -46,3 +48,7 @@ install-netcore:
 	 cp ./plugins/netcore/bin/networking.so /usr/local/lib/pulseha
 install-hcping:
 	 cp ./plugins/hcPing/bin/hcping.so /usr/local/lib/pulseha
+install-hcserial:
+	 cp ./plugins/hcSerial/bin/hcserial.so /usr/local/lib/pulseha
+install-genemailalerts:
+	 cp ./plugins/genEmailAlerts/bin/genemail.so /usr/local/lib/pulseha

@@ -191,7 +191,14 @@ PulseHA requires a networking plugin for any floating address fencing.
 The default networking plugin can be built using the following command:
 
 ```
-$ sudo make plugin-netcore
+$ sudo make netcore
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-netcore
 ...
 ```
 
@@ -204,7 +211,14 @@ The email alerts plugin offers email notifications upon failover.
 Use the following command to build this plugin:
 
 ```
-$ sudo make plugin-email
+$ sudo make genemailalerts
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-genemailalerts
 ...
 ```
 
@@ -225,7 +239,14 @@ Note: Currently ONLY has IPv4 support.
 Use the following command to build this plugin:
 
 ```
-$ sudo make plugin-hcping
+$ sudo make hcping
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-hcping
 ...
 ```
 
@@ -243,13 +264,21 @@ The Serial plugin offers serial as an additional method of communication.
 Use the following command to build this plugin:
 
 ```
-$ sudo make plugin-hcserial
+$ sudo make hcserial
+...
+```
+
+Use the following command to install the plugin:
+
+```
+$ sudo install plugin-hcserial
 ...
 ```
 
 The following are configurable options:
 
-*
+* PortName (Default: /dev/ttyS0) - The name serial port on Linux.
+* BaudRate (Default: 9600) - The configured baud rate for the specified port.
 
 ## Acknowledgments
 
