@@ -170,7 +170,7 @@ func ICMPv4(Ipv4Addr string) error {
 		//log.Error("ICMP request failed.")
 		return err
 	}
-	if strings.Contains(out.String(), "0") {
+	if strings.Contains(out.String(), "1") {
 		return errors.New("failed to reach host")
 	}
 	return nil

@@ -433,6 +433,30 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 func (m *MemberList) GetHighestScoreMember() *Member {
 	var score int = -1
 	var winningMember *Member
+	
+	// First check to see if we all have the same score
+	for _, node := range DB.Config.Nodes {
+		member := m.GetMemberByHostname(node.Hostname)
+		
+		// If this is the first round, set our score and move onto the next
+		if score < 0 {
+			score = member.Score
+			continue
+		} 
+		
+		// Check if our score is different
+		if score != member.Score {
+			// We are different, reset our score and break from the loop
+			score = -1
+			break
+		}
+		
+		// otherwise we are the same! return our current active node.
+		_, activeMember := m.GetActiveMember()
+		return activeMember
+	}
+	
+	// otherwise calculate who has the winning score
 	for _, node := range DB.Config.Nodes {
 		member := m.GetMemberByHostname(node.Hostname)
 		if member == nil {
@@ -443,7 +467,8 @@ func (m *MemberList) GetHighestScoreMember() *Member {
 			winningMember = member
 		}
 	}
-	log.Debug(">> WINNING HIGHEST SCORE >>>", winningMember)
+	
+	log.Debug("MemberList:GetHighestScoreMember() Winning member: ", winningMember)
 	return winningMember
 }
 
