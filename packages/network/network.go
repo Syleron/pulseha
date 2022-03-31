@@ -157,20 +157,21 @@ func Curl(httpRequestURL string) bool {
  */
 func ICMPv4(Ipv4Addr string) error {
 	// Validate the IP address to ensure it's an IPv4 addr.
-	if err := utils.ValidIPAddress(Ipv4Addr); err != nil {
-		return errors.New("invalid UPv4 address for ICMP check")
-	}
+	// if err := utils.ValidIPAddress(Ipv4Addr); err != nil {
+	// 	return errors.New("invalid UPv4 address for ICMP check")
+	// }
 	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
 	cmd := exec.Command("bash", "-c", cmds)
-	cmd.Stdin = strings.NewReader("some input")
+	// cmd.Stdin = strings.NewReader("some input")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
-		//log.Error("ICMP request failed.")
+		log.Error("ICMP request failed.", Ipv4Addr)
 		return err
 	}
-	if strings.Contains(out.String(), "1") {
+	if !strings.Contains(out.String(), "0") {
+		log.Error("ICMP request failed. ", Ipv4Addr, out.String())
 		return errors.New("failed to reach host")
 	}
 	return nil
