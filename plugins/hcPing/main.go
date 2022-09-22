@@ -4,7 +4,6 @@ import (
 	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/plugins/hcPing/packages/config"
 	"github.com/syleron/pulseha/src/pulseha"
-	"fmt"
 )
 
 type PulseHCPing bool
@@ -12,10 +11,13 @@ type PulseHCPing bool
 const PluginName = "PingHC"
 const PluginVersion = 1.0
 
-const PluginWeight = 10
 
 var (
 	DB   *pulseha.Database
+    PluginWeight int64 = 10
+	
+	Threshold int64 = 1
+	FailureCount int64 = 1
 )
 
 func (e PulseHCPing) Name() string {
@@ -35,17 +37,28 @@ func (e PulseHCPing) Run(db *pulseha.Database) error {
 	DB = db
 	
 	// Check to see if we have a plugin section
-	_, err := db.Config.GetPluginConfig(e.Name())
+	conf, err := db.Config.GetPluginConfig(e.Name())
 	
-	// Define config object
-	conf := config.Config{}
 	
 	// Write default section if one doesn't exist
 	if err != nil {
-		if err := db.Config.SetPluginConfig(e.Name(), conf.GenerateDefaultConfig()); err != nil {
+		// Define config object
+		c := config.Config{}
+		if err := db.Config.SetPluginConfig(e.Name(), c.GenerateDefaultConfig()); err != nil {
 			// TODO: Do something with this error
 		}
+		// We had to write a default config so the rest of Run will be skipped
+		return nil
 	}
+	
+	// Type our config section
+	confC := conf.(map[string]interface{})
+	
+	// Set our custom config options
+	PluginWeight = int64(confC["weight"].(float64))
+	Threshold = int64(confC["threshold"].(float64))
+	FailureCount = int64(confC["failureCount"].(float64))
+	
 	return nil
 }
 
@@ -62,7 +75,7 @@ func (e PulseHCPing) Send() error {
 	confC := conf.(map[string]interface{})
 	
 	// Iterate through our groups
-	for _, group := range confC["Groups"].([]interface{}) {
+	for _, group := range confC["groups"].([]interface{}) {
 		g := group.(map[string]interface{})
 		ips := g["ips"].([]interface{})
 		// name := g["name"].(string)

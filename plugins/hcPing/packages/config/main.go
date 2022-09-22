@@ -4,16 +4,18 @@ package config
 
 type Config struct {
 	// An array of Ping groups
-	Groups []Group
+	Groups []Group `json:"groups"`
 	// Health check weight for failover calculations
-	Weight int32
-	// How many times a failure can occur before considering down.
-	Threshold int32
+	Weight int32 `json:"weight"`
+	// How many address failures can occur before considering down.
+	Threshold int32 `json:"threshold"`
+	// Maximum number of icmp failures per address
+	FailureCount int32 `json:"failureCount"`
 }
 
 type Group struct {
-	Name string
-	Ips []string
+	Name string `json:"name"`
+	Ips []string `json:"ips"`
 }
 
 // Validate that our config is of the proper structure and data.
@@ -25,6 +27,7 @@ func (c *Config) GenerateDefaultConfig() *Config {
 	return &Config{
 		Groups:    make([]Group, 0),
 		Weight:    10,
-		Threshold: 2,
+		Threshold: 1,
+		FailureCount: 1,
 	}
 }
