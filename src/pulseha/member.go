@@ -236,7 +236,7 @@ func (m *Member) MakeActive() error {
 		return errors.New("unable to retrieve local node configuration")
 	}
 
-	// Are we making ourself active?
+	// Are we making ourselves active?
 	if m.GetHostname() == localNode.Hostname {
 		// Reset vars
 		m.SetLatency("")

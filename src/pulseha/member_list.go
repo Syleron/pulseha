@@ -336,11 +336,19 @@ func (m *MemberList) AddHealthCheckHandler() bool {
 		DB.Logging.Debug("MemberList:addHealthCheckHandler() Health check handler has stopped as it seems we are no longer active")
 		return true
 	}
-	// make sure we are still the highest scoring member
-	highScorer := m.GetHighestScoreMember()
+	//make sure we are still the highest scoring member
+	highScorer, err := m.GetHighestScoreMember()
+
+	if err != nil {
+		// TODO: better handling
+		panic(err)
+	}
+
 	if highScorer != localMember {
 		log.Debug("A different node has a higher score. Promoting...")
-		m.PromoteMember(highScorer.Hostname)
+		if err := m.PromoteMember(highScorer.Hostname); err != nil {
+			log.Debug(err)
+		}
 		return true
 	}
 	for _, member := range m.Members {
@@ -430,46 +438,60 @@ func (m *MemberList) GetNextActiveMember() (*Member, error) {
 }
 
 // TODO: Check if everyone is the same
-func (m *MemberList) GetHighestScoreMember() *Member {
+func (m *MemberList) GetHighestScoreMember() (*Member, error) {
 	var score int = -1
 	var winningMember *Member
-	
+
 	// First check to see if we all have the same score
 	for _, node := range DB.Config.Nodes {
 		member := m.GetMemberByHostname(node.Hostname)
-		
+
+		// Are we the only member?
+		if len(DB.Config.Nodes) == 1 {
+			return member, nil
+		}
+
 		// If this is the first round, set our score and move onto the next
 		if score < 0 {
 			score = member.Score
 			continue
-		} 
-		
+		}
+
 		// Check if our score is different
 		if score != member.Score {
 			// We are different, reset our score and break from the loop
 			score = -1
 			break
 		}
-		
+
 		// otherwise we are the same! return our current active node.
 		_, activeMember := m.GetActiveMember()
-		return activeMember
+		return activeMember, nil
 	}
-	
+
 	// otherwise calculate who has the winning score
 	for _, node := range DB.Config.Nodes {
+		// Get our member by hostname
 		member := m.GetMemberByHostname(node.Hostname)
+
+		// Make sure our member is not nil
 		if member == nil {
 			panic("MemberList:getNextActiveMember() Cannot get member by hostname " + node.Hostname)
 		}
+
 		if member.Score > score {
 			score = member.Score
 			winningMember = member
 		}
 	}
-	
+
+	// Handle encase we are unable to get a new member for whatever logical reason
+	if winningMember == nil {
+		return nil, errors.New("failed to find winning member")
+	}
+
 	log.Debug("MemberList:GetHighestScoreMember() Winning member: ", winningMember)
-	return winningMember
+	return winningMember, nil
 }
 
 // GetLocalMember returns the local member object.
