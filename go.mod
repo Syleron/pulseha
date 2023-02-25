@@ -12,7 +12,7 @@ require (
 	github.com/ssgreg/journald v1.0.0 // indirect
 	github.com/ssgreg/journalhook v0.0.0-20180529133218-9a0802d16187
 	github.com/vishvananda/netlink v1.1.0
-	golang.org/x/sys v0.0.0-20190813064441-fde4db37ae7a
+	golang.org/x/sys v0.1.0
 	google.golang.org/grpc v1.27.1
 	google.golang.org/protobuf v1.25.0
 )
