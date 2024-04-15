@@ -22,7 +22,6 @@ genemailalerts: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
 	 go mod download
-	 go get -u github.com/golang/protobuf/protoc-gen-go
 cli: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulsectl/bin/pulsectl ./cmd/pulsectl
 protos:
