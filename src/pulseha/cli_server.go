@@ -63,7 +63,7 @@ func (s *CLIServer) Join(ctx context.Context, in *rpc.JoinRequest) (*rpc.JoinRes
 	if !DB.Config.ClusterCheck() {
 		// Validate our IP & Port
 		i, _ := strconv.Atoi(in.BindPort)
-		if i == 0 && i > 65535 {
+		if i < 1 || i > 65535 {
 			return &rpc.JoinResponse{
 				Success:   false,
 				Message:   "Invalid port range",
@@ -360,7 +360,7 @@ func (s *CLIServer) Create(ctx context.Context, in *rpc.CreateRequest) (*rpc.Cre
 	if !DB.Config.ClusterCheck() {
 		// Validate our IP & Port
 		i, _ := strconv.Atoi(in.BindPort)
-		if i == 0 && i > 65535 {
+		if i < 1 || i > 65535 {
 			return &rpc.CreateResponse{
 				Success:   false,
 				Message:   "Invalid port range",
