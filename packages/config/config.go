@@ -196,7 +196,7 @@ func (c *Config) Validate() error {
 		return errors.New("unable to load nodes section of the config")
 	}
 
-	// if we are in a cluster.. does our hostname exist?
+	// if we are in a cluster. does our hostname exist?
 	if c.ClusterCheck() {
 		var exists = func() bool {
 			for _, node := range c.Nodes {
@@ -261,7 +261,8 @@ func (c *Config) ClusterCheck() bool {
 	return false
 }
 
-/**
+/*
+*
 Returns the interface the group is assigned to
 */
 func (c *Config) GetGroupIface(hostname string, groupName string) (ifaceName string, err error) {
@@ -279,7 +280,8 @@ func (c *Config) GetGroupIface(hostname string, groupName string) (ifaceName str
 	return "", errors.New("cannot find interface assignment for group")
 }
 
-/**
+/*
+*
 Returns the hostname for a node based of it's IP address
 */
 func (c *Config) GetNodeHostnameByAddress(address string) (string, error) {

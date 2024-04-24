@@ -45,3 +45,4 @@ plugins/netcore/bin/
 .idea/
 
 go.sum
+/vendor/
