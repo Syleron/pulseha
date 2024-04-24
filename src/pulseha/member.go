@@ -214,7 +214,7 @@ func (m *Member) RoutineHC(data *rpc.HealthCheckRequest) {
 		m.SetStatus(rpc.MemberStatus_UNAVAILABLE) // This may not be required
 	}
 	// Make sure we have a response
-	if response != nil && m != nil {
+	if response != nil && response.(*rpc.HealthCheckResponse) != nil {
 		// Update our score
 		m.SetScore(int(response.(*rpc.HealthCheckResponse).Score))
 	}
@@ -331,7 +331,9 @@ func (m *Member) MakePassive() error {
 
 // BringUpIPs used to bring up a particular floating address on a member.
 // Note: We need to know the group to work out what interface to
-//       bring it up on.
+//
+//	bring it up on.
+//
 // TODO: Return an error instead of a boolean
 func (m *Member) BringUpIPs(ips []string, group string) bool {
 	iface, err := DB.Config.GetGroupIface(m.Hostname, group)
