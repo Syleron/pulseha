@@ -21,7 +21,7 @@ hcserial: get
 genemailalerts: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
-	 go mod vedndor
+	 go mod vendor
 cli: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulsectl/bin/pulsectl ./cmd/pulsectl
 protos:
