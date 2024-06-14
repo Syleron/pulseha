@@ -41,7 +41,7 @@ endif
 	#chmod +x /etc/pulsectl/pulse
 	if [ ! -d "/etc/pulseha/" ]; then mkdir /etc/pulseha/; fi
 	if [ ! -d "/usr/local/lib/pulseha" ]; then mkdir /usr/local/lib/pulseha; fi
-	cp pulseha.service /etc/systemd/system/
+	cp pulseha.service /usr/lib/systemd/system/
 	systemctl daemon-reload
 install-netcore:
 	 cp ./plugins/netcore/bin/networking.so /usr/local/lib/pulseha
