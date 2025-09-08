@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,36 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+// isLocalIP checks whether the given IP address is assigned to a local interface
+func isLocalIP(ip string) bool {
+    if ip == "127.0.0.1" || ip == "::1" {
+        return true
+    }
+    ifaces, err := net.Interfaces()
+    if err != nil {
+        return false
+    }
+    for _, iface := range ifaces {
+        addrs, err := iface.Addrs()
+        if err != nil {
+            continue
+        }
+        for _, addr := range addrs {
+            switch v := addr.(type) {
+            case *net.IPNet:
+                if v.IP.String() == ip {
+                    return true
+                }
+            case *net.IPAddr:
+                if v.IP.String() == ip {
+                    return true
+                }
+            }
+        }
+    }
+    return false
+}
 
 type Client struct {
 	Connection *grpc.ClientConn
@@ -455,6 +486,58 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 		return fmt.Errorf("successfully joined cluster but failed to save local config: %v", err)
 	}
 
+	// Post-join validation and health checks
+	// 1) Validate bind-ip is local (if provided)
+	var warnings []string
+	if bindIP != "" {
+		if !isLocalIP(bindIP) {
+			warnings = append(warnings, fmt.Sprintf("bind-ip %s does not match any local interface", bindIP))
+		}
+	}
+
+	// 2) Detect duplicate bind tuple (IP:Port) with existing nodes
+	if localNode, ok := cfg.Nodes[resp.NodeId]; ok {
+		for id, node := range cfg.Nodes {
+			if id == resp.NodeId {
+				continue
+			}
+			if node.IP == localNode.IP && node.Port == localNode.Port && node.IP != "" && node.Port != "" {
+				warnings = append(warnings, fmt.Sprintf("bind %s:%s conflicts with existing node %s", node.IP, node.Port, id))
+			}
+		}
+	}
+
+	// 3) Wait briefly for local daemon to load new config and report full membership
+	// Poll Status up to ~8s
+	expectedMembers := len(cfg.Nodes)
+	membershipEstablished := false
+	for i := 0; i < 8; i++ {
+		statusResp, statusErr := c.CLI().Status(context.Background(), &rpc.StatusRequest{})
+		if statusErr == nil && statusResp != nil {
+			if len(statusResp.Members) >= expectedMembers {
+				membershipEstablished = true
+				break
+			}
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if !membershipEstablished {
+		warnings = append(warnings, "node membership not established within timeout")
+	}
+
+	// If we detected any critical issues, provide actionable guidance and return an error
+	if len(warnings) > 0 {
+		for _, w := range warnings {
+			fmt.Printf("WARN  %s\n", w)
+		}
+		// Suggest corrective action when bind-ip seems wrong and a conflict exists
+		if bindIP != "" && !isLocalIP(bindIP) {
+			fmt.Printf("HINT  Re-run with a local --bind-ip or update /etc/pulseha/config.json and restart pulseha.\n")
+		}
+		return fmt.Errorf("join configuration applied, but cluster membership not healthy")
+	}
+
 	fmt.Printf("Successfully joined cluster with node ID: %s\n", resp.NodeId)
 	return nil
 }
@@ -468,10 +551,55 @@ func (c *Client) LeaveCluster() error {
 		return fmt.Errorf("failed to get local node ID: %v", err)
 	}
 
-	_, err = c.CLI().Leave(context.Background(), &rpc.LeaveRequest{
-		NodeId: localNodeID,
-	})
-	return err
+	resp, err := c.CLI().Leave(context.Background(), &rpc.LeaveRequest{NodeId: localNodeID})
+	if err != nil {
+		return fmt.Errorf("leave request failed: %v\nHINT  If the local daemon is unreachable, try: pulsectl cluster leave --address <leader-ip:port>", err)
+	}
+	if resp == nil || !resp.Success {
+		msg := "unknown error"
+		if resp != nil && resp.Message != "" {
+			msg = resp.Message
+		}
+		return fmt.Errorf("leave failed: %s", msg)
+	}
+	fmt.Println(resp.Message)
+	return nil
+}
+
+// LeaveClusterVia attempts to issue a leave against a specific cluster member (leader/peer)
+func (c *Client) LeaveClusterVia(address string, nodeID string) error {
+    host, port := address, "8080"
+    if strings.Contains(address, ":") {
+        parts := strings.Split(address, ":")
+        if len(parts) == 2 {
+            host = parts[0]
+            port = parts[1]
+        }
+    }
+    if err := c.Connect(host, port, false); err != nil {
+        return fmt.Errorf("failed to connect to %s:%s: %v", host, port, err)
+    }
+    if nodeID == "" {
+        cfg := c.GetConfig()
+        var err error
+        nodeID, err = cfg.GetLocalNodeUUID()
+        if err != nil {
+            return fmt.Errorf("failed to get local node ID: %v", err)
+        }
+    }
+    resp, err := c.CLI().Leave(context.Background(), &rpc.LeaveRequest{NodeId: nodeID})
+    if err != nil {
+        return fmt.Errorf("leave request to %s:%s failed: %v", host, port, err)
+    }
+    if resp == nil || !resp.Success {
+        msg := "unknown error"
+        if resp != nil && resp.Message != "" {
+            msg = resp.Message
+        }
+        return fmt.Errorf("leave failed via %s:%s: %s", host, port, msg)
+    }
+    fmt.Println(resp.Message)
+    return nil
 }
 
 // GetClusterStatus returns the current cluster status

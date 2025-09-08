@@ -3,12 +3,47 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/rpc"
 )
+
+// isLocalInterfaceIP checks if an IP is assigned to a local interface
+func isLocalInterfaceIP(ip string) bool {
+    if ip == "" {
+        return false
+    }
+    if ip == "127.0.0.1" || ip == "::1" {
+        return true
+    }
+    ifaces, err := net.Interfaces()
+    if err != nil {
+        return false
+    }
+    for _, iface := range ifaces {
+        addrs, err := iface.Addrs()
+        if err != nil {
+            continue
+        }
+        for _, addr := range addrs {
+            switch v := addr.(type) {
+            case *net.IPNet:
+                if v.IP.String() == ip {
+                    return true
+                }
+            case *net.IPAddr:
+                if v.IP.String() == ip {
+                    return true
+                }
+            }
+        }
+    }
+    return false
+}
 
 func NewClusterCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -24,6 +59,7 @@ func NewClusterCmd() *cobra.Command {
 		newClusterTokenCmd(),
 		newClusterModeCmd(),
 		newNetworkCmd(),
+		newClusterDoctorCmd(),
 	)
 
 	return cmd
@@ -86,18 +122,24 @@ func newClusterJoinCmd() *cobra.Command {
 }
 
 func newClusterLeaveCmd() *cobra.Command {
+	var address string
+	var nodeID string
 	cmd := &cobra.Command{
 		Use:   "leave",
 		Short: "Leave the current cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client, err := client.New()
+			c, err := client.New()
 			if err != nil {
 				return err
 			}
-
-			return client.LeaveCluster()
+			if address != "" {
+				return c.LeaveClusterVia(address, nodeID)
+			}
+			return c.LeaveCluster()
 		},
 	}
+	cmd.Flags().StringVar(&address, "address", "", "Address of a cluster member to send leave to (IP:port)")
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID to remove (defaults to local node)")
 
 	return cmd
 }
@@ -213,6 +255,60 @@ func newNetworkResyncCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&createGroups, "create-default-groups", false, "Create default groups for new interfaces")
 	return cmd
+}
+
+// newClusterDoctorCmd adds diagnostics for common misconfigurations
+func newClusterDoctorCmd() *cobra.Command {
+    cmd := &cobra.Command{
+        Use:   "doctor",
+        Short: "Diagnose common cluster issues on this node",
+        RunE: func(cmd *cobra.Command, args []string) error {
+            // Load current config
+            cfg := config.New()
+            // Check local node entry
+            localID, err := cfg.GetLocalNodeUUID()
+            if err != nil {
+                return fmt.Errorf("no local node configured: %v", err)
+            }
+            node := cfg.Nodes[localID]
+            if node == nil {
+                return fmt.Errorf("local node %s not found in config", localID)
+            }
+
+            // 1) Local bind-ip is assigned
+            if !isLocalInterfaceIP(node.IP) {
+                return fmt.Errorf("bind-ip %s is not assigned to any local interface", node.IP)
+            }
+
+            // 2) Duplicate bind tuple
+            for id, n := range cfg.Nodes {
+                if id == localID {
+                    continue
+                }
+                if n.IP == node.IP && n.Port == node.Port {
+                    return fmt.Errorf("bind %s:%s conflicts with node %s (%s)", n.IP, n.Port, id, n.Hostname)
+                }
+            }
+
+            // 3) Peer connectivity basic checks
+            // Try to connect TCP to each peer
+            for id, n := range cfg.Nodes {
+                if id == localID {
+                    continue
+                }
+                addr := net.JoinHostPort(n.IP, n.Port)
+                conn, err := net.DialTimeout("tcp", addr, 750*time.Millisecond)
+                if err != nil {
+                    return fmt.Errorf("cannot reach peer %s at %s: %v", n.Hostname, addr, err)
+                }
+                _ = conn.Close()
+            }
+
+            fmt.Println("Doctor checks passed: local bind IP valid, no conflicts, peers reachable")
+            return nil
+        },
+    }
+    return cmd
 }
 
 // createCluster creates a new cluster

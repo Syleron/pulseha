@@ -109,9 +109,9 @@ func printClusterStatus(status *client.ClusterStatus) error {
 	fmt.Printf("Mode: %s\n", status.Mode)
 	fmt.Printf("==============\n")
 
-	// Print node information
-	fmt.Printf("\nNodes:\n")
-	fmt.Printf("------\n")
+	// Print live member information
+	fmt.Printf("\nLive Members:\n")
+	fmt.Printf("-------------\n")
 	for _, member := range status.Members {
 		fmt.Printf("\nNode: %s\n", member.Hostname)
 		fmt.Printf("Address: %s:%s\n", member.IP, member.Port)
@@ -127,6 +127,44 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		}
 		if member.Latency != "" {
 			fmt.Printf("Latency: %s\n", member.Latency)
+		}
+	}
+
+	// Derive configured-but-not-live nodes
+	liveHosts := make(map[string]struct{})
+	liveAddr := make(map[string]struct{})
+	for _, m := range status.Members {
+		if m.Hostname != "" {
+			liveHosts[m.Hostname] = struct{}{}
+		}
+		if m.IP != "" && m.Port != "" {
+			liveAddr[m.IP+":"+m.Port] = struct{}{}
+		}
+	}
+
+	// Fetch configured nodes from current config
+	c, err := client.New()
+	if err == nil {
+		cfg := c.GetConfig()
+		var printedHeader bool
+		for id, node := range cfg.Nodes {
+			_, hostLive := liveHosts[node.Hostname]
+			_, addrLive := liveAddr[node.IP+":"+node.Port]
+			if hostLive || addrLive {
+				continue
+			}
+			if !printedHeader {
+				fmt.Printf("\nConfigured Nodes (not live):\n")
+				fmt.Printf("---------------------------\n")
+				printedHeader = true
+			}
+			fmt.Printf("\nNode ID: %s\n", id)
+			fmt.Printf("Hostname: %s\n", node.Hostname)
+			fmt.Printf("Configured Address: %s:%s\n", node.IP, node.Port)
+			// Hint if address conflicts with a live member
+			if _, conflict := liveAddr[node.IP+":"+node.Port]; conflict {
+				fmt.Printf("Hint: Address conflicts with a live member at %s:%s\n", node.IP, node.Port)
+			}
 		}
 	}
 
