@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -417,10 +418,19 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 
 	// Validate cluster token for existing cluster
 	s.logger.Debugf("Validating cluster token for join...")
-	clusterToken := s.config.Pulse.ClusterToken // Direct read - config token shouldn't change during join
-	s.logger.Debugf("Expected token: %s, Received token: %s", clusterToken, req.Token)
+	receivedToken := strings.TrimSpace(req.Token)
+	receivedToken = strings.TrimPrefix(receivedToken, "Bearer ")
+	receivedToken = strings.TrimPrefix(receivedToken, "bearer ")
+	clusterToken := strings.TrimSpace(s.config.Pulse.ClusterToken) // Direct read - config token shouldn't change during join
+	redact := func(t string) string {
+		if len(t) <= 8 {
+			return "***"
+		}
+		return "***" + t[len(t)-6:]
+	}
+	s.logger.Debugf("Token debug (redacted) - expected=%s received=%s", redact(clusterToken), redact(receivedToken))
 
-	if req.Token != clusterToken {
+	if !strings.EqualFold(receivedToken, clusterToken) {
 		s.logger.Warning("Invalid cluster join token received")
 		return &rpc.JoinResponse{
 			Success: false,
