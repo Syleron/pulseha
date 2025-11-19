@@ -56,3 +56,6 @@ debug_*
 
 # IDE
 .vscode/
+
+# Generated protobuf sources
+*.pb.go
