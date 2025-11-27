@@ -995,50 +995,98 @@ func (s *Server) PromoteNode(ctx context.Context, req *rpc.PromoteRequest) (*rpc
 	// Get the member
 	member := s.memberList.GetMemberByID(nodeID)
 	if member == nil {
+		s.logger.Error("PROMOTE: Member not found in member list",
+			"requested_node_id", nodeID,
+			"available_members", len(s.memberList.MembersSnapshot()))
 		return &rpc.PromoteResponse{
 			Success: false,
 			Message: fmt.Sprintf("node not found with ID %s", nodeID),
 		}, nil
 	}
 
+	// Check if member is local for routing decision
+	isLocal := member.IsLocal()
+	localNodeID, _ := s.config.GetLocalNodeUUID()
+
+	s.logger.Info("PROMOTE: Determining promotion route",
+		"requested_node_id", nodeID,
+		"member_hostname", member.Hostname,
+		"is_local", isLocal,
+		"config_local_node_id", localNodeID)
+
 	// If the member is local, promote locally; otherwise, connect to the target node and ask it to promote itself
-	if member.IsLocal() {
+	if isLocal {
+		s.logger.Info("PROMOTE: Performing local promotion",
+			"node_id", nodeID,
+			"hostname", member.Hostname,
+			"current_status", membership.StatusToString(member.Status))
+
 		if err := member.MakeActive(req.Ips); err != nil {
-			s.logger.Error("Failed to promote local member", "error", err)
+			s.logger.Error("PROMOTE: Failed to promote local member", "error", err)
 			return &rpc.PromoteResponse{Success: false, Message: "Failed to promote member: " + err.Error()}, nil
 		}
+
+		s.logger.Info("PROMOTE: Local promotion successful", "node_id", nodeID)
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
+			s.logger.Error("PROMOTE: Node configuration not found for remote promotion",
+				"node_id", req.NodeId)
 			return &rpc.PromoteResponse{Success: false, Message: "Node configuration not found"}, nil
 		}
+
+		s.logger.Info("PROMOTE: Performing remote promotion",
+			"target_node_id", nodeID,
+			"target_hostname", member.Hostname,
+			"target_ip", node.IP,
+			"target_port", node.Port,
+			"local_node_id", localNodeID)
+
 		remoteClient, err := client.New()
 		if err != nil {
+			s.logger.Error("PROMOTE: Failed to create client for remote promotion", "error", err)
 			return &rpc.PromoteResponse{Success: false, Message: "Failed to create client: " + err.Error()}, nil
 		}
 		defer remoteClient.Close()
+
+		s.logger.Debug("PROMOTE: Connecting to remote node", "ip", node.IP, "port", node.Port)
 		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+			s.logger.Error("PROMOTE: Failed to connect to target node", "error", err, "ip", node.IP, "port", node.Port)
 			return &rpc.PromoteResponse{Success: false, Message: "Failed to connect to target node: " + err.Error()}, nil
 		}
+
 		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		s.logger.Debug("PROMOTE: Sending remote promotion request", "timeout", "5s")
 		rresp, rerr := remoteClient.CLI().Promote(ctx2, &rpc.PromoteRequest{NodeId: req.NodeId, Ips: req.Ips, ForceDemote: req.ForceDemote})
 		if rerr != nil {
+			s.logger.Error("PROMOTE: Remote promote RPC failed", "error", rerr)
 			return &rpc.PromoteResponse{Success: false, Message: "Remote promote failed: " + rerr.Error()}, nil
 		}
 		if !rresp.Success {
+			s.logger.Warn("PROMOTE: Remote promote returned failure", "message", rresp.Message)
 			return &rpc.PromoteResponse{Success: false, Message: rresp.Message}, nil
 		}
+
+		s.logger.Info("PROMOTE: Remote promotion successful", "node_id", nodeID)
 		// Reflect the status change locally
 		member.Status = membership.StatusActive
 	}
 
-	// Broadcast convergence state so peers adopt the same active (active-passive)
+	// Capture state for broadcast before releasing lock
 	states := make(map[string]membership.MemberStatus)
 	for id, m := range s.memberList.MembersSnapshot() {
 		states[id] = m.Status
 	}
-	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, nodeID, nil)
+	epoch := s.GetClusterEpoch() + 1
+
+	// Release lock before calling BroadcastClusterState to avoid deadlock
+	// (BroadcastClusterState acquires the lock internally)
+	s.Unlock()
+
+	// Broadcast convergence state so peers adopt the same active (active-passive)
+	_ = s.BroadcastClusterState(states, epoch, nodeID, nil)
 
 	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after promotion
 	// The BroadcastClusterState above will trigger health checker updates that handle VIP assignments
@@ -1272,20 +1320,72 @@ func (s *Server) Leave(ctx context.Context, req *rpc.LeaveRequest) (*rpc.LeaveRe
 // Promote handles the CLI Promote RPC call
 func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error) {
 	localNodeID, _ := s.config.GetLocalNodeUUID()
-	s.logger.Info("PROMOTE: Received promote request", "target_node", req.NodeId, "local_node", localNodeID)
-	forceDemote := req.GetForceDemote()
-	s.logger.Debug("PROMOTE: Force demote flag", "force_demote", forceDemote)
+	s.logger.Info("PROMOTE: Received promote request",
+		"target_node", req.NodeId,
+		"local_node", localNodeID,
+		"force_demote", req.GetForceDemote())
 
+	// Fast-fail validation checks
 	if !s.config.ClusterCheck() {
-		return &rpc.PromoteResponse{Success: false, Message: "no cluster configured"}, nil
+		s.logger.Warn("PROMOTE: Rejecting - no cluster configured")
+		return &rpc.PromoteResponse{
+			Success: false,
+			Message: "no cluster configured",
+		}, nil
 	}
 
 	if req.NodeId == "" {
+		s.logger.Warn("PROMOTE: Rejecting - node_id is required")
 		return &rpc.PromoteResponse{
 			Success: false,
 			Message: "node_id is required",
 		}, nil
 	}
+
+	// Verify target node exists
+	member := s.memberList.GetMemberByID(req.NodeId)
+	if member == nil {
+		s.logger.Warn("PROMOTE: Rejecting - node not found", "node_id", req.NodeId)
+		return &rpc.PromoteResponse{
+			Success: false,
+			Message: fmt.Sprintf("Node not found with ID: %s", req.NodeId),
+		}, nil
+	}
+
+	// Check if already active
+	if member.Status == membership.StatusActive {
+		s.logger.Info("PROMOTE: Node is already active", "node_id", req.NodeId)
+		return &rpc.PromoteResponse{
+			Success: true,
+			Message: fmt.Sprintf("Node %s is already active", req.NodeId),
+		}, nil
+	}
+
+	// All validation passed - kick off async promotion
+	s.logger.Info("PROMOTE: Validation passed, starting asynchronous promotion",
+		"target_node", req.NodeId,
+		"target_hostname", member.Hostname)
+
+	go s.performPromotionAsync(req.NodeId, req.Ips, req.GetForceDemote())
+
+	// Return immediately - actual work happens asynchronously
+	// Frontend will poll Status to see the final result
+	return &rpc.PromoteResponse{
+		Success: true,
+		Message: fmt.Sprintf("Promotion of node %s initiated - check status for completion", req.NodeId),
+	}, nil
+}
+
+// performPromotionAsync executes the promotion operation asynchronously
+// This prevents frontend timeouts on long-running IP failover operations
+func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceDemote bool) {
+	startTime := time.Now()
+	s.logger.Info("PROMOTE_ASYNC: Starting asynchronous promotion",
+		"target_node", targetNodeID,
+		"force_demote", forceDemote,
+		"ip_count", len(ips))
+
+	localNodeID, _ := s.config.GetLocalNodeUUID()
 
 	// Identify current active (if any)
 	prevActiveID := ""
@@ -1293,22 +1393,20 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 		for id, m := range s.memberList.MembersSnapshot() {
 			if m.Status == membership.StatusActive {
 				prevActiveID = id
-				s.logger.Info("PROMOTE: Found current active node", "active_node", id, "hostname", m.Hostname)
+				s.logger.Info("PROMOTE_ASYNC: Found current active node", "active_node", id, "hostname", m.Hostname)
 				break
 			}
 		}
 	}
 	if prevActiveID == "" {
-		s.logger.Info("PROMOTE: No active node found in cluster")
+		s.logger.Info("PROMOTE_ASYNC: No active node found in cluster")
 	}
 
 	// Get the member
-	member := s.memberList.GetMemberByID(req.NodeId)
+	member := s.memberList.GetMemberByID(targetNodeID)
 	if member == nil {
-		return &rpc.PromoteResponse{
-			Success: false,
-			Message: fmt.Sprintf("Node not found with ID: %s", req.NodeId),
-		}, nil
+		s.logger.Error("PROMOTE_ASYNC: Target node not found", "node_id", targetNodeID)
+		return
 	}
 
 	// Snapshot current states for rollback
@@ -1317,55 +1415,71 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 		originalStates[id] = m.Status
 	}
 
-	// New order: Demote previous active first to satisfy MakeActive single-active guard
-	// Skip demotion if this is a remote-initiated promotion where the target node is local
-	// In remote promotion, the initiating node already handles demotion to prevent circular calls
-	shouldDemote := s.config.Pulse.Mode == "active-passive" && prevActiveID != "" && prevActiveID != req.NodeId
-
-	// If the target node is local but we're NOT the previous active, this indicates
-	// a remote promotion where another node initiated the promotion of this local node
+	// Determine demotion strategy
+	shouldDemote := s.config.Pulse.Mode == "active-passive" && prevActiveID != "" && prevActiveID != targetNodeID
 	isTargetNodePromotion := member.IsLocal() && prevActiveID != localNodeID
 
-	s.logger.Info("PROMOTE: Demotion decision", "shouldDemote", shouldDemote, "isTargetNodePromotion", isTargetNodePromotion,
-		"target_is_local", member.IsLocal(), "prev_active", prevActiveID, "target", req.NodeId)
+	s.logger.Info("PROMOTE_ASYNC: Demotion decision",
+		"shouldDemote", shouldDemote,
+		"isTargetNodePromotion", isTargetNodePromotion,
+		"target_is_local", member.IsLocal(),
+		"prev_active", prevActiveID,
+		"target", targetNodeID)
 
+	// Step 1: Demote previous active if needed
 	demotionFailed := false
 	if shouldDemote && !isTargetNodePromotion {
-		s.logger.Info("PROMOTE: Demoting current active before promotion", "previous_active", prevActiveID, "new_active", req.NodeId)
+		s.logger.Info("PROMOTE_ASYNC: Demoting current active before promotion",
+			"previous_active", prevActiveID,
+			"new_active", targetNodeID)
+
 		if _, err := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID}); err != nil {
-			s.logger.Error("PROMOTE: Failed to demote previous active", "previous_active", prevActiveID, "error", err)
+			s.logger.Error("PROMOTE_ASYNC: Failed to demote previous active",
+				"previous_active", prevActiveID,
+				"error", err)
+
 			if !forceDemote {
-				// Restore view and abort
+				// Abort and restore
+				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion due to demotion failure")
 				for id, st := range originalStates {
 					if mm := s.memberList.GetMemberByID(id); mm != nil {
 						mm.Status = st
 					}
 				}
 				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-				return &rpc.PromoteResponse{Success: false, Message: "Failed to demote previous active: " + err.Error()}, nil
+				return
 			}
+
 			demotionFailed = true
-			s.logger.Warn("PROMOTE: Continuing with promotion despite demotion failure", "previous_active", prevActiveID, "force_demote", forceDemote)
+			s.logger.Warn("PROMOTE_ASYNC: Continuing with promotion despite demotion failure (force_demote=true)",
+				"previous_active", prevActiveID)
+
 			if failingMember := s.memberList.GetMemberByID(prevActiveID); failingMember != nil {
 				failingMember.Status = membership.StatusUnknown
 				failingMember.ActiveIPs = nil
 				failingMember.PartialActive = false
 			}
 		} else {
-			s.logger.Info("PROMOTE: Successfully demoted previous active", "previous_active", prevActiveID)
+			s.logger.Info("PROMOTE_ASYNC: Successfully demoted previous active", "previous_active", prevActiveID)
 		}
 	} else if shouldDemote && isTargetNodePromotion {
-		s.logger.Info("PROMOTE: Skipping demotion (remote-initiated promotion, initiator handled demotion)", "previous_active", prevActiveID, "new_active", req.NodeId)
+		s.logger.Info("PROMOTE_ASYNC: Skipping demotion (remote-initiated promotion)",
+			"previous_active", prevActiveID,
+			"new_active", targetNodeID)
 	}
 
-	// Promote target
+	// Step 2: Promote target node
 	if member.IsLocal() {
-		s.logger.Info("PROMOTE: Promoting local node to Active", "node_id", req.NodeId)
-		if err := member.MakeActive(req.Ips); err != nil {
-			s.logger.Error("PROMOTE: Failed to promote local node", "node_id", req.NodeId, "error", err)
-			// Attempt rollback: re-promote previous active if known
-			if prevActiveID != "" && prevActiveID != req.NodeId {
-				_, _ = s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: req.NodeId})
+		s.logger.Info("PROMOTE_ASYNC: Promoting local node to Active", "node_id", targetNodeID)
+		if err := member.MakeActive(ips); err != nil {
+			s.logger.Error("PROMOTE_ASYNC: Failed to promote local node",
+				"node_id", targetNodeID,
+				"error", err)
+
+			// Attempt rollback
+			if prevActiveID != "" && prevActiveID != targetNodeID {
+				s.logger.Info("PROMOTE_ASYNC: Attempting rollback of failed promotion")
+				_, _ = s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: targetNodeID})
 				if mm := s.memberList.GetMemberByID(prevActiveID); mm != nil {
 					_ = mm.MakeActive(nil)
 				}
@@ -1376,37 +1490,49 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 				}
 			}
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-			return &rpc.PromoteResponse{Success: false, Message: "Failed to promote member: " + err.Error()}, nil
+			return
 		}
-		s.logger.Info("PROMOTE: Successfully promoted local node to Active", "node_id", req.NodeId)
+		s.logger.Info("PROMOTE_ASYNC: Successfully promoted local node to Active", "node_id", targetNodeID)
 	} else {
-		s.logger.Info("PROMOTE: Target is remote, forwarding promote request", "node_id", req.NodeId)
-		node := s.config.Nodes[req.NodeId]
+		s.logger.Info("PROMOTE_ASYNC: Target is remote, forwarding promote request", "node_id", targetNodeID)
+		node := s.config.Nodes[targetNodeID]
 		if node == nil {
-			for id, st := range originalStates {
-				if mm := s.memberList.GetMemberByID(id); mm != nil {
-					mm.Status = st
-				}
-			}
+			s.logger.Error("PROMOTE_ASYNC: Node configuration not found", "node_id", targetNodeID)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-			return &rpc.PromoteResponse{Success: false, Message: "Node configuration not found"}, nil
+			return
 		}
+
 		remoteClient, err := client.New()
 		if err != nil {
+			s.logger.Error("PROMOTE_ASYNC: Failed to create client", "error", err)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-			return &rpc.PromoteResponse{Success: false, Message: "Failed to create client: " + err.Error()}, nil
+			return
 		}
 		defer remoteClient.Close()
+
 		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+			s.logger.Error("PROMOTE_ASYNC: Failed to connect to target node", "error", err)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-			return &rpc.PromoteResponse{Success: false, Message: "Failed to connect to target node: " + err.Error()}, nil
+			return
 		}
-		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		rresp, rerr := remoteClient.CLI().Promote(ctx2, &rpc.PromoteRequest{NodeId: req.NodeId, Ips: req.Ips, ForceDemote: req.ForceDemote})
+
+		rresp, rerr := remoteClient.CLI().Promote(ctx, &rpc.PromoteRequest{
+			NodeId:      targetNodeID,
+			Ips:         ips,
+			ForceDemote: forceDemote,
+		})
+
 		if rerr != nil || (rresp != nil && !rresp.Success) {
-			// Attempt rollback of demotion if any
-			if prevActiveID != "" && prevActiveID != req.NodeId {
+			s.logger.Error("PROMOTE_ASYNC: Remote promotion failed",
+				"error", rerr,
+				"response", rresp)
+
+			// Attempt rollback
+			if prevActiveID != "" && prevActiveID != targetNodeID {
+				s.logger.Info("PROMOTE_ASYNC: Attempting rollback after remote failure")
 				if mm := s.memberList.GetMemberByID(prevActiveID); mm != nil {
 					_ = mm.MakeActive(nil)
 				}
@@ -1417,67 +1543,60 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 				}
 			}
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
-			if rerr != nil {
-				return &rpc.PromoteResponse{Success: false, Message: "Remote promote failed: " + rerr.Error()}, nil
-			}
-			return &rpc.PromoteResponse{Success: false, Message: rresp.Message}, nil
+			return
 		}
+
 		member.Status = membership.StatusActive
+		s.logger.Info("PROMOTE_ASYNC: Remote promotion succeeded", "node_id", targetNodeID)
 	}
 
-	// If active-passive, orchestrate floating IP transfer from old active to new active
+	// Step 3: Orchestrate IP failover (potentially slow operation)
 	if s.config.Pulse.Mode == "active-passive" {
-		// Collect all floating IPs defined in config
 		var allIPs []string
 		for _, ipList := range s.config.Groups {
 			allIPs = append(allIPs, ipList...)
 		}
-		// Use previously captured active (before demotion)
-		oldActiveID := prevActiveID
+
 		if len(allIPs) > 0 {
-			if err := s.OrchestrateIPFailover(oldActiveID, req.NodeId, allIPs); err != nil {
-				s.logger.Warn("VIP transfer encountered issues", "error", err)
+			s.logger.Info("PROMOTE_ASYNC: Starting IP failover orchestration",
+				"ip_count", len(allIPs),
+				"old_node", prevActiveID,
+				"new_node", targetNodeID)
+
+			if err := s.OrchestrateIPFailover(prevActiveID, targetNodeID, allIPs); err != nil {
+				s.logger.Warn("PROMOTE_ASYNC: IP failover encountered issues", "error", err)
+			} else {
+				s.logger.Info("PROMOTE_ASYNC: IP failover completed successfully")
 			}
 		}
 	}
 
-	// Broadcast convergence state so peers adopt the same active (active-passive) AFTER successful promotion
-	// Build the intended final state based on the promotion operation, not current memberList state
-	// This prevents race conditions where health checker may have updated states during the promotion
+	// Step 4: Broadcast final cluster state
 	states := make(map[string]membership.MemberStatus)
 	for id, m := range s.memberList.MembersSnapshot() {
 		if id == prevActiveID && s.config.Pulse.Mode == "active-passive" {
 			if demotionFailed {
 				states[id] = membership.StatusUnknown
-				s.logger.Info("PROMOTE: Marking previous active as Unknown in broadcast", "node_id", id)
 			} else {
-				// In active-passive mode, the previous active node must be demoted to Passive
 				states[id] = membership.StatusPassive
-				s.logger.Info("PROMOTE: Setting demoted node to Passive in broadcast", "node_id", id)
 			}
-		} else if id == req.NodeId {
-			// The promoted node is Active
+		} else if id == targetNodeID {
 			states[id] = membership.StatusActive
-			s.logger.Info("PROMOTE: Setting promoted node to Active in broadcast", "node_id", id)
 		} else {
-			// Preserve current status for all other nodes
 			states[id] = m.Status
 		}
 	}
+
 	newEpoch := s.GetClusterEpoch() + 1
-	s.logger.Info("PROMOTE: Broadcasting cluster state after promotion", "new_active", req.NodeId, "epoch", newEpoch, "states", states)
-	_ = s.BroadcastClusterState(states, newEpoch, req.NodeId, nil)
-	s.logger.Info("PROMOTE: Broadcast complete")
+	s.logger.Info("PROMOTE_ASYNC: Broadcasting final cluster state",
+		"new_active", targetNodeID,
+		"epoch", newEpoch)
+	_ = s.BroadcastClusterState(states, newEpoch, targetNodeID, nil)
 
-	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after promotion
-	// The BroadcastClusterState above will trigger health checker updates that handle VIP assignments
-	// go s.refreshLocalMonitorExpectedIPs()
-
-	// Success
-	return &rpc.PromoteResponse{
-		Success: true,
-		Message: fmt.Sprintf("Successfully promoted node %s to active", req.NodeId),
-	}, nil
+	elapsed := time.Since(startTime)
+	s.logger.Info("PROMOTE_ASYNC: Promotion completed successfully",
+		"target_node", targetNodeID,
+		"elapsed_time", elapsed.String())
 }
 
 // MakePassive handles the passive RPC call making one node passive
@@ -3726,20 +3845,85 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 
 	// Force immediate activation if cluster configuration exists
 	// Create a fresh config instance to ensure we read the current on-disk config
+
+	// Preserve local node identity before reloading config (critical for correct member identification)
+	prevLocalNodeID := ""
+	prevNodeCount := 0
+	if s.config != nil {
+		prevLocalNodeID, _ = s.config.GetLocalNodeUUID()
+		prevNodeCount = len(s.config.Nodes)
+	}
+
+	s.logger.Info("RESYNC: Reloading config from disk",
+		"prev_local_node_id", prevLocalNodeID,
+		"prev_node_count", prevNodeCount)
+
 	cfg, err := config.New()
 	if err != nil {
-		s.logger.Errorf("Failed to reload config during resync: %v", err)
+		s.logger.Errorf("RESYNC: Failed to reload config during resync: %v", err)
 		return &rpc.ResyncNetworkResponse{Success: false, Message: fmt.Sprintf("failed to reload config: %v", err)}, nil
 	}
+
+	diskLocalNodeID, _ := cfg.GetLocalNodeUUID()
+	diskNodeCount := len(cfg.Nodes)
+
+	s.logger.Info("RESYNC: Loaded config from disk",
+		"disk_local_node_id", diskLocalNodeID,
+		"disk_node_count", diskNodeCount)
+
+	// Preserve local node identity if it was set and differs from disk
+	// This prevents config corruption during resync (similar to ConfigSync logic)
+	if prevLocalNodeID != "" && diskLocalNodeID != prevLocalNodeID {
+		s.logger.Warn("RESYNC: Local node identity mismatch between runtime and disk config",
+			"runtime_local_id", prevLocalNodeID,
+			"disk_local_id", diskLocalNodeID)
+
+		// Verify the runtime local node ID exists in the disk config's nodes
+		if _, exists := cfg.Nodes[prevLocalNodeID]; exists {
+			s.logger.Info("RESYNC: Preserving runtime local node identity",
+				"preserved_id", prevLocalNodeID,
+				"disk_id", diskLocalNodeID)
+			cfg.Pulse.LocalNode = prevLocalNodeID
+
+			// Save the corrected identity back to disk to prevent future mismatches
+			if err := cfg.Save(); err != nil {
+				s.logger.Error("RESYNC: Failed to save corrected local node identity to disk", "error", err)
+			} else {
+				s.logger.Info("RESYNC: Saved corrected local node identity to disk")
+			}
+		} else {
+			s.logger.Error("RESYNC: Runtime local node ID not found in disk config nodes, using disk config",
+				"runtime_id", prevLocalNodeID,
+				"disk_nodes", cfg.Nodes)
+		}
+	} else if prevLocalNodeID != "" && diskLocalNodeID == prevLocalNodeID {
+		s.logger.Debug("RESYNC: Local node identity consistent between runtime and disk")
+	}
+
 	s.config = cfg
+
+	newLocalNodeID, _ := s.config.GetLocalNodeUUID()
+	s.logger.Info("RESYNC: Config update complete",
+		"final_local_node_id", newLocalNodeID,
+		"final_node_count", len(s.config.Nodes))
 
 	if s.config.ClusterCheck() {
 		// Sync member list with latest config and reload members
+		s.logger.Info("RESYNC: Updating member list with new config",
+			"current_member_count", len(s.memberList.MembersSnapshot()))
+
 		s.memberList.UpdateConfig(s.config)
+
+		s.logger.Info("RESYNC: Loading initial members from new config",
+			"config_node_count", len(s.config.Nodes))
+
 		if err := s.loadInitialMembers(); err != nil {
-			s.logger.Errorf("Failed to load members during resync: %v", err)
+			s.logger.Errorf("RESYNC: Failed to load members during resync: %v", err)
 			return &rpc.ResyncNetworkResponse{Success: false, Message: fmt.Sprintf("failed to load members: %v", err)}, nil
 		}
+
+		s.logger.Info("RESYNC: Member loading complete",
+			"final_member_count", len(s.memberList.MembersSnapshot()))
 
 		// Ensure cluster listener is bound and health checker running
 		if err := s.Reconfigure(); err != nil {
@@ -4153,11 +4337,16 @@ func (s *Server) preflightBind(ip, port string) error {
 // It brings the IPs down on the old node first (best-effort) and then brings them up on the new node,
 // using the server's IP helper RPCs (or local equivalents) grouped per interface according to config.
 func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string) error {
+	s.logger.Info("IP_FAILOVER: Starting orchestration",
+		"old_node", oldNodeID,
+		"new_node", newNodeID,
+		"ip_count", len(ips))
+
 	// Group IPs per interface for old and new nodes based on current configuration
 	oldIfaceToIPs, err := s.groupIPsByInterfaceForNode(oldNodeID, ips)
 	if err != nil {
 		// Old node grouping failure should not block bringing IPs up elsewhere; log and continue
-		s.logger.Warn("Failed to map IPs to interfaces on old node", "node", oldNodeID, "error", err)
+		s.logger.Warn("IP_FAILOVER: Failed to map IPs to interfaces on old node", "node", oldNodeID, "error", err)
 		oldIfaceToIPs = map[string][]string{}
 	}
 
@@ -4166,38 +4355,105 @@ func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string
 		return fmt.Errorf("failed to map IPs to interfaces on new node: %w", err)
 	}
 
+	s.logger.Info("IP_FAILOVER: Grouped IPs by interface",
+		"old_node_interfaces", len(oldIfaceToIPs),
+		"new_node_interfaces", len(newIfaceToIPs))
+
+	// OPTIMIZATION: Parallelize bring-down operations across interfaces
 	// Best-effort: bring down IPs on old node per interface
-	if oldNodeID != "" {
+	if oldNodeID != "" && len(oldIfaceToIPs) > 0 {
+		s.logger.Info("IP_FAILOVER: Bringing down IPs on old node (parallel)",
+			"old_node", oldNodeID,
+			"interface_count", len(oldIfaceToIPs))
+
+		var wg sync.WaitGroup
 		for iface, ipList := range oldIfaceToIPs {
-			if oldNodeID == s.config.Pulse.LocalNode {
-				// Local: call helper directly
-				if _, derr := s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ipList}); derr != nil {
-					s.logger.Warn("Failed to bring IPs down locally on old node", "iface", iface, "error", derr)
+			wg.Add(1)
+			go func(iface string, ipList []string) {
+				defer wg.Done()
+				if oldNodeID == s.config.Pulse.LocalNode {
+					// Local: call helper directly
+					if _, derr := s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ipList}); derr != nil {
+						s.logger.Warn("IP_FAILOVER: Failed to bring IPs down locally on old node", "iface", iface, "error", derr)
+					} else {
+						s.logger.Debug("IP_FAILOVER: Successfully brought down IPs locally", "iface", iface, "count", len(ipList))
+					}
+				} else {
+					if derr := s.bringIPsOnNodeDown(oldNodeID, iface, ipList); derr != nil {
+						s.logger.Warn("IP_FAILOVER: Failed to bring IPs down on old node", "node", oldNodeID, "iface", iface, "error", derr)
+					} else {
+						s.logger.Debug("IP_FAILOVER: Successfully brought down IPs remotely", "node", oldNodeID, "iface", iface, "count", len(ipList))
+					}
 				}
-			} else {
-				if derr := s.bringIPsOnNodeDown(oldNodeID, iface, ipList); derr != nil {
-					s.logger.Warn("Failed to bring IPs down on old node", "node", oldNodeID, "iface", iface, "error", derr)
-				}
-			}
+			}(iface, ipList)
 		}
+		wg.Wait()
+		s.logger.Info("IP_FAILOVER: Completed bringing down IPs on old node")
 	}
 
+	// OPTIMIZATION: Parallelize bring-up operations across interfaces
 	// Bring up IPs on new node per interface
-	for iface, ipList := range newIfaceToIPs {
-		if newNodeID == s.config.Pulse.LocalNode {
-			// Local: call helper directly
-			if _, uerr := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ipList}); uerr != nil {
-				return fmt.Errorf("failed to bring IPs up locally on iface %s: %w", iface, uerr)
-			}
-		} else {
-			if uerr := s.bringIPsOnNodeUp(newNodeID, iface, ipList); uerr != nil {
-				return fmt.Errorf("failed to bring IPs up on node %s iface %s: %w", newNodeID, iface, uerr)
+	if len(newIfaceToIPs) > 0 {
+		s.logger.Info("IP_FAILOVER: Bringing up IPs on new node (parallel)",
+			"new_node", newNodeID,
+			"interface_count", len(newIfaceToIPs))
+
+		type bringUpResult struct {
+			iface string
+			err   error
+		}
+		resultChan := make(chan bringUpResult, len(newIfaceToIPs))
+
+		var wg sync.WaitGroup
+		for iface, ipList := range newIfaceToIPs {
+			wg.Add(1)
+			go func(iface string, ipList []string) {
+				defer wg.Done()
+				var uerr error
+				if newNodeID == s.config.Pulse.LocalNode {
+					// Local: call helper directly
+					_, uerr = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ipList})
+					if uerr != nil {
+						s.logger.Error("IP_FAILOVER: Failed to bring IPs up locally", "iface", iface, "error", uerr)
+					} else {
+						s.logger.Debug("IP_FAILOVER: Successfully brought up IPs locally", "iface", iface, "count", len(ipList))
+					}
+				} else {
+					uerr = s.bringIPsOnNodeUp(newNodeID, iface, ipList)
+					if uerr != nil {
+						s.logger.Error("IP_FAILOVER: Failed to bring IPs up remotely", "node", newNodeID, "iface", iface, "error", uerr)
+					} else {
+						s.logger.Debug("IP_FAILOVER: Successfully brought up IPs remotely", "node", newNodeID, "iface", iface, "count", len(ipList))
+					}
+				}
+				resultChan <- bringUpResult{iface: iface, err: uerr}
+			}(iface, ipList)
+		}
+		wg.Wait()
+		close(resultChan)
+
+		// Check for any critical bring-up failures
+		var failedInterfaces []string
+		for result := range resultChan {
+			if result.err != nil {
+				failedInterfaces = append(failedInterfaces, result.iface)
 			}
 		}
+
+		if len(failedInterfaces) > 0 {
+			s.logger.Error("IP_FAILOVER: Some interfaces failed to bring up IPs",
+				"failed_interfaces", failedInterfaces,
+				"total_interfaces", len(newIfaceToIPs))
+			return fmt.Errorf("failed to bring up IPs on %d/%d interfaces: %v",
+				len(failedInterfaces), len(newIfaceToIPs), failedInterfaces)
+		}
+
+		s.logger.Info("IP_FAILOVER: Successfully brought up all IPs on new node")
 	}
 
 	// For local node, refresh expected IPs for the interfaces involved
 	if s.ipMonitor != nil && newNodeID == s.config.Pulse.LocalNode {
+		s.logger.Debug("IP_FAILOVER: Refreshing IP monitor expected IPs", "interface_count", len(newIfaceToIPs))
 		for iface := range newIfaceToIPs {
 			// Recompute expected IPs for this interface from authoritative config
 			var ifaceIPs []string
@@ -4215,6 +4471,7 @@ func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string
 		}
 	}
 
+	s.logger.Info("IP_FAILOVER: Orchestration completed successfully")
 	return nil
 }
 

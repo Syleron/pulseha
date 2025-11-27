@@ -34,12 +34,66 @@ func (m *MemberList) SetIPMonitor(monitor *IPMonitor) {
 	m.ipMonitor = monitor
 }
 
-// UpdateConfig updates the config reference
+// UpdateConfig updates the config reference for the member list and all existing members
 func (m *MemberList) UpdateConfig(cfg *config.Config) {
 	m.Lock()
 	defer m.Unlock()
+
+	oldConfig := m.config
 	m.config = cfg
-	m.logger.Debug("Updated member list config reference")
+
+	// Get local node ID from both old and new configs for comparison
+	var oldLocalID, newLocalID string
+	if oldConfig != nil {
+		oldLocalID, _ = oldConfig.GetLocalNodeUUID()
+	}
+	if cfg != nil {
+		newLocalID, _ = cfg.GetLocalNodeUUID()
+	}
+
+	m.logger.Info("CONFIG_UPDATE: Updating member list config reference",
+		"member_count", len(m.Members),
+		"old_local_id", oldLocalID,
+		"new_local_id", newLocalID)
+
+	// Update config reference for all existing members to prevent stale references
+	updatedCount := 0
+	for id, member := range m.Members {
+		if member != nil {
+			// Check if this member's IsLocal() result will change
+			wasLocal := false
+			if oldConfig != nil {
+				oldID, err := oldConfig.GetLocalNodeUUID()
+				wasLocal = err == nil && member.ID == oldID
+			}
+
+			member.config = cfg
+
+			willBeLocal := false
+			if cfg != nil {
+				newID, err := cfg.GetLocalNodeUUID()
+				willBeLocal = err == nil && member.ID == newID
+			}
+
+			if wasLocal != willBeLocal {
+				m.logger.Warn("CONFIG_UPDATE: Member local status changed",
+					"member_id", id,
+					"hostname", member.Hostname,
+					"was_local", wasLocal,
+					"will_be_local", willBeLocal)
+			}
+
+			updatedCount++
+			m.logger.Debug("CONFIG_UPDATE: Updated config reference for member",
+				"member_id", id,
+				"hostname", member.Hostname,
+				"is_local", willBeLocal)
+		}
+	}
+
+	m.logger.Info("CONFIG_UPDATE: Completed config update",
+		"updated_members", updatedCount,
+		"total_members", len(m.Members))
 }
 
 // RedistributeIPs handles redistribution of failed IPs to healthy nodes

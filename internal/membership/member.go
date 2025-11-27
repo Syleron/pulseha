@@ -326,11 +326,36 @@ func (m *Member) groupIPsByInterface(ips []string) (map[string][]string, error) 
 
 // IsLocal checks if this member is the local node
 func (m *Member) IsLocal() bool {
-	localNodeID, err := m.config.GetLocalNodeUUID()
-	if err != nil {
+	if m.config == nil {
+		if m.logger != nil {
+			m.logger.Error("MEMBER: IsLocal() called with nil config",
+				"member_id", m.ID,
+				"hostname", m.Hostname)
+		}
 		return false
 	}
-	return m.ID == localNodeID
+
+	localNodeID, err := m.config.GetLocalNodeUUID()
+	if err != nil {
+		if m.logger != nil {
+			m.logger.Debug("MEMBER: IsLocal() GetLocalNodeUUID failed",
+				"member_id", m.ID,
+				"hostname", m.Hostname,
+				"error", err)
+		}
+		return false
+	}
+
+	result := m.ID == localNodeID
+	if m.logger != nil {
+		m.logger.Debug("MEMBER: IsLocal() check",
+			"member_id", m.ID,
+			"hostname", m.Hostname,
+			"local_node_id", localNodeID,
+			"is_local", result)
+	}
+
+	return result
 }
 
 // RemoveIPs removes the specified IPs from the member's active IPs

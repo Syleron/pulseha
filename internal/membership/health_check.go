@@ -420,15 +420,31 @@ func (h *HealthChecker) performHealthChecks() {
 		// Always check for active node failure, not just when passive
 		h.checkForActiveNodeFailure()
 	} else {
-		// Debug why no local member found
+		// Debug why no local member found - this indicates a serious configuration issue
 		localNodeID, err := h.members.config.GetLocalNodeUUID()
 		memberCount := len(membersSnapshot)
 		var memberIDs []string
-		for id := range membersSnapshot {
+		var memberDetails []string
+		for id, m := range membersSnapshot {
 			memberIDs = append(memberIDs, id)
+			// Check each member's IsLocal() status for debugging
+			isLocal := m.IsLocal()
+			memberDetails = append(memberDetails, fmt.Sprintf("%s(isLocal=%v,hostname=%s)", id, isLocal, m.Hostname))
 		}
-		h.logger.Warnf("No local member found! LocalNodeID=%s (err=%v), MemberCount=%d, MemberIDs=%v",
-			localNodeID, err, memberCount, memberIDs)
+
+		h.logger.Warnf("HEALTH_CHECK: No local member found! This indicates config/member mismatch. "+
+			"LocalNodeID=%s (err=%v), MemberCount=%d, MemberIDs=%v, MemberDetails=%v",
+			localNodeID, err, memberCount, memberIDs, memberDetails)
+
+		// Additional diagnostic logging
+		if h.members.config != nil {
+			h.logger.Info("HEALTH_CHECK: MemberList config state",
+				"local_node_id", localNodeID,
+				"cluster_check", h.members.config.ClusterCheck(),
+				"node_count_in_config", len(h.members.config.Nodes))
+		} else {
+			h.logger.Error("HEALTH_CHECK: MemberList config is nil!")
+		}
 	}
 }
 
