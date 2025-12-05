@@ -7,7 +7,7 @@ require (
 	github.com/labstack/gommon v0.3.0
 	github.com/mitchellh/cli v1.0.0
 	github.com/olekukonko/tablewriter v0.0.4
-	github.com/sirupsen/logrus v1.4.2
+	github.com/sirupsen/logrus v1.8.3
 	github.com/ssgreg/journalhook v0.0.0-20180529133218-9a0802d16187
 	github.com/vishvananda/netlink v1.1.0
 	golang.org/x/sys v0.19.0
@@ -22,7 +22,6 @@ require (
 	github.com/golang/protobuf v1.5.3 // indirect
 	github.com/hashicorp/errwrap v1.0.0 // indirect
 	github.com/hashicorp/go-multierror v1.0.0 // indirect
-	github.com/konsorten/go-windows-terminal-sequences v1.0.1 // indirect
 	github.com/mattn/go-colorable v0.1.2 // indirect
 	github.com/mattn/go-isatty v0.0.9 // indirect
 	github.com/mattn/go-runewidth v0.0.7 // indirect
