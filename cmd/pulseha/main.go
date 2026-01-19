@@ -24,6 +24,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -41,22 +42,12 @@ var (
 
 func main() {
 
-	// Draw logo
-	buildStr := "unknown"
-	if len(Build) >= 7 {
-		buildStr = Build[0:7]
-	}
-	fmt.Printf(`
-   ___       _                  _
-  / _ \_   _| |___  ___  /\  /\/_\
- / /_)/ | | | / __|/ _ \/ /_/ //_\\
-/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
-\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
-
-`, Version, buildStr)
-
-	// Initialize logger
-	logger := log.New(os.Stdout)
+	// Initialize logger with date/time and PID prefix.
+	logger := log.NewWithOptions(os.Stdout, log.Options{
+		ReportTimestamp: true,
+		TimeFormat:      time.DateTime,
+		Prefix:          "(" + strconv.Itoa(os.Getpid()) + ")",
+	})
 	logger.SetFormatter(log.TextFormatter)
 
 	// Set default logging level to debug during development
@@ -81,6 +72,20 @@ func main() {
 	if err := setupLogging(cfg, logger); err != nil {
 		logger.Fatal(err)
 	}
+
+	// Draw logo
+	buildStr := "unknown"
+	if len(Build) >= 7 {
+		buildStr = Build[0:7]
+	}
+	fmt.Printf(`
+   ___       _                  _
+  / _ \_   _| |___  ___  /\  /\/_\
+ / /_)/ | | | / __|/ _ \/ /_/ //_\\
+/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
+\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
+
+`, Version, buildStr)
 
 	// Initialize member list
 	memberList := membership.NewMemberList(cfg, logger)
@@ -177,8 +182,6 @@ func main() {
 func setupLogging(cfg *config.Config, logger *log.Logger) error {
 	var writers []io.Writer
 
-	// We prefer syslog/file if configured; we'll fallback to stdout only if no other writers are available
-
 	// Setup syslog logging if enabled (default to true if not explicitly set)
 	logToSyslog := cfg.Pulse.LogToSyslog
 	if cfg.Pulse.SyslogTag == "" {
@@ -251,10 +254,8 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 		logger.Info("File logging enabled", "path", cfg.Pulse.LogFileLocation)
 	}
 
-	// Fallback to stdout if no writers configured (ensures we always emit logs somewhere)
-	if len(writers) == 0 {
-		writers = append(writers, os.Stdout)
-	}
+	// Always add stdout to the list of logging destinations.
+	writers = append(writers, os.Stdout)
 
 	// Set multi-writer output (stdout + file if enabled)
 	if len(writers) > 1 {
