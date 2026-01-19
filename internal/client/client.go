@@ -357,7 +357,7 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 	}
 	if respJoin != nil && !respJoin.Success {
 		if respJoin.Message != "" {
-			return fmt.Errorf(respJoin.Message)
+			return errors.New(respJoin.Message)
 		}
 		return fmt.Errorf("join initiate failed")
 	}
@@ -371,7 +371,8 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 		if sErr == nil && resp != nil {
 			for _, m := range resp.Members {
 				if m.NodeId == nodeID {
-					fmt.Printf("Successfully joined cluster: %s (%s:%s) [id=%s]\n", m.Hostname, utils.FormatIPv6(m.Ip), m.Port, m.NodeId)
+					fmt.Printf("Successfully joined cluster: %s (%s:%s) [id=%s]\n", m.Hostname, utils.FormatIPv6(m.Ip),
+						m.Port, m.NodeId)
 					return nil
 				}
 			}
@@ -386,7 +387,8 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 			if rErr == nil && rResp != nil {
 				for _, m := range rResp.Members {
 					if m.NodeId == nodeID {
-						fmt.Printf("Joined cluster (confirmed by %s); local daemon will reflect shortly. Node ID: %s\n", host, nodeID)
+						fmt.Printf("Joined cluster (confirmed by %s); local daemon will reflect shortly. Node ID: %s\n",
+							host, nodeID)
 						cancel3()
 						return nil
 					}
@@ -643,7 +645,7 @@ func (c *Client) DeleteGroup(groupName string, force bool) error {
 	}
 
 	if !resp.Success {
-		return fmt.Errorf(resp.Message)
+		return errors.New(resp.Message)
 	}
 
 	fmt.Printf("%s\n", resp.Message)

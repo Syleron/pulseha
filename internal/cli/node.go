@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -54,7 +55,7 @@ func newNodePromoteCmd() *cobra.Command {
 				return err
 			}
 			if !resp.Success {
-				return fmt.Errorf(resp.Message)
+				return errors.New(resp.Message)
 			}
 			fmt.Println(resp.Message)
 			return nil
@@ -107,7 +108,7 @@ func newNodeRemoveCmd() *cobra.Command {
 				return err
 			}
 			if !resp.Success {
-				return fmt.Errorf(resp.Message)
+				return errors.New(resp.Message)
 			}
 			fmt.Println(resp.Message)
 			return nil
