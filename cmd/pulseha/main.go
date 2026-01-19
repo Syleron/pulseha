@@ -42,6 +42,20 @@ var (
 
 func main() {
 
+	// Draw logo
+	buildStr := "unknown"
+	if len(Build) >= 7 {
+		buildStr = Build[0:7]
+	}
+	fmt.Printf(`
+   ___       _                  _
+  / _ \_   _| |___  ___  /\  /\/_\
+ / /_)/ | | | / __|/ _ \/ /_/ //_\\
+/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
+\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
+
+`, Version, buildStr)
+
 	// Initialize logger with date/time and PID prefix.
 	logger := log.NewWithOptions(os.Stdout, log.Options{
 		ReportTimestamp: true,
@@ -72,20 +86,6 @@ func main() {
 	if err := setupLogging(cfg, logger); err != nil {
 		logger.Fatal(err)
 	}
-
-	// Draw logo
-	buildStr := "unknown"
-	if len(Build) >= 7 {
-		buildStr = Build[0:7]
-	}
-	fmt.Printf(`
-   ___       _                  _
-  / _ \_   _| |___  ___  /\  /\/_\
- / /_)/ | | | / __|/ _ \/ /_/ //_\\
-/ ___/| |_| | \__ \  __/ __  /  _  \  Version %s
-\/     \__,_|_|___/\___\/ /_/\_/ \_/  Build   %s
-
-`, Version, buildStr)
 
 	// Initialize member list
 	memberList := membership.NewMemberList(cfg, logger)
