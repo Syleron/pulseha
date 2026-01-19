@@ -25,7 +25,7 @@ func TestValidIPAddress(t *testing.T) {
 	err := ValidIPAddress("192.168.63.200/24")
 
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Error(err.Error())
 	}
 }
 
@@ -50,7 +50,7 @@ func TestGetHostname(t *testing.T) {
 	_, err := GetHostname()
 
 	if err != nil {
-		t.Errorf(err.Error())
+		t.Error(err.Error())
 	}
 }
 
