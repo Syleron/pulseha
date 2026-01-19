@@ -236,8 +236,8 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 			// If syslog is not available (e.g., in containers), log warning but continue
 			logger.Warn("Failed to connect to syslog, continuing without syslog", "error", err)
 		} else {
-			writers = append(writers, sysw)
 			logger.Info("Syslog logging enabled")
+			writers = append(writers, sysw)
 		}
 	}
 
@@ -250,8 +250,8 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %v", err)
 		}
+		logger.Info("File logging enabled to path: " + cfg.Pulse.LogFileLocation)
 		writers = append(writers, logFile)
-		logger.Info("File logging enabled", "path", cfg.Pulse.LogFileLocation)
 	}
 
 	// Always add stdout to the list of logging destinations.
