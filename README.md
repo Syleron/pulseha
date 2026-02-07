@@ -597,6 +597,5 @@ This project is licensed under the GNU Affero General Public License v3.0 - see 
 - **Documentation**: [GitHub Wiki](https://github.com/syleron/pulseha/wiki)
 - **Issues**: [GitHub Issues](https://github.com/syleron/pulseha/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/syleron/pulseha/discussions)
-- **Security**: Report security issues privately to security@pulseha.com
 
 For questions, feature requests, and contributions, please visit our [GitHub repository](https://github.com/syleron/pulseha).
