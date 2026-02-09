@@ -219,6 +219,7 @@ func (h *HealthChecker) performHealthChecks() {
 				"This message will only be logged once.")
 			h.loggedNoMembers = true
 		}
+		h.Unlock()
 		return // No logging needed when no members exist
 	} else {
 		// Reset the "no members" log field if we now have members.
