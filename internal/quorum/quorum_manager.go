@@ -63,8 +63,10 @@ type VotingSession struct {
 func (s *VotingSession) Copy() *VotingSession {
 	// Obtain a struct copy via dereferencing.
 	sessionCopy := *s
-	// Deep copy the Result as this is a pointer type.
-	sessionCopy.Result = sessionCopy.Result.Copy()
+	if s.Result != nil {
+		// Deep copy the Result as this is a pointer type.
+		sessionCopy.Result = sessionCopy.Result.Copy()
+	}
 	return &sessionCopy
 }
 
@@ -81,7 +83,8 @@ type VotingSessionResult struct {
 // Copy returns a deep copy of a VotingSessionResult.
 func (s *VotingSessionResult) Copy() *VotingSessionResult {
 	// Obtain a struct copy via dereferencing.
-	return &*s
+	value := *s
+	return &value
 }
 
 // CompactSessionHistory stores minimal session data for history (uses ~16 bytes vs ~1KB)
