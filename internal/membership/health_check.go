@@ -209,7 +209,8 @@ func (h *HealthChecker) LastTickTime() time.Time {
 // performHealthChecks executes health checks on all nodes and their IPs
 func (h *HealthChecker) performHealthChecks() {
 	h.logger.Debug("HEALTH_CHECK: Starting health check cycle...")
-
+	h.Lock()
+	defer h.Unlock()
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
 	if memberCount == 0 {
@@ -224,7 +225,6 @@ func (h *HealthChecker) performHealthChecks() {
 		// Reset the "no members" log field if we now have members.
 		h.loggedNoMembers = false
 	}
-
 	// Collect cluster status information for a single consolidated log
 	clusterStatus := make([]string, 0, memberCount)
 	clusterStatusForComparison := make([]string, 0, memberCount)
@@ -285,7 +285,7 @@ func (h *HealthChecker) performHealthChecks() {
 				statusChanges = append(statusChanges, fmt.Sprintf("%s became unreachable (was %s)",
 					member.Hostname, StatusToString(previousStatus)))
 				// Immediate convergence nudge on status change
-				if h.server != nil && previousStatus != StatusUnknown {
+				if h.server != nil {
 					states := getMemberStatusMap()
 					for id, m := range membersSnapshot {
 						m.Lock()
@@ -891,11 +891,13 @@ func (h *HealthChecker) checkNodeConnectivity(member *Member) bool {
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(member.IP), member.Port)
 	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
 	if err == nil {
-		conn.Close()
-		h.logger.Debugf("Health check succeeded for %s (%s)", member.Hostname, address)
-		return true
+		err = conn.Close()
+		if err == nil {
+			h.logger.Debugf("Health check succeeded for %s (%s)",
+				member.Hostname, address)
+			return true
+		}
 	}
-
 	h.logger.Warnf("Health check failed for %s (%s): %v", member.Hostname, address, err)
 	return false
 }
@@ -945,7 +947,11 @@ func (h *HealthChecker) checkIP(ip string) HealthCheck {
 	for i := 0; i < 1; i++ {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:80", ip), 500*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			err = conn.Close()
+			if err != nil {
+				lastErr = err
+				break
+			}
 			latency := time.Since(start)
 			h.logger.Debugf("Health check successful for IP %s (latency: %v)", ip, latency)
 			return HealthCheck{
