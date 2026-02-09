@@ -209,10 +209,10 @@ func (h *HealthChecker) LastTickTime() time.Time {
 // performHealthChecks executes health checks on all nodes and their IPs
 func (h *HealthChecker) performHealthChecks() {
 	h.logger.Debug("HEALTH_CHECK: Starting health check cycle...")
-	h.Lock()
-	defer h.Unlock()
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
+	h.Lock()
+	defer h.Unlock()
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
 		if h.loggedNoMembers == false {
