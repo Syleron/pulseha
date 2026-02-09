@@ -212,7 +212,6 @@ func (h *HealthChecker) performHealthChecks() {
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
 	h.Lock()
-	defer h.Unlock()
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
 		if h.loggedNoMembers == false {
@@ -225,6 +224,7 @@ func (h *HealthChecker) performHealthChecks() {
 		// Reset the "no members" log field if we now have members.
 		h.loggedNoMembers = false
 	}
+	h.Unlock()
 	// Collect cluster status information for a single consolidated log
 	clusterStatus := make([]string, 0, memberCount)
 	clusterStatusForComparison := make([]string, 0, memberCount)
