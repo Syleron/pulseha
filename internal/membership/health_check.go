@@ -208,10 +208,11 @@ func (h *HealthChecker) LastTickTime() time.Time {
 
 // performHealthChecks executes health checks on all nodes and their IPs
 func (h *HealthChecker) performHealthChecks() {
+	defer h.Unlock()
+	h.Lock()
 	h.logger.Debug("HEALTH_CHECK: Starting health check cycle...")
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
-	h.Lock()
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
 		if h.loggedNoMembers == false {
@@ -219,13 +220,12 @@ func (h *HealthChecker) performHealthChecks() {
 				"This message will only be logged once.")
 			h.loggedNoMembers = true
 		}
-		h.Unlock()
-		return // No logging needed when no members exist
+		// No health check is needed when no members exist.
+		return
 	} else {
 		// Reset the "no members" log field if we now have members.
 		h.loggedNoMembers = false
 	}
-	h.Unlock()
 	// Collect cluster status information for a single consolidated log
 	clusterStatus := make([]string, 0, memberCount)
 	clusterStatusForComparison := make([]string, 0, memberCount)
@@ -296,9 +296,7 @@ func (h *HealthChecker) performHealthChecks() {
 					_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(),
 						nil)
 					putMemberStatusMap(states)
-					h.Lock()
 					h.lastLeaderBroadcast = time.Now()
-					h.Unlock()
 				}
 			}
 
@@ -314,10 +312,8 @@ func (h *HealthChecker) performHealthChecks() {
 		member.Latency = fmt.Sprintf("%.2fms", float64(responseTime.Nanoseconds())/1000000)
 
 		// Handle auto-failback for previously failed nodes
-		h.RLock()
 		autoFailback := h.members.config.Pulse.AutoFailback
 		mode := h.members.config.Pulse.Mode
-		h.RUnlock()
 
 		if wasUnknown && autoFailback {
 			switch mode {
@@ -387,9 +383,7 @@ func (h *HealthChecker) performHealthChecks() {
 			}
 			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
 			putMemberStatusMap(states)
-			h.Lock()
 			h.lastLeaderBroadcast = time.Now()
-			h.Unlock()
 			h.logger.Debug("HEALTH_CHECK: Cluster state broadcast completed")
 		}
 	} else {
