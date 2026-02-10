@@ -65,7 +65,15 @@ func (s *VotingSession) Copy() *VotingSession {
 	sessionCopy := *s
 	if s.Result != nil {
 		// Deep copy the Result as this is a pointer type.
-		sessionCopy.Result = sessionCopy.Result.Copy()
+		sessionCopy.Result = s.Result.Copy()
+	}
+	// Deep copy the Votes map to prevent chaining of the Vote objects.
+	if s.Votes != nil {
+		votesCopy := make(map[string]Vote, len(s.Votes))
+		for k, v := range s.Votes {
+			votesCopy[k] = v
+		}
+		sessionCopy.Votes = votesCopy
 	}
 	return &sessionCopy
 }
