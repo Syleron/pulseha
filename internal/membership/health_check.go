@@ -887,11 +887,11 @@ func (h *HealthChecker) checkNodeConnectivity(member *Member) bool {
 	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
 	if err == nil {
 		err = conn.Close()
-		if err == nil {
-			h.logger.Debugf("Health check succeeded for %s (%s)",
-				member.Hostname, address)
-			return true
+		if err != nil {
+			h.logger.Warnf("Warning: Failed to close connection for %s (%s): %v",
+				member.Hostname, address, err)
 		}
+		return true
 	}
 	h.logger.Warnf("Health check failed for %s (%s): %v", member.Hostname, address, err)
 	return false
@@ -944,8 +944,7 @@ func (h *HealthChecker) checkIP(ip string) HealthCheck {
 		if err == nil {
 			err = conn.Close()
 			if err != nil {
-				lastErr = err
-				break
+				h.logger.Warnf("Warning: Failed to close connection for %s: %v", ip, err)
 			}
 			latency := time.Since(start)
 			h.logger.Debugf("Health check successful for IP %s (latency: %v)", ip, latency)
