@@ -217,15 +217,14 @@ func (h *HealthChecker) performHealthChecks() {
 		// Use a field to print the "no members" message only once to the logs.
 		if h.loggedNoMembers == false {
 			h.logger.Warn("No members in cluster, skipping health check. " +
-				"This message will only be logged once.")
+				"This message will only be logged once until members are added.")
 			h.loggedNoMembers = true
 		}
 		// No health check is needed when no members exist.
 		return
-	} else {
-		// Reset the "no members" log field if we now have members.
-		h.loggedNoMembers = false
 	}
+	// Reset the "no members" log field, as we now have members.
+	h.loggedNoMembers = false
 	// Collect cluster status information for a single consolidated log
 	clusterStatus := make([]string, 0, memberCount)
 	clusterStatusForComparison := make([]string, 0, memberCount)
