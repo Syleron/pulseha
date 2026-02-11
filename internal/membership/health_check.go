@@ -84,7 +84,7 @@ type HealthChecker struct {
 	checksWithoutChange int       // Counter for periodic status logs
 	lastLeaderBroadcast time.Time // suppress elections briefly after leader broadcast
 	lastTick            time.Time // last time a check cycle executed
-	loggedNoMembers     bool      // Has a no-member condition been written to the logs?
+	loggedNoMembers     bool      // Tracks if a no-member condition has already been logged in the current state
 }
 
 // NewHealthChecker creates a new health checker
