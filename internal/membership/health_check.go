@@ -1502,10 +1502,7 @@ func (h *HealthChecker) tryForcePromote(candidate *Member) bool {
 	if candidate == nil {
 		return false
 	}
-
-	h.RLock()
 	server := h.server
-	h.RUnlock()
 	if server == nil {
 		h.logger.Debug("ELECTION: Server reference unavailable, skipping Promote RPC")
 		return false
