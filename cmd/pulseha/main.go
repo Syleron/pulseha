@@ -24,6 +24,7 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -55,8 +56,12 @@ func main() {
 
 `, Version, buildStr)
 
-	// Initialize logger
-	logger := log.New(os.Stdout)
+	// Initialize logger with date/time and PID prefix.
+	logger := log.NewWithOptions(os.Stdout, log.Options{
+		ReportTimestamp: true,
+		TimeFormat:      time.DateTime,
+		Prefix:          "(" + strconv.Itoa(os.Getpid()) + ")",
+	})
 	logger.SetFormatter(log.TextFormatter)
 
 	// Set default logging level to debug during development
@@ -177,8 +182,6 @@ func main() {
 func setupLogging(cfg *config.Config, logger *log.Logger) error {
 	var writers []io.Writer
 
-	// We prefer syslog/file if configured; we'll fallback to stdout only if no other writers are available
-
 	// Setup syslog logging if enabled (default to true if not explicitly set)
 	logToSyslog := cfg.Pulse.LogToSyslog
 	if cfg.Pulse.SyslogTag == "" {
@@ -233,8 +236,8 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 			// If syslog is not available (e.g., in containers), log warning but continue
 			logger.Warn("Failed to connect to syslog, continuing without syslog", "error", err)
 		} else {
-			writers = append(writers, sysw)
 			logger.Info("Syslog logging enabled")
+			writers = append(writers, sysw)
 		}
 	}
 
@@ -247,14 +250,12 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 		if err != nil {
 			return fmt.Errorf("failed to open log file: %v", err)
 		}
+		logger.Info("File logging enabled to path: " + cfg.Pulse.LogFileLocation)
 		writers = append(writers, logFile)
-		logger.Info("File logging enabled", "path", cfg.Pulse.LogFileLocation)
 	}
 
-	// Fallback to stdout if no writers configured (ensures we always emit logs somewhere)
-	if len(writers) == 0 {
-		writers = append(writers, os.Stdout)
-	}
+	// Always add stdout to the list of logging destinations.
+	writers = append(writers, os.Stdout)
 
 	// Set multi-writer output (stdout + file if enabled)
 	if len(writers) > 1 {

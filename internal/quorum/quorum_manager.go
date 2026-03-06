@@ -59,7 +59,26 @@ type VotingSession struct {
 	Result      *VotingSessionResult // Result of the vote, nil if not completed
 }
 
-// VotingSessionResult represents the result of a completed voting session
+// Copy returns a deep copy of a VotingSession.
+func (s *VotingSession) Copy() *VotingSession {
+	// Obtain a struct copy via dereferencing.
+	sessionCopy := *s
+	if s.Result != nil {
+		// Deep copy the Result as this is a pointer type.
+		sessionCopy.Result = s.Result.Copy()
+	}
+	// Deep copy the Votes map to prevent chaining of the Vote objects.
+	if s.Votes != nil {
+		votesCopy := make(map[string]Vote, len(s.Votes))
+		for k, v := range s.Votes {
+			votesCopy[k] = v
+		}
+		sessionCopy.Votes = votesCopy
+	}
+	return &sessionCopy
+}
+
+// VotingSessionResult represents the result of a completed voting session.
 type VotingSessionResult struct {
 	Passed      bool      // Whether the vote passed
 	YesCount    int       // Number of yes votes
@@ -67,6 +86,13 @@ type VotingSessionResult struct {
 	TotalVotes  int       // Total number of votes cast
 	QuorumMet   bool      // Whether quorum was met
 	CompletedAt time.Time // When the voting completed
+}
+
+// Copy returns a deep copy of a VotingSessionResult.
+func (s *VotingSessionResult) Copy() *VotingSessionResult {
+	// Obtain a struct copy via dereferencing.
+	value := *s
+	return &value
 }
 
 // CompactSessionHistory stores minimal session data for history (uses ~16 bytes vs ~1KB)
@@ -118,7 +144,8 @@ func (q *QuorumManager) UpdateNodeCount(count int) {
 }
 
 // StartVotingSession creates a new voting session and returns its ID
-func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, description string, timeout time.Duration) (string, error) {
+func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, description string,
+	timeout time.Duration) (string, error) {
 	q.Lock()
 	defer q.Unlock()
 
@@ -189,13 +216,15 @@ func (q *QuorumManager) GetVotingSession(sessionID string) (*VotingSession, erro
 	// Check active sessions
 	session, exists := q.activeSessions[sessionID]
 	if exists {
-		return session, nil
+		// Return a deep copy of the session to protect our mutex.
+		return session.Copy(), nil
 	}
 
 	// Check session history
 	session, exists = q.sessionHistory[sessionID]
 	if exists {
-		return session, nil
+		// Return a deep copy of the session to protect our mutex.
+		return session.Copy(), nil
 	}
 
 	return nil, fmt.Errorf("voting session %s not found", sessionID)
@@ -208,7 +237,8 @@ func (q *QuorumManager) GetActiveVotingSessions() []*VotingSession {
 
 	sessions := make([]*VotingSession, 0, len(q.activeSessions))
 	for _, session := range q.activeSessions {
-		sessions = append(sessions, session)
+		// Append a copy of the session to protect our mutex.
+		sessions = append(sessions, session.Copy())
 	}
 
 	return sessions

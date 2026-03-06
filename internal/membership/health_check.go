@@ -48,7 +48,8 @@ type ServerReference interface {
 	OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string) error
 	// Cluster-state convergence helpers
 	GetClusterEpoch() int64
-	BroadcastClusterState(memberStates map[string]MemberStatus, epoch int64, leaderID string, leases map[string]string) error
+	BroadcastClusterState(memberStates map[string]MemberStatus, epoch int64, leaderID string,
+		leases map[string]string) error
 	// Leader getters for lease-based failover
 	GetLeaderID() string
 	GetLeaderLeaseUntil() time.Time
@@ -83,6 +84,7 @@ type HealthChecker struct {
 	checksWithoutChange int       // Counter for periodic status logs
 	lastLeaderBroadcast time.Time // suppress elections briefly after leader broadcast
 	lastTick            time.Time // last time a check cycle executed
+	loggedNoMembers     bool      // Tracks if a no-member condition has already been logged in the current state
 }
 
 // NewHealthChecker creates a new health checker
@@ -206,15 +208,23 @@ func (h *HealthChecker) LastTickTime() time.Time {
 
 // performHealthChecks executes health checks on all nodes and their IPs
 func (h *HealthChecker) performHealthChecks() {
+	defer h.Unlock()
+	h.Lock()
 	h.logger.Debug("HEALTH_CHECK: Starting health check cycle...")
-
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
 	if memberCount == 0 {
-		h.logger.Warn("No members in cluster, skipping health check")
-		return // No logging needed when no members exist
+		// Use a field to print the "no members" message only once to the logs.
+		if !h.loggedNoMembers {
+			h.logger.Warn("No members in cluster, skipping health check. " +
+				"This message will only be logged once until members are added.")
+			h.loggedNoMembers = true
+		}
+		// No health check is needed when no members exist.
+		return
 	}
-
+	// Reset the "no members" log field, as we now have members.
+	h.loggedNoMembers = false
 	// Collect cluster status information for a single consolidated log
 	clusterStatus := make([]string, 0, memberCount)
 	clusterStatusForComparison := make([]string, 0, memberCount)
@@ -257,7 +267,8 @@ func (h *HealthChecker) performHealthChecks() {
 		h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 		isReachable := h.checkNodeConnectivity(member)
 		responseTime := time.Since(startTime)
-		h.logger.Debugf("Connectivity check result for %s: reachable=%v, responseTime=%v", member.Hostname, isReachable, responseTime)
+		h.logger.Debugf("Connectivity check result for %s: reachable=%v, responseTime=%v", member.Hostname, isReachable,
+			responseTime)
 
 		member.Lock()
 		member.LastHCResponse = time.Now()
@@ -274,18 +285,17 @@ func (h *HealthChecker) performHealthChecks() {
 				statusChanges = append(statusChanges, fmt.Sprintf("%s became unreachable (was %s)",
 					member.Hostname, StatusToString(previousStatus)))
 				// Immediate convergence nudge on status change
-				if h.server != nil && previousStatus != StatusUnknown {
+				if h.server != nil {
 					states := getMemberStatusMap()
 					for id, m := range membersSnapshot {
 						m.Lock()
 						states[id] = m.Status
 						m.Unlock()
 					}
-					_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
+					_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(),
+						nil)
 					putMemberStatusMap(states)
-					h.Lock()
 					h.lastLeaderBroadcast = time.Now()
-					h.Unlock()
 				}
 			}
 
@@ -301,10 +311,8 @@ func (h *HealthChecker) performHealthChecks() {
 		member.Latency = fmt.Sprintf("%.2fms", float64(responseTime.Nanoseconds())/1000000)
 
 		// Handle auto-failback for previously failed nodes
-		h.RLock()
 		autoFailback := h.members.config.Pulse.AutoFailback
 		mode := h.members.config.Pulse.Mode
-		h.RUnlock()
 
 		if wasUnknown && autoFailback {
 			switch mode {
@@ -374,9 +382,7 @@ func (h *HealthChecker) performHealthChecks() {
 			}
 			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
 			putMemberStatusMap(states)
-			h.Lock()
 			h.lastLeaderBroadcast = time.Now()
-			h.Unlock()
 			h.logger.Debug("HEALTH_CHECK: Cluster state broadcast completed")
 		}
 	} else {
@@ -385,7 +391,8 @@ func (h *HealthChecker) performHealthChecks() {
 
 		// Heartbeat convergence nudge every 3 checks (~3s) to advance LastResponse and align peers
 		if h.server != nil && h.checksWithoutChange%3 == 0 {
-			h.logger.Debug("HEALTH_CHECK: Performing heartbeat convergence nudge", "checksWithoutChange", h.checksWithoutChange)
+			h.logger.Debug("HEALTH_CHECK: Performing heartbeat convergence nudge", "checksWithoutChange",
+				h.checksWithoutChange)
 			states := getMemberStatusMap()
 			for id, m := range membersSnapshot {
 				m.Lock()
@@ -416,7 +423,8 @@ func (h *HealthChecker) performHealthChecks() {
 
 	// Check for active node failure and initiate failover if needed
 	if localMember != nil {
-		h.logger.Debug("HEALTH_CHECK: Local member has status, checking for active node failure", "hostname", localMember.Hostname, "status", StatusToString(localMember.Status))
+		h.logger.Debug("HEALTH_CHECK: Local member has status, checking for active node failure", "hostname",
+			localMember.Hostname, "status", StatusToString(localMember.Status))
 		// Always check for active node failure, not just when passive
 		h.checkForActiveNodeFailure()
 	} else {
@@ -503,10 +511,12 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	activeIPs := member.ActiveIPs
 	member.Unlock()
 
-	h.logger.Debug("ACTIVE_CHECK: Active node health status", "hostname", hostname, "timeSinceLastResponse", timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit, "isUnreachable", isUnreachable)
+	h.logger.Debug("ACTIVE_CHECK: Active node health status", "hostname", hostname, "timeSinceLastResponse",
+		timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit, "isUnreachable", isUnreachable)
 
 	if isUnreachable {
-		h.logger.Warn("ACTIVE_CHECK: Active node has been unreachable, initiating failover", "hostname", hostname, "timeSinceLastResponse", timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit)
+		h.logger.Warn("ACTIVE_CHECK: Active node has been unreachable, initiating failover", "hostname", hostname,
+			"timeSinceLastResponse", timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit)
 
 		// Mark the active node as unknown
 		member.Lock()
@@ -558,7 +568,8 @@ func (h *HealthChecker) electNewActiveNode() {
 		// Non-coordinators are purely passive and never promote themselves
 		// This follows industry standard (keepalived/VRRP) where backups only monitor
 		// If coordinator fails, next health check cycle will elect new coordinator
-		h.logger.Info("ELECTION: This node is not the coordinator, monitoring for active node appearance", "monitorDuration", backoffDelay+(10*time.Second))
+		h.logger.Info("ELECTION: This node is not the coordinator, monitoring for active node appearance",
+			"monitorDuration", backoffDelay+(10*time.Second))
 
 		// Monitor for active node with polling
 		deadline := time.Now().Add(backoffDelay + (10 * time.Second))
@@ -629,7 +640,8 @@ func (h *HealthChecker) electNewActiveNode() {
 		// CRITICAL: Re-check if an active node appeared while we were voting
 		// This prevents multiple nodes from promoting themselves simultaneously
 		if activeNode := h.findActiveNode(); activeNode != nil {
-			h.logger.Info("ELECTION: Active node appeared during voting, aborting promotion", "activeNode", activeNode.Hostname)
+			h.logger.Info("ELECTION: Active node appeared during voting, aborting promotion", "activeNode",
+				activeNode.Hostname)
 			return
 		}
 
@@ -828,7 +840,8 @@ func (h *HealthChecker) emergencyFallback() {
 
 	coordinatorID := h.findElectionCoordinator()
 	if coordinatorID != localNodeID {
-		h.logger.Info("Emergency fallback: Another node should coordinate", "coordinator", coordinatorID, "local", localNodeID)
+		h.logger.Info("Emergency fallback: Another node should coordinate", "coordinator", coordinatorID, "local",
+			localNodeID)
 		return
 	}
 
@@ -872,11 +885,13 @@ func (h *HealthChecker) checkNodeConnectivity(member *Member) bool {
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(member.IP), member.Port)
 	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
 	if err == nil {
-		conn.Close()
-		h.logger.Debugf("Health check succeeded for %s (%s)", member.Hostname, address)
+		err = conn.Close()
+		if err != nil {
+			h.logger.Warnf("Warning: Failed to close connection for %s (%s): %v",
+				member.Hostname, address, err)
+		}
 		return true
 	}
-
 	h.logger.Warnf("Health check failed for %s (%s): %v", member.Hostname, address, err)
 	return false
 }
@@ -926,7 +941,10 @@ func (h *HealthChecker) checkIP(ip string) HealthCheck {
 	for i := 0; i < 1; i++ {
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:80", ip), 500*time.Millisecond)
 		if err == nil {
-			conn.Close()
+			err = conn.Close()
+			if err != nil {
+				h.logger.Warnf("Warning: Failed to close connection for %s: %v", ip, err)
+			}
 			latency := time.Since(start)
 			h.logger.Debugf("Health check successful for IP %s (latency: %v)", ip, latency)
 			return HealthCheck{
@@ -1009,7 +1027,8 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 					}
 
 					if h.server != nil {
-						if err := h.server.OrchestrateIPFailover(member.ID, otherMember.ID, member.ActiveIPs); err != nil {
+						if err := h.server.OrchestrateIPFailover(member.ID, otherMember.ID,
+							member.ActiveIPs); err != nil {
 							h.logger.Errorf("Failed to promote passive node: %v", err)
 						} else {
 							h.logger.Infof("Passive node %s promoted to active", otherMember.Hostname)
@@ -1136,7 +1155,8 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberStatus) bool {
 	maxRetries := 3
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		h.logger.Infof("Initiating vote for node %s status change to %s (attempt %d/%d)", nodeID, statusToString(newStatus), attempt, maxRetries)
+		h.logger.Infof("Initiating vote for node %s status change to %s (attempt %d/%d)", nodeID,
+			statusToString(newStatus), attempt, maxRetries)
 
 		// Check cluster size to determine if voting is needed
 		// Count only available/responding nodes for quorum calculation
@@ -1183,7 +1203,8 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 				}
 				// Deterministic rule: smaller node ID wins
 				shouldWin := localNodeID < otherNodeID
-				h.logger.Infof("2-node tie-breaking: local=%s, other=%s, shouldWin=%v", localNodeID, otherNodeID, shouldWin)
+				h.logger.Infof("2-node tie-breaking: local=%s, other=%s, shouldWin=%v", localNodeID, otherNodeID,
+					shouldWin)
 				return shouldWin
 			}
 			return true // Allow non-Active status changes
@@ -1481,10 +1502,7 @@ func (h *HealthChecker) tryForcePromote(candidate *Member) bool {
 	if candidate == nil {
 		return false
 	}
-
-	h.RLock()
 	server := h.server
-	h.RUnlock()
 	if server == nil {
 		h.logger.Debug("ELECTION: Server reference unavailable, skipping Promote RPC")
 		return false

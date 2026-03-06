@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -103,7 +104,7 @@ func newClusterLeaveCmd() *cobra.Command {
 				return err
 			}
 			if !resp.Success {
-				return fmt.Errorf(resp.Message)
+				return errors.New(resp.Message)
 			}
 			fmt.Println(resp.Message)
 			return nil
@@ -126,7 +127,8 @@ and sync it across all cluster members.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := client.New()
 			if err != nil {
-				return fmt.Errorf("failed to connect to PulseHA daemon - ensure the pulseha service is running: %v", err)
+				return fmt.Errorf("failed to connect to PulseHA daemon - ensure the pulseha service is running: %v",
+					err)
 			}
 			defer client.Close()
 
@@ -144,7 +146,8 @@ and sync it across all cluster members.`,
 
 			// Display the result
 			if regenerate {
-				fmt.Printf("New cluster token generated:\n%s\n\nToken has been synchronized across all cluster members.\n", resp.Token)
+				fmt.Printf("New cluster token generated:\n%s\n\nToken has been synchronized across all cluster members.\n",
+					resp.Token)
 			} else {
 				fmt.Println(resp.Token)
 			}
@@ -185,7 +188,7 @@ func newClusterModeSetCmd() *cobra.Command {
 				return err
 			}
 			if !resp.Success {
-				return fmt.Errorf(resp.Message)
+				return errors.New(resp.Message)
 			}
 			fmt.Println(resp.Message)
 			return nil
@@ -218,12 +221,13 @@ func newNetworkResyncCmd() *cobra.Command {
 				return err
 			}
 			defer c.Close()
-			resp, err := c.CLI().ResyncNetwork(context.Background(), &rpc.ResyncNetworkRequest{CreateDefaultGroups: createGroups})
+			resp, err := c.CLI().ResyncNetwork(context.Background(),
+				&rpc.ResyncNetworkRequest{CreateDefaultGroups: createGroups})
 			if err != nil {
 				return err
 			}
 			if !resp.Success {
-				return fmt.Errorf(resp.Message)
+				return errors.New(resp.Message)
 			}
 			fmt.Println(resp.Message)
 			return nil
@@ -323,7 +327,7 @@ func createCluster(cmd *cobra.Command, args []string) error {
 	}
 
 	if !resp.Success {
-		return fmt.Errorf(resp.Message)
+		return errors.New(resp.Message)
 	}
 
 	fmt.Println("Cluster created successfully!")
