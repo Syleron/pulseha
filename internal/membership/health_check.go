@@ -215,7 +215,7 @@ func (h *HealthChecker) performHealthChecks() {
 	memberCount := len(membersSnapshot)
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
-		if h.loggedNoMembers == false {
+		if !h.loggedNoMembers {
 			h.logger.Warn("No members in cluster, skipping health check. " +
 				"This message will only be logged once until members are added.")
 			h.loggedNoMembers = true
