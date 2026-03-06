@@ -91,15 +91,8 @@ func (m *IPMonitor) monitorLoop() {
 					m.logger.Info("IP monitor: dropped IP on passive node", "ip", changedIP, "iface", iface)
 					continue
 				}
-				// Active: allow only expected IPs on the correct interface
-				correctIface, isExpected := allExpected[changedIP]
-				if !isExpected {
-					// Unexpected addition; remove
-					_ = netlink.AddrDel(link, addrObj)
-					m.logger.Warn("IP monitor: removed unexpected IP on active node", "ip", changedIP, "iface", iface)
-					continue
-				}
-				if correctIface != iface {
+				// Active: Move to correct interface if it's not already there
+				if correctIface, ok := allExpected[changedIP]; ok && correctIface != iface {
 					// Move to correct interface
 					_ = netlink.AddrDel(link, addrObj)
 					if targetLink, e := netlink.LinkByName(correctIface); e == nil {
