@@ -2463,6 +2463,9 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 							continue
 						}
 
+						// Unconditionally add the IP to the expected IPs for the local monitor
+						s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
+
 						// Check if IP is already present; treat as success if on target iface
 						ipObj, _ := utils.GetCIDR(ipToUse)
 						if ipObj != nil {
@@ -2476,9 +2479,6 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 									// Already configured on desired iface; mark success and update expected IPs
 									ipBroughtUp = true
 									s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
-									if s.ipMonitor != nil {
-										s.ipMonitor.UpdateExpectedIPs(iface, []string{ipToUse})
-									}
 									continue
 								}
 								// Present on a different iface; try to bring it down there first
@@ -2495,10 +2495,6 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 						}
 						ipBroughtUp = true
 						s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
-						// Update expected IPs for local monitor
-						if s.ipMonitor != nil {
-							s.ipMonitor.UpdateExpectedIPs(iface, []string{ipToUse})
-						}
 					} else {
 						// This is a remote node, send RPC to bring up the IP
 						s.logger.Infof("Sending request to bring up IP %s on node %s", ipToUse, node.Hostname)
@@ -3408,7 +3404,7 @@ func (s *Server) GetQuorumManager() *quorum.QuorumManager {
 
 // ConfigSync handles configuration synchronization between nodes
 func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*rpc.ConfigSyncResponse, error) {
-	s.logger.Info("CONFIG_SYNC: Received configuration sync request", "configSize", len(req.Config))
+	s.logger.Debug("CONFIG_SYNC: Received configuration sync request", "configSize", len(req.Config))
 
 	if req.Config == nil {
 		s.logger.Warn("CONFIG_SYNC: No configuration data provided")
@@ -3425,16 +3421,16 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	if raw != nil {
 		if _, ok := raw["pulseha"]; ok {
 			isFullConfig = true
-			s.logger.Info("CONFIG_SYNC: Detected full config format (has pulseha root)")
+			s.logger.Debug("CONFIG_SYNC: Detected full config format (has pulseha root)")
 		} else {
-			s.logger.Info("CONFIG_SYNC: Detected envelope format (no pulseha root)")
+			s.logger.Debug("CONFIG_SYNC: Detected envelope format (no pulseha root)")
 		}
 		// Log what keys are present
 		var keys []string
 		for k := range raw {
 			keys = append(keys, k)
 		}
-		s.logger.Info("CONFIG_SYNC: Config contains keys", "keys", keys)
+		s.logger.Debug("CONFIG_SYNC: Config contains keys", "keys", keys)
 	}
 
 	// Optionally read member states and convergence metadata if present (EnhancedConfig)
@@ -3598,7 +3594,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		// Persist and update our configuration
-		s.logger.Info("CONFIG_SYNC: Saving synchronized configuration")
+		s.logger.Debug("CONFIG_SYNC: Saving synchronized configuration")
 		if err := newConfig.Save(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to save synchronized configuration", "error", err)
 			s.Unlock()
@@ -3607,12 +3603,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				Message: fmt.Sprintf("failed to save synchronized configuration: %v", err),
 			}, nil
 		}
-		s.logger.Info("CONFIG_SYNC: Configuration saved successfully")
+		s.logger.Debug("CONFIG_SYNC: Configuration saved successfully")
 
 		// Log what nodes are in the new config
-		s.logger.Info("CONFIG_SYNC: New config contains nodes", "nodeCount", len(newConfig.Nodes))
+		s.logger.Debug("CONFIG_SYNC: New config contains nodes", "nodeCount", len(newConfig.Nodes))
 		for id, node := range newConfig.Nodes {
-			s.logger.Info("CONFIG_SYNC: Node in new config",
+			s.logger.Debug("CONFIG_SYNC: Node in new config",
 				"nodeID", id,
 				"hostname", node.Hostname,
 				"ip", node.IP,
@@ -3624,7 +3620,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 		// Update convergence metadata if newer
 		if incomingEpoch > s.clusterEpoch {
-			s.logger.Info("CONFIG_SYNC: Updating cluster epoch",
+			s.logger.Debug("CONFIG_SYNC: Updating cluster epoch",
 				"oldEpoch", s.clusterEpoch,
 				"newEpoch", incomingEpoch,
 				"leaderID", incomingLeaderID)
@@ -3633,10 +3629,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		// Immediately refresh member list from new configuration so peers become visible
-		s.logger.Info("CONFIG_SYNC: Updating member list with new config")
+		s.logger.Debug("CONFIG_SYNC: Updating member list with new config")
 		s.memberList.UpdateConfig(s.config)
 
-		s.logger.Info("CONFIG_SYNC: Loading initial members")
+		s.logger.Debug("CONFIG_SYNC: Loading initial members")
 		if err := s.loadInitialMembers(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to load members after sync", "error", err)
 		}
@@ -3657,22 +3653,22 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		applyStates := false
 		currentEpoch := s.clusterEpoch
 		currentLeader := s.leaderID
-		s.logger.Info("CONFIG_SYNC: Evaluating incoming member states", "incoming_epoch", incomingEpoch, "current_epoch", currentEpoch,
+		s.logger.Debug("CONFIG_SYNC: Evaluating incoming member states", "incoming_epoch", incomingEpoch, "current_epoch", currentEpoch,
 			"incoming_leader", incomingLeaderID, "current_leader", currentLeader, "states", incomingMemberStates)
 
 		if incomingEpoch > currentEpoch {
 			applyStates = true
-			s.logger.Info("CONFIG_SYNC: Will apply states (incoming epoch is higher)")
+			s.logger.Debug("CONFIG_SYNC: Will apply states (incoming epoch is higher)")
 		} else if incomingEpoch == currentEpoch {
 			// Only accept if leader matches (or no leader set yet)
 			if currentLeader == "" || incomingLeaderID == currentLeader {
 				applyStates = true
-				s.logger.Info("CONFIG_SYNC: Will apply states (same epoch, matching leader)")
+				s.logger.Debug("CONFIG_SYNC: Will apply states (same epoch, matching leader)")
 			} else {
-				s.logger.Info("CONFIG_SYNC: Rejecting states (same epoch, different leader)")
+				s.logger.Debug("CONFIG_SYNC: Rejecting states (same epoch, different leader)")
 			}
 		} else {
-			s.logger.Info("CONFIG_SYNC: Rejecting states (incoming epoch is lower)")
+			s.logger.Debug("CONFIG_SYNC: Rejecting states (incoming epoch is lower)")
 		}
 
 		if applyStates {
@@ -3680,7 +3676,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			if incomingEpoch >= currentEpoch {
 				s.clusterEpoch = incomingEpoch
 				s.leaderID = incomingLeaderID
-				s.logger.Info("CONFIG_SYNC: Updated cluster epoch and leader", "epoch", incomingEpoch, "leader", incomingLeaderID)
+				s.logger.Debug("CONFIG_SYNC: Updated cluster epoch and leader", "epoch", incomingEpoch, "leader", incomingLeaderID)
 			}
 
 			// Capture LOCAL node's status before applying incoming states
@@ -3694,12 +3690,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				}
 			}
 
-			s.logger.Info("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
+			s.logger.Debug("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
 			for id, st := range incomingMemberStates {
 				if m := s.memberList.GetMemberByID(id); m != nil {
 					oldStatus := m.Status
 					m.Status = st
-					s.logger.Info("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
+					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
 				} else {
 					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
 				}
@@ -3710,7 +3706,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// Only triggers on state CHANGE, not continuous heartbeats, so no GARP storm risk
 			if hadLocalMember && oldLocalStatus != membership.StatusActive {
 				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.Status == membership.StatusActive {
-					s.logger.Info("ConfigSync: LOCAL node transitioned to Active, triggering VIP setup", "oldStatus", membership.StatusToString(oldLocalStatus), "newStatus", "Active")
+					s.logger.Debug("ConfigSync: LOCAL node transitioned to Active, triggering VIP setup", "oldStatus", membership.StatusToString(oldLocalStatus), "newStatus", "Active")
 					go s.refreshLocalMonitorExpectedIPs()
 				}
 			}
@@ -3729,7 +3725,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			if err := s.Reconfigure(); err != nil {
 				s.logger.Error("Async reconfigure failed after ConfigSync", "error", err)
 			} else {
-				s.logger.Info("Async reconfigure completed after ConfigSync")
+				s.logger.Debug("Async reconfigure completed after ConfigSync")
 			}
 		}()
 	}
@@ -4096,9 +4092,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		}
 
 		// Inform monitor of expectation before manipulations
-		if s.ipMonitor != nil {
-			s.ipMonitor.UpdateExpectedIPs(req.Iface, []string{ip})
-		}
+		s.ipMonitor.AddExpectedIPs(req.Iface, []string{ip})
 
 		// Pre-check if already present
 		ipOnly, ipNet := utils.GetCIDR(ip)
@@ -4164,9 +4158,7 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 			}
 		}
 
-		if s.ipMonitor != nil {
-			s.ipMonitor.RemoveExpectedIPs(req.Iface, []string{ip})
-		}
+		s.ipMonitor.RemoveExpectedIPs(req.Iface, []string{ip})
 
 		if err := network.BringIPdown(req.Iface, ip); err != nil {
 			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", ip, "error", err)
