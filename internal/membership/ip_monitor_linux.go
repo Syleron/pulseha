@@ -218,12 +218,8 @@ func (m *IPMonitor) enforceExpectations() {
 		copy(cpy, ips)
 		expectations[iface] = cpy
 	}
-	expectationsCopy := make(map[string][]string)
-	for k, v := range expectations {
-		expectationsCopy[k] = v
-	}
 	m.RUnlock()
-	m.logger.Info("ENFORCE: Current expectations", "expectations", expectationsCopy)
+	m.logger.Info("ENFORCE: Current expectations", "expectations", expectations)
 
 	// Build snapshot of current interface assignments to avoid repeated netlink allocations during checks.
 	ipInventory, invErr := network.BuildIPInventory()

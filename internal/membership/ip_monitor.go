@@ -3,6 +3,7 @@ package membership
 import (
 	"fmt"
 	"net"
+	"slices"
 	"sync"
 
 	log "github.com/charmbracelet/log"
@@ -35,6 +36,9 @@ func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 
 // Start begins monitoring IP addresses
 func (m *IPMonitor) Start() error {
+	if m == nil {
+		return nil
+	}
 	m.Lock()
 	defer m.Unlock()
 
@@ -54,6 +58,9 @@ func (m *IPMonitor) Start() error {
 
 // TriggerEnforce performs an immediate expectations check asynchronously.
 func (m *IPMonitor) TriggerEnforce() {
+	if m == nil {
+		return
+	}
 	m.logger.Debug("TRIGGER: TriggerEnforce called")
 	select {
 	case <-m.stopChan:
@@ -67,6 +74,9 @@ func (m *IPMonitor) TriggerEnforce() {
 
 // Stop stops the IP monitor
 func (m *IPMonitor) Stop() {
+	if m == nil {
+		return
+	}
 	m.stopOnce.Do(func() {
 		close(m.stopChan)
 		m.logger.Info("IP monitor stopped")
@@ -75,20 +85,43 @@ func (m *IPMonitor) Stop() {
 
 // UpdateExpectedIPs updates the list of expected IPs for an interface
 func (m *IPMonitor) UpdateExpectedIPs(iface string, ips []string) {
+	if m == nil {
+		return
+	}
 	m.Lock()
 	defer m.Unlock()
 
 	// Create a copy of the IPs slice to avoid external modifications
 	ipsCopy := make([]string, len(ips))
 	copy(ipsCopy, ips)
+	slices.Sort(ipsCopy)
 
 	m.expectedIPs[iface] = ipsCopy
 	m.logger.Info("Updated expected IPs", "iface", iface, "ips", ips)
 	m.TriggerEnforce()
 }
 
+// AddExpectedIPs adds IPs to the expected list for an interface
+func (m *IPMonitor) AddExpectedIPs(iface string, ips []string) {
+	if m == nil {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	m.expectedIPs[iface] = append(m.expectedIPs[iface], ips...)
+	slices.Sort(m.expectedIPs[iface])
+	m.expectedIPs[iface] = slices.Compact(m.expectedIPs[iface])
+
+	m.logger.Info("Added IPs to interface", "iface", iface, "ips", ips)
+	m.TriggerEnforce()
+}
+
 // RemoveExpectedIPs removes IPs from the expected list for an interface
 func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
+	if m == nil {
+		return
+	}
 	m.Lock()
 	defer m.Unlock()
 
@@ -114,6 +147,9 @@ func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
 
 // ClearExpectedIPs removes all expected IPs for an interface
 func (m *IPMonitor) ClearExpectedIPs(iface string) {
+	if m == nil {
+		return
+	}
 	m.Lock()
 	defer m.Unlock()
 
@@ -124,6 +160,9 @@ func (m *IPMonitor) ClearExpectedIPs(iface string) {
 
 // GetExpectedIPs returns the expected IPs for an interface (read-only copy)
 func (m *IPMonitor) GetExpectedIPs(iface string) []string {
+	if m == nil {
+		return []string{}
+	}
 	m.RLock()
 	defer m.RUnlock()
 
