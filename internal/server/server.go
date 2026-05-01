@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -113,6 +114,8 @@ type Server struct {
 	// Connection pool for peer clients
 	peerClients map[string]*client.Client
 	clientMutex sync.RWMutex
+	// Unix socket path used by the CLI gRPC server
+	cliSocketPath string
 }
 
 // NewServer creates a new PulseHA server instance
@@ -166,19 +169,32 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to load initial members: %v", err)
 	}
 
-	// Start CLI server on localhost (ephemeral in tests to avoid conflicts)
-	cliAddr := "127.0.0.1:8080"
+	// Start CLI server on a Unix socket.
+	// Test mode gets a per-instance temp path to avoid conflicts between concurrent in-process servers.
+	socketPath := config.CLI_SOCKET_PATH
 	if os.Getenv("PULSEHA_TEST") == "true" {
-		cliAddr = "127.0.0.1:0"
+		socketPath = fmt.Sprintf("/tmp/pulseha-test-%s.sock", uuid.New().String()[:8])
 	}
-	s.logger.Debug("Starting CLI gRPC server", "addr", cliAddr)
+	s.cliSocketPath = socketPath
+	s.logger.Debug("Starting CLI gRPC server", "socket", socketPath)
+
+	// Ensure parent directory exists and remove any stale socket file
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0750); err != nil {
+		return fmt.Errorf("failed to create socket directory %s: %v", filepath.Dir(socketPath), err)
+	}
+	os.Remove(socketPath)
+
 	s.cliServer = grpc.NewServer()
 	// Register both CLI and Server services on the local listener so local operations (e.g., ConfigSync) work pre-cluster
 	rpc.RegisterServerServer(s.cliServer, s)
 	rpc.RegisterCLIServer(s.cliServer, s)
-	cliListener, err := net.Listen("tcp", cliAddr)
+	cliListener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		return fmt.Errorf("failed to listen for CLI server on %s: %v", cliAddr, err)
+		return fmt.Errorf("failed to listen on Unix socket %s: %v", socketPath, err)
+	}
+	// Restrict access to the socket owner only
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		s.logger.Warn("Failed to set socket permissions", "socket", socketPath, "error", err)
 	}
 	go func() {
 		s.logger.Debug("Serving CLI gRPC", "addr", cliListener.Addr().String())
@@ -195,7 +211,7 @@ func (s *Server) Start() error {
 			return err
 		}
 	} else {
-		s.logger.Info("No cluster binding configuration found; cluster RPC server not started. CLI is available on 127.0.0.1:8080 for bootstrap.")
+		s.logger.Info("No cluster binding configuration found; cluster RPC server not started.", "cli_socket", s.cliSocketPath)
 	}
 
 	// Generate certificates if they don't exist
@@ -409,6 +425,11 @@ func (s *Server) Stop() {
 	}
 	if oldCli != nil {
 		oldCli.GracefulStop()
+	}
+
+	// Remove the CLI Unix socket
+	if s.cliSocketPath != "" {
+		os.Remove(s.cliSocketPath)
 	}
 
 	s.logger.Info("PulseHA server stopped")

@@ -82,12 +82,14 @@ func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 
-// New creates a new client with default local connection
+// New creates a new client connected to the daemon's CLI Unix socket.
 func New() (*Client, error) {
-	// Always connect CLI to localhost
-	conn, err := grpc.Dial("127.0.0.1:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		"unix://"+config.CLI_SOCKET_PATH,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to CLI server: %v", err)
+		return nil, fmt.Errorf("failed to connect to CLI socket %s: %v", config.CLI_SOCKET_PATH, err)
 	}
 
 	return &Client{
