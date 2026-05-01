@@ -25,7 +25,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/syleron/pulseha/internal/client"
-	"github.com/syleron/pulseha/packages/config"
 	rpc "github.com/syleron/pulseha/rpc"
 )
 
@@ -61,8 +60,8 @@ func newConfigGetCmd() *cobra.Command {
 			}
 			defer c.Connection.Close()
 
-			// Get local config
-			cfg, err := config.New()
+			// Get live config from daemon via gRPC
+			cfg, err := c.GetConfig()
 			if err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)

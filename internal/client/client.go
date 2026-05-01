@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -51,6 +52,7 @@ const (
 	SendListGroups
 	SendCreateCluster
 	SendToken
+	SendReadConfig
 )
 
 var protoFunctions = []string{
@@ -73,6 +75,7 @@ var protoFunctions = []string{
 	"ListGroups",
 	"CreateCluster",
 	"Token",
+	"ReadConfig",
 }
 
 func (p ProtoFunction) String() string {
@@ -153,6 +156,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"Token": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.cliClient.Token(ctx, data.(*rpc.TokenRequest))
+		},
+		"ReadConfig": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.cliClient.ReadConfig(ctx, data.(*rpc.ReadConfigRequest))
 		},
 	}
 }
@@ -512,9 +518,21 @@ func (c *Client) PromoteNode(hostname string, ips []string) error {
 	return err
 }
 
-// GetConfig returns the current configuration
+// GetConfig returns the daemon's live configuration via gRPC.
 func (c *Client) GetConfig() (*config.Config, error) {
-	return config.New()
+	r, err := c.Send(SendReadConfig, &rpc.ReadConfigRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config: %v", err)
+	}
+	resp := r.(*rpc.ReadConfigResponse)
+	if !resp.Success {
+		return nil, fmt.Errorf("failed to read config: %s", resp.Message)
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(resp.Config, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
+	}
+	return &cfg, nil
 }
 
 // SetClusterMode changes the cluster operation mode

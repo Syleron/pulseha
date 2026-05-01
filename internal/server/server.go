@@ -3783,6 +3783,18 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 	return &rpc.UpdateConfigResponse{Success: true, Message: "updated"}, nil
 }
 
+// ReadConfig implements CLI.ReadConfig — returns the daemon's live config as JSON.
+func (s *Server) ReadConfig(ctx context.Context, req *rpc.ReadConfigRequest) (*rpc.ReadConfigResponse, error) {
+	s.RLock()
+	defer s.RUnlock()
+
+	data, err := json.Marshal(s.config)
+	if err != nil {
+		return &rpc.ReadConfigResponse{Success: false, Message: err.Error()}, nil
+	}
+	return &rpc.ReadConfigResponse{Success: true, Config: data}, nil
+}
+
 // ResyncNetwork implements CLI.ResyncNetwork RPC
 func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkRequest) (*rpc.ResyncNetworkResponse, error) {
 	// Avoid holding the server lock while calling Reconfigure to prevent deadlocks,

@@ -1,6 +1,6 @@
 module github.com/syleron/pulseha
 
-go 1.23.0
+go 1.24.0
 
 toolchain go1.24.4
 
@@ -12,8 +12,8 @@ require (
 	github.com/stretchr/testify v1.10.0
 	github.com/vishvananda/netlink v1.3.1
 	golang.org/x/sys v0.34.0
-	google.golang.org/grpc v1.65.0
-	google.golang.org/protobuf v1.36.10
+	google.golang.org/grpc v1.70.0
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
@@ -36,9 +36,9 @@ require (
 	github.com/vishvananda/netns v0.0.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
-	golang.org/x/net v0.32.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect
-	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.5.1 // indirect
+	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250115164207-1a7da9e5054f // indirect
+	google.golang.org/grpc/cmd/protoc-gen-go-grpc v1.6.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
