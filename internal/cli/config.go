@@ -37,10 +37,68 @@ func NewConfigCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(
+		newConfigAllCmd(),
 		newConfigGetCmd(),
 		newConfigSetCmd(),
 	)
 
+	return cmd
+}
+
+// newConfigAllCmd creates the config all command
+func newConfigAllCmd() *cobra.Command {
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "all",
+		Short: "Display all global configuration settings",
+		Long:  `Display all global PulseHA configuration settings retrieved live from the daemon.`,
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			c, err := client.New()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			defer c.Connection.Close()
+
+			cfg, err := c.GetConfig()
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+
+			if jsonOutput {
+				data, err := json.MarshalIndent(cfg.Pulse, "", "  ")
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
+				fmt.Println(string(data))
+				return
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "Global Configuration:")
+			fmt.Fprintln(w, "====================")
+			fmt.Fprintf(w, "Mode:\t%s\n", cfg.Pulse.Mode)
+			fmt.Fprintf(w, "Logging Level:\t%s\n", cfg.Pulse.LoggingLevel)
+			fmt.Fprintf(w, "Health Check Interval:\t%dms\n", cfg.Pulse.HealthCheckInterval)
+			fmt.Fprintf(w, "Failover Interval:\t%dms\n", cfg.Pulse.FailOverInterval)
+			fmt.Fprintf(w, "Failover Limit:\t%dms\n", cfg.Pulse.FailOverLimit)
+			fmt.Fprintf(w, "Auto Failback:\t%v\n", cfg.Pulse.AutoFailback)
+			fmt.Fprintf(w, "Log to File:\t%v\n", cfg.Pulse.LogToFile)
+			fmt.Fprintf(w, "Log File Location:\t%s\n", cfg.Pulse.LogFileLocation)
+			fmt.Fprintf(w, "Log to Syslog:\t%v\n", cfg.Pulse.LogToSyslog)
+			fmt.Fprintf(w, "Syslog Network:\t%s\n", cfg.Pulse.SyslogNetwork)
+			fmt.Fprintf(w, "Syslog Address:\t%s\n", cfg.Pulse.SyslogAddress)
+			fmt.Fprintf(w, "Syslog Facility:\t%s\n", cfg.Pulse.SyslogFacility)
+			fmt.Fprintf(w, "Syslog Tag:\t%s\n", cfg.Pulse.SyslogTag)
+			w.Flush()
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	return cmd
 }
 
