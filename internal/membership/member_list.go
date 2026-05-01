@@ -269,14 +269,15 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 		return nil
 	}
 
-	// Create new member instance
+	// Create new member instance — start in maintenance so the operator can
+	// verify the node before it becomes eligible for failover promotion.
 	m.logger.Debug("Creating new member instance", "hostname", hostname, "id", nodeID)
 	member := &Member{
 		ID:       nodeID,
 		Hostname: hostname,
 		IP:       bindIP,
 		Port:     bindPort,
-		Status:   StatusPassive,
+		Status:   StatusMaintenance,
 		config:   m.config,
 		logger:   m.logger,
 	}
