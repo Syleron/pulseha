@@ -22,6 +22,7 @@ func NewNodeCmd() *cobra.Command {
 		newNodePromoteCmd(),
 		newNodeDemoteCmd(),
 		newNodeRemoveCmd(),
+		newNodeMaintenanceCmd(),
 	)
 
 	return cmd
@@ -118,5 +119,40 @@ func newNodeRemoveCmd() *cobra.Command {
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID (UUID) of the node to remove (required)")
 	cmd.MarkFlagRequired("node-id")
 
+	return cmd
+}
+
+func newNodeMaintenanceCmd() *cobra.Command {
+	var disable bool
+
+	cmd := &cobra.Command{
+		Use:   "maintenance",
+		Short: "Enter or exit maintenance mode on the local node",
+		Long: `Put the local node into maintenance mode so it is excluded from failover elections.
+If the node is currently active, a failover is triggered first.
+Use --disable to return the node to passive and make it eligible for promotion again.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := client.New()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			enable := !disable
+			resp, err := c.CLI().SetMaintenance(context.Background(), &rpc.SetMaintenanceRequest{
+				Enable: enable,
+			})
+			if err != nil {
+				return fmt.Errorf("RPC error: %v", err)
+			}
+			if !resp.Success {
+				return errors.New(resp.Message)
+			}
+			fmt.Println(resp.Message)
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&disable, "disable", false, "Exit maintenance mode and return the node to passive")
 	return cmd
 }

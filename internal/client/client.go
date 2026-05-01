@@ -53,6 +53,7 @@ const (
 	SendCreateCluster
 	SendToken
 	SendReadConfig
+	SendSetMaintenance
 )
 
 var protoFunctions = []string{
@@ -76,6 +77,7 @@ var protoFunctions = []string{
 	"CreateCluster",
 	"Token",
 	"ReadConfig",
+	"SetMaintenance",
 }
 
 func (p ProtoFunction) String() string {
@@ -161,6 +163,9 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"ReadConfig": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.cliClient.ReadConfig(ctx, data.(*rpc.ReadConfigRequest))
+		},
+		"SetMaintenance": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.cliClient.SetMaintenance(ctx, data.(*rpc.SetMaintenanceRequest))
 		},
 	}
 }
@@ -442,6 +447,8 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Passive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
 			statusStr = "PartialActive"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
+			statusStr = "Maintenance"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
 			statusStr = "Unknown"
 		}

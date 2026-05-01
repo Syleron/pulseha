@@ -930,6 +930,8 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
 		case membership.StatusPartialActive:
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE
+		case membership.StatusMaintenance:
+			st = rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
 		default:
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
 		}
@@ -3814,6 +3816,70 @@ func (s *Server) ReadConfig(ctx context.Context, req *rpc.ReadConfigRequest) (*r
 		return &rpc.ReadConfigResponse{Success: false, Message: err.Error()}, nil
 	}
 	return &rpc.ReadConfigResponse{Success: true, Config: data}, nil
+}
+
+// SetMaintenance implements CLI.SetMaintenance.
+// Entering maintenance on an active node triggers a failover before the transition.
+func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequest) (*rpc.SetMaintenanceResponse, error) {
+	localID, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to resolve local node: " + err.Error()}, nil
+	}
+
+	s.RLock()
+	member := s.memberList.Members[localID]
+	s.RUnlock()
+	if member == nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: "local node not found in member list"}, nil
+	}
+
+	if req.Enable {
+		member.Lock()
+		currentStatus := member.Status
+		member.Unlock()
+
+		if currentStatus == membership.StatusMaintenance {
+			return &rpc.SetMaintenanceResponse{Success: true, Message: "node is already in maintenance mode"}, nil
+		}
+
+		// If currently active, initiate failover first so the cluster doesn't lose an active node
+		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
+			s.logger.Info("Maintenance: local node is active — triggering failover before entering maintenance")
+			if _, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID}); err != nil {
+				s.logger.Warn("Maintenance: MakePassive RPC error (continuing anyway)", "error", err)
+			}
+		}
+
+		if err := member.EnterMaintenance(); err != nil {
+			return &rpc.SetMaintenanceResponse{Success: false, Message: err.Error()}, nil
+		}
+
+		// Broadcast updated state so peers know not to include this node in elections
+		states := getStatusMap()
+		for id, m := range s.memberList.MembersSnapshot() {
+			states[id] = m.Status
+		}
+		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+		putStatusMap(states)
+
+		s.logger.Info("Node entered maintenance mode")
+		return &rpc.SetMaintenanceResponse{Success: true, Message: "node is now in maintenance mode"}, nil
+	}
+
+	// Disable maintenance — return the node to passive
+	if err := member.ExitMaintenance(); err != nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: err.Error()}, nil
+	}
+
+	states := getStatusMap()
+	for id, m := range s.memberList.MembersSnapshot() {
+		states[id] = m.Status
+	}
+	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+	putStatusMap(states)
+
+	s.logger.Info("Node exited maintenance mode")
+	return &rpc.SetMaintenanceResponse{Success: true, Message: "node returned to passive — eligible for promotion"}, nil
 }
 
 // ResyncNetwork implements CLI.ResyncNetwork RPC

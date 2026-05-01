@@ -702,7 +702,8 @@ func (h *HealthChecker) selectBestCandidate() *Member {
 		// Calculate score
 		score := float64(0)
 
-		// Base score by status
+		// Base score by status.
+		// StatusMaintenance hits the else branch and is skipped — never promoted.
 		if status == StatusPassive {
 			score += 50
 		} else if status == StatusUnknown {
