@@ -56,6 +56,12 @@ service CLI {
     // Initiate a server-driven join against a target member
     rpc InitiateJoin(InitiateJoinRequest) returns (InitiateJoinResponse) {}
 
+    // Config read
+    rpc ReadConfig(ReadConfigRequest) returns (ReadConfigResponse) {}
+
+    // Maintenance mode
+    rpc SetMaintenance(SetMaintenanceRequest) returns (SetMaintenanceResponse) {}
+
     // Quorum info (read-only)
     rpc GetVotingSessions(GetVotingSessionsRequest) returns (GetVotingSessionsResponse) {}
     rpc GetVotingSessionDetails(GetVotingSessionDetailsRequest) returns (GetVotingSessionDetailsResponse) {}
@@ -120,6 +126,7 @@ enum MemberStatusEnum {
     MEMBER_STATUS_ACTIVE = 1;
     MEMBER_STATUS_PASSIVE = 2;
     MEMBER_STATUS_PARTIAL_ACTIVE = 3;
+    MEMBER_STATUS_MAINTENANCE = 4;
 }
 
 message Member {
@@ -253,6 +260,25 @@ message UpdateConfigRequest {
 message UpdateConfigResponse {
     bool success = 1;
     string message = 2;
+}
+
+// Maintenance Mode Request/Response
+message SetMaintenanceRequest {
+    bool enable = 1;  // true = enter maintenance, false = exit maintenance
+}
+
+message SetMaintenanceResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Read Config Request/Response
+message ReadConfigRequest {}
+
+message ReadConfigResponse {
+    bool success = 1;
+    string message = 2;
+    bytes config = 3;  // Full config serialized as JSON
 }
 
 // Resync Network

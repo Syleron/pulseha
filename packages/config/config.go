@@ -36,6 +36,7 @@ import (
 var (
 	CONFIG_DIR      = ""
 	CONFIG_LOCATION = ""
+	CLI_SOCKET_PATH = ""
 )
 
 func init() {
@@ -44,6 +45,7 @@ func init() {
 		if err := os.MkdirAll("/etc/pulseha", 0755); err == nil {
 			CONFIG_DIR = "/etc/pulseha"
 			CONFIG_LOCATION = filepath.Join(CONFIG_DIR, "config.json")
+			CLI_SOCKET_PATH = "/var/run/pulseha/pulseha.sock"
 			return
 		}
 	}
@@ -56,6 +58,7 @@ func init() {
 
 	CONFIG_DIR = filepath.Join(homeDir, ".pulseha")
 	CONFIG_LOCATION = filepath.Join(CONFIG_DIR, "config.json")
+	CLI_SOCKET_PATH = filepath.Join(CONFIG_DIR, "pulseha.sock")
 
 	// Create user directory
 	if err := os.MkdirAll(CONFIG_DIR, 0755); err != nil {

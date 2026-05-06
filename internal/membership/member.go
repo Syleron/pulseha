@@ -21,6 +21,7 @@ const (
 	StatusActive
 	StatusPassive
 	StatusPartialActive // New state for active-active
+	StatusMaintenance   // Node is up but excluded from failover promotion
 )
 
 // Member defines our member object
@@ -426,6 +427,40 @@ func (m *Member) GetHealthStatus() MemberHealth {
 	}
 }
 
+// EnterMaintenance transitions this member to maintenance mode.
+// If the member is currently active, its IPs are brought down first so the
+// cluster can elect a new active node before marking the transition.
+func (m *Member) EnterMaintenance() error {
+	m.Lock()
+	defer m.Unlock()
+	if m.Status == StatusMaintenance {
+		return nil
+	}
+	if m.Status == StatusActive || m.Status == StatusPartialActive {
+		// Bring down all hosted IPs before leaving active state
+		if len(m.ActiveIPs) > 0 {
+			_ = m.BringDownIPs(m.ActiveIPs)
+		}
+		m.ActiveIPs = nil
+		m.PartialActive = false
+		m.LoadFactor = 0
+	}
+	m.Status = StatusMaintenance
+	return nil
+}
+
+// ExitMaintenance returns this member to passive state so it can be
+// considered for promotion again.
+func (m *Member) ExitMaintenance() error {
+	m.Lock()
+	defer m.Unlock()
+	if m.Status != StatusMaintenance {
+		return nil
+	}
+	m.Status = StatusPassive
+	return nil
+}
+
 // StatusToString converts a MemberStatus to its string representation
 func StatusToString(status MemberStatus) string {
 	switch status {
@@ -435,6 +470,8 @@ func StatusToString(status MemberStatus) string {
 		return "Passive"
 	case StatusPartialActive:
 		return "PartialActive"
+	case StatusMaintenance:
+		return "Maintenance"
 	case StatusUnknown:
 		return "Unknown"
 	default:

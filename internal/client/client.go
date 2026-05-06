@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -51,6 +52,8 @@ const (
 	SendListGroups
 	SendCreateCluster
 	SendToken
+	SendReadConfig
+	SendSetMaintenance
 )
 
 var protoFunctions = []string{
@@ -73,18 +76,22 @@ var protoFunctions = []string{
 	"ListGroups",
 	"CreateCluster",
 	"Token",
+	"ReadConfig",
+	"SetMaintenance",
 }
 
 func (p ProtoFunction) String() string {
 	return protoFunctions[p-1]
 }
 
-// New creates a new client with default local connection
+// New creates a new client connected to the daemon's CLI Unix socket.
 func New() (*Client, error) {
-	// Always connect CLI to localhost
-	conn, err := grpc.Dial("127.0.0.1:8080", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(
+		"unix://"+config.CLI_SOCKET_PATH,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to CLI server: %v", err)
+		return nil, fmt.Errorf("failed to connect to CLI socket %s: %v", config.CLI_SOCKET_PATH, err)
 	}
 
 	return &Client{
@@ -153,6 +160,12 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 		},
 		"Token": func(ctx context.Context, data interface{}) (interface{}, error) {
 			return c.cliClient.Token(ctx, data.(*rpc.TokenRequest))
+		},
+		"ReadConfig": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.cliClient.ReadConfig(ctx, data.(*rpc.ReadConfigRequest))
+		},
+		"SetMaintenance": func(ctx context.Context, data interface{}) (interface{}, error) {
+			return c.cliClient.SetMaintenance(ctx, data.(*rpc.SetMaintenanceRequest))
 		},
 	}
 }
@@ -434,6 +447,8 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Passive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
 			statusStr = "PartialActive"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
+			statusStr = "Maintenance"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
 			statusStr = "Unknown"
 		}
@@ -512,9 +527,21 @@ func (c *Client) PromoteNode(hostname string, ips []string) error {
 	return err
 }
 
-// GetConfig returns the current configuration
+// GetConfig returns the daemon's live configuration via gRPC.
 func (c *Client) GetConfig() (*config.Config, error) {
-	return config.New()
+	r, err := c.Send(SendReadConfig, &rpc.ReadConfigRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config: %v", err)
+	}
+	resp := r.(*rpc.ReadConfigResponse)
+	if !resp.Success {
+		return nil, fmt.Errorf("failed to read config: %s", resp.Message)
+	}
+	var cfg config.Config
+	if err := json.Unmarshal(resp.Config, &cfg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %v", err)
+	}
+	return &cfg, nil
 }
 
 // SetClusterMode changes the cluster operation mode
