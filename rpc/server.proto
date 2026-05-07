@@ -199,12 +199,14 @@ message DownIpResponse {
 
 // Health Check Request/Response
 message HealthCheckRequest {
-    string node_id = 1;   // Primary identifier (UUID)
+    string node_id = 1;      // Primary identifier (UUID)
+    string cluster_token = 2; // Cluster membership token; if set, receiver validates it
 }
 
 message HealthCheckResponse {
     bool success = 1;
     string message = 2;
+    string cluster_token = 3; // Receiver echoes its own token so caller can verify
 }
 
 // Logs Request/Response

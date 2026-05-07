@@ -1708,6 +1708,19 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 
 // HealthCheck handles the health check RPC call
 func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (*rpc.HealthCheckResponse, error) {
+	localToken := s.config.Pulse.ClusterToken
+
+	// Validate cluster membership token when provided
+	if req.ClusterToken != "" && req.ClusterToken != localToken {
+		s.logger.Warnf("HealthCheck cluster token mismatch from node %s (expected %s, got %s)",
+			req.NodeId, localToken, req.ClusterToken)
+		return &rpc.HealthCheckResponse{
+			Success:      false,
+			Message:      "cluster token mismatch",
+			ClusterToken: localToken,
+		}, nil
+	}
+
 	// Get the member
 	var member *membership.Member
 
@@ -1715,8 +1728,9 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		member = s.memberList.GetMemberByID(req.NodeId)
 		if member == nil {
 			return &rpc.HealthCheckResponse{
-				Success: false,
-				Message: fmt.Sprintf("Node not found with ID: %s", req.NodeId),
+				Success:      false,
+				Message:      fmt.Sprintf("Node not found with ID: %s", req.NodeId),
+				ClusterToken: localToken,
 			}, nil
 		}
 		s.logger.Debugf("Found node by ID: %s (%s)", req.NodeId, member.Hostname)
@@ -1724,8 +1738,9 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 
 	if member == nil {
 		return &rpc.HealthCheckResponse{
-			Success: false,
-			Message: "No node identifier provided",
+			Success:      false,
+			Message:      "No node identifier provided",
+			ClusterToken: localToken,
 		}, nil
 	}
 
@@ -1737,10 +1752,10 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 	member.Latency = latency
 	s.logger.Debugf("Member %s latency: %s", member.Hostname, latency)
 
-	// Return healthy response
 	return &rpc.HealthCheckResponse{
-		Success: true,
-		Message: fmt.Sprintf("Node %s is healthy", member.Hostname),
+		Success:      true,
+		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
+		ClusterToken: localToken,
 	}, nil
 }
 
