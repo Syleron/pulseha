@@ -3850,6 +3850,23 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 			return &rpc.SetMaintenanceResponse{Success: true, Message: "node is already in maintenance mode"}, nil
 		}
 
+		// Refuse if this would leave no non-maintenance nodes in the cluster
+		availableAfter := 0
+		for id, m := range s.memberList.MembersSnapshot() {
+			if id == targetID {
+				continue
+			}
+			m.Lock()
+			st := m.Status
+			m.Unlock()
+			if st != membership.StatusMaintenance && st != membership.StatusUnknown {
+				availableAfter++
+			}
+		}
+		if availableAfter == 0 {
+			return &rpc.SetMaintenanceResponse{Success: false, Message: "cannot enter maintenance: at least one other node must remain available"}, nil
+		}
+
 		// If currently active, demote first so the cluster elects a new active node
 		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
 			s.logger.Info("Maintenance: target node is active — triggering failover before entering maintenance", "node_id", targetID)
