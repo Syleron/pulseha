@@ -84,6 +84,8 @@ service Server {
     rpc StartVotingSession(StartVotingSessionRequest) returns (StartVotingSessionResponse) {}
     rpc CastVote(CastVoteRequest) returns (CastVoteResponse) {}
     rpc GetVotingResult(GetVotingResultRequest) returns (GetVotingResultResponse) {}
+    // Maintenance — forwarded from the initiating node so the target manages its own state
+    rpc SetMaintenance(SetMaintenanceRequest) returns (SetMaintenanceResponse) {}
 }
 
 // Join Request/Response
@@ -264,7 +266,8 @@ message UpdateConfigResponse {
 
 // Maintenance Mode Request/Response
 message SetMaintenanceRequest {
-    bool enable = 1;  // true = enter maintenance, false = exit maintenance
+    bool enable = 1;   // true = enter maintenance, false = exit maintenance
+    string node_id = 2; // optional: target node UUID; defaults to local node if empty
 }
 
 message SetMaintenanceResponse {

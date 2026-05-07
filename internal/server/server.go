@@ -541,7 +541,13 @@ func (s *Server) loadInitialMembers() error {
 
 			// For local node, we can set initial status based on cluster mode
 			if isLocalNode {
-				if s.config.Pulse.Mode == "active-passive" {
+				// Restore maintenance state across restarts before applying any other default
+				if node.Maintenance {
+					member.Status = membership.StatusMaintenance
+					member.ActiveIPs = nil
+					member.PartialActive = false
+					s.logger.Infof("Restoring local node %s to Maintenance (persisted in config)", id)
+				} else if s.config.Pulse.Mode == "active-passive" {
 					// In active-passive mode, determine who should be active
 					totalNodes := len(s.config.Nodes)
 
@@ -3574,6 +3580,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 		}
 		// Preserve per-node interface group assignments when missing in incoming
+		localNodeID, _ := s.config.GetLocalNodeUUID()
 		for nodeID, existing := range s.config.Nodes {
 			if existing == nil {
 				continue
@@ -3613,6 +3620,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					copy(gg, localGroups)
 					nIncoming.IPGroups[iface] = gg
 				}
+			}
+			// Preserve the LOCAL node's maintenance flag; only this daemon owns its own maintenance state
+			if existing.Maintenance && nodeID == localNodeID {
+				nIncoming.Maintenance = true
 			}
 		}
 
@@ -3714,8 +3725,20 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 
 			s.logger.Debug("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
+			syncLocalID, _ := s.config.GetLocalNodeUUID()
 			for id, st := range incomingMemberStates {
 				if m := s.memberList.GetMemberByID(id); m != nil {
+					// Peers must not override the local node's maintenance state;
+					// only the local daemon controls its own maintenance flag.
+					if id == syncLocalID {
+						if node := s.config.Nodes[id]; node != nil && node.Maintenance {
+							if m.Status != membership.StatusMaintenance {
+								m.Status = membership.StatusMaintenance
+								s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
+							}
+							continue
+						}
+					}
 					oldStatus := m.Status
 					m.Status = st
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
@@ -3818,22 +3841,116 @@ func (s *Server) ReadConfig(ctx context.Context, req *rpc.ReadConfigRequest) (*r
 	return &rpc.ReadConfigResponse{Success: true, Config: data}, nil
 }
 
-// SetMaintenance implements CLI.SetMaintenance.
-// Entering maintenance on an active node triggers a failover before the transition.
+// SetMaintenance implements CLI.SetMaintenance and Server.SetMaintenance.
+//
+// When called via the CLI service (pulsectl), it may target any node:
+//   - Local node: handled directly.
+//   - Remote node: forwarded to the target via the inter-node Server.SetMaintenance RPC so
+//     the target manages its own state and persists the flag in its own config.
+//
+// When called via the Server service (inter-node forward), req.NodeId is always the local
+// node so it is handled as a local operation.
 func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequest) (*rpc.SetMaintenanceResponse, error) {
 	localID, err := s.config.GetLocalNodeUUID()
 	if err != nil {
 		return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to resolve local node: " + err.Error()}, nil
 	}
 
-	s.RLock()
-	member := s.memberList.Members[localID]
-	s.RUnlock()
+	// Resolve target; empty means local
+	targetID := req.NodeId
+	if targetID == "" {
+		targetID = localID
+	}
+
+	if targetID != localID {
+		// Remote target: forward the request directly to that node so it manages its own state
+		return s.setMaintenanceRemote(ctx, targetID, req.Enable)
+	}
+
+	// Local target
+	return s.setMaintenanceLocal(ctx, localID, req.Enable)
+}
+
+// setMaintenanceRemote forwards a maintenance request to a remote node via the Server service.
+func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enable bool) (*rpc.SetMaintenanceResponse, error) {
+	// Quorum guard: refuse if this would leave no available nodes
+	if enable {
+		availableAfter := 0
+		for id, m := range s.memberList.MembersSnapshot() {
+			if id == targetID {
+				continue
+			}
+			m.Lock()
+			st := m.Status
+			m.Unlock()
+			if st != membership.StatusMaintenance && st != membership.StatusUnknown {
+				availableAfter++
+			}
+		}
+		if availableAfter == 0 {
+			return &rpc.SetMaintenanceResponse{Success: false, Message: "cannot enter maintenance: at least one other node must remain available"}, nil
+		}
+	}
+
+	node := s.config.Nodes[targetID]
+	if node == nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: fmt.Sprintf("node %s not found in config", targetID)}, nil
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to create client: " + err.Error()}, nil
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to connect to target node: " + err.Error()}, nil
+	}
+
+	fwdCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Forward with NodeId = targetID so the remote resolves it as its own local node
+	resp, err := remoteClient.Server().SetMaintenance(fwdCtx, &rpc.SetMaintenanceRequest{
+		Enable: enable,
+		NodeId: targetID,
+	})
+	if err != nil {
+		return &rpc.SetMaintenanceResponse{Success: false, Message: "remote SetMaintenance failed: " + err.Error()}, nil
+	}
+
+	// Reflect the state change in our local member list so status is correct here too
+	if member := s.memberList.GetMemberByID(targetID); member != nil {
+		member.Lock()
+		if enable {
+			member.Status = membership.StatusMaintenance
+			member.ActiveIPs = nil
+			member.PartialActive = false
+			member.LoadFactor = 0
+		} else {
+			member.Status = membership.StatusPassive
+		}
+		member.Unlock()
+	}
+
+	states := getStatusMap()
+	for id, m := range s.memberList.MembersSnapshot() {
+		states[id] = m.Status
+	}
+	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+	putStatusMap(states)
+
+	return resp, nil
+}
+
+// setMaintenanceLocal enters or exits maintenance on the local node.
+func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable bool) (*rpc.SetMaintenanceResponse, error) {
+	member := s.memberList.GetMemberByID(localID)
 	if member == nil {
 		return &rpc.SetMaintenanceResponse{Success: false, Message: "local node not found in member list"}, nil
 	}
 
-	if req.Enable {
+	if enable {
 		member.Lock()
 		currentStatus := member.Status
 		member.Unlock()
@@ -3842,7 +3959,24 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 			return &rpc.SetMaintenanceResponse{Success: true, Message: "node is already in maintenance mode"}, nil
 		}
 
-		// If currently active, initiate failover first so the cluster doesn't lose an active node
+		// Refuse if this would leave no available nodes
+		availableAfter := 0
+		for id, m := range s.memberList.MembersSnapshot() {
+			if id == localID {
+				continue
+			}
+			m.Lock()
+			st := m.Status
+			m.Unlock()
+			if st != membership.StatusMaintenance && st != membership.StatusUnknown {
+				availableAfter++
+			}
+		}
+		if availableAfter == 0 {
+			return &rpc.SetMaintenanceResponse{Success: false, Message: "cannot enter maintenance: at least one other node must remain available"}, nil
+		}
+
+		// Demote first if active so the cluster elects a new active node
 		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
 			s.logger.Info("Maintenance: local node is active — triggering failover before entering maintenance")
 			if _, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID}); err != nil {
@@ -3854,7 +3988,15 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 			return &rpc.SetMaintenanceResponse{Success: false, Message: err.Error()}, nil
 		}
 
-		// Broadcast updated state so peers know not to include this node in elections
+		s.Lock()
+		if node := s.config.Nodes[localID]; node != nil {
+			node.Maintenance = true
+		}
+		s.Unlock()
+		if err := s.config.Save(); err != nil {
+			s.logger.Warn("Maintenance: failed to persist maintenance flag", "error", err)
+		}
+
 		states := getStatusMap()
 		for id, m := range s.memberList.MembersSnapshot() {
 			states[id] = m.Status
@@ -3863,12 +4005,21 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 		putStatusMap(states)
 
 		s.logger.Info("Node entered maintenance mode")
-		return &rpc.SetMaintenanceResponse{Success: true, Message: "node is now in maintenance mode"}, nil
+		return &rpc.SetMaintenanceResponse{Success: true, Message: fmt.Sprintf("node %s is now in maintenance mode", localID)}, nil
 	}
 
-	// Disable maintenance — return the node to passive
+	// Exit maintenance
 	if err := member.ExitMaintenance(); err != nil {
 		return &rpc.SetMaintenanceResponse{Success: false, Message: err.Error()}, nil
+	}
+
+	s.Lock()
+	if node := s.config.Nodes[localID]; node != nil {
+		node.Maintenance = false
+	}
+	s.Unlock()
+	if err := s.config.Save(); err != nil {
+		s.logger.Warn("Maintenance: failed to clear maintenance flag", "error", err)
 	}
 
 	states := getStatusMap()
@@ -3879,7 +4030,7 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 	putStatusMap(states)
 
 	s.logger.Info("Node exited maintenance mode")
-	return &rpc.SetMaintenanceResponse{Success: true, Message: "node returned to passive — eligible for promotion"}, nil
+	return &rpc.SetMaintenanceResponse{Success: true, Message: fmt.Sprintf("node %s returned to passive — eligible for promotion", localID)}, nil
 }
 
 // ResyncNetwork implements CLI.ResyncNetwork RPC

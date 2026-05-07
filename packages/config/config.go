@@ -95,10 +95,11 @@ type Local struct {
 }
 
 type Node struct {
-	Hostname string              `json:"hostname"`
-	IP       string              `json:"bind_address"`
-	Port     string              `json:"bind_port"`
-	IPGroups map[string][]string `json:"group_assignments"`
+	Hostname    string              `json:"hostname"`
+	IP          string              `json:"bind_address"`
+	Port        string              `json:"bind_port"`
+	IPGroups    map[string][]string `json:"group_assignments"`
+	Maintenance bool                `json:"maintenance,omitempty"`
 }
 
 // New instantiates and setups up our config object

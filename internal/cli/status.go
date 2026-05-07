@@ -75,6 +75,8 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			s = "Passive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
 			s = "PartialActive"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
+			s = "Maintenance"
 		}
 
 		nodeID := m.NodeId
