@@ -264,7 +264,8 @@ message UpdateConfigResponse {
 
 // Maintenance Mode Request/Response
 message SetMaintenanceRequest {
-    bool enable = 1;  // true = enter maintenance, false = exit maintenance
+    bool enable = 1;   // true = enter maintenance, false = exit maintenance
+    string node_id = 2; // optional: target node UUID; defaults to local node if empty
 }
 
 message SetMaintenanceResponse {
