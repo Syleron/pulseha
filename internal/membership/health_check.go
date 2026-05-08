@@ -11,6 +11,7 @@ import (
 	"time"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
@@ -84,7 +85,9 @@ type HealthChecker struct {
 	checksWithoutChange int       // Counter for periodic status logs
 	lastLeaderBroadcast time.Time // suppress elections briefly after leader broadcast
 	lastTick            time.Time // last time a check cycle executed
-	loggedNoMembers     bool      // Tracks if a no-member condition has already been logged in the current state
+	loggedNoMembers        bool            // Tracks if a no-member condition has already been logged in the current state
+	deepCheckCounter       int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
+	membershipCheckFailed  map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
 }
 
 // NewHealthChecker creates a new health checker
@@ -93,9 +96,10 @@ func NewHealthChecker(members *MemberList, logger *log.Logger) *HealthChecker {
 		logger = log.New(nil)
 	}
 	return &HealthChecker{
-		members:  members,
-		logger:   logger,
-		stopChan: make(chan struct{}),
+		members:               members,
+		logger:                logger,
+		stopChan:              make(chan struct{}),
+		membershipCheckFailed: make(map[string]bool),
 	}
 }
 
@@ -211,6 +215,8 @@ func (h *HealthChecker) performHealthChecks() {
 	defer h.Unlock()
 	h.Lock()
 	h.logger.Debug("HEALTH_CHECK: Starting health check cycle...")
+	h.deepCheckCounter++
+	doDeepCheck := h.deepCheckCounter%5 == 0
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
 	if memberCount == 0 {
@@ -262,10 +268,29 @@ func (h *HealthChecker) performHealthChecks() {
 		wasUnknown := member.Status == StatusUnknown
 		member.Unlock()
 
-		// Check node connectivity
+		// Check node connectivity. Every 5th cycle we do a full cluster-membership gRPC
+		// check (verifies the remote node shares our cluster token, catching split-cluster
+		// scenarios where a rebooted peer is running its own isolated cluster).
+		// All other cycles use a cheap TCP dial for low-latency failure detection.
+		//
+		// Once a node fails the deep check it stays unreachable until the next deep check
+		// passes — a passing TCP dial alone is not enough to clear the failed state.
 		startTime := time.Now()
-		h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-		isReachable := h.checkNodeConnectivity(member)
+		var isReachable bool
+		if doDeepCheck {
+			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
+			isReachable = h.checkClusterMembership(member)
+			h.membershipCheckFailed[member.ID] = !isReachable
+		} else {
+			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
+			isReachable = h.checkNodeConnectivity(member)
+			// If the last deep check determined this node is in a foreign cluster,
+			// keep it marked unreachable regardless of TCP reachability.
+			if isReachable && h.membershipCheckFailed[member.ID] {
+				h.logger.Debugf("Node %s passes TCP but failed last membership check; treating as unreachable", member.Hostname)
+				isReachable = false
+			}
+		}
 		responseTime := time.Since(startTime)
 		h.logger.Debugf("Connectivity check result for %s: reachable=%v, responseTime=%v", member.Hostname, isReachable,
 			responseTime)
@@ -872,6 +897,60 @@ func (h *HealthChecker) findActiveNode() *Member {
 		}
 	}
 	return nil
+}
+
+// checkClusterMembership makes a gRPC HealthCheck call to the remote node and validates
+// that it shares the same cluster token. Returns false if the node is unreachable,
+// rejects the token, or is running in a different cluster.
+func (h *HealthChecker) checkClusterMembership(member *Member) bool {
+	if member.IP == "" || member.Port == "" {
+		return false
+	}
+
+	localToken := h.members.config.Pulse.ClusterToken
+	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	if err != nil {
+		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
+		return false
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		h.logger.Warnf("checkClusterMembership: failed to create client: %v", err)
+		return false
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(member.IP, member.Port, false); err != nil {
+		h.logger.Warnf("checkClusterMembership: failed to connect to %s (%s:%s): %v",
+			member.Hostname, member.IP, member.Port, err)
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	resp, err := remoteClient.Server().HealthCheck(ctx, &rpc.HealthCheckRequest{
+		NodeId:       localNodeID,
+		ClusterToken: localToken,
+	})
+	if err != nil {
+		h.logger.Warnf("checkClusterMembership: gRPC call to %s failed: %v", member.Hostname, err)
+		return false
+	}
+
+	if !resp.Success {
+		h.logger.Warnf("checkClusterMembership: %s rejected membership check: %s", member.Hostname, resp.Message)
+		return false
+	}
+
+	// Verify the remote node echoes a matching token (detects split-cluster scenarios)
+	if localToken != "" && resp.ClusterToken != "" && resp.ClusterToken != localToken {
+		h.logger.Warnf("checkClusterMembership: %s is in a different cluster (token mismatch)", member.Hostname)
+		return false
+	}
+
+	return true
 }
 
 // checkNodeConnectivity verifies basic node connectivity
