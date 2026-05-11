@@ -3758,12 +3758,20 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
-						if node := s.config.Nodes[id]; node != nil && node.Maintenance {
-							if m.Status != membership.StatusMaintenance {
-								m.Status = membership.StatusMaintenance
-								s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
+						if node := s.config.Nodes[id]; node != nil {
+							if node.Maintenance {
+								// Config says we're in maintenance — enforce it.
+								if m.Status != membership.StatusMaintenance {
+									m.Status = membership.StatusMaintenance
+									s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
+								}
+								continue
 							}
-							continue
+							// Config says we're NOT in maintenance — reject stale StatusMaintenance from peers.
+							if st == membership.StatusMaintenance {
+								s.logger.Debug("CONFIG_SYNC: Rejected stale maintenance status from peer; local config shows not in maintenance", "node_id", id)
+								continue
+							}
 						}
 					}
 					oldStatus := m.Status
