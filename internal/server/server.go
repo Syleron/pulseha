@@ -741,10 +741,11 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		}
 	}
 	s.config.Nodes[nodeID] = &config.Node{
-		Hostname: req.Hostname,
-		IP:       req.BindIp,
-		Port:     req.BindPort,
-		IPGroups: make(map[string][]string),
+		Hostname:    req.Hostname,
+		IP:          req.BindIp,
+		Port:        req.BindPort,
+		IPGroups:    make(map[string][]string),
+		Maintenance: true,
 	}
 	s.logger.Debugf("Config updated, releasing config lock...")
 	s.config.Unlock()
