@@ -178,11 +178,22 @@ func (s *Server) Start() error {
 	s.cliSocketPath = socketPath
 	s.logger.Debug("Starting CLI gRPC server", "socket", socketPath)
 
-	// Ensure parent directory exists and remove any stale socket file
+	// Ensure parent directory exists
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0750); err != nil {
 		return fmt.Errorf("failed to create socket directory %s: %v", filepath.Dir(socketPath), err)
 	}
-	os.Remove(socketPath)
+	// Only remove the existing socket if it is stale. If another daemon is already
+	// listening on it, refuse to start rather than silently steal its socket.
+	if _, statErr := os.Stat(socketPath); statErr == nil {
+		conn, dialErr := net.DialTimeout("unix", socketPath, 200*time.Millisecond)
+		if dialErr == nil {
+			conn.Close()
+			return fmt.Errorf("another process is already listening on %s; refusing to start", socketPath)
+		}
+		if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove stale socket %s: %v", socketPath, err)
+		}
+	}
 
 	s.cliServer = grpc.NewServer()
 	// Register both CLI and Server services on the local listener so local operations (e.g., ConfigSync) work pre-cluster
@@ -3992,11 +4003,23 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 			return &rpc.SetMaintenanceResponse{Success: false, Message: "cannot enter maintenance: at least one other node must remain available"}, nil
 		}
 
-		// Demote first if active so the cluster elects a new active node
+		// Demote first if active so the cluster elects a new active node.
+		// Abort maintenance if demotion fails — otherwise the node would be marked
+		// maintenance while still holding active IPs, leaving the cluster in a split state.
 		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
 			s.logger.Info("Maintenance: local node is active — triggering failover before entering maintenance")
-			if _, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID}); err != nil {
-				s.logger.Warn("Maintenance: MakePassive RPC error (continuing anyway)", "error", err)
+			resp, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID})
+			if err != nil {
+				s.logger.Error("Maintenance: MakePassive RPC error; aborting maintenance entry", "error", err)
+				return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to demote node before maintenance: " + err.Error()}, nil
+			}
+			if resp == nil || !resp.Success {
+				msg := "demotion reported failure"
+				if resp != nil && resp.Message != "" {
+					msg = resp.Message
+				}
+				s.logger.Error("Maintenance: MakePassive returned failure; aborting maintenance entry", "message", msg)
+				return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to demote node before maintenance: " + msg}, nil
 			}
 		}
 
