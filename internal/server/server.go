@@ -3636,9 +3636,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					nIncoming.IPGroups[iface] = gg
 				}
 			}
-			// Preserve the LOCAL node's maintenance flag; only this daemon owns its own maintenance state
-			if existing.Maintenance && nodeID == localNodeID {
-				nIncoming.Maintenance = true
+			// Always use the local daemon's maintenance state — peers cannot override it in either direction
+			if nodeID == localNodeID {
+				nIncoming.Maintenance = existing.Maintenance
 			}
 		}
 
