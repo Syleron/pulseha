@@ -741,10 +741,11 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		}
 	}
 	s.config.Nodes[nodeID] = &config.Node{
-		Hostname: req.Hostname,
-		IP:       req.BindIp,
-		Port:     req.BindPort,
-		IPGroups: make(map[string][]string),
+		Hostname:    req.Hostname,
+		IP:          req.BindIp,
+		Port:        req.BindPort,
+		IPGroups:    make(map[string][]string),
+		Maintenance: true,
 	}
 	s.logger.Debugf("Config updated, releasing config lock...")
 	s.config.Unlock()
@@ -3636,9 +3637,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					nIncoming.IPGroups[iface] = gg
 				}
 			}
-			// Preserve the LOCAL node's maintenance flag; only this daemon owns its own maintenance state
-			if existing.Maintenance && nodeID == localNodeID {
-				nIncoming.Maintenance = true
+			// Always use the local daemon's maintenance state — peers cannot override it in either direction
+			if nodeID == localNodeID {
+				nIncoming.Maintenance = existing.Maintenance
 			}
 		}
 
