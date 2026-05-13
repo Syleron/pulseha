@@ -118,8 +118,9 @@ type Server struct {
 	clientMutex sync.RWMutex
 	// Unix socket path used by the CLI gRPC server
 	cliSocketPath string
-	// reconfigureMu serializes Reconfigure() so concurrent ConfigSync
-	// callbacks don't race on the cluster listener's bind to IP:port.
+	// reconfigureMu serializes Reconfigure() so concurrent callers (such as
+	// ConfigSync-triggered reconfigures) don't race on the cluster listener
+	// bind to IP:port.
 	reconfigureMu sync.Mutex
 }
 
@@ -304,10 +305,10 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
 	listenCtx, cancelListen := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelListen()
 	listener, err := listenTCPReuseAddr(listenCtx, address)
-	cancelListen()
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", address, err)
+		return fmt.Errorf("failed to listen on %s: %w", address, err)
 	}
 
 	// If bound to an ephemeral port, record the actual port in config
@@ -324,9 +325,12 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 		}
 	}
 
+	// Capture the gRPC server pointer locally so a concurrent Reconfigure()
+	// swapping s.grpcServer doesn't race with this goroutine's read.
+	grpcSrv := s.grpcServer
 	go func() {
 		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
-		if err := s.grpcServer.Serve(listener); err != nil {
+		if err := grpcSrv.Serve(listener); err != nil {
 			s.logger.Error("Cluster gRPC server failed", "error", err)
 		}
 	}()
@@ -335,10 +339,9 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 }
 
 // listenTCPReuseAddr is net.Listen("tcp", addr) with SO_REUSEADDR (and
-// SO_REUSEPORT on Linux) set on the underlying socket. Without these the
-// next bind after Reconfigure() can hit "address already in use" while the
-// previous listener's socket is still in TIME_WAIT in the kernel — the
-// failure mode that triggers the cluster split-brain we patched against.
+// best-effort SO_REUSEPORT) set on the underlying socket so that re-binding
+// the same IP:port immediately after Close() succeeds even while the kernel
+// still holds the previous endpoint in TIME_WAIT.
 func listenTCPReuseAddr(ctx context.Context, address string) (net.Listener, error) {
 	lc := net.ListenConfig{
 		Control: func(network, addr string, c syscall.RawConn) error {
@@ -348,9 +351,12 @@ func listenTCPReuseAddr(ctx context.Context, address string) (net.Listener, erro
 					sockErr = err
 					return
 				}
-				// SO_REUSEPORT is Linux-only; production target is Linux.
-				// Tolerated to fail on platforms that don't support it.
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+				// SO_REUSEPORT is best-effort hardening on top of SO_REUSEADDR;
+				// it allows rebind in additional kernel states. Failure is non-fatal
+				// (e.g. legacy kernels return ENOPROTOOPT, seccomp may strip it).
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+					log.Debug("SO_REUSEPORT setsockopt failed (best-effort, continuing)", "addr", addr, "error", err)
+				}
 			})
 			if ctlErr != nil {
 				return ctlErr
@@ -2008,10 +2014,13 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 	}, nil
 }
 
-// Reconfigure updates the server configuration in real-time.
-// Serialized via reconfigureMu — concurrent callers (e.g. two ConfigSync
-// goroutines firing in quick succession) used to race on the cluster
-// listener bind and surface as "address already in use" errors.
+// Reconfigure updates the server configuration in real-time. Serialized via
+// reconfigureMu so concurrent callers (e.g. ConfigSync-triggered reconfigures)
+// don't both attempt to rebind the cluster listener simultaneously.
+//
+// Lock order: reconfigureMu is acquired before any short-lived s.RWMutex
+// sections taken inside the body. Callers MUST NOT hold s.RWMutex when
+// invoking Reconfigure.
 func (s *Server) Reconfigure() error {
 	s.reconfigureMu.Lock()
 	defer s.reconfigureMu.Unlock()

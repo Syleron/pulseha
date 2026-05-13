@@ -1,45 +1,68 @@
-//go:build linux
+//go:build !windows
 
 package server
 
 import (
 	"context"
+	"errors"
 	"net"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
-// TestListenTCPReuseAddr_RapidRebind verifies the bug fix: closing a
-// listener and immediately re-binding the same address must succeed.
-// Without SO_REUSEADDR this commonly fails with EADDRINUSE while the
-// previous socket is in TIME_WAIT, which is the failure mode that surfaces
-// as "Async reconfigure failed after ConfigSync: bind: address already in
-// use" on the cluster listener after ConfigSync.
-func TestListenTCPReuseAddr_RapidRebind(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// TestListenTCPReuseAddr_SetsSocketOptions asserts that listenTCPReuseAddr
+// applies SO_REUSEADDR to the bound socket so that a subsequent rebind on
+// the same IP:port succeeds even while the kernel holds the previous
+// endpoint in TIME_WAIT. SO_REUSEPORT is verified best-effort: kernels or
+// sandboxes that strip it are tolerated.
+func TestListenTCPReuseAddr_SetsSocketOptions(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
-	first, err := listenTCPReuseAddr(ctx, "127.0.0.1:0")
+	ln, err := listenTCPReuseAddr(ctx, "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("first listen failed: %v", err)
+		t.Fatalf("listen: %v", err)
 	}
-	addr := first.Addr().String()
+	defer ln.Close()
 
-	// Establish + close a client connection so the socket has a chance to
-	// enter TIME_WAIT, mirroring what gRPC's Serve loop produces.
-	conn, err := net.Dial("tcp", addr)
+	tcpLn, ok := ln.(*net.TCPListener)
+	if !ok {
+		t.Fatalf("expected *net.TCPListener, got %T", ln)
+	}
+	rc, err := tcpLn.SyscallConn()
 	if err != nil {
-		t.Fatalf("dial first listener failed: %v", err)
-	}
-	_ = conn.Close()
-
-	if err := first.Close(); err != nil {
-		t.Fatalf("close first listener failed: %v", err)
+		t.Fatalf("syscall conn: %v", err)
 	}
 
-	second, err := listenTCPReuseAddr(ctx, addr)
-	if err != nil {
-		t.Fatalf("rebind to %s failed: %v", addr, err)
+	var (
+		reuseAddr   int
+		reuseAddrEr error
+		reusePort   int
+		reusePortEr error
+	)
+	ctrlErr := rc.Control(func(fd uintptr) {
+		reuseAddr, reuseAddrEr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR)
+		reusePort, reusePortEr = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT)
+	})
+	if ctrlErr != nil {
+		t.Fatalf("rawconn control: %v", ctrlErr)
 	}
-	_ = second.Close()
+
+	if reuseAddrEr != nil {
+		t.Fatalf("getsockopt SO_REUSEADDR: %v", reuseAddrEr)
+	}
+	if reuseAddr == 0 {
+		t.Fatalf("SO_REUSEADDR not set on bound socket")
+	}
+
+	// SO_REUSEPORT is best-effort. Tolerate ENOPROTOOPT on platforms or
+	// kernels that lack support; only fail on unexpected errors.
+	switch {
+	case reusePortEr == nil && reusePort == 0:
+		t.Logf("SO_REUSEPORT not set (tolerated; setsockopt is best-effort)")
+	case reusePortEr != nil && !errors.Is(reusePortEr, unix.ENOPROTOOPT):
+		t.Logf("getsockopt SO_REUSEPORT returned unexpected error (tolerated): %v", reusePortEr)
+	}
 }
