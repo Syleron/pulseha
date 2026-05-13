@@ -122,6 +122,10 @@ type Server struct {
 	// ConfigSync-triggered reconfigures) don't race on the cluster listener
 	// bind to IP:port.
 	reconfigureMu sync.Mutex
+	// clusterInitMu serializes CreateCluster and InitiateJoin to prevent a
+	// TOCTOU race where both pass the ClusterCheck() guard concurrently and
+	// both activate as the "first node", causing dual-active in active-passive mode.
+	clusterInitMu sync.Mutex
 }
 
 // NewServer creates a new PulseHA server instance
@@ -3191,6 +3195,12 @@ func (s *Server) ListGroups(ctx context.Context, req *rpc.ListGroupsRequest) (*r
 func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterRequest) (*rpc.CreateClusterResponse, error) {
 	s.logger.Infof("Received CreateCluster request with bindIP: %s, bindPort: %s, mode: %s", req.BindIp, req.BindPort, req.Mode)
 
+	// Serialize with InitiateJoin to prevent a TOCTOU race where both pass
+	// ClusterCheck() concurrently (both see 0 nodes) and both activate as
+	// "first node", producing dual-active in active-passive mode.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
+
 	// Check if cluster is already configured
 	if s.config.ClusterCheck() {
 		return &rpc.CreateClusterResponse{
@@ -4532,6 +4542,12 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 	if req == nil || req.TargetHost == "" {
 		return &rpc.InitiateJoinResponse{Success: false, Message: "target_host is required"}, nil
 	}
+
+	// Serialize with CreateCluster to prevent a TOCTOU race where both pass
+	// ClusterCheck() concurrently (both see 0 nodes) and both activate as
+	// "first node", producing dual-active in active-passive mode.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
 
 	// Prevent joining if this node is already part of a cluster
 	if s.config != nil && s.config.ClusterCheck() {
