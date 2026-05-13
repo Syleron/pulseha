@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/charmbracelet/log"
@@ -23,6 +24,7 @@ import (
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
 
@@ -116,6 +118,9 @@ type Server struct {
 	clientMutex sync.RWMutex
 	// Unix socket path used by the CLI gRPC server
 	cliSocketPath string
+	// reconfigureMu serializes Reconfigure() so concurrent ConfigSync
+	// callbacks don't race on the cluster listener's bind to IP:port.
+	reconfigureMu sync.Mutex
 }
 
 // NewServer creates a new PulseHA server instance
@@ -298,7 +303,9 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	}
 
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
-	listener, err := net.Listen("tcp", address)
+	listenCtx, cancelListen := context.WithTimeout(context.Background(), 5*time.Second)
+	listener, err := listenTCPReuseAddr(listenCtx, address)
+	cancelListen()
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %v", address, err)
 	}
@@ -325,6 +332,33 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	}()
 
 	return nil
+}
+
+// listenTCPReuseAddr is net.Listen("tcp", addr) with SO_REUSEADDR (and
+// SO_REUSEPORT on Linux) set on the underlying socket. Without these the
+// next bind after Reconfigure() can hit "address already in use" while the
+// previous listener's socket is still in TIME_WAIT in the kernel — the
+// failure mode that triggers the cluster split-brain we patched against.
+func listenTCPReuseAddr(ctx context.Context, address string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(network, addr string, c syscall.RawConn) error {
+			var sockErr error
+			ctlErr := c.Control(func(fd uintptr) {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+					sockErr = err
+					return
+				}
+				// SO_REUSEPORT is Linux-only; production target is Linux.
+				// Tolerated to fail on platforms that don't support it.
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			})
+			if ctlErr != nil {
+				return ctlErr
+			}
+			return sockErr
+		},
+	}
+	return lc.Listen(ctx, "tcp", address)
 }
 
 // startHealthChecker starts the health checker with the configured interval
@@ -1974,8 +2008,14 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 	}, nil
 }
 
-// Reconfigure updates the server configuration in real-time
+// Reconfigure updates the server configuration in real-time.
+// Serialized via reconfigureMu — concurrent callers (e.g. two ConfigSync
+// goroutines firing in quick succession) used to race on the cluster
+// listener bind and surface as "address already in use" errors.
 func (s *Server) Reconfigure() error {
+	s.reconfigureMu.Lock()
+	defer s.reconfigureMu.Unlock()
+
 	s.logger.Info("Reconfiguring PulseHA server...")
 
 	// Reload config (uses config's own lock)
