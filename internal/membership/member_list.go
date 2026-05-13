@@ -231,17 +231,23 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 			// Assign IP and update load
 			distribution[targetNode.Hostname] = append(distribution[targetNode.Hostname], ip)
 			nodeCapacities[targetNode.Hostname]--
-			currentLoads[targetNode.Hostname] = float64(len(distribution[targetNode.Hostname])) / float64(targetNode.Capacity)
+			capacity := targetNode.Capacity
+			if capacity == 0 {
+				capacity = len(m.config.Groups)
+			}
+			currentLoads[targetNode.Hostname] = float64(len(distribution[targetNode.Hostname])) / float64(capacity)
 		}
 	}
 
 	return distribution
 }
 
-// getNodeAvailableCapacity calculates remaining capacity for a node
+// getNodeAvailableCapacity calculates remaining capacity for a node.
+// Returns a large sentinel value for unlimited nodes (Capacity == 0) so
+// callers that gate on <= 0 still include them in distribution.
 func (m *MemberList) getNodeAvailableCapacity(member *Member) int {
 	if member.Capacity == 0 {
-		return 0 // Unlimited capacity
+		return len(m.config.Groups) + 1
 	}
 	return member.Capacity - len(member.ActiveIPs)
 }
