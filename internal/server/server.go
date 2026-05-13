@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/charmbracelet/log"
@@ -23,6 +24,7 @@ import (
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 )
 
@@ -116,6 +118,10 @@ type Server struct {
 	clientMutex sync.RWMutex
 	// Unix socket path used by the CLI gRPC server
 	cliSocketPath string
+	// reconfigureMu serializes Reconfigure() so concurrent callers (such as
+	// ConfigSync-triggered reconfigures) don't race on the cluster listener
+	// bind to IP:port.
+	reconfigureMu sync.Mutex
 }
 
 // NewServer creates a new PulseHA server instance
@@ -298,9 +304,11 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	}
 
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
-	listener, err := net.Listen("tcp", address)
+	listenCtx, cancelListen := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelListen()
+	listener, err := listenTCPReuseAddr(listenCtx, address)
 	if err != nil {
-		return fmt.Errorf("failed to listen on %s: %v", address, err)
+		return fmt.Errorf("failed to listen on %s: %w", address, err)
 	}
 
 	// If bound to an ephemeral port, record the actual port in config
@@ -317,14 +325,46 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 		}
 	}
 
+	// Capture the gRPC server pointer locally so a concurrent Reconfigure()
+	// swapping s.grpcServer doesn't race with this goroutine's read.
+	grpcSrv := s.grpcServer
 	go func() {
 		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
-		if err := s.grpcServer.Serve(listener); err != nil {
+		if err := grpcSrv.Serve(listener); err != nil {
 			s.logger.Error("Cluster gRPC server failed", "error", err)
 		}
 	}()
 
 	return nil
+}
+
+// listenTCPReuseAddr is net.Listen("tcp", addr) with SO_REUSEADDR (and
+// best-effort SO_REUSEPORT) set on the underlying socket so that re-binding
+// the same IP:port immediately after Close() succeeds even while the kernel
+// still holds the previous endpoint in TIME_WAIT.
+func listenTCPReuseAddr(ctx context.Context, address string) (net.Listener, error) {
+	lc := net.ListenConfig{
+		Control: func(network, addr string, c syscall.RawConn) error {
+			var sockErr error
+			ctlErr := c.Control(func(fd uintptr) {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+					sockErr = err
+					return
+				}
+				// SO_REUSEPORT is best-effort hardening on top of SO_REUSEADDR;
+				// it allows rebind in additional kernel states. Failure is non-fatal
+				// (e.g. legacy kernels return ENOPROTOOPT, seccomp may strip it).
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+					log.Debug("SO_REUSEPORT setsockopt failed (best-effort, continuing)", "addr", addr, "error", err)
+				}
+			})
+			if ctlErr != nil {
+				return ctlErr
+			}
+			return sockErr
+		},
+	}
+	return lc.Listen(ctx, "tcp", address)
 }
 
 // startHealthChecker starts the health checker with the configured interval
@@ -1974,8 +2014,17 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 	}, nil
 }
 
-// Reconfigure updates the server configuration in real-time
+// Reconfigure updates the server configuration in real-time. Serialized via
+// reconfigureMu so concurrent callers (e.g. ConfigSync-triggered reconfigures)
+// don't both attempt to rebind the cluster listener simultaneously.
+//
+// Lock order: reconfigureMu is acquired before any short-lived s.RWMutex
+// sections taken inside the body. Callers MUST NOT hold s.RWMutex when
+// invoking Reconfigure.
 func (s *Server) Reconfigure() error {
+	s.reconfigureMu.Lock()
+	defer s.reconfigureMu.Unlock()
+
 	s.logger.Info("Reconfiguring PulseHA server...")
 
 	// Reload config (uses config's own lock)
