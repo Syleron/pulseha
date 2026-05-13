@@ -61,3 +61,4 @@ debug_*
 *.pb.go
 /vendor/
 /graphify-out/
+/rpc/

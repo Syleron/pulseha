@@ -178,6 +178,9 @@ func (m *Member) BringUpIPs(ips []string) error {
 	}
 
 	// Remote: send one RPC per interface
+	if err := m.initializeClient(); err != nil {
+		return fmt.Errorf("failed to initialize client for member %s: %v", m.Hostname, err)
+	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring up IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)
 		if _, err := m.Client.Send(client.ProtoFunction(client.SendBringUpIP), &rpc.UpIpRequest{Iface: iface, Ips: ipList}); err != nil {
@@ -267,6 +270,9 @@ func (m *Member) BringDownIPs(ips []string) error {
 	}
 
 	// Remote: send one RPC per interface
+	if err := m.initializeClient(); err != nil {
+		return fmt.Errorf("failed to initialize client for member %s: %v", m.Hostname, err)
+	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring down IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)
 		if _, err := m.Client.Send(client.ProtoFunction(client.SendBringDownIP), &rpc.DownIpRequest{Iface: iface, Ips: ipList}); err != nil {

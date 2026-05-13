@@ -227,8 +227,8 @@ func (m *IPMonitor) enforceExpectations() {
 		m.logger.Error("ENFORCE: Failed to build IP inventory snapshot", "error", invErr)
 	}
 
-	// Passive: remove all floating IPs; Active: ensure missing are added
-	if member.Status != StatusActive {
+	// Passive: remove all floating IPs; Active/PartialActive: ensure missing are added
+	if member.Status != StatusActive && member.Status != StatusPartialActive {
 		m.logger.Info("ENFORCE: Node is not Active, removing floating IPs", "status", StatusToString(member.Status))
 
 		// CRITICAL: Passive nodes must remove ALL cluster floating IPs, not just expected IPs

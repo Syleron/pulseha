@@ -119,7 +119,8 @@ message StatusRequest {}
 
 message StatusResponse {
     repeated Member members = 1;
-    repeated GroupInfo groups = 2;  // Add group information to the response
+    repeated GroupInfo groups = 2;
+    string mode = 3;
 }
 
 // Member status enum provides explicit values on the wire

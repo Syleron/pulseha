@@ -1044,6 +1044,7 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 	return &rpc.StatusResponse{
 		Members: members,
 		Groups:  groups,
+		Mode:    s.config.Pulse.Mode,
 	}, nil
 }
 
@@ -2138,7 +2139,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 
 	s.logger.Info("REFRESH: Processing node", "nodeID", localID, "status", membership.StatusToString(member.Status))
 
-	if member.Status != membership.StatusActive {
+	if member.Status != membership.StatusActive && member.Status != membership.StatusPartialActive {
 		// For passive nodes, trigger enforcement to clean up any floating IPs
 		s.logger.Info("REFRESH: Node is not Active, cleanup needed", "status", membership.StatusToString(member.Status))
 		if s.ipMonitor != nil {
@@ -2152,13 +2153,25 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 		return
 	}
 
+	// In active-active, only expect the IPs assigned to this node, not all group IPs.
+	assignedIPs := make(map[string]bool)
+	if member.Status == membership.StatusPartialActive {
+		for _, ip := range member.ActiveIPs {
+			assignedIPs[ip] = true
+		}
+	}
+
 	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(member.Status))
 	for iface := range node.IPGroups {
 		var ifaceIPs []string
 		s.logger.Debug("REFRESH: Processing interface", "iface", iface, "groups", node.IPGroups[iface])
 		for _, g := range node.IPGroups[iface] {
 			if ips, ok := s.config.Groups[g]; ok {
-				ifaceIPs = append(ifaceIPs, ips...)
+				for _, ip := range ips {
+					if len(assignedIPs) == 0 || assignedIPs[ip] {
+						ifaceIPs = append(ifaceIPs, ip)
+					}
+				}
 				s.logger.Debug("REFRESH: Added IPs from group", "group", g, "ips", ips)
 			} else {
 				s.logger.Warn("REFRESH: Group not found in config", "group", g)
@@ -2420,6 +2433,15 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 
 		// Assign all IPs to active node
 		if activeNode != nil {
+			// Demote all non-selected nodes to Passive before promoting the winner.
+			// Without this, nodes remain PartialActive and are invisible to the
+			// election's selectBestCandidate, which only scores Passive/Unknown.
+			for _, member := range s.memberList.MembersSnapshot() {
+				if member.ID != activeNode.ID {
+					member.Status = membership.StatusPassive
+					member.PartialActive = false
+				}
+			}
 			if err := activeNode.MakeActive(allIPs); err != nil {
 				s.logger.Error("Failed to bring up IPs on active node during mode switch", "error", err)
 			}

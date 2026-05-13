@@ -517,8 +517,35 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		}
 	}
 
-	// If no active node exists, we need to elect one immediately
+	// If no active node exists, handle based on cluster mode
 	if activeMember == nil {
+		if config.Pulse.Mode == "active-active" {
+			// In active-active mode a single Active node is not expected.
+			// If every node is also not PartialActive, the cluster is stuck
+			// (e.g. after a mode switch with no successful redistribution).
+			// Trigger a redistribution rather than a single-node election.
+			hasPartialActive := false
+			for _, member := range members {
+				member.Lock()
+				partialActive := member.Status == StatusPartialActive
+				member.Unlock()
+				if partialActive {
+					hasPartialActive = true
+					break
+				}
+			}
+			if !hasPartialActive {
+				h.logger.Warn("ACTIVE_CHECK: active-active mode but no PartialActive nodes found, triggering redistribution")
+				var allIPs []string
+				for _, ips := range config.Groups {
+					allIPs = append(allIPs, ips...)
+				}
+				if err := h.members.RedistributeIPs(allIPs); err != nil {
+					h.logger.Error("ACTIVE_CHECK: Redistribution failed", "error", err)
+				}
+			}
+			return
+		}
 		h.logger.Error("ACTIVE_CHECK: No active node found in cluster, initiating leader election")
 		h.electNewActiveNode()
 		return
