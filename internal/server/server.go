@@ -3257,6 +3257,11 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 		}, nil
 	}
 
+	// Sync the updated config (with LocalNode set) into the member list before adding
+	// members. Without this, the health checker sees LocalNode="" and treats the node
+	// as remote, causing it to be marked Unknown after gRPC checks fail.
+	s.memberList.UpdateConfig(s.config)
+
 	// Add the first member to the member list
 	if err := s.memberList.AddMember(nodeID, hostname, req.BindIp, bindPort); err != nil {
 		s.logger.Error("Failed to add first node to member list", "error", err)
@@ -4200,12 +4205,16 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 		"final_local_node_id", newLocalNodeID,
 		"final_node_count", len(s.config.Nodes))
 
+	// Always sync the member list's config pointer after replacing s.config.
+	// If we skip this when ClusterCheck is false (e.g. RESYNC before cluster creation),
+	// the member list holds a stale pointer and CreateCluster's LocalNode update becomes
+	// invisible to the health checker, causing the node to be marked Unknown.
+	s.memberList.UpdateConfig(s.config)
+
 	if s.config.ClusterCheck() {
-		// Sync member list with latest config and reload members
+		// Reload members and reconfigure listener for the new config
 		s.logger.Info("RESYNC: Updating member list with new config",
 			"current_member_count", len(s.memberList.MembersSnapshot()))
-
-		s.memberList.UpdateConfig(s.config)
 
 		s.logger.Info("RESYNC: Loading initial members from new config",
 			"config_node_count", len(s.config.Nodes))

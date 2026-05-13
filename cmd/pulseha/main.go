@@ -254,10 +254,15 @@ func setupLogging(cfg *config.Config, logger *log.Logger) error {
 		writers = append(writers, logFile)
 	}
 
-	// Always add stdout to the list of logging destinations.
-	writers = append(writers, os.Stdout)
+	// Only fall back to stdout if no other destination was configured.
+	// When running under systemd, stdout is captured and forwarded to the
+	// journal/syslog, so adding it alongside a syslog writer causes every
+	// log line to appear twice.
+	if len(writers) == 0 {
+		writers = append(writers, os.Stdout)
+	}
 
-	// Set multi-writer output (stdout + file if enabled)
+	// Set multi-writer output
 	if len(writers) > 1 {
 		mw := io.MultiWriter(writers...)
 		logger.SetOutput(mw)
