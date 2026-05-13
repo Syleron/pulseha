@@ -2392,6 +2392,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	if req.Mode == "active-passive" {
 		s.logger.Info("Moving all IPs to active node")
 		var activeNode *membership.Member
+		var firstPartialActive *membership.Member
 		var allIPs []string
 
 		// Find active node and collect all IPs
@@ -2399,13 +2400,31 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			if member.Status == membership.StatusActive {
 				activeNode = member
 			}
+			if member.Status == membership.StatusPartialActive && firstPartialActive == nil {
+				firstPartialActive = member
+			}
 			allIPs = append(allIPs, member.ActiveIPs...)
 			member.ActiveIPs = nil // Clear current assignments
 		}
 
+		// In active-active mode no node has StatusActive; fall back to the
+		// current leader, then the first partial-active node we found.
+		if activeNode == nil {
+			if s.leaderID != "" {
+				activeNode = s.memberList.GetMemberByID(s.leaderID)
+			}
+			if activeNode == nil {
+				activeNode = firstPartialActive
+			}
+		}
+
 		// Assign all IPs to active node
 		if activeNode != nil {
-			activeNode.ActiveIPs = allIPs
+			if err := activeNode.MakeActive(allIPs); err != nil {
+				s.logger.Error("Failed to bring up IPs on active node during mode switch", "error", err)
+			}
+		} else {
+			s.logger.Warn("No eligible node found to become active during mode switch")
 		}
 	}
 
