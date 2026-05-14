@@ -52,7 +52,7 @@ func (d *Distributor) DistributeIPs(group string) error {
 			continue
 		}
 
-		if err := member.MakePartialActive(nodeIPs); err != nil {
+		if err := member.MakeActive(nodeIPs); err != nil {
 			return fmt.Errorf("failed to assign IPs to node %s: %v", nodeID, err)
 		}
 	}
@@ -66,14 +66,13 @@ func (d *Distributor) getAvailableNodes() []string {
 
 	membersSnapshot := d.members.MembersSnapshot()
 	for _, member := range membersSnapshot {
-		// Skip unavailable nodes
-		if member.Status == membership.StatusUnknown {
+		// Skip unavailable or maintenance nodes
+		if member.Status == membership.StatusUnknown || member.Status == membership.StatusMaintenance {
 			continue
 		}
 
-		// Add node if it can accept more IPs
-		if member.Status == membership.StatusPassive ||
-			member.Status == membership.StatusPartialActive {
+		// Passive or Active nodes can accept IP assignments
+		if member.Status == membership.StatusPassive || member.Status == membership.StatusActive {
 			nodes = append(nodes, member.Hostname)
 		}
 	}
@@ -125,7 +124,7 @@ func (d *Distributor) HandleNodeFailure(failedNode string) error {
 			continue
 		}
 
-		if err := member.MakePartialActive(ips); err != nil {
+		if err := member.MakeActive(ips); err != nil {
 			return fmt.Errorf("failed to reassign IPs to node %s: %v", nodeID, err)
 		}
 	}
