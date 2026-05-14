@@ -357,8 +357,8 @@ func (h *HealthChecker) performHealthChecks() {
 					statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
 				}
 			case "active-active":
-				member.Status = StatusPartialActive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to partial-active", member.Hostname))
+				member.Status = StatusActive
+				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to active", member.Hostname))
 			default:
 				member.Status = StatusPassive
 				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
@@ -517,35 +517,34 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		}
 	}
 
-	// If no active node exists, handle based on cluster mode
-	if activeMember == nil {
-		if config.Pulse.Mode == "active-active" {
-			// In active-active mode a single Active node is not expected.
-			// If every node is also not PartialActive, the cluster is stuck
-			// (e.g. after a mode switch with no successful redistribution).
-			// Trigger a redistribution rather than a single-node election.
-			hasPartialActive := false
-			for _, member := range members {
-				member.Lock()
-				partialActive := member.Status == StatusPartialActive
-				member.Unlock()
-				if partialActive {
-					hasPartialActive = true
-					break
-				}
+	// In active-active mode, all eligible nodes are StatusActive.
+	// Per-node IP failover is handled by the health-check loop; here we only
+	// trigger redistribution when no Active nodes remain at all.
+	if config.Pulse.Mode == "active-active" {
+		hasActive := false
+		for _, member := range members {
+			member.Lock()
+			active := member.Status == StatusActive
+			member.Unlock()
+			if active {
+				hasActive = true
+				break
 			}
-			if !hasPartialActive {
-				h.logger.Warn("ACTIVE_CHECK: active-active mode but no PartialActive nodes found, triggering redistribution")
-				var allIPs []string
-				for _, ips := range config.Groups {
-					allIPs = append(allIPs, ips...)
-				}
-				if err := h.members.RedistributeIPs(allIPs); err != nil {
-					h.logger.Error("ACTIVE_CHECK: Redistribution failed", "error", err)
-				}
-			}
-			return
 		}
+		if !hasActive {
+			h.logger.Warn("ACTIVE_CHECK: active-active mode but no Active nodes found, triggering redistribution")
+			var allIPs []string
+			for _, ips := range config.Groups {
+				allIPs = append(allIPs, ips...)
+			}
+			if err := h.members.RedistributeIPs(allIPs); err != nil {
+				h.logger.Error("ACTIVE_CHECK: Redistribution failed", "error", err)
+			}
+		}
+		return
+	}
+
+	if activeMember == nil {
 		h.logger.Error("ACTIVE_CHECK: No active node found in cluster, initiating leader election")
 		h.electNewActiveNode()
 		return
@@ -1178,27 +1177,9 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 
 			member.Status = StatusUnknown
 		} else {
-			// Partial failure - update status and load factor
-			h.logger.Infof("Partial IP failure for member %s, updating status", member.Hostname)
-
-			// If quorum is enabled, we need to initiate a vote before changing to partial active
-			if quorumEnabled && member.Status != StatusPartialActive {
-				h.logger.Info("Quorum voting is enabled, initiating vote for partial active status")
-				member.Unlock() // Unlock before initiating vote
-
-				// Initiate vote through the server component
-				voteResult := h.initiateNodeStatusVote(member.ID, StatusPartialActive)
-
-				if !voteResult {
-					h.logger.Warn("Quorum vote failed, not changing node status")
-					return
-				}
-
-				h.logger.Info("Quorum vote passed, proceeding with status change")
-				member.Lock() // Lock again to continue with status change
-			}
-
-			member.Status = StatusPartialActive
+			// Partial failure in active-active — node keeps StatusActive with reduced IPs.
+			// No status transition needed; update LoadFactor to reflect reduced load.
+			h.logger.Infof("Partial IP failure for member %s, updating load factor", member.Hostname)
 			if member.Capacity > 0 {
 				member.LoadFactor = float64(len(member.ActiveIPs)-len(failedIPs)) / float64(member.Capacity)
 			}
