@@ -122,6 +122,10 @@ type Server struct {
 	// ConfigSync-triggered reconfigures) don't race on the cluster listener
 	// bind to IP:port.
 	reconfigureMu sync.Mutex
+	// clusterInitMu serializes CreateCluster and InitiateJoin to prevent a
+	// TOCTOU race where both pass the ClusterCheck() guard concurrently and
+	// both activate as the "first node", causing dual-active in active-passive mode.
+	clusterInitMu sync.Mutex
 }
 
 // NewServer creates a new PulseHA server instance
@@ -686,6 +690,12 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	s.logger.Infof("Handling join request from node: %s", req.Hostname)
 	s.logger.Debugf("Join request details - NodeID: %s, BindIP: %s, BindPort: %s, Token provided: %v",
 		req.NodeId, req.BindIp, req.BindPort, req.Token != "")
+
+	// Serialize with CreateCluster and InitiateJoin to prevent a TOCTOU race
+	// where the tokenless first-node branch below (or two concurrent tokenless
+	// Joins) both observe an empty member list and both initialize the cluster.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
 
 	// Check if this is initial cluster creation
 	if s.memberList.GetMemberCount() == 0 && req.Token == "" {
@@ -3191,8 +3201,16 @@ func (s *Server) ListGroups(ctx context.Context, req *rpc.ListGroupsRequest) (*r
 func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterRequest) (*rpc.CreateClusterResponse, error) {
 	s.logger.Infof("Received CreateCluster request with bindIP: %s, bindPort: %s, mode: %s", req.BindIp, req.BindPort, req.Mode)
 
+	// Serialize with InitiateJoin to prevent a TOCTOU race where both pass
+	// ClusterCheck() concurrently (both see 0 nodes) and both activate as
+	// "first node", producing dual-active in active-passive mode.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
+
 	// Check if cluster is already configured
 	if s.config.ClusterCheck() {
+		s.logger.Warn("CreateCluster rejected: cluster is already configured",
+			"bind_ip", req.BindIp, "mode", req.Mode)
 		return &rpc.CreateClusterResponse{
 			Success: false,
 			Message: "cluster is already configured",
@@ -4533,8 +4551,16 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "target_host is required"}, nil
 	}
 
+	// Serialize with CreateCluster to prevent a TOCTOU race where both pass
+	// ClusterCheck() concurrently (both see 0 nodes) and both activate as
+	// "first node", producing dual-active in active-passive mode.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
+
 	// Prevent joining if this node is already part of a cluster
 	if s.config != nil && s.config.ClusterCheck() {
+		s.logger.Warn("InitiateJoin rejected: node is already part of a cluster",
+			"target_host", req.TargetHost)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "node is already part of a cluster; leave first"}, nil
 	}
 
@@ -4583,7 +4609,11 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		"bindIP", req.BindIp,
 		"bindPort", bindPort)
 
-	jResp, jErr := remoteClient.CLI().Join(context.Background(), joinReq)
+	// Bound the outbound Join RPC so a hung target cannot hold clusterInitMu
+	// indefinitely and block concurrent CreateCluster / HandleNodeJoin callers.
+	joinCtx, joinCancel := context.WithTimeout(ctx, 30*time.Second)
+	jResp, jErr := remoteClient.CLI().Join(joinCtx, joinReq)
+	joinCancel()
 	if jErr != nil {
 		s.logger.Error("INITIATE_JOIN: Join request failed", "error", jErr)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "join request failed: " + jErr.Error()}, nil
