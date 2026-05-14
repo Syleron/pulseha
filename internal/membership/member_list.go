@@ -154,8 +154,8 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
-		// Skip nodes that are down or at capacity
-		if member.Status == StatusUnknown {
+		// Skip nodes that are down, at capacity, or in maintenance
+		if member.Status == StatusUnknown || member.Status == StatusMaintenance {
 			continue
 		}
 
