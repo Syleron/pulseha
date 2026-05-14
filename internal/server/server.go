@@ -2402,29 +2402,21 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	if req.Mode == "active-passive" {
 		s.logger.Info("Moving all IPs to active node")
 		var activeNode *membership.Member
-		var firstActive *membership.Member
 		var allIPs []string
 
 		// Find active node and collect all IPs
 		for _, member := range s.memberList.MembersSnapshot() {
-			if member.Status == membership.StatusActive {
-				activeNode = member
-			}
-			if member.Status == membership.StatusActive && firstActive == nil {
-				firstActive = member
+			if member.Status == membership.StatusActive && activeNode == nil {
+				activeNode = member // take the first active node found
 			}
 			allIPs = append(allIPs, member.ActiveIPs...)
 			member.ActiveIPs = nil // Clear current assignments
 		}
 
-		// In active-active mode, all active nodes have StatusActive; fall back to the
-		// current leader, then the first active node we found.
+		// Prefer the current leader when no explicit active node is found
 		if activeNode == nil {
 			if s.leaderID != "" {
 				activeNode = s.memberList.GetMemberByID(s.leaderID)
-			}
-			if activeNode == nil {
-				activeNode = firstActive
 			}
 		}
 

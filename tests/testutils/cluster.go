@@ -448,8 +448,6 @@ func (n *TestNode) GetMemberStatus(targetHostname string) string {
 		return "active"
 	case membership.StatusPassive:
 		return "passive"
-	case membership.StatusPartialActive:
-		return "partial"
 	default:
 		return "unknown"
 	}
