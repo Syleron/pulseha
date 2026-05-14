@@ -128,7 +128,8 @@ enum MemberStatusEnum {
     MEMBER_STATUS_UNKNOWN = 0;
     MEMBER_STATUS_ACTIVE = 1;
     MEMBER_STATUS_PASSIVE = 2;
-    MEMBER_STATUS_PARTIAL_ACTIVE = 3;
+    reserved 3;
+    reserved "MEMBER_STATUS_PARTIAL_ACTIVE";
     MEMBER_STATUS_MAINTENANCE = 4;
 }
 
@@ -138,7 +139,8 @@ message Member {
     repeated string active_ips = 3;
     string last_response = 4;
     string latency = 5;
-    bool partial_active = 6;
+    reserved 6;
+    reserved "partial_active";
     string ip = 7;
     string port = 8;
     string node_id = 9;  // UUID of the node
