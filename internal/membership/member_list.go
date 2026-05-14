@@ -136,7 +136,7 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 				continue
 			}
 
-			if err := node.MakePartialActive(ips); err != nil {
+			if err := node.MakeActive(ips); err != nil {
 				m.logger.Error("Failed to assign IPs to node", "hostname", node.Hostname, "error", err)
 				// Continue with other nodes even if one fails
 				continue
