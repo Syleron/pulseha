@@ -691,6 +691,12 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	s.logger.Debugf("Join request details - NodeID: %s, BindIP: %s, BindPort: %s, Token provided: %v",
 		req.NodeId, req.BindIp, req.BindPort, req.Token != "")
 
+	// Serialize with CreateCluster and InitiateJoin to prevent a TOCTOU race
+	// where the tokenless first-node branch below (or two concurrent tokenless
+	// Joins) both observe an empty member list and both initialize the cluster.
+	s.clusterInitMu.Lock()
+	defer s.clusterInitMu.Unlock()
+
 	// Check if this is initial cluster creation
 	if s.memberList.GetMemberCount() == 0 && req.Token == "" {
 		s.logger.Info("Initializing new cluster with first node: ", req.Hostname)
@@ -3203,6 +3209,8 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 
 	// Check if cluster is already configured
 	if s.config.ClusterCheck() {
+		s.logger.Warn("CreateCluster rejected: cluster is already configured",
+			"bind_ip", req.BindIp, "mode", req.Mode)
 		return &rpc.CreateClusterResponse{
 			Success: false,
 			Message: "cluster is already configured",
@@ -4551,6 +4559,8 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 
 	// Prevent joining if this node is already part of a cluster
 	if s.config != nil && s.config.ClusterCheck() {
+		s.logger.Warn("InitiateJoin rejected: node is already part of a cluster",
+			"target_host", req.TargetHost)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "node is already part of a cluster; leave first"}, nil
 	}
 
@@ -4599,7 +4609,11 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		"bindIP", req.BindIp,
 		"bindPort", bindPort)
 
-	jResp, jErr := remoteClient.CLI().Join(context.Background(), joinReq)
+	// Bound the outbound Join RPC so a hung target cannot hold clusterInitMu
+	// indefinitely and block concurrent CreateCluster / HandleNodeJoin callers.
+	joinCtx, joinCancel := context.WithTimeout(ctx, 30*time.Second)
+	jResp, jErr := remoteClient.CLI().Join(joinCtx, joinReq)
+	joinCancel()
 	if jErr != nil {
 		s.logger.Error("INITIATE_JOIN: Join request failed", "error", jErr)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "join request failed: " + jErr.Error()}, nil
