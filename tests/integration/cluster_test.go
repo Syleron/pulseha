@@ -189,11 +189,11 @@ func TestActiveActiveMode(t *testing.T) {
 	node1Status := node1.GetMemberStatus(node1.Hostname)
 	node2Status := node2.GetMemberStatus(node2.Hostname)
 
-	// In active-active mode, both nodes should be either active or partially active
-	require.Contains(t, []string{"active", "partial-active"}, node1Status,
-		"Node1 should be active or partially active in active-active mode")
-	require.Contains(t, []string{"active", "partial-active"}, node2Status,
-		"Node2 should be active or partially active in active-active mode")
+	// In active-active mode, all eligible nodes should be active
+	require.Equal(t, "active", node1Status,
+		"Node1 should be active in active-active mode")
+	require.Equal(t, "active", node2Status,
+		"Node2 should be active in active-active mode")
 
 	// Log the active IPs from both nodes
 	t.Logf("Node1 active IPs: %v", node1.GetActiveIPs())
