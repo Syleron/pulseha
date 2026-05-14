@@ -17,11 +17,10 @@ import (
 type MemberStatus int
 
 const (
-	StatusUnknown MemberStatus = iota
+	StatusUnknown    MemberStatus = iota
 	StatusActive
 	StatusPassive
-	StatusPartialActive // New state for active-active
-	StatusMaintenance   // Node is up but excluded from failover promotion
+	StatusMaintenance // Node is up but excluded from failover promotion
 )
 
 // Member defines our member object
@@ -42,10 +41,9 @@ type Member struct {
 	memberList     *MemberList
 
 	// Active-Active support
-	ActiveIPs     []string // IPs currently hosted by this member
-	Capacity      int      // Node capacity for weighted distribution
-	PartialActive bool     // Whether node is partially active
-	LoadFactor    float64  // Current load factor (0.0-1.0)
+	ActiveIPs  []string // IPs currently hosted by this member
+	Capacity   int      // Node capacity for weighted distribution
+	LoadFactor float64  // Current load factor (0.0-1.0)
 }
 
 // NewMember creates a new member instance
@@ -113,49 +111,20 @@ func (m *Member) Close() {
 	}
 }
 
-// MakeActive promotes a member to fully active state (active-passive mode)
+// MakeActive promotes a member to active state.
+// In active-passive mode the node receives all floating IPs.
+// In active-active mode the node receives its assigned subset of IPs.
 func (m *Member) MakeActive(ips []string) error {
 	m.Lock()
 	defer m.Unlock()
 
-	// Check if we're in active-passive mode
-	if m.config.Pulse.Mode != "active-passive" {
-		return fmt.Errorf("cannot make fully active in %s mode", m.config.Pulse.Mode)
-	}
-
-	// Note: We removed the check for another active node here because:
-	// 1. The Promote() handler (server.go) already handles demotion of the previous active
-	// 2. This check was causing a race condition in remote promotions where the demotion
-	//    state hadn't propagated to the target node yet
-	// 3. Single-active enforcement is maintained by the Promote() handler's demotion logic
-
 	m.Status = StatusActive
 	m.ActiveIPs = ips
-	m.PartialActive = false
-	m.LoadFactor = 1.0
-
-	return m.BringUpIPs(ips)
-}
-
-// MakePartialActive promotes a member to partially active state (active-active mode)
-func (m *Member) MakePartialActive(ips []string) error {
-	m.Lock()
-	defer m.Unlock()
-
-	if m.config.Pulse.Mode == "active-passive" {
-		return fmt.Errorf("cannot make partially active in active-passive mode")
-	}
-
-	// Calculate load factor based on capacity
 	if m.Capacity > 0 {
 		m.LoadFactor = float64(len(ips)) / float64(m.Capacity)
 	} else {
-		m.LoadFactor = float64(len(ips)) / float64(len(m.config.Groups))
+		m.LoadFactor = 1.0
 	}
-
-	m.Status = StatusPartialActive
-	m.ActiveIPs = ips
-	m.PartialActive = true
 
 	return m.BringUpIPs(ips)
 }
@@ -424,12 +393,11 @@ func (m *Member) GetHealthStatus() MemberHealth {
 	defer m.Unlock()
 
 	return MemberHealth{
-		Hostname:      m.Hostname,
-		Status:        m.Status,
-		ActiveIPs:     append([]string{}, m.ActiveIPs...),
-		LastResponse:  m.LastHCResponse,
-		Latency:       m.Latency,
-		PartialActive: m.PartialActive,
+		Hostname:     m.Hostname,
+		Status:       m.Status,
+		ActiveIPs:    append([]string{}, m.ActiveIPs...),
+		LastResponse: m.LastHCResponse,
+		Latency:      m.Latency,
 	}
 }
 
@@ -442,13 +410,12 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusMaintenance {
 		return nil
 	}
-	if m.Status == StatusActive || m.Status == StatusPartialActive {
+	if m.Status == StatusActive {
 		// Bring down all hosted IPs before leaving active state
 		if len(m.ActiveIPs) > 0 {
 			_ = m.BringDownIPs(m.ActiveIPs)
 		}
 		m.ActiveIPs = nil
-		m.PartialActive = false
 		m.LoadFactor = 0
 	}
 	m.Status = StatusMaintenance
@@ -474,8 +441,6 @@ func StatusToString(status MemberStatus) string {
 		return "Active"
 	case StatusPassive:
 		return "Passive"
-	case StatusPartialActive:
-		return "PartialActive"
 	case StatusMaintenance:
 		return "Maintenance"
 	case StatusUnknown:
