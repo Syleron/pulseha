@@ -596,7 +596,6 @@ func (s *Server) loadInitialMembers() error {
 				if node.Maintenance {
 					member.Status = membership.StatusMaintenance
 					member.ActiveIPs = nil
-					member.PartialActive = false
 					s.logger.Infof("Restoring local node %s to Maintenance (persisted in config)", id)
 				} else if s.config.Pulse.Mode == "active-passive" {
 					// In active-passive mode, determine who should be active
@@ -986,8 +985,6 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
 		case membership.StatusPassive:
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
-		case membership.StatusPartialActive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE
 		case membership.StatusMaintenance:
 			st = rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
 		default:
@@ -1003,11 +1000,10 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 		members = append(members, &rpc.Member{
 			Hostname:      health.Hostname,
 			Status:        st,
-			ActiveIps:     health.ActiveIPs,
-			LastResponse:  lastResp,
-			Latency:       health.Latency,
-			PartialActive: health.PartialActive,
-			Ip:            member.IP,
+			ActiveIps:    health.ActiveIPs,
+			LastResponse: lastResp,
+			Latency:      health.Latency,
+			Ip:           member.IP,
 			Port:          member.Port,
 			NodeId:        member.ID,
 		})
@@ -1539,7 +1535,6 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			if failingMember := s.memberList.GetMemberByID(prevActiveID); failingMember != nil {
 				failingMember.Status = membership.StatusUnknown
 				failingMember.ActiveIPs = nil
-				failingMember.PartialActive = false
 			}
 		} else {
 			s.logger.Info("PROMOTE_ASYNC: Successfully demoted previous active", "previous_active", prevActiveID)
@@ -1721,7 +1716,6 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		}
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.PartialActive = false
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -1747,7 +1741,6 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// Reflect locally
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.PartialActive = false
 	}
 
 	// Success
@@ -2116,7 +2109,6 @@ func (s *Server) RefreshLocalMonitorExpectedIPs() {
 // Only enforces when the local member is Active; clears expectations when not active
 func (s *Server) refreshLocalMonitorExpectedIPs() {
 	s.logger.Debug("REFRESH: Starting refreshLocalMonitorExpectedIPs")
-	s.logger.Error("REFRESH_DEBUG_2025_ERROR: This function WAS CALLED with latest code")
 
 	if s.ipMonitor == nil {
 		s.logger.Debug("REFRESH: IP monitor is nil, skipping")
@@ -2139,15 +2131,14 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 
 	s.logger.Info("REFRESH: Processing node", "nodeID", localID, "status", membership.StatusToString(member.Status))
 
-	if member.Status != membership.StatusActive && member.Status != membership.StatusPartialActive {
-		// For passive nodes, trigger enforcement to clean up any floating IPs
+	if member.Status != membership.StatusActive {
+		// For passive/unknown/maintenance nodes, trigger enforcement to clean up any floating IPs
 		s.logger.Info("REFRESH: Node is not Active, cleanup needed", "status", membership.StatusToString(member.Status))
 		if s.ipMonitor != nil {
 			s.logger.Debug("REFRESH: Calling TriggerEnforce for passive node cleanup")
 			s.ipMonitor.TriggerEnforce()
 		} else {
 			s.logger.Debug("REFRESH: IP monitor disabled, skipping cleanup TriggerEnforce")
-			// Since IP monitor is disabled, call network functions directly for cleanup
 			s.cleanupFloatingIPsDirectly(node)
 		}
 		return
@@ -2155,7 +2146,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 
 	// In active-active, only expect the IPs assigned to this node, not all group IPs.
 	assignedIPs := make(map[string]bool)
-	if member.Status == membership.StatusPartialActive {
+	if s.config.Pulse.Mode == "active-active" {
 		for _, ip := range member.ActiveIPs {
 			assignedIPs[ip] = true
 		}
@@ -2389,10 +2380,16 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// If switching to active-active, redistribute IPs
 	if req.Mode == "active-active" {
 		s.logger.Info("Redistributing IPs for active-active mode")
+		// Use config.Groups as the authoritative IP source.
+		// member.ActiveIPs is nil when the active node was promoted via election
+		// (elections set Status=StatusActive but never populate ActiveIPs).
 		var allIPs []string
+		for _, ips := range s.config.Groups {
+			allIPs = append(allIPs, ips...)
+		}
+		// Clear current per-member assignments before redistributing
 		for _, member := range s.memberList.MembersSnapshot() {
-			allIPs = append(allIPs, member.ActiveIPs...)
-			member.ActiveIPs = nil // Clear current assignments
+			member.ActiveIPs = nil
 		}
 
 		if err := s.memberList.RedistributeIPs(allIPs); err != nil {
@@ -2405,7 +2402,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	if req.Mode == "active-passive" {
 		s.logger.Info("Moving all IPs to active node")
 		var activeNode *membership.Member
-		var firstPartialActive *membership.Member
+		var firstActive *membership.Member
 		var allIPs []string
 
 		// Find active node and collect all IPs
@@ -2413,33 +2410,32 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			if member.Status == membership.StatusActive {
 				activeNode = member
 			}
-			if member.Status == membership.StatusPartialActive && firstPartialActive == nil {
-				firstPartialActive = member
+			if member.Status == membership.StatusActive && firstActive == nil {
+				firstActive = member
 			}
 			allIPs = append(allIPs, member.ActiveIPs...)
 			member.ActiveIPs = nil // Clear current assignments
 		}
 
-		// In active-active mode no node has StatusActive; fall back to the
-		// current leader, then the first partial-active node we found.
+		// In active-active mode, all active nodes have StatusActive; fall back to the
+		// current leader, then the first active node we found.
 		if activeNode == nil {
 			if s.leaderID != "" {
 				activeNode = s.memberList.GetMemberByID(s.leaderID)
 			}
 			if activeNode == nil {
-				activeNode = firstPartialActive
+				activeNode = firstActive
 			}
 		}
 
 		// Assign all IPs to active node
 		if activeNode != nil {
 			// Demote all non-selected nodes to Passive before promoting the winner.
-			// Without this, nodes remain PartialActive and are invisible to the
+			// Without this, nodes remain Active and are invisible to the
 			// election's selectBestCandidate, which only scores Passive/Unknown.
 			for _, member := range s.memberList.MembersSnapshot() {
 				if member.ID != activeNode.ID {
 					member.Status = membership.StatusPassive
-					member.PartialActive = false
 				}
 			}
 			if err := activeNode.MakeActive(allIPs); err != nil {
@@ -2451,8 +2447,18 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	}
 
 	s.logger.Infof("Successfully changed cluster mode to: %s", req.Mode)
+
+	// Bump epoch by 2 so our health-check broadcasts (epoch+1) supersede any stale
+	// broadcasts from peers that still carry the pre-switch epoch.
+	s.clusterEpoch += 2
+
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
+
+	// Propagate the new config (including the mode change) to all peers.
+	// The goroutine runs after s.Lock() is released via the deferred s.Unlock().
+	go s.broadcastFullConfigToPeers()
+
 	return &rpc.SetModeResponse{
 		Success: true,
 		Message: fmt.Sprintf("cluster mode changed to %s", req.Mode),
@@ -4055,7 +4061,6 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 		if enable {
 			member.Status = membership.StatusMaintenance
 			member.ActiveIPs = nil
-			member.PartialActive = false
 			member.LoadFactor = 0
 		} else {
 			member.Status = membership.StatusPassive
@@ -4109,7 +4114,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 		// Demote first if active so the cluster elects a new active node.
 		// Abort maintenance if demotion fails — otherwise the node would be marked
 		// maintenance while still holding active IPs, leaving the cluster in a split state.
-		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
+		if currentStatus == membership.StatusActive {
 			s.logger.Info("Maintenance: local node is active — triggering failover before entering maintenance")
 			resp, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID})
 			if err != nil {
@@ -4534,6 +4539,38 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		// Best-effort GARP
 		_ = network.SendGARP(req.Iface, ip)
 	}
+
+	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
+	// call means the coordinator has assigned these IPs to us. Transition to
+	// Active so the ENFORCE loop doesn't immediately strip the IPs back off.
+	if s.config.Pulse.Mode == "active-active" {
+		localID, err := s.config.GetLocalNodeUUID()
+		if err == nil {
+			localMember := s.memberList.GetMemberByID(localID)
+			if localMember != nil {
+				localMember.Lock()
+				if localMember.Status == membership.StatusPassive || localMember.Status == membership.StatusUnknown {
+					localMember.Status = membership.StatusActive
+					s.logger.Info("BringUpIP: Transitioned local node to Active for active-active mode")
+				}
+				for _, ip := range req.Ips {
+					found := false
+					for _, existing := range localMember.ActiveIPs {
+						if existing == ip {
+							found = true
+							break
+						}
+					}
+					if !found {
+						localMember.ActiveIPs = append(localMember.ActiveIPs, ip)
+					}
+				}
+				localMember.Unlock()
+				s.refreshLocalMonitorExpectedIPs()
+			}
+		}
+	}
+
 	return &rpc.UpIpResponse{Success: true, Message: "IPs brought up"}, nil
 }
 

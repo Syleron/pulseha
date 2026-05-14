@@ -61,10 +61,14 @@ func NewStatusCmd() *cobra.Command {
 }
 
 func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, error) {
+	mode := resp.Mode
+	if mode == "" {
+		mode = "active-passive" // backward compat with older daemons
+	}
 	status := &client.ClusterStatus{
 		Members: make([]client.Member, len(resp.Members)),
 		Groups:  make([]client.GroupInfo, 0),
-		Mode:    "active-passive",
+		Mode:    mode,
 	}
 	for i, m := range resp.Members {
 		s := "Unknown"
@@ -73,8 +77,6 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			s = "Active"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE:
 			s = "Passive"
-		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
-			s = "PartialActive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			s = "Maintenance"
 		}
@@ -87,11 +89,10 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			IP:            m.Ip,
 			Port:          m.Port,
 			Status:        s,
-			IPs:           m.ActiveIps,
-			ActiveIPs:     m.ActiveIps,
-			LastResponse:  m.LastResponse,
-			Latency:       m.Latency,
-			PartialActive: m.PartialActive,
+			IPs:          m.ActiveIps,
+			ActiveIPs:    m.ActiveIps,
+			LastResponse: m.LastResponse,
+			Latency:      m.Latency,
 		}
 	}
 	for _, g := range resp.Groups {
@@ -149,9 +150,6 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		fmt.Printf("Status: %s\n", member.Status)
 		if len(member.ActiveIPs) > 0 {
 			fmt.Printf("Active IPs: %v\n", member.ActiveIPs)
-		}
-		if member.PartialActive {
-			fmt.Printf("Partially Active: Yes\n")
 		}
 		if member.Status == "Unknown" || member.LastResponse == "" {
 			fmt.Printf("Last Response: N/A\n")

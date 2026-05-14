@@ -267,7 +267,6 @@ type Member struct {
 	ActiveIPs     []string `json:"active_ips"`
 	LastResponse  string   `json:"last_response"`
 	Latency       string   `json:"latency"`
-	PartialActive bool     `json:"partial_active"`
 }
 
 // GroupInfo represents a floating IP group
@@ -445,8 +444,6 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Active"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE:
 			statusStr = "Passive"
-		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
-			statusStr = "PartialActive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			statusStr = "Maintenance"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
@@ -456,11 +453,10 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			Hostname:      m.Hostname,
 			Status:        statusStr,
 			IPs:           m.ActiveIps,
-			ActiveIPs:     m.ActiveIps,
-			LastResponse:  m.LastResponse,
-			Latency:       m.Latency,
-			PartialActive: m.PartialActive,
-			IP:            m.Ip,
+			ActiveIPs:    m.ActiveIps,
+			LastResponse: m.LastResponse,
+			Latency:      m.Latency,
+			IP:           m.Ip,
 			Port:          m.Port,
 		}
 
