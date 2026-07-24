@@ -1726,6 +1726,15 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 		}
 	}
 
+	// Broadcast the vote request to other nodes so they can participate —
+	// without this the session only ever holds the initiator's vote and can
+	// never reach quorum, permanently blocking redistribution.
+	h.logger.Info("Broadcasting IP redistribution vote request to cluster nodes...")
+	if err := h.server.BroadcastVoteRequest(sessionID, "ip_redistribution", subject, description, 30); err != nil {
+		h.logger.Warnf("Failed to broadcast vote request: %v", err)
+		// Continue anyway - maybe some nodes are offline but others might still vote
+	}
+
 	// Wait for the vote to complete
 	// In a production implementation, this would be asynchronous with callbacks
 	// For simplicity, we'll use a polling approach here

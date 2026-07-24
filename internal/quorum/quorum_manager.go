@@ -263,6 +263,14 @@ func (q *QuorumManager) HasQuorum(voteCount int) bool {
 	q.RLock()
 	defer q.RUnlock()
 
+	return q.hasQuorumLocked(voteCount)
+}
+
+// hasQuorumLocked is the internal implementation of HasQuorum that assumes the
+// lock is already held. Internal callers that hold the write lock (CastVote,
+// concludeVotingSessionLocked) must use this — calling HasQuorum from them
+// would RLock the same RWMutex and self-deadlock.
+func (q *QuorumManager) hasQuorumLocked(voteCount int) bool {
 	// With fewer than 3 nodes, quorum logic is not applicable
 	if q.nodeCount < 3 {
 		return true
@@ -297,7 +305,7 @@ func (q *QuorumManager) canConcludeVoting(session *VotingSession) bool {
 	}
 
 	// If we have enough YES votes to guarantee passage
-	if q.HasQuorum(yesCount) {
+	if q.hasQuorumLocked(yesCount) {
 		return true
 	}
 
@@ -345,7 +353,7 @@ func (q *QuorumManager) concludeVotingSessionLocked(sessionID string) {
 	}
 
 	totalVotes := len(session.Votes)
-	quorumMet := q.HasQuorum(totalVotes)
+	quorumMet := q.hasQuorumLocked(totalVotes)
 
 	// Determine if the vote passed
 	// A vote passes if:
