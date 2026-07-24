@@ -1683,6 +1683,11 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 		return true // Default to allowing the change if quorum manager is not available
 	}
 
+	// Refresh the quorum manager's node count — it is seeded at daemon startup
+	// and goes stale as nodes join, which would make StartVotingSession refuse
+	// with "requires at least 3 nodes" on a healthy 3+ node cluster.
+	quorumManager.UpdateNodeCount(clusterSize)
+
 	// Create a descriptive subject and description for the vote
 	ipList := ""
 	if len(ips) <= 5 {
