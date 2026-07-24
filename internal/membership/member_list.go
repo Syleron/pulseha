@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/packages/config"
 )
 
@@ -69,6 +70,16 @@ func (m *MemberList) UpdateConfig(cfg *config.Config) {
 			}
 
 			member.config = cfg
+
+			// Refresh capacity from config so synced changes take effect
+			// without recreating the member.
+			if cfg != nil {
+				if node, ok := cfg.Nodes[id]; ok {
+					member.Lock()
+					member.Capacity = node.Capacity
+					member.Unlock()
+				}
+			}
 
 			willBeLocal := false
 			if cfg != nil {
@@ -155,32 +166,20 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 
 // getAvailableNodes returns a list of nodes that can accept new IPs,
 // sorted by node ID so distribution decisions are deterministic.
+// Capacity is deliberately not checked here: active-passive assigns all IPs
+// to a single node regardless of capacity, and active-active placement
+// enforces capacity in ipam.Distribute.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
-		// Skip nodes that are down, at capacity, or in maintenance
+		// Skip nodes that are down or in maintenance
 		if member.Status == StatusUnknown || member.Status == StatusMaintenance {
 			continue
 		}
-
-		// Check if node has capacity for more IPs
-		if m.hasAvailableCapacity(member) {
-			available = append(available, member)
-		}
+		available = append(available, member)
 	}
 	sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	return available
-}
-
-// hasAvailableCapacity checks if a node can handle more IPs
-func (m *MemberList) hasAvailableCapacity(member *Member) bool {
-	// If no capacity is set, assume node can handle more IPs
-	if member.Capacity == 0 {
-		return true
-	}
-
-	// Check if node is under its capacity limit
-	return len(member.ActiveIPs) < member.Capacity
 }
 
 // calculateIPDistribution determines how to distribute IPs across available nodes
@@ -202,50 +201,23 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 		// Balance by IP count: each IP goes to the node currently holding the
 		// fewest IPs (existing assignments plus IPs handed out in this pass),
 		// ties broken by node order (sorted by ID for determinism).
-		ipCounts := make(map[string]int)
-		nodeCapacities := make(map[string]int)
+		snapshots := make([]ipam.Node, 0, len(nodes))
 		for _, node := range nodes {
-			ipCounts[node.Hostname] = len(node.ActiveIPs)
-			nodeCapacities[node.Hostname] = m.getNodeAvailableCapacity(node)
+			snapshots = append(snapshots, ipam.Node{
+				Hostname: node.Hostname,
+				IPCount:  len(node.ActiveIPs),
+				Capacity: node.Capacity,
+			})
 		}
 
-		for _, ip := range ips {
-			var targetNode *Member
-			for _, node := range nodes {
-				if nodeCapacities[node.Hostname] <= 0 {
-					continue
-				}
-				if targetNode == nil || ipCounts[node.Hostname] < ipCounts[targetNode.Hostname] {
-					targetNode = node
-				}
-			}
-
-			if targetNode == nil {
-				m.logger.Warn("No nodes with available capacity for IP", "ip", ip)
-				continue
-			}
-
-			distribution[targetNode.Hostname] = append(distribution[targetNode.Hostname], ip)
-			ipCounts[targetNode.Hostname]++
-			nodeCapacities[targetNode.Hostname]--
+		assignments, unplaced := ipam.Distribute(ips, snapshots)
+		for _, ip := range unplaced {
+			m.logger.Warn("No nodes with available capacity for IP", "ip", ip)
 		}
+		distribution = assignments
 	}
 
 	return distribution
-}
-
-// getNodeAvailableCapacity calculates remaining capacity for a node.
-// Returns a sentinel larger than the total configured IP count for unlimited
-// nodes (Capacity == 0) so capacity never constrains their distribution.
-func (m *MemberList) getNodeAvailableCapacity(member *Member) int {
-	if member.Capacity == 0 {
-		total := 0
-		for _, ips := range m.config.Groups {
-			total += len(ips)
-		}
-		return total + 1
-	}
-	return member.Capacity - len(member.ActiveIPs)
 }
 
 // getActiveNode returns the current active node in the cluster
@@ -282,6 +254,13 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 		Status:   StatusMaintenance,
 		config:   m.config,
 		logger:   m.logger,
+	}
+
+	// Seed capacity from config so distribution decisions respect it immediately
+	if m.config != nil {
+		if node, ok := m.config.Nodes[nodeID]; ok {
+			member.Capacity = node.Capacity
+		}
 	}
 
 	// Set back-reference so member methods can access the list (e.g., during MakeActive)

@@ -62,6 +62,9 @@ service CLI {
     // Maintenance mode
     rpc SetMaintenance(SetMaintenanceRequest) returns (SetMaintenanceResponse) {}
 
+    // Node capacity (max floating IPs a node may host)
+    rpc SetCapacity(SetCapacityRequest) returns (SetCapacityResponse) {}
+
     // Quorum info (read-only)
     rpc GetVotingSessions(GetVotingSessionsRequest) returns (GetVotingSessionsResponse) {}
     rpc GetVotingSessionDetails(GetVotingSessionDetailsRequest) returns (GetVotingSessionDetailsResponse) {}
@@ -276,6 +279,17 @@ message SetMaintenanceRequest {
 }
 
 message SetMaintenanceResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Node Capacity Request/Response
+message SetCapacityRequest {
+    string node_id = 1; // optional: target node UUID; defaults to local node if empty
+    int32 capacity = 2; // max floating IPs the node may host; 0 = unlimited
+}
+
+message SetCapacityResponse {
     bool success = 1;
     string message = 2;
 }

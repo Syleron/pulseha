@@ -4192,6 +4192,68 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 	return &rpc.SetMaintenanceResponse{Success: true, Message: fmt.Sprintf("node %s returned to passive — eligible for promotion", localID)}, nil
 }
 
+// SetCapacity implements CLI.SetCapacity. Capacity is a config-only setting:
+// it is persisted and broadcast here, and every node (including this one)
+// applies it to its member list when the synced config lands. Existing IP
+// assignments above the new capacity are not evicted; the active-active
+// reconcile loop simply stops placing new IPs on the node.
+func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (*rpc.SetCapacityResponse, error) {
+	s.Lock()
+	defer s.Unlock()
+
+	if !s.config.ClusterCheck() {
+		return &rpc.SetCapacityResponse{Success: false, Message: "no cluster configured"}, nil
+	}
+
+	if req.Capacity < 0 {
+		return &rpc.SetCapacityResponse{Success: false, Message: "capacity must be >= 0 (0 = unlimited)"}, nil
+	}
+
+	// Resolve target; empty means local, otherwise accept UUID or hostname
+	targetID := req.NodeId
+	if targetID == "" {
+		localID, err := s.config.GetLocalNodeUUID()
+		if err != nil {
+			return &rpc.SetCapacityResponse{Success: false, Message: "failed to resolve local node: " + err.Error()}, nil
+		}
+		targetID = localID
+	}
+	if _, ok := s.config.Nodes[targetID]; !ok {
+		if member := s.memberList.GetMemberByIdentifier(targetID); member != nil {
+			targetID = member.ID
+		}
+	}
+
+	node, ok := s.config.Nodes[targetID]
+	if !ok {
+		return &rpc.SetCapacityResponse{Success: false, Message: fmt.Sprintf("node %s not found in config", req.NodeId)}, nil
+	}
+
+	node.Capacity = int(req.Capacity)
+
+	if err := s.config.Save(); err != nil {
+		return &rpc.SetCapacityResponse{Success: false, Message: fmt.Sprintf("failed to save config: %v", err)}, nil
+	}
+
+	// Apply to the in-memory member immediately so local distribution
+	// decisions don't wait for the next config sync
+	if member := s.memberList.GetMemberByID(targetID); member != nil {
+		member.Lock()
+		member.Capacity = int(req.Capacity)
+		member.Unlock()
+	}
+
+	// Broadcast updated config to peers
+	go s.broadcastFullConfigToPeers()
+
+	limit := "unlimited"
+	if req.Capacity > 0 {
+		limit = fmt.Sprintf("%d floating IP(s)", req.Capacity)
+	}
+	s.logger.Info("Node capacity updated", "node", node.Hostname, "capacity", req.Capacity)
+	return &rpc.SetCapacityResponse{Success: true, Message: fmt.Sprintf("capacity for node %s set to %s", node.Hostname, limit)}, nil
+}
+
 // ResyncNetwork implements CLI.ResyncNetwork RPC
 func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkRequest) (*rpc.ResyncNetworkResponse, error) {
 	// Avoid holding the server lock while calling Reconfigure to prevent deadlocks,

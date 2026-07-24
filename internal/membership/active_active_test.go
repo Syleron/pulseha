@@ -253,3 +253,53 @@ func TestRemoveIPFromList(t *testing.T) {
 		t.Errorf("expected empty result, got %v", got)
 	}
 }
+
+// Regression: capacity must not exclude nodes from redistribution
+// eligibility. In active-passive mode all IPs go to one node regardless of
+// capacity; in active-active mode ipam.Distribute enforces capacity during
+// placement. Filtering here made active-passive failover error with "no
+// available nodes" once capacities were set.
+func TestGetAvailableNodesIgnoresCapacity(t *testing.T) {
+	cfg := newAATestConfig(nil)
+	cfg.Pulse.Mode = "active-passive"
+	a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
+	a.Capacity = 1 // at capacity
+	b := newAATestMember("node-b", "host-b", StatusPassive, []string{"10.0.0.2/24"})
+	b.Capacity = 1 // at capacity
+	ml := newAATestMemberList(cfg, a, b)
+
+	nodes := ml.getAvailableNodes()
+
+	if len(nodes) != 2 {
+		t.Fatalf("expected both at-capacity nodes to remain eligible, got %d", len(nodes))
+	}
+}
+
+func TestAddMemberSeedsCapacityFromConfig(t *testing.T) {
+	cfg := newAATestConfig(nil)
+	cfg.Nodes["node-a"] = &config.Node{Hostname: "host-a", Capacity: 3}
+	ml := newAATestMemberList(cfg)
+
+	if err := ml.AddMember("node-a", "host-a", "127.0.0.1", "1234"); err != nil {
+		t.Fatalf("AddMember failed: %v", err)
+	}
+
+	if got := ml.Members["node-a"].Capacity; got != 3 {
+		t.Errorf("expected capacity 3 seeded from config, got %d", got)
+	}
+}
+
+func TestUpdateConfigRefreshesCapacity(t *testing.T) {
+	cfg := newAATestConfig(nil)
+	cfg.Nodes["node-a"] = &config.Node{Hostname: "host-a"}
+	a := newAATestMember("node-a", "host-a", StatusActive, nil)
+	ml := newAATestMemberList(cfg, a)
+
+	newCfg := newAATestConfig(nil)
+	newCfg.Nodes["node-a"] = &config.Node{Hostname: "host-a", Capacity: 2}
+	ml.UpdateConfig(newCfg)
+
+	if got := a.Capacity; got != 2 {
+		t.Errorf("expected capacity refreshed to 2 after config sync, got %d", got)
+	}
+}

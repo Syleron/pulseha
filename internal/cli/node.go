@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -23,6 +24,7 @@ func NewNodeCmd() *cobra.Command {
 		newNodeDemoteCmd(),
 		newNodeRemoveCmd(),
 		newNodeMaintenanceCmd(),
+		newNodeCapacityCmd(),
 	)
 
 	return cmd
@@ -158,5 +160,47 @@ Omit --node-id to target the local node.`,
 
 	cmd.Flags().BoolVar(&disable, "disable", false, "Exit maintenance mode and return the node to passive")
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID (UUID) of the target node; defaults to local node if omitted")
+	return cmd
+}
+
+func newNodeCapacityCmd() *cobra.Command {
+	var nodeID string
+
+	cmd := &cobra.Command{
+		Use:   "capacity <limit>",
+		Short: "Set the maximum number of floating IPs a node may host",
+		Long: `Set a node's floating IP capacity for active-active distribution.
+IP placement and rebalancing will not assign more than this many IPs to the node.
+A limit of 0 removes the cap (unlimited).
+Omit --node-id to target the local node.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			capacity, err := strconv.Atoi(args[0])
+			if err != nil || capacity < 0 {
+				return fmt.Errorf("limit must be a non-negative integer, got %q", args[0])
+			}
+
+			c, err := client.New()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			resp, err := c.CLI().SetCapacity(context.Background(), &rpc.SetCapacityRequest{
+				NodeId:   nodeID,
+				Capacity: int32(capacity),
+			})
+			if err != nil {
+				return fmt.Errorf("RPC error: %v", err)
+			}
+			if !resp.Success {
+				return errors.New(resp.Message)
+			}
+			fmt.Println(resp.Message)
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID (UUID) or hostname of the target node; defaults to local node if omitted")
 	return cmd
 }

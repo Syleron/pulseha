@@ -100,6 +100,7 @@ type Node struct {
 	Port        string              `json:"bind_port"`
 	IPGroups    map[string][]string `json:"group_assignments"`
 	Maintenance bool                `json:"maintenance,omitempty"`
+	Capacity    int                 `json:"capacity,omitempty"` // Max floating IPs this node may host; 0 = unlimited
 }
 
 // New instantiates and setups up our config object

@@ -12,6 +12,7 @@ import (
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
@@ -795,23 +796,23 @@ func rebalanceCandidates(members map[string]*Member) []*Member {
 // nodes, or nils when the assignment is already balanced (max-min <= 1).
 // Nodes must be sorted by ID so ties resolve deterministically.
 func planRebalanceMove(nodes []*Member) (*Member, *Member, string) {
-	var src, dst *Member
-	srcCount, dstCount := -1, -1
+	snapshots := make([]ipam.Node, 0, len(nodes))
 	for _, node := range nodes {
 		node.Lock()
-		count := len(node.ActiveIPs)
-		atCapacity := node.Capacity > 0 && count >= node.Capacity
+		snapshots = append(snapshots, ipam.Node{
+			Hostname: node.Hostname,
+			IPCount:  len(node.ActiveIPs),
+			Capacity: node.Capacity,
+		})
 		node.Unlock()
-		if count > srcCount {
-			src, srcCount = node, count
-		}
-		if !atCapacity && (dst == nil || count < dstCount) {
-			dst, dstCount = node, count
-		}
 	}
-	if src == nil || dst == nil || src == dst || srcCount-dstCount < 2 {
+
+	srcIdx, dstIdx, ok := ipam.PlanMove(snapshots)
+	if !ok {
 		return nil, nil, ""
 	}
+
+	src, dst := nodes[srcIdx], nodes[dstIdx]
 	src.Lock()
 	ip := src.ActiveIPs[len(src.ActiveIPs)-1]
 	src.Unlock()
