@@ -26,6 +26,7 @@ import (
 	rpc "github.com/syleron/pulseha/rpc"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/peer"
 )
 
 // Object pools to reduce memory allocations
@@ -91,6 +92,18 @@ func putStringSliceMap(m map[string][]string) {
 	if m != nil {
 		stringSliceMapPool.Put(m)
 	}
+}
+
+// callerAddr returns the network address of the gRPC caller for audit logging.
+// Group membership is cluster-wide persisted state; any client (pulsectl, the
+// appliance API over the unix socket, or a peer node) can mutate it, so log
+// who asked — without this, externally triggered removals are indistinguishable
+// from daemon-internal ones (see the floating IP group wipe incident).
+func callerAddr(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		return p.Addr.String()
+	}
+	return "unknown"
 }
 
 // Server represents the PulseHA server
@@ -2459,7 +2472,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 
 // CreateGroup implements the CLI.CreateGroup RPC method
 func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (*rpc.CreateGroupResponse, error) {
-	s.logger.Infof("Received CreateGroup request for group: %s", req.Name)
+	s.logger.Infof("Received CreateGroup request for group: %s (caller: %s)", req.Name, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -2504,7 +2517,7 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 
 // AddIPToGroup implements the CLI.AddIPToGroup RPC method
 func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest) (*rpc.AddIPToGroupResponse, error) {
-	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s", req.GroupName, req.Ip)
+	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -2745,7 +2758,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 
 // RemoveIPFromGroup implements the CLI.RemoveIPFromGroup RPC method
 func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, error) {
-	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s", req.GroupName, req.Ip)
+	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -3113,7 +3126,7 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 
 // DeleteGroup implements the CLI.DeleteGroup RPC method
 func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, error) {
-	s.logger.Infof("Received DeleteGroup request for group: %s", req.GroupName)
+	s.logger.Infof("Received DeleteGroup request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
