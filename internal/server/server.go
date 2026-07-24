@@ -2586,6 +2586,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 
 	// Find nodes that have this group assigned and try to bring up the IP
 	ipBroughtUp := false
+	localBroughtUp := false
 	for nodeID, node := range s.config.Nodes {
 		for iface, groups := range node.IPGroups {
 			for _, g := range groups {
@@ -2622,6 +2623,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 								if existingIface == iface {
 									// Already configured on desired iface; mark success and update expected IPs
 									ipBroughtUp = true
+									localBroughtUp = true
 									s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
 									continue
 								}
@@ -2638,6 +2640,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 							continue
 						}
 						ipBroughtUp = true
+						localBroughtUp = true
 						s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
 					} else {
 						// This is a remote node, send RPC to bring up the IP
@@ -2690,6 +2693,30 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 				Message:  "Failed to bring up IP on any node",
 				Warnings: warnings,
 			}, nil
+		}
+	}
+
+	// Track the IP on the local member so status and the active-active
+	// reconciler see it as hosted — otherwise it is treated as orphaned and
+	// endlessly re-redistributed. Mirrors what the BringUpIP RPC handler does
+	// for remote nodes, including the transition to Active in active-active.
+	if localBroughtUp {
+		if member := s.memberList.GetMemberByID(s.config.Pulse.LocalNode); member != nil {
+			member.Lock()
+			alreadyTracked := false
+			for _, ip := range member.ActiveIPs {
+				if ip == ipToUse {
+					alreadyTracked = true
+					break
+				}
+			}
+			if !alreadyTracked {
+				member.ActiveIPs = append(member.ActiveIPs, ipToUse)
+			}
+			if s.config.Pulse.Mode == "active-active" && member.Status == membership.StatusPassive {
+				member.Status = membership.StatusActive
+			}
+			member.Unlock()
 		}
 	}
 
