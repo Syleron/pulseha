@@ -2,6 +2,7 @@ package membership
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	log "github.com/charmbracelet/log"
@@ -136,7 +137,9 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 				continue
 			}
 
-			if err := node.MakeActive(ips); err != nil {
+			// Merge with the node's existing assignments; MakeActive would
+			// replace them and lose track of IPs the node already hosts.
+			if err := node.AddActiveIPs(ips); err != nil {
 				m.logger.Error("Failed to assign IPs to node", "hostname", node.Hostname, "error", err)
 				// Continue with other nodes even if one fails
 				continue
@@ -150,7 +153,8 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 	return nil
 }
 
-// getAvailableNodes returns a list of nodes that can accept new IPs
+// getAvailableNodes returns a list of nodes that can accept new IPs,
+// sorted by node ID so distribution decisions are deterministic.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
@@ -164,6 +168,7 @@ func (m *MemberList) getAvailableNodes() []*Member {
 			available = append(available, member)
 		}
 	}
+	sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	return available
 }
 
@@ -194,31 +199,23 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 		}
 
 	case "active-active":
-		// Calculate total available capacity and current load
-		totalCapacity := 0
+		// Balance by IP count: each IP goes to the node currently holding the
+		// fewest IPs (existing assignments plus IPs handed out in this pass),
+		// ties broken by node order (sorted by ID for determinism).
+		ipCounts := make(map[string]int)
 		nodeCapacities := make(map[string]int)
-		currentLoads := make(map[string]float64)
-
 		for _, node := range nodes {
-			available := m.getNodeAvailableCapacity(node)
-			nodeCapacities[node.Hostname] = available
-			totalCapacity += available
-			currentLoads[node.Hostname] = node.LoadFactor
+			ipCounts[node.Hostname] = len(node.ActiveIPs)
+			nodeCapacities[node.Hostname] = m.getNodeAvailableCapacity(node)
 		}
 
-		// Distribute IPs based on capacity and current load
 		for _, ip := range ips {
 			var targetNode *Member
-			minLoad := float64(1000000) // High initial value
-
-			// Find node with lowest load
 			for _, node := range nodes {
 				if nodeCapacities[node.Hostname] <= 0 {
 					continue
 				}
-
-				if currentLoads[node.Hostname] < minLoad {
-					minLoad = currentLoads[node.Hostname]
+				if targetNode == nil || ipCounts[node.Hostname] < ipCounts[targetNode.Hostname] {
 					targetNode = node
 				}
 			}
@@ -228,14 +225,9 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 				continue
 			}
 
-			// Assign IP and update load
 			distribution[targetNode.Hostname] = append(distribution[targetNode.Hostname], ip)
+			ipCounts[targetNode.Hostname]++
 			nodeCapacities[targetNode.Hostname]--
-			capacity := targetNode.Capacity
-			if capacity == 0 {
-				capacity = len(m.config.Groups)
-			}
-			currentLoads[targetNode.Hostname] = float64(len(distribution[targetNode.Hostname])) / float64(capacity)
 		}
 	}
 
@@ -243,11 +235,15 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 }
 
 // getNodeAvailableCapacity calculates remaining capacity for a node.
-// Returns a large sentinel value for unlimited nodes (Capacity == 0) so
-// callers that gate on <= 0 still include them in distribution.
+// Returns a sentinel larger than the total configured IP count for unlimited
+// nodes (Capacity == 0) so capacity never constrains their distribution.
 func (m *MemberList) getNodeAvailableCapacity(member *Member) int {
 	if member.Capacity == 0 {
-		return len(m.config.Groups) + 1
+		total := 0
+		for _, ips := range m.config.Groups {
+			total += len(ips)
+		}
+		return total + 1
 	}
 	return member.Capacity - len(member.ActiveIPs)
 }

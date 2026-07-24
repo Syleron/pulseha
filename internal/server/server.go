@@ -3587,6 +3587,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		incomingMemberStates map[string]membership.MemberStatus
 		incomingEpoch        int64
 		incomingLeaderID     string
+		senderID             string
+		senderActiveIPs      []string
 	)
 	// Defer cleanup of any allocated maps
 	defer func() {
@@ -3596,10 +3598,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	}()
 	{
 		type enhanced struct {
-			MemberStates map[string]int    `json:"member_states"`
-			Epoch        *int64            `json:"epoch"`
-			LeaderID     string            `json:"leader_id"`
-			Leases       map[string]string `json:"leases"`
+			MemberStates    map[string]int    `json:"member_states"`
+			Epoch           *int64            `json:"epoch"`
+			LeaderID        string            `json:"leader_id"`
+			Leases          map[string]string `json:"leases"`
+			SenderID        string            `json:"sender_id"`
+			SenderActiveIPs []string          `json:"sender_active_ips"`
 		}
 		var e enhanced
 		if err := json.Unmarshal(req.Config, &e); err == nil {
@@ -3613,6 +3617,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				incomingEpoch = *e.Epoch
 			}
 			incomingLeaderID = e.LeaderID
+			senderID = e.SenderID
+			senderActiveIPs = e.SenderActiveIPs
 		}
 	}
 
@@ -3890,6 +3896,20 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			s.logger.Debug("ConfigSync: ignoring incoming member_states due to stale epoch or lower-priority leader",
 				"incoming_epoch", incomingEpoch, "current_epoch", currentEpoch,
 				"incoming_leader", incomingLeaderID, "current_leader", currentLeader)
+		}
+	}
+
+	// Apply the sender's self-reported hosted IPs (active-active only). A
+	// node's report about itself is authoritative, so no epoch gating; this
+	// keeps every peer's view of the IP assignment map current enough to
+	// redistribute correctly if the sender later fails.
+	if s.config.Pulse.Mode == "active-active" && senderID != "" && senderActiveIPs != nil {
+		if localID, err := s.config.GetLocalNodeUUID(); err == nil && senderID != localID {
+			if senderMember := s.memberList.GetMemberByID(senderID); senderMember != nil {
+				senderMember.Lock()
+				senderMember.ActiveIPs = append([]string{}, senderActiveIPs...)
+				senderMember.Unlock()
+			}
 		}
 	}
 
@@ -4591,6 +4611,29 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 			continue
 		}
 	}
+	// In active-active mode keep the local member's ActiveIPs bookkeeping in
+	// sync (mirror of BringUpIP) so a later monitor refresh doesn't resurrect
+	// IPs that were deliberately moved to another node.
+	if s.config.Pulse.Mode == "active-active" {
+		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
+			if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
+				removed := make(map[string]bool, len(req.Ips))
+				for _, ip := range req.Ips {
+					removed[ip] = true
+				}
+				localMember.Lock()
+				var remaining []string
+				for _, ip := range localMember.ActiveIPs {
+					if !removed[ip] {
+						remaining = append(remaining, ip)
+					}
+				}
+				localMember.ActiveIPs = remaining
+				localMember.Unlock()
+			}
+		}
+	}
+
 	if len(failed) > 0 {
 		return &rpc.DownIpResponse{Success: true, Message: "Best-effort: some IPs may not have been present"}, nil
 	}
@@ -5074,6 +5117,22 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	if leases != nil {
 		payload["leases"] = leases
 	}
+
+	localID, _ := s.config.GetLocalNodeUUID()
+
+	// In active-active, self-report this node's hosted IPs so peers keep an
+	// accurate view of the assignment map. Without this, a peer that takes
+	// over as redistribution coordinator wouldn't know which IPs this node
+	// held when it failed.
+	if s.config.Pulse.Mode == "active-active" && localID != "" {
+		if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
+			localMember.Lock()
+			payload["sender_id"] = localID
+			payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
+			localMember.Unlock()
+		}
+	}
+
 	enhancedBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -5083,7 +5142,6 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	_, _ = s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: enhancedBytes})
 
 	// Broadcast to peers best-effort using connection pool
-	localID, _ := s.config.GetLocalNodeUUID()
 	for peerID, node := range s.config.Nodes {
 		if peerID == localID {
 			continue

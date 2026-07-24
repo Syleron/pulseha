@@ -88,6 +88,7 @@ type HealthChecker struct {
 	loggedNoMembers        bool            // Tracks if a no-member condition has already been logged in the current state
 	deepCheckCounter       int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
 	membershipCheckFailed  map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
+	aaReconcileCycles      int             // cycles since startup; active-active reconciliation waits for a grace period
 }
 
 // NewHealthChecker creates a new health checker
@@ -517,30 +518,11 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		}
 	}
 
-	// In active-active mode, all eligible nodes are StatusActive.
-	// Per-node IP failover is handled by the health-check loop; here we only
-	// trigger redistribution when no Active nodes remain at all.
+	// In active-active mode, all eligible nodes are StatusActive. The
+	// coordinator reconciles orphaned IPs (dead nodes, restarts) and
+	// rebalances load onto empty nodes (fresh joins, failback) every cycle.
 	if config.Pulse.Mode == "active-active" {
-		hasActive := false
-		for _, member := range members {
-			member.Lock()
-			active := member.Status == StatusActive
-			member.Unlock()
-			if active {
-				hasActive = true
-				break
-			}
-		}
-		if !hasActive {
-			h.logger.Warn("ACTIVE_CHECK: active-active mode but no Active nodes found, triggering redistribution")
-			var allIPs []string
-			for _, ips := range config.Groups {
-				allIPs = append(allIPs, ips...)
-			}
-			if err := h.members.RedistributeIPs(allIPs); err != nil {
-				h.logger.Error("ACTIVE_CHECK: Redistribution failed", "error", err)
-			}
-		}
+		h.reconcileActiveActive(members)
 		return
 	}
 
@@ -600,6 +582,251 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 			}
 		}
 	}
+}
+
+// aaReconcileGraceCycles is the number of health-check cycles to wait after
+// startup before making active-active redistribution decisions. It gives
+// initial health checks and peer self-reports (which carry each node's
+// ActiveIPs) time to converge so we don't redistribute IPs that a peer is
+// actually still hosting.
+const aaReconcileGraceCycles = 10
+
+// reconcileActiveActive keeps floating IPs assigned and balanced in
+// active-active mode. Group IPs no longer hosted by any healthy node are
+// redistributed, and IPs are moved onto underloaded nodes. Only the
+// coordinator — the healthy node with the lowest ID — acts, so concurrent
+// redistribution from multiple nodes can't race.
+func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
+	h.aaReconcileCycles++
+	if h.aaReconcileCycles < aaReconcileGraceCycles {
+		return
+	}
+
+	localID, err := h.members.config.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	if activeActiveCoordinator(members) != localID {
+		return
+	}
+
+	deduped := h.resolveDuplicateAssignments(members)
+	redistributed := h.redistributeOrphanedIPs(members)
+	moved := h.rebalanceActiveActive(members)
+
+	// Broadcast so peers converge on the new assignments quickly.
+	if (deduped || redistributed || moved) && h.server != nil {
+		states := getMemberStatusMap()
+		for id, m := range members {
+			m.Lock()
+			states[id] = m.Status
+			m.Unlock()
+		}
+		_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
+		putMemberStatusMap(states)
+	}
+}
+
+// activeActiveCoordinator returns the ID of the node that should orchestrate
+// active-active redistribution: the healthy (Active or Passive) node with the
+// lowest ID. Returns "" when no healthy node exists.
+func activeActiveCoordinator(members map[string]*Member) string {
+	coordinator := ""
+	for id, member := range members {
+		member.Lock()
+		healthy := member.Status == StatusActive || member.Status == StatusPassive
+		member.Unlock()
+		if healthy && (coordinator == "" || id < coordinator) {
+			coordinator = id
+		}
+	}
+	return coordinator
+}
+
+// resolveDuplicateAssignments finds IPs tracked by more than one healthy
+// member and removes them everywhere but the first owner (lowest node ID).
+// Convergence races can transiently double-assign an IP; left alone that
+// means two nodes ARP-fighting over the same address. Returns true if any
+// duplicate was resolved.
+func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) bool {
+	resolved := false
+	owners := make(map[string]*Member)
+	for _, node := range rebalanceCandidates(members) {
+		node.Lock()
+		ips := append([]string{}, node.ActiveIPs...)
+		node.Unlock()
+		for _, ip := range ips {
+			owner, seen := owners[ip]
+			if !seen {
+				owners[ip] = node
+				continue
+			}
+			h.logger.Warnf("ACTIVE_CHECK: IP %s assigned to both %s and %s, removing from %s",
+				ip, owner.Hostname, node.Hostname, node.Hostname)
+			node.Lock()
+			node.ActiveIPs = removeIPFromList(node.ActiveIPs, ip)
+			node.Unlock()
+			if err := node.BringDownIPs([]string{ip}); err != nil {
+				h.logger.Error("ACTIVE_CHECK: failed to bring down duplicate IP", "ip", ip,
+					"hostname", node.Hostname, "error", err)
+			}
+			resolved = true
+		}
+	}
+	return resolved
+}
+
+// redistributeOrphanedIPs reassigns group IPs that no healthy node currently
+// hosts — IPs stranded on failed nodes or lost entirely (e.g. a node
+// rebooted and came back empty). Returns true if anything was redistributed.
+func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool {
+	// Collect IPs hosted by healthy nodes; clear stranded assignments from
+	// failed nodes so their IPs count as orphaned.
+	hosted := make(map[string]bool)
+	for _, member := range members {
+		member.Lock()
+		switch member.Status {
+		case StatusActive, StatusPassive:
+			for _, ip := range member.ActiveIPs {
+				hosted[ip] = true
+			}
+		case StatusUnknown:
+			if len(member.ActiveIPs) > 0 {
+				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s",
+					len(member.ActiveIPs), member.Hostname)
+				member.ActiveIPs = nil
+				member.LoadFactor = 0
+			}
+		}
+		member.Unlock()
+	}
+
+	orphaned := orphanedGroupIPs(h.members.config.Groups, hosted)
+	if len(orphaned) == 0 {
+		return false
+	}
+
+	// Quorum-gate redistribution the same way partial IP failures are, so a
+	// minority partition can't grab IPs the majority side still serves.
+	if len(members) >= 3 && !h.initiateIPRedistributionVote(orphaned) {
+		h.logger.Warn("ACTIVE_CHECK: quorum vote failed, not redistributing orphaned IPs")
+		return false
+	}
+
+	h.logger.Warnf("ACTIVE_CHECK: redistributing %d orphaned floating IP(s)", len(orphaned))
+	if err := h.members.RedistributeIPs(orphaned); err != nil {
+		h.logger.Error("ACTIVE_CHECK: failed to redistribute orphaned IPs", "error", err)
+		return false
+	}
+	return true
+}
+
+// orphanedGroupIPs returns all configured group IPs not present in hosted,
+// sorted for deterministic redistribution.
+func orphanedGroupIPs(groups map[string][]string, hosted map[string]bool) []string {
+	var orphaned []string
+	for _, ips := range groups {
+		for _, ip := range ips {
+			if !hosted[ip] {
+				orphaned = append(orphaned, ip)
+			}
+		}
+	}
+	sort.Strings(orphaned)
+	return orphaned
+}
+
+// rebalanceActiveActive moves IPs from the most-loaded node to the
+// least-loaded one until the cluster is balanced (difference <= 1). This is
+// what tops up freshly joined and failed-back nodes, which otherwise sit
+// Active but empty forever. Returns true if any IP was moved.
+func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
+	if h.server == nil {
+		return false
+	}
+
+	totalIPs := 0
+	for _, ips := range h.members.config.Groups {
+		totalIPs += len(ips)
+	}
+
+	moved := false
+	// Each successful move shrinks the imbalance, so the total IP count
+	// bounds the loop.
+	for i := 0; i < totalIPs; i++ {
+		src, dst, ip := planRebalanceMove(rebalanceCandidates(members))
+		if src == nil {
+			break
+		}
+		h.logger.Infof("ACTIVE_CHECK: rebalancing IP %s from %s to %s", ip, src.Hostname, dst.Hostname)
+		if err := h.server.OrchestrateIPFailover(src.ID, dst.ID, []string{ip}); err != nil {
+			h.logger.Error("ACTIVE_CHECK: rebalance move failed", "ip", ip, "error", err)
+			break
+		}
+		src.Lock()
+		src.ActiveIPs = removeIPFromList(src.ActiveIPs, ip)
+		src.Unlock()
+		dst.Lock()
+		dst.Status = StatusActive
+		dst.ActiveIPs = append(dst.ActiveIPs, ip)
+		dst.Unlock()
+		moved = true
+	}
+	return moved
+}
+
+// rebalanceCandidates returns the healthy members eligible for rebalancing,
+// sorted by ID so move planning is deterministic.
+func rebalanceCandidates(members map[string]*Member) []*Member {
+	var nodes []*Member
+	for _, member := range members {
+		member.Lock()
+		eligible := member.Status == StatusActive || member.Status == StatusPassive
+		member.Unlock()
+		if eligible {
+			nodes = append(nodes, member)
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	return nodes
+}
+
+// planRebalanceMove returns the next IP move that reduces imbalance across
+// nodes, or nils when the assignment is already balanced (max-min <= 1).
+// Nodes must be sorted by ID so ties resolve deterministically.
+func planRebalanceMove(nodes []*Member) (*Member, *Member, string) {
+	var src, dst *Member
+	srcCount, dstCount := -1, -1
+	for _, node := range nodes {
+		node.Lock()
+		count := len(node.ActiveIPs)
+		atCapacity := node.Capacity > 0 && count >= node.Capacity
+		node.Unlock()
+		if count > srcCount {
+			src, srcCount = node, count
+		}
+		if !atCapacity && (dst == nil || count < dstCount) {
+			dst, dstCount = node, count
+		}
+	}
+	if src == nil || dst == nil || src == dst || srcCount-dstCount < 2 {
+		return nil, nil, ""
+	}
+	src.Lock()
+	ip := src.ActiveIPs[len(src.ActiveIPs)-1]
+	src.Unlock()
+	return src, dst, ip
+}
+
+// removeIPFromList returns ips with target removed.
+func removeIPFromList(ips []string, target string) []string {
+	out := ips[:0]
+	for _, ip := range ips {
+		if ip != target {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 // electNewActiveNode elects a new active node using deterministic backoff to prevent races

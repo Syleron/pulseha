@@ -129,6 +129,39 @@ func (m *Member) MakeActive(ips []string) error {
 	return m.BringUpIPs(ips)
 }
 
+// AddActiveIPs assigns additional IPs to this member without dropping the
+// IPs it already holds. The member is promoted to Active and only the newly
+// added IPs are brought up. Used for incremental redistribution in
+// active-active mode, where MakeActive's replace semantics would lose track
+// of a node's existing assignments.
+func (m *Member) AddActiveIPs(ips []string) error {
+	m.Lock()
+	existing := make(map[string]bool, len(m.ActiveIPs))
+	for _, ip := range m.ActiveIPs {
+		existing[ip] = true
+	}
+	var added []string
+	for _, ip := range ips {
+		if !existing[ip] {
+			existing[ip] = true
+			m.ActiveIPs = append(m.ActiveIPs, ip)
+			added = append(added, ip)
+		}
+	}
+	m.Status = StatusActive
+	if m.Capacity > 0 {
+		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
+	} else {
+		m.LoadFactor = 1.0
+	}
+	m.Unlock()
+
+	if len(added) == 0 {
+		return nil
+	}
+	return m.BringUpIPs(added)
+}
+
 // BringUpIPs brings up the specified IPs on this member
 func (m *Member) BringUpIPs(ips []string) error {
 	// Resolve interface per IP using group assignments
