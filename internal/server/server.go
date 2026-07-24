@@ -5216,6 +5216,15 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	if s.config.Pulse.Mode == "active-active" && localID != "" {
 		if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
 			localMember.Lock()
+			// A non-active node cannot host floating IPs — the IP monitor
+			// enforces that on the interface — so clear any stale claim
+			// before self-reporting. Otherwise peers keep counting these
+			// IPs as hosted and the reconciler never re-places them, and
+			// status shows IPs on a node that doesn't actually hold them.
+			if localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
+				localMember.ActiveIPs = nil
+				localMember.LoadFactor = 0
+			}
 			payload["sender_id"] = localID
 			payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
 			localMember.Unlock()
