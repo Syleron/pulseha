@@ -175,6 +175,12 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		fmt.Printf("\nFloating IP Groups:\n")
 		fmt.Printf("------------------\n")
 
+		// Map node IDs to hostnames so assignments can show and sort by node name
+		hostnames := make(map[string]string, len(status.Members))
+		for _, member := range status.Members {
+			hostnames[member.NodeID] = member.Hostname
+		}
+
 		for _, group := range status.Groups {
 			fmt.Printf("\nGroup: %s\n", group.Name)
 
@@ -188,11 +194,22 @@ func printClusterStatus(status *client.ClusterStatus) error {
 				fmt.Printf("  IPs: None\n")
 			}
 
-			// Print assignments
+			// Print assignments sorted by node name
 			if len(group.Assignments) > 0 {
+				sort.Slice(group.Assignments, func(i, j int) bool {
+					ni, nj := hostnames[group.Assignments[i].NodeID], hostnames[group.Assignments[j].NodeID]
+					if ni != nj {
+						return ni < nj
+					}
+					return group.Assignments[i].Interface < group.Assignments[j].Interface
+				})
 				fmt.Printf("  Assigned to:\n")
 				for _, assignment := range group.Assignments {
-					fmt.Printf("    - Node: %s, Interface: %s\n", assignment.NodeID, assignment.Interface)
+					name := hostnames[assignment.NodeID]
+					if name == "" {
+						name = assignment.NodeID
+					}
+					fmt.Printf("    - Node: %s (%s), Interface: %s\n", name, assignment.NodeID, assignment.Interface)
 				}
 			} else {
 				fmt.Printf("  Assigned to: None\n")
