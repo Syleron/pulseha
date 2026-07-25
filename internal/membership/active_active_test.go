@@ -289,6 +289,77 @@ func TestAddMemberSeedsCapacityFromConfig(t *testing.T) {
 	}
 }
 
+// ConsolidationTarget picks the node that keeps every floating IP when the
+// cluster switches from active-active to active-passive.
+func TestConsolidationTarget(t *testing.T) {
+	members := func(ms ...*Member) map[string]*Member {
+		out := make(map[string]*Member, len(ms))
+		for _, m := range ms {
+			out[m.ID] = m
+		}
+		return out
+	}
+
+	t.Run("prefers the most loaded active node", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
+		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.2/24", "10.0.0.3/24"})
+		c := newAATestMember("node-c", "host-c", StatusPassive, nil)
+
+		if got := ConsolidationTarget(members(a, b, c), ""); got != b {
+			t.Errorf("expected most-loaded node-b, got %v", got)
+		}
+	})
+
+	t.Run("breaks load ties on lowest node ID", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
+		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.2/24"})
+
+		// Run repeatedly: the selection must not depend on map iteration order.
+		for i := 0; i < 20; i++ {
+			if got := ConsolidationTarget(members(a, b), ""); got != a {
+				t.Fatalf("expected lowest-ID node-a on tie, got %v", got)
+			}
+		}
+	})
+
+	t.Run("never selects a failed or maintenance node", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusUnknown, []string{"10.0.0.1/24"})
+		b := newAATestMember("node-b", "host-b", StatusMaintenance, nil)
+		c := newAATestMember("node-c", "host-c", StatusActive, nil)
+
+		if got := ConsolidationTarget(members(a, b, c), "node-a"); got != c {
+			t.Errorf("expected healthy node-c, got %v", got)
+		}
+	})
+
+	t.Run("falls back to the healthy leader when no node is active", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusPassive, nil)
+		b := newAATestMember("node-b", "host-b", StatusPassive, nil)
+
+		if got := ConsolidationTarget(members(a, b), "node-b"); got != b {
+			t.Errorf("expected leader node-b, got %v", got)
+		}
+	})
+
+	t.Run("falls back to the lowest-ID healthy node", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusPassive, nil)
+		b := newAATestMember("node-b", "host-b", StatusPassive, nil)
+
+		if got := ConsolidationTarget(members(a, b), "node-gone"); got != a {
+			t.Errorf("expected lowest-ID node-a, got %v", got)
+		}
+	})
+
+	t.Run("returns nil when no node is healthy", func(t *testing.T) {
+		a := newAATestMember("node-a", "host-a", StatusUnknown, nil)
+		b := newAATestMember("node-b", "host-b", StatusMaintenance, nil)
+
+		if got := ConsolidationTarget(members(a, b), "node-a"); got != nil {
+			t.Errorf("expected nil, got %v", got)
+		}
+	})
+}
+
 func TestUpdateConfigRefreshesCapacity(t *testing.T) {
 	cfg := newAATestConfig(nil)
 	cfg.Nodes["node-a"] = &config.Node{Hostname: "host-a"}

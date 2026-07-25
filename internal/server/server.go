@@ -2411,43 +2411,63 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 		}
 	}
 
-	// If switching to active-passive, move all IPs to the active node
+	// If switching to active-passive, consolidate every floating IP onto a
+	// single active node. In active-passive an Active node's IP monitor expects
+	// *all* of the group IPs on its interfaces, so leaving more than one node
+	// Active — the normal state in active-active — makes every node claim every
+	// floating IP and ARP-fight over them. The whole consolidation is driven
+	// from here, the node handling the request, so it happens exactly once
+	// rather than once per node reacting to the mode change.
 	if req.Mode == "active-passive" {
-		s.logger.Info("Moving all IPs to active node")
-		var activeNode *membership.Member
-		var allIPs []string
-
-		// Find active node and collect all IPs
-		for _, member := range s.memberList.MembersSnapshot() {
-			if member.Status == membership.StatusActive && activeNode == nil {
-				activeNode = member // take the first active node found
-			}
-			allIPs = append(allIPs, member.ActiveIPs...)
-			member.ActiveIPs = nil // Clear current assignments
-		}
-
-		// Prefer the current leader when no explicit active node is found
+		activeNode := membership.ConsolidationTarget(s.memberList.MembersSnapshot(), s.leaderID)
 		if activeNode == nil {
-			if s.leaderID != "" {
-				activeNode = s.memberList.GetMemberByID(s.leaderID)
-			}
-		}
+			s.logger.Warn("No eligible node found to become active during mode switch")
+		} else {
+			s.logger.Info("Consolidating floating IPs onto a single active node",
+				"hostname", activeNode.Hostname, "node_id", activeNode.ID)
 
-		// Assign all IPs to active node
-		if activeNode != nil {
-			// Demote all non-selected nodes to Passive before promoting the winner.
-			// Without this, nodes remain Active and are invisible to the
-			// election's selectBestCandidate, which only scores Passive/Unknown.
+			// Demote every other node and release the IPs it holds.
 			for _, member := range s.memberList.MembersSnapshot() {
-				if member.ID != activeNode.ID {
+				if member.ID == activeNode.ID {
+					continue
+				}
+
+				member.Lock()
+				heldIPs := append([]string{}, member.ActiveIPs...)
+				wasActive := member.Status == membership.StatusActive
+				member.ActiveIPs = nil
+				member.LoadFactor = 0
+				member.Unlock()
+
+				// Bring the IPs down while the node is still Active: a node
+				// already marked Passive defers its bring-down to the monitor.
+				if len(heldIPs) > 0 {
+					if err := member.BringDownIPs(heldIPs); err != nil {
+						s.logger.Warn("Failed to release IPs from demoted node during mode switch",
+							"hostname", member.Hostname, "error", err)
+					}
+				}
+
+				// Only Active nodes are demoted; a failed or maintenance node
+				// keeps its status so it isn't falsely reported as healthy.
+				if wasActive {
+					member.Lock()
 					member.Status = membership.StatusPassive
+					member.Unlock()
+					s.logger.Info("Demoted node to passive for active-passive mode", "hostname", member.Hostname)
 				}
 			}
-			if err := activeNode.MakeActive(allIPs); err != nil {
+
+			// config.Groups is the authoritative IP source: member.ActiveIPs is
+			// empty on nodes promoted by election, and only groups actually
+			// assigned to this node's interfaces can be brought up on it.
+			if err := activeNode.MakeActive(s.groupIPsForNode(activeNode.ID)); err != nil {
 				s.logger.Error("Failed to bring up IPs on active node during mode switch", "error", err)
 			}
-		} else {
-			s.logger.Warn("No eligible node found to become active during mode switch")
+
+			// In active-passive the active node is the leader; peers accept
+			// this along with the bumped epoch below.
+			s.leaderID = activeNode.ID
 		}
 	}
 
@@ -2460,14 +2480,59 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
 
-	// Propagate the new config (including the mode change) to all peers.
+	// Propagate the new config (including the mode change) and the resulting
+	// member states to all peers, so demoted nodes stop claiming IPs instead of
+	// waiting for the next health-check broadcast to notice the change.
 	// The goroutine runs after s.Lock() is released via the deferred s.Unlock().
-	go s.broadcastFullConfigToPeers()
+	go func() {
+		s.broadcastFullConfigToPeers()
+		states := getStatusMap()
+		for id, member := range s.memberList.MembersSnapshot() {
+			member.Lock()
+			states[id] = member.Status
+			member.Unlock()
+		}
+		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.GetLeaderID(), nil)
+		putStatusMap(states)
+	}()
 
 	return &rpc.SetModeResponse{
 		Success: true,
 		Message: fmt.Sprintf("cluster mode changed to %s", req.Mode),
 	}, nil
+}
+
+// groupIPsForNode returns every configured group IP the given node can host —
+// the IPs of the groups assigned to one of its interfaces. Group IPs the node
+// cannot host are logged: in active-passive they have nowhere else to go.
+// Callers must hold s.Lock().
+func (s *Server) groupIPsForNode(nodeID string) []string {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		s.logger.Warn("No node configuration found when collecting group IPs", "node_id", nodeID)
+		return nil
+	}
+
+	assigned := make(map[string]bool)
+	var ips []string
+	for _, groups := range node.IPGroups {
+		for _, group := range groups {
+			if assigned[group] {
+				continue
+			}
+			assigned[group] = true
+			ips = append(ips, s.config.Groups[group]...)
+		}
+	}
+
+	for group, groupIPs := range s.config.Groups {
+		if !assigned[group] && len(groupIPs) > 0 {
+			s.logger.Warn("Group is not assigned to an interface on the active node; its IPs stay down",
+				"group", group, "node_id", nodeID)
+		}
+	}
+
+	return ips
 }
 
 // CreateGroup implements the CLI.CreateGroup RPC method
@@ -3915,6 +3980,17 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					}
 					oldStatus := m.Status
 					m.Status = st
+					// A Passive or Maintenance node cannot hold floating IPs, so
+					// drop any assignment still recorded against it. Without
+					// this, status keeps listing IPs the node already released
+					// (after a demote, or a switch to active-passive) because
+					// the node's own clear is never reported to its peers.
+					// StatusUnknown is deliberately left alone: failover reads a
+					// failed active's last-known IPs to hand to its replacement.
+					if st == membership.StatusPassive || st == membership.StatusMaintenance {
+						m.ActiveIPs = nil
+						m.LoadFactor = 0
+					}
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
 				} else {
 					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
@@ -5222,24 +5298,28 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 
 	localID, _ := s.config.GetLocalNodeUUID()
 
-	// In active-active, self-report this node's hosted IPs so peers keep an
-	// accurate view of the assignment map. Without this, a peer that takes
-	// over as redistribution coordinator wouldn't know which IPs this node
-	// held when it failed.
-	if s.config.Pulse.Mode == "active-active" && localID != "" {
+	if localID != "" {
 		if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
 			localMember.Lock()
 			// A non-active node cannot host floating IPs — the IP monitor
-			// enforces that on the interface — so clear any stale claim
-			// before self-reporting. Otherwise peers keep counting these
-			// IPs as hosted and the reconciler never re-places them, and
-			// status shows IPs on a node that doesn't actually hold them.
+			// enforces that on the interface — so clear any stale claim before
+			// reporting state. Otherwise peers keep counting these IPs as
+			// hosted and the reconciler never re-places them, and status shows
+			// IPs on a node that doesn't actually hold them. This applies in
+			// both modes: active-passive demotions (mode switch, failover,
+			// maintenance) leave the same stale claims behind.
 			if localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
 				localMember.ActiveIPs = nil
 				localMember.LoadFactor = 0
 			}
-			payload["sender_id"] = localID
-			payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
+			// In active-active, self-report this node's hosted IPs so peers
+			// keep an accurate view of the assignment map. Without this, a peer
+			// that takes over as redistribution coordinator wouldn't know which
+			// IPs this node held when it failed.
+			if s.config.Pulse.Mode == "active-active" {
+				payload["sender_id"] = localID
+				payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
+			}
 			localMember.Unlock()
 		}
 	}

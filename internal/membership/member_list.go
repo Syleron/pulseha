@@ -230,6 +230,56 @@ func (m *MemberList) getActiveNode() *Member {
 	return nil
 }
 
+// ConsolidationTarget picks the single node that should hold every floating IP
+// once the cluster runs in active-passive mode. Preference order:
+//
+//  1. the most-loaded Active node — it already holds the most IPs, so the
+//     fewest have to move;
+//  2. the current leader, if it is healthy;
+//  3. the lowest-ID healthy node.
+//
+// Ties break on the lowest node ID so the choice is deterministic rather than
+// dependent on map iteration order. Failed and maintenance nodes are never
+// selected. Returns nil when no healthy node exists.
+func ConsolidationTarget(members map[string]*Member, leaderID string) *Member {
+	var mostLoadedActive, lowestHealthy, healthyLeader *Member
+	mostLoadedIPs := -1
+
+	for id, member := range members {
+		member.Lock()
+		status := member.Status
+		ipCount := len(member.ActiveIPs)
+		member.Unlock()
+
+		if status == StatusUnknown || status == StatusMaintenance {
+			continue
+		}
+
+		if lowestHealthy == nil || id < lowestHealthy.ID {
+			lowestHealthy = member
+		}
+		if id == leaderID {
+			healthyLeader = member
+		}
+
+		if status != StatusActive {
+			continue
+		}
+		if ipCount > mostLoadedIPs || (ipCount == mostLoadedIPs && id < mostLoadedActive.ID) {
+			mostLoadedActive = member
+			mostLoadedIPs = ipCount
+		}
+	}
+
+	if mostLoadedActive != nil {
+		return mostLoadedActive
+	}
+	if healthyLeader != nil {
+		return healthyLeader
+	}
+	return lowestHealthy
+}
+
 // AddMember adds a new member to the member list
 func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error {
 	m.Lock()

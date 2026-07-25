@@ -74,14 +74,44 @@ func newNodePromoteCmd() *cobra.Command {
 }
 
 func newNodeDemoteCmd() *cobra.Command {
+	var nodeID string
+
 	cmd := &cobra.Command{
 		Use:   "demote",
 		Short: "Demote a node to passive state",
+		Long: `Demote a node to passive, bringing down every floating IP it holds.
+
+In active-passive mode the cluster elects a new active node; in active-active
+mode the released IPs are redistributed across the remaining nodes.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// TODO: Implement node demotion
-			return fmt.Errorf("node demotion not implemented yet")
+			if nodeID == "" {
+				return fmt.Errorf("--node-id is required")
+			}
+
+			c, err := client.New()
+			if err != nil {
+				return err
+			}
+			defer c.Close()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			resp, err := c.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
+			if err != nil {
+				return err
+			}
+			if !resp.Success {
+				return errors.New(resp.Message)
+			}
+			fmt.Println(resp.Message)
+			return nil
 		},
 	}
+
+	cmd.Flags().StringVar(&nodeID, "node-id", "", "Node ID (UUID) of the node to demote (required)")
+	cmd.MarkFlagRequired("node-id")
+
 	return cmd
 }
 
