@@ -175,6 +175,12 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		fmt.Printf("\nFloating IP Groups:\n")
 		fmt.Printf("------------------\n")
 
+		// Groups arrive in map order from the daemon; sort by name so the
+		// listing is stable between runs
+		sort.Slice(status.Groups, func(i, j int) bool {
+			return status.Groups[i].Name < status.Groups[j].Name
+		})
+
 		// Map node IDs to hostnames so assignments can show and sort by node name
 		hostnames := make(map[string]string, len(status.Members))
 		for _, member := range status.Members {
