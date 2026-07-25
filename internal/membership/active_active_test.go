@@ -150,18 +150,18 @@ func TestPlanRebalanceMove(t *testing.T) {
 	})
 }
 
-func TestActiveActiveCoordinator(t *testing.T) {
+func TestClusterCoordinator(t *testing.T) {
 	members := map[string]*Member{
 		"node-c": newAATestMember("node-c", "host-c", StatusActive, nil),
 		"node-a": newAATestMember("node-a", "host-a", StatusUnknown, nil),
 		"node-b": newAATestMember("node-b", "host-b", StatusPassive, nil),
 		"node-d": newAATestMember("node-d", "host-d", StatusMaintenance, nil),
 	}
-	if got := activeActiveCoordinator(members); got != "node-b" {
+	if got := clusterCoordinator(members); got != "node-b" {
 		t.Errorf("expected lowest healthy node-b as coordinator, got %q", got)
 	}
 
-	if got := activeActiveCoordinator(map[string]*Member{
+	if got := clusterCoordinator(map[string]*Member{
 		"node-a": newAATestMember("node-a", "host-a", StatusUnknown, nil),
 	}); got != "" {
 		t.Errorf("expected no coordinator with no healthy nodes, got %q", got)

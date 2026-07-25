@@ -61,6 +61,8 @@ type ServerReference interface {
 	BroadcastVoteRequest(sessionID string, voteType, subject, description string, timeoutSeconds int64) error
 	// Promotion orchestration
 	Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error)
+	// Demotion orchestration; releases every group IP the node could host
+	MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error)
 }
 
 // HealthCheck represents the result of a health check
@@ -89,7 +91,7 @@ type HealthChecker struct {
 	loggedNoMembers        bool            // Tracks if a no-member condition has already been logged in the current state
 	deepCheckCounter       int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
 	membershipCheckFailed  map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
-	aaReconcileCycles      int             // cycles since startup; active-active reconciliation waits for a grace period
+	reconcileCycles        int             // cycles since startup; reconciliation waits for a grace period
 }
 
 // NewHealthChecker creates a new health checker
@@ -502,6 +504,8 @@ func (h *HealthChecker) getCurrentLeaderID() string {
 func (h *HealthChecker) checkForActiveNodeFailure() {
 	h.logger.Debug("ACTIVE_CHECK: Starting active node failure check")
 
+	h.reconcileCycles++
+
 	members := h.members.MembersSnapshot()
 	config := h.members.config
 
@@ -524,6 +528,13 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	// rebalances load onto empty nodes (fresh joins, failback) every cycle.
 	if config.Pulse.Mode == "active-active" {
 		h.reconcileActiveActive(members)
+		return
+	}
+
+	// Active-passive tolerates exactly one Active node. If more than one is
+	// Active the scan above picked one of them arbitrarily, so consolidate now
+	// and re-evaluate failover next cycle against a single-Active view.
+	if h.enforceSingleActive(members) {
 		return
 	}
 
@@ -585,12 +596,111 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	}
 }
 
-// aaReconcileGraceCycles is the number of health-check cycles to wait after
-// startup before making active-active redistribution decisions. It gives
+// reconcileGraceCycles is the number of health-check cycles to wait after
+// startup before making redistribution or consolidation decisions. It gives
 // initial health checks and peer self-reports (which carry each node's
 // ActiveIPs) time to converge so we don't redistribute IPs that a peer is
-// actually still hosting.
-const aaReconcileGraceCycles = 10
+// actually still hosting, or demote a node whose reported status is still
+// the stale one we started up with.
+const reconcileGraceCycles = 10
+
+// makePassiveTimeout bounds a demotion issued by the consolidation invariant so
+// an unresponsive peer can't stall the health-check loop.
+const makePassiveTimeout = 10 * time.Second
+
+// enforceSingleActive keeps the active-passive invariant that at most one node
+// is Active. Consolidating only when the mode changes cannot hold it: anything
+// that promotes a node afterwards — a late BringUpIP reaching a peer that still
+// believes the cluster is active-active, an election racing the switch — leaves
+// two Actives, and in active-passive every Active expects *all* the group IPs
+// on its interfaces, so the two ARP-fight over every floating IP. Checking each
+// cycle means such a promotion is undone on the next one.
+//
+// Only the coordinator acts, so peers can't issue conflicting demotions, and
+// the survivor is ConsolidationTarget — the same choice SetMode makes — so the
+// decision is stable across cycles and nodes. Demotion goes through the
+// MakePassive RPC because that releases every group IP the node could host
+// rather than only the ones recorded against it: a node promoted by election
+// holds them all while its ActiveIPs is still empty.
+//
+// Returns true if any node was demoted.
+func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
+	if h.reconcileCycles < reconcileGraceCycles || h.server == nil {
+		return false
+	}
+
+	var actives []*Member
+	for _, member := range members {
+		member.Lock()
+		isActive := member.Status == StatusActive
+		member.Unlock()
+		if isActive {
+			actives = append(actives, member)
+		}
+	}
+	if len(actives) < 2 {
+		return false
+	}
+
+	localID, err := h.members.config.GetLocalNodeUUID()
+	if err != nil {
+		return false
+	}
+	if clusterCoordinator(members) != localID {
+		h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode; waiting for the coordinator to consolidate",
+			len(actives))
+		return false
+	}
+
+	target := ConsolidationTarget(members, h.server.GetLeaderID())
+	if target == nil {
+		h.logger.Error("ACTIVE_CHECK: no eligible node to consolidate floating IPs onto")
+		return false
+	}
+
+	h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode, consolidating onto %s",
+		len(actives), target.Hostname)
+
+	demoted := false
+	for _, member := range actives {
+		if member.ID == target.ID {
+			continue
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), makePassiveTimeout)
+		resp, err := h.server.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: member.ID})
+		cancel()
+
+		switch {
+		case err != nil:
+			h.logger.Error("ACTIVE_CHECK: failed to demote extra Active node",
+				"hostname", member.Hostname, "error", err)
+		case !resp.Success:
+			h.logger.Error("ACTIVE_CHECK: demotion of extra Active node was rejected",
+				"hostname", member.Hostname, "message", resp.Message)
+		default:
+			h.logger.Warn("ACTIVE_CHECK: demoted extra Active node", "hostname", member.Hostname)
+			demoted = true
+		}
+	}
+
+	if !demoted {
+		return false
+	}
+
+	// Push the corrected state out so demoted nodes stop claiming IPs instead
+	// of waiting to notice the change on their own.
+	states := getMemberStatusMap()
+	for id, member := range members {
+		member.Lock()
+		states[id] = member.Status
+		member.Unlock()
+	}
+	_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, target.ID, nil)
+	putMemberStatusMap(states)
+
+	return true
+}
 
 // reconcileActiveActive keeps floating IPs assigned and balanced in
 // active-active mode. Group IPs no longer hosted by any healthy node are
@@ -598,8 +708,7 @@ const aaReconcileGraceCycles = 10
 // coordinator — the healthy node with the lowest ID — acts, so concurrent
 // redistribution from multiple nodes can't race.
 func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
-	h.aaReconcileCycles++
-	if h.aaReconcileCycles < aaReconcileGraceCycles {
+	if h.reconcileCycles < reconcileGraceCycles {
 		return
 	}
 
@@ -607,7 +716,7 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 	if err != nil {
 		return
 	}
-	if activeActiveCoordinator(members) != localID {
+	if clusterCoordinator(members) != localID {
 		return
 	}
 
@@ -628,10 +737,11 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 	}
 }
 
-// activeActiveCoordinator returns the ID of the node that should orchestrate
-// active-active redistribution: the healthy (Active or Passive) node with the
-// lowest ID. Returns "" when no healthy node exists.
-func activeActiveCoordinator(members map[string]*Member) string {
+// clusterCoordinator returns the ID of the node that should orchestrate
+// cluster-wide IP decisions — active-active redistribution and active-passive
+// consolidation: the healthy (Active or Passive) node with the lowest ID.
+// Returns "" when no healthy node exists.
+func clusterCoordinator(members map[string]*Member) string {
 	coordinator := ""
 	for id, member := range members {
 		member.Lock()

@@ -1722,13 +1722,18 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 				}
 			}
 		}
+		// Release the IPs while the node still counts as Active: BringDownIPs
+		// on an already-Passive local node defers to the monitor instead.
 		if len(ipsToDrop) > 0 {
 			if err := member.BringDownIPs(ipsToDrop); err != nil {
 				s.logger.Warn("Failed to bring down IPs during demotion", "error", err)
 			}
 		}
+		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
+		member.LoadFactor = 0
+		member.Unlock()
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -1742,7 +1747,10 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 			return &rpc.MakePassiveResponse{Success: false, Message: "Failed to connect to target node: " + err.Error()}, nil
 		}
-		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Derived from the caller's context so a caller with a deadline — the
+		// health checker's consolidation invariant — isn't left waiting on an
+		// unresponsive peer for the full timeout.
+		ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId})
 		if rerr != nil {
@@ -1752,8 +1760,11 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 			return &rpc.MakePassiveResponse{Success: false, Message: rresp.Message}, nil
 		}
 		// Reflect locally
+		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
+		member.LoadFactor = 0
+		member.Unlock()
 	}
 
 	// Success
@@ -2351,6 +2362,14 @@ func (s *Server) BroadcastVoteRequest(sessionID string, voteType, subject, descr
 	return fmt.Errorf("failed to broadcast vote request to any nodes: %v", broadcastErrors)
 }
 
+// pendingDemotion is a node whose floating IPs still have to be released.
+// Releasing them on a remote node is a synchronous gRPC call, so the work is
+// deferred until the server lock has been dropped.
+type pendingDemotion struct {
+	member *membership.Member
+	ips    []string
+}
+
 // SetMode handles changing the cluster operation mode
 func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.SetModeResponse, error) {
 	s.logger.Infof("Received request to change cluster mode to: %s", req.Mode)
@@ -2378,6 +2397,9 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			Message: fmt.Sprintf("cluster is already in %s mode", req.Mode),
 		}, nil
 	}
+
+	// IP releases owed by nodes demoted below, run after s.Unlock().
+	var demotions []pendingDemotion
 
 	// Update mode in config
 	s.config.Pulse.Mode = req.Mode
@@ -2437,24 +2459,24 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 				wasActive := member.Status == membership.StatusActive
 				member.ActiveIPs = nil
 				member.LoadFactor = 0
-				member.Unlock()
-
-				// Bring the IPs down while the node is still Active: a node
-				// already marked Passive defers its bring-down to the monitor.
-				if len(heldIPs) > 0 {
-					if err := member.BringDownIPs(heldIPs); err != nil {
-						s.logger.Warn("Failed to release IPs from demoted node during mode switch",
-							"hostname", member.Hostname, "error", err)
-					}
-				}
-
 				// Only Active nodes are demoted; a failed or maintenance node
 				// keeps its status so it isn't falsely reported as healthy.
 				if wasActive {
-					member.Lock()
 					member.Status = membership.StatusPassive
-					member.Unlock()
+				}
+				member.Unlock()
+
+				if wasActive {
 					s.logger.Info("Demoted node to passive for active-passive mode", "hostname", member.Hostname)
+				}
+
+				// Releasing a remote node's IPs is a blocking gRPC call, so it
+				// waits until s.Lock() is dropped — an unreachable peer would
+				// otherwise stall every other daemon operation. The local node
+				// needs no call at all: refreshLocalMonitorExpectedIPs below
+				// makes the monitor strip the IPs now that it isn't Active.
+				if len(heldIPs) > 0 && !member.IsLocal() {
+					demotions = append(demotions, pendingDemotion{member: member, ips: heldIPs})
 				}
 			}
 
@@ -2485,6 +2507,13 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// waiting for the next health-check broadcast to notice the change.
 	// The goroutine runs after s.Lock() is released via the deferred s.Unlock().
 	go func() {
+		for _, demotion := range demotions {
+			if err := demotion.member.BringDownIPs(demotion.ips); err != nil {
+				s.logger.Warn("Failed to release IPs from demoted node during mode switch",
+					"hostname", demotion.member.Hostname, "error", err)
+			}
+		}
+
 		s.broadcastFullConfigToPeers()
 		states := getStatusMap()
 		for id, member := range s.memberList.MembersSnapshot() {
@@ -4003,6 +4032,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			if hadLocalMember && oldLocalStatus != membership.StatusActive {
 				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.Status == membership.StatusActive {
 					s.logger.Debug("ConfigSync: LOCAL node transitioned to Active, triggering VIP setup", "oldStatus", membership.StatusToString(oldLocalStatus), "newStatus", "Active")
+					go s.refreshLocalMonitorExpectedIPs()
+				}
+			}
+
+			// The mirror case: a node that learns it has been demoted must
+			// release the floating IPs it still holds. Without this the release
+			// waits on the monitor's periodic reconcile, and until then this
+			// node and the surviving Active ARP-fight over every floating IP.
+			if hadLocalMember && oldLocalStatus == membership.StatusActive {
+				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.Status != membership.StatusActive {
+					s.logger.Info("ConfigSync: LOCAL node demoted from Active, releasing floating IPs",
+						"newStatus", membership.StatusToString(newLocalMember.Status))
 					go s.refreshLocalMonitorExpectedIPs()
 				}
 			}
