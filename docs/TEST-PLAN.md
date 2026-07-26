@@ -203,6 +203,56 @@ once, or a VIP vanishing entirely. Previously never converged over ~85s.
 paying the TC-5 4s cost. Expect ~10 minutes to rebalance 200 IPs from 1 node to 4, with the
 health-check loop blocked throughout. Distinguish "slow but converging" from "thrashing".
 
+#### Result 2026-07-26 — **FAILED, aborted, manual recovery required**
+
+Not thrash. **Split-brain.** Switching a 201-IP cluster to active-active put every floating
+IP up on multiple nodes at once and the cluster never recovered on its own.
+
+| Time | n1 | n2 | n3 | n4 | duplicated IPs |
+|------|----|----|----|----|----------------|
+| 10:54 | 35 | 0 | 0 | 201 | 35 |
+| 11:01 | 84 | 89 | 63 | 116 | 109 |
+| 11:02 | 101 | 127 | 78 | 134 | 156 |
+| 11:05 | **201** | 85 | **201** | 178 | **201 (all)** |
+
+440+ placements for 201 unique IPs, diverging monotonically. **The live `Management` VIP
+10.200.0.150 was simultaneously up on node-1, node-3 and node-4.**
+
+**Causal chain — this is defect #4 escalating from "slow" to "unsafe":**
+
+1. The switch starts bulk IP movement; every IP costs a blocking 4s `arping`.
+2. That starves the daemon's health checking. node-4 logged all three peers
+   `unreachable` at 10:55:44 while it was mid-GARP.
+3. Each node, seeing every peer dead, independently concluded the whole group was
+   unowned: `ACTIVE_CHECK: redistributing 203 orphaned floating IP(s)` — logged on
+   node-1 at 10:56:09 and node-4 at 10:55:45.
+4. Each then claimed all 203 IPs. Nothing reconciles this, because the same GARP load
+   keeps the peers looking dead.
+
+So the serial GARP is not merely an SLA problem. Under any bulk IP operation it induces a
+mutual-unreachability window long enough for every node to declare itself sole owner.
+
+**The `Management` group is swept into redistribution along with `Test`** — it is treated as
+just another group, so a 2-IP production group gets spread and duplicated across nodes.
+
+**No working abort.** `SetMode` takes `s.Lock()` as its first statement
+(`internal/server/server.go:2392`) and the in-flight IP work holds it. The revert issued at
+10:58:43 was still blocked 13 minutes later; the same command on a second node returned
+rc=124 (timeout). **An operator cannot abort a bad active-active switch through the CLI.**
+
+**`ConsolidationTarget` picked a dead node.** Once the revert did land, node-4 chose
+node-1 — whose daemon was stopped at the time — as the consolidation target and began
+releasing its IPs to it (201 → 150) before the target was started.
+
+**Recovery required manual intervention** and could not be done through `pulsectl`:
+`systemctl stop pulseha` on 3 nodes (two needed SIGKILL escalation — they were wedged in
+GARP and could not process SIGTERM), `ip addr del` of every stray address, hand-editing
+`"mode"` in `config.json` on the stopped nodes, then a staggered restart.
+
+**Do not re-run TC-6 on a cluster carrying live addresses** until the GARP is made
+non-blocking and the orphan-reclaim path requires quorum. On this cluster it duplicated a
+production VIP for roughly 15 minutes.
+
 ### TC-7 — Capacity caps placement
 
 **Targets:** `pulsectl node capacity`, `ipam.Distribute` / `ipam.HasCapacity`.
@@ -249,5 +299,10 @@ not just `pulsectl`).
 | TC-2 | #6 Active self-strips VIPs on Unknown | Fixed, needs live verification |
 | TC-3 | #5 config diverges under concurrent mutation | **Open** |
 | TC-4, TC-5 | #4 serial 4s GARP per IP | **Open** — quantified 2026-07-26: 13m49s to fail over 201 IPs |
-| TC-6 | #2 active-active distribution thrash | **Open** |
-| TC-7 | capacity enforcement | Untested at scale |
+| TC-6 | #2 active-active — **split-brain, not thrash** | **Open, blocker.** Every node claimed all 203 IPs; live VIP triple-homed; manual recovery |
+| TC-6 | #7 GARP starvation → mutual unreachability → orphan reclaim | **Open, root cause of #2** |
+| TC-6 | #8 `SetMode` unabortable — blocks on `s.Lock()` | **Open** — no CLI escape from a bad switch |
+| TC-6 | #9 `ConsolidationTarget` selects a node with a dead daemon | **Open** |
+| TC-6 | #10 `Management` group redistributed like any other | **Open** — spreads live VIPs |
+| TC-7 | capacity enforcement | **Not run** — blocked by TC-6 |
+| TC-8 | return to active-passive | **Not run** — blocked by TC-6 |
