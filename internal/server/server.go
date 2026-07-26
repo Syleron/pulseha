@@ -94,6 +94,22 @@ func putStringSliceMap(m map[string][]string) {
 	}
 }
 
+// isDemotion reports whether a status transition means this node has actually
+// been demoted and must release its floating IPs.
+//
+// StatusUnknown deliberately does not count. It means peers have lost sight of
+// the node, not that the node lost its role — and the node that goes Unknown is
+// by definition the one already under load, so treating it as a demotion makes a
+// healthy Active strip every floating IP over a transient health-check blip.
+// Recovery is bounded by the per-IP GARP, so a large group then stays down for
+// minutes. Unknown is left to the health checker to resolve into a real state.
+func isDemotion(old, new membership.MemberStatus) bool {
+	if old != membership.StatusActive {
+		return false
+	}
+	return new == membership.StatusPassive || new == membership.StatusMaintenance
+}
+
 // callerAddr returns the network address of the gRPC caller for audit logging.
 // Group membership is cluster-wide persisted state; any client (pulsectl, the
 // appliance API over the unix socket, or a peer node) can mutate it, so log
@@ -4040,8 +4056,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// release the floating IPs it still holds. Without this the release
 			// waits on the monitor's periodic reconcile, and until then this
 			// node and the surviving Active ARP-fight over every floating IP.
-			if hadLocalMember && oldLocalStatus == membership.StatusActive {
-				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.Status != membership.StatusActive {
+			// See isDemotion for why a transition to Unknown is not one.
+			if hadLocalMember {
+				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil &&
+					isDemotion(oldLocalStatus, newLocalMember.Status) {
 					s.logger.Info("ConfigSync: LOCAL node demoted from Active, releasing floating IPs",
 						"newStatus", membership.StatusToString(newLocalMember.Status))
 					go s.refreshLocalMonitorExpectedIPs()
