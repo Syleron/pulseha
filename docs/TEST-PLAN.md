@@ -279,6 +279,163 @@ GARP and could not process SIGTERM), `ip addr del` of every stray address, hand-
 non-blocking and the orphan-reclaim path requires quorum. On this cluster it duplicated a
 production VIP for roughly 15 minutes.
 
+#### Result 2026-07-27 (2nd run) — FAILED again, with an exact root cause
+
+Re-run on the freshly reset cluster against the 201-IP `RealTest` group on the real
+`10.200.0.0/23` range. `Management` was empty this run, so no production VIP was at risk.
+
+Baseline at 00:23:00 was clean: node-1 Active with all 201, nodes 2-4 at zero, 201 unique /
+201 placements / **0 duplicates**, all four configs agreeing at 201.
+
+`cluster mode set --mode active-active` issued on node-1 at 00:23:17. It **produced no
+output and was killed by a 120s client-side timeout** — it never returned successfully.
+
+Observed progression — a ~5 minute split-brain window, then a collapse to a single node:
+
+| Time | n1 | n2 | n3 | n4 | placements | unique | duplicated |
+|------|----|----|----|----|-----------|--------|-----------|
+| 00:23:00 | 201 | 0 | 0 | 0 | 201 | 201 | 0 |
+| 00:26:17 | 201 | 70 | 0 | 0 | 271 | 201 | 70 |
+| 00:27:48 | 201 | 96 | 1 | 0 | 298 | 201 | **97** |
+| ~00:28 | 201 | 99 | 1 | 0 | 304 | 201 | **103** |
+| 00:28:55 | **0** | 108 | 1 | 0 | 109 | **109** | 0 |
+| 00:30:14 | 1 | 123 | 1 | 0 | 125 | **125** | 0 |
+
+Two distinct failures, in sequence:
+
+**Phase 1 (00:23:30 – 00:28:55) — split-brain.** Up to **103 of 201 addresses were
+simultaneously up on two nodes** for about five minutes.
+
+**Phase 2 (from 00:28:55) — mass outage.** node-1 dropped all 201 addresses in one step, and
+because node-2 can only re-add them at ~4s each, **unique coverage fell to 109 of 201** — i.e.
+**92 addresses were down on every node at once**, recovering only slowly. The group was never
+correctly distributed; it converged toward node-2 holding everything, which is
+active-passive behaviour, not the 50/50/50/51 split `ipam` planned.
+
+**Root cause — corrected.** This is *not* the "GARP starvation → unguarded orphan reclaim"
+path recorded under defect #7. The journal gives an unambiguous chain:
+
+```
+00:23:24.394  node-1  Received request to change cluster mode to: active-active
+00:23:24.394  node-1  Redistributing IPs for active-active mode        [holds s.Lock()]
+00:23:24.397  node-2  RPC BringUpIP on iface enX0 for 51 IP(s)         ← its assigned share
+00:23:29      node-2  HEALTH_CHECK: cluster state changed - node-1(unreachable)
+00:23:31      node-2  Status change: MC-LB-node-1 became unreachable (was Active)
+00:23:31      node-2  ACTIVE_CHECK: No active node found in cluster, initiating election
+00:23:32      node-2  ELECTION: Voting election succeeded, promoting candidate=MC-LB-node-2
+00:23:32      node-2  PROMOTE_ASYNC: No active node found in cluster
+00:23:32      node-2  PROMOTE_ASYNC: Demotion decision shouldDemote=false
+00:23:32      node-2  PROMOTE_ASYNC: Successfully promoted local node to Active
+00:23:32      node-2  RPC BringUpIP on iface enX0 for 201 IP(s)        ← claims the WHOLE group
+```
+
+node-1's own journal fills in the other half. Its redistribution planned a stride-4
+interleave — 50 IPs for itself, 51 for node-2, 50 each for nodes 3 and 4 — and **every peer
+assignment RPC timed out**, because each peer was itself blocked doing serial GARP:
+
+```
+00:23:54  node-1  Failed to assign IPs to node hostname=MC-LB-node-2 error="DeadlineExceeded"
+00:24:24  node-1  Failed to assign IPs to node hostname=MC-LB-node-4 error="DeadlineExceeded"
+00:24:54  node-1  Failed to assign IPs to node hostname=MC-LB-node-3 error="DeadlineExceeded"
+00:24:54  node-1  Bringing up IPs on interface count=50 iface=enX0
+```
+
+**GARP runs even when there is nothing to do.** node-1's own 50 were already up, and the
+log shows the 4-second cost being paid regardless:
+
+```
+00:24:54  NETWORK: IP existence check ip=10.200.0.155 exists=true existingIface=enX0
+00:24:54  NETWORK: IP already exists on target interface (nothing to do) ip=10.200.0.155
+00:24:58  Successfully brought up IP on interface ip=10.200.0.155/23      ← 4s later
+```
+
+That is 200s spent re-announcing 50 addresses that never moved — the clearest single
+demonstration of defect #4, and it is what keeps node-1 unresponsive long enough for the
+election to fire.
+
+The sequence is **election-driven self-promotion during a lock-induced false death**:
+
+1. `SetMode` takes `s.Lock()` and runs redistribution synchronously, so node-1's daemon
+   stops answering health checks (defects #4 + #8 combined).
+2. Peers conclude there is **no Active node at all** — not that a peer is merely slow.
+3. node-2 wins an election and promotes itself. Because it sees "No active node found",
+   **`shouldDemote=false`** — so it never issues `MakePassive` to node-1.
+4. node-1 is not dead, only wedged, and still holds all 201 addresses. Every address
+   node-2 brings up is therefore a duplicate.
+5. When node-1 finally drains its GARP backlog it learns from `ConfigSync` that node-2 is
+   Active, so it is now non-Active — and the non-Active branch of
+   `IPMonitor.enforceExpectations` (`internal/membership/ip_monitor_linux.go:231-283`)
+   removes **all** cluster floating IPs, not just the ones it was not assigned. All 201 go
+   down in one step, which is why coverage collapsed to 109 unique at 00:28:55.
+6. node-2 then re-adds the shortfall at ~4s per address, so the group stays partially down
+   for many minutes. This is the same asymmetry as defect #4: teardown is instant, recovery
+   is serial.
+
+The critical defect is step 3: **an incumbent that looks *absent* is never demoted, only an
+incumbent that looks *present* is.** A promotion that cannot confirm the old Active has
+released its IPs must not bring those IPs up. `enforceSingleActive` (`5b1e6bf`) does not
+help here because the wedged node cannot participate in its own demotion.
+
+**Failed IP assignments are never retried.** node-1 logged one `DeadlineExceeded` per peer
+and moved on. Nodes 3 and 4 consequently held **zero and one** address respectively for the
+entire run — the 100 addresses `ipam` planned for them were simply dropped on the floor.
+Even if the split-brain were fixed, active-active would still not distribute, because the
+distribution step has no retry and no reconciliation to notice it failed.
+
+**The mode change was lost entirely.** After the dust settled, `pulsectl status` on node-2
+reported `Mode: active-passive` with node-2 as the sole Active holding the whole group. So
+the switch to active-active did not merely fail to distribute — **it never took effect
+anywhere except node-1's on-disk config**, while still causing a five-minute split-brain and
+a 92-address outage on the way through. The most likely reason is that node-1 was killed by
+the client timeout before it ever broadcast the new mode, and nothing retries it.
+
+**The diverged mode is unrepairable through the CLI, and it makes the node oscillate.**
+node-1 was left Passive but with `"mode": "active-active"` on disk. In that state the refresh
+path still hands it an active-active assignment (29 stride-4 addresses), and a single ENFORCE
+pass then does both halves of the contradiction:
+
+```
+00:39:02  Adding IP to interface ip=10.200.1.3/23  → Successfully brought up IP
+00:39:02  ENFORCE: Node is not Active, removing floating IPs status=Passive
+00:39:02  ENFORCE: Removing stale floating IP from passive node ip=10.200.1.3/23
+00:39:02  ENFORCE: Successfully removed floating IP ip=10.200.1.3/23
+```
+
+It adds an address and deletes it again in the same pass, forever, walking the list
+(`0.239 → 0.211 → 1.3 → 1.43`). Each iteration momentarily duplicates an address the real
+Active legitimately holds — which is why the duplicate count never reached a clean zero and
+the offending address kept moving. On real on-subnet addresses this is continuous ARP churn.
+
+Attempts to repair it:
+- `mode set --mode active-passive` **on node-1** → `rc=124`, timed out after 180s (defect #8).
+- `mode set --mode active-passive` **on node-2** → `cluster is already in active-passive mode`,
+  `rc=0`, **no change**. `SetMode` early-returns on the local node's view of the mode, so it
+  can never repair cross-node divergence.
+- Recovery therefore required `systemctl stop pulseha` on node-1, hand-editing `config.json`,
+  clearing strays with `ip addr del`, and restarting — the same manual procedure as 2026-07-26.
+  The `systemctl stop` again exceeded 120s (the wedged daemon does not process SIGTERM promptly).
+
+**A Passive node can stop enforcing entirely, holding a duplicate indefinitely.** node-3
+picked up `10.200.1.94` early in the run and still held it 20+ minutes later, dual-homed with
+node-2. All the preconditions for cleanup were satisfied — the address was on `enX0`, it *was*
+present in node-3's `RealTest` group (201 IPs), and node-3's status *was* Passive — yet
+node-3's journal showed **no ENFORCE lines at all** over a 4-minute window, only
+`Health check failed for MC-LB-node-1 ... connection refused` repeated once per second. Its IP
+monitor had effectively stopped reconciling. Manual `ip addr del` was required. Worth checking
+whether a peer that is hard-down starves the monitor loop, since that is the only unusual
+condition node-3 was under.
+
+Also confirmed this run:
+- **The mode never propagates before the switch completes.** Mid-switch, node-1's
+  `config.json` read `"mode": "active-active"` while nodes 2, 3 and 4 all still read
+  `"active-passive"` — the cluster ran in two modes at once. `SetMode` persists the mode
+  before consolidating, so on-disk mode is not a reliable state indicator (defect #8).
+- **`BringUpIP` treats an already-assigned address as success** — node-2 logged
+  `BringUpIP: IP assignment failed but IP is now present on <iface>` repeatedly. The
+  duplicate is detected at the syscall level and then swallowed, so nothing escalates.
+- Only node-2 self-promoted this time; nodes 3 and 4 accepted the election result and
+  stayed at zero. The 3-way claim seen on 2026-07-26 is the worse case, not the only one.
+
 ### TC-7 — Capacity caps placement
 
 **Targets:** `pulsectl node capacity`, `ipam.Distribute` / `ipam.HasCapacity`.
@@ -326,9 +483,15 @@ not just `pulsectl`).
 | TC-3 | #5 config diverges under concurrent mutation | **Open** |
 | TC-4, TC-5 | #4 serial 4s GARP per IP | **Open** — quantified 2026-07-26: 13m49s to fail over 201 IPs |
 | TC-6 | #2 active-active — **split-brain, not thrash** | **Open, blocker.** Every node claimed all 203 IPs; live VIP triple-homed; manual recovery |
-| TC-6 | #7 GARP starvation → mutual unreachability → orphan reclaim | **Open, root cause of #2** |
+| TC-6 | #7 GARP starvation → false death of the Active | **Open, root cause of #2.** Re-run 2026-07-27 refined this: the trigger is a *promotion election*, not orphan reclaim |
+| TC-6 | #12 promotion never demotes an *absent* incumbent (`shouldDemote=false`) | **Open, the core split-brain defect** — 103/201 IPs dual-homed |
+| TC-6 | #13 failed `assign IPs` RPCs are never retried | **Open** — nodes 3 and 4 got 0 and 1 IP; 100 planned placements dropped |
+| TC-6 | #14 non-Active branch strips *all* group IPs, not just unassigned | **Open** — 92/201 addresses down cluster-wide at once |
+| TC-6 | #15 GARP re-announces addresses that never moved | **Open** — 200s for 50 already-present IPs; amplifies #4 |
+| TC-6 | #16 `BringUpIP` swallows "IP already present" as success | **Open** — free split-brain detector currently discarded |
 | TC-6 | #8 `SetMode` unabortable — blocks on `s.Lock()` | **Open** — no CLI escape from a bad switch |
 | TC-6 | #9 `ConsolidationTarget` selects a node with a dead daemon | **Open** |
 | TC-6 | #10 `Management` group redistributed like any other | **Open** — spreads live VIPs |
-| TC-7 | capacity enforcement | **Not run** — blocked by TC-6 |
-| TC-8 | return to active-passive | **Not run** — blocked by TC-6 |
+| TC-6 | #17 the mode change is lost entirely if `SetMode` is interrupted | **Open** — cluster ended in active-passive; no retry, no propagation |
+| TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
+| TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
