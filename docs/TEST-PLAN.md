@@ -141,6 +141,22 @@ two nodes at any sample.
 **Record:** wall-clock from restart to full restoration, and the peak number of VIPs
 simultaneously down. This is the number that matters for the SLA.
 
+**Measured 2026-07-26 (201-IP `Test` group, clean `systemctl restart` of the Active node):**
+
+| | |
+|---|---|
+| Restart issued | 01:09:59 |
+| All 201 VIPs restored | 01:23:48 |
+| **Restoration time** | **13m 49s** |
+| Rate | 4.12 s/IP |
+| Peak VIPs down | 201 (all of them) |
+
+node-4 took over and the count climbed monotonically — 17, 34, 51, 68, 85, 102, 119, …, 187,
+201 — at a dead-steady ~17 IPs per 68s sample. No IP was ever up on two nodes. So the
+failover itself is *correct*; it is only the duration that fails, and the duration is entirely
+TC-5's serial GARP. Restoration is fully linear in IP count with no fixed overhead worth
+noting, which means the SLA for a group of N floating IPs is currently ~4N seconds of outage.
+
 ### TC-5 — IP operation cost scales linearly (known defect #4)
 
 **Targets:** the blocking per-IP GARP.
@@ -153,7 +169,9 @@ simultaneously down. This is the number that matters for the SLA.
 - One `AddIPToGroup` = **4.01s** wall, essentially all of it `arping -U -c 5`
   (`packages/network/network.go:190`) — 5 packets at 1/s, blocking.
 - Restoration ran at **~4s/IP**: node-3 went 12 → 193 IPs in ~11 minutes.
-- Extrapolated: **~13.4 minutes** to restore a 201-IP group.
+- Confirmed end-to-end by TC-4: a full 201-IP failover took **13m 49s** at 4.12 s/IP.
+  The predicted ~13.4 min and the measured 13m49s agree to within 3%, so the cost model
+  "one blocking `arping` per IP, nothing else material" is established, not inferred.
 
 **Pass criterion once fixed:** restoration time must be substantially sub-linear in IP count —
 GARP batched or issued asynchronously after the addresses are up, not once per IP inline.
@@ -164,8 +182,14 @@ Both `Server.BringUpIP` (`internal/server/server.go:~4714`) and `Member.BringUpI
 
 **Targets:** defect #2 (distribution thrash).
 
-1. `sudo pulsectl set-mode active-active`.
-2. Sample all four nodes' IP counts every 30s for 10 minutes.
+1. `sudo pulsectl cluster mode set --mode active-active`.
+2. **Confirm the switch landed** before sampling anything:
+   `sudo pulsectl status | grep Mode` must read `active-active`. A rejected command prints a
+   one-line cobra usage hint and changes nothing; a sampling loop then records a perfectly
+   plausible-looking active-passive cluster for its whole duration. This cost a 75-minute run
+   on 2026-07-26 — the mode never changed and every sample read `n4=201`, which is correct
+   active-passive behaviour and so looked like real data.
+3. Sample all four nodes' IP counts every 30s for 10 minutes.
 
 **Pass:** counts converge to within 1 of each other (`ipam.PlanMove` stops at `max-min <= 1`)
 and then **stay put**. No IP appears on more than one node in any sample. No IP is absent from
@@ -198,7 +222,7 @@ overflow as `unplaced` — confirm those IPs are reported rather than silently d
 
 ### TC-8 — Return to active-passive consolidates cleanly
 
-1. `sudo pulsectl set-mode active-passive`.
+1. `sudo pulsectl cluster mode set --mode active-passive`.
 2. Wait 3 health-check cycles past the grace period.
 
 **Pass:** exactly one Active; that node holds **all** group IPs; the other three hold none.
@@ -208,7 +232,7 @@ demoting at switch time while a late `BringUpIP` re-promotes a node.
 ## 4. Teardown
 
 ```bash
-sudo pulsectl set-mode active-passive
+sudo pulsectl cluster mode set --mode active-passive
 for i in $(seq 20 219); do sudo pulsectl group remove-ip --group Test --ip 200.0.0.$i/23; done
 sudo touch /run/lbBootFlag          # if removed in §1.1
 ```
@@ -224,6 +248,6 @@ not just `pulsectl`).
 | TC-1, TC-8 | #1 two-Active in active-passive | Fixed `5b1e6bf`, needs live re-verification |
 | TC-2 | #6 Active self-strips VIPs on Unknown | Fixed, needs live verification |
 | TC-3 | #5 config diverges under concurrent mutation | **Open** |
-| TC-4, TC-5 | #4 serial 4s GARP per IP | **Open** |
+| TC-4, TC-5 | #4 serial 4s GARP per IP | **Open** — quantified 2026-07-26: 13m49s to fail over 201 IPs |
 | TC-6 | #2 active-active distribution thrash | **Open** |
 | TC-7 | capacity enforcement | Untested at scale |
