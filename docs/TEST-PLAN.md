@@ -61,16 +61,36 @@ criterion below is against `ip addr`.
 
 ## 2. Baseline setup
 
+The flag is `--interface`, **not** `--iface` — cobra rejects the latter and, as with the
+`set-mode` case in TC-6, a rejected command prints a usage hint and changes nothing.
+
 ```bash
-sudo pulsectl group create Test                       # if absent
-sudo pulsectl group assign --group Test --node-id <id> --iface enX1   # per node
-for i in $(seq 20 219); do
-  sudo pulsectl group add-ip --group Test --ip 200.0.0.$i/23
+sudo pulsectl group create RealTest
+for id in <uuid-1> <uuid-2> <uuid-3> <uuid-4>; do
+  sudo pulsectl group assign --group RealTest --node-id "$id" --interface enX0
 done
+for i in $(seq 152 255); do sudo pulsectl group add-ip --group RealTest --ip 10.200.0.$i/23; done
+for i in $(seq 0 95);    do sudo pulsectl group add-ip --group RealTest --ip 10.200.1.$i/23; done
 ```
 
-Budget ~4s per IP (see TC-5) — 200 IPs takes ~13 minutes. Back up first:
+That is 200 addresses in one contiguous span of the real `10.200.0.0/23` management subnet.
+In a /23 both `10.200.0.255` and `10.200.1.0` are ordinary host addresses (network is
+`10.200.0.0`, broadcast is `10.200.1.255`), so the range crosses the third octet without a gap.
+
+**Why the real subnet rather than `200.0.0.x`:** the old `Test` group used off-network
+addresses, so no switch or neighbour on the segment cared about its ARP. GARP and
+duplicate-address behaviour were never actually exercised. Verified free by ping sweep plus
+`arping` on 2026-07-26: in use across the whole /23 are only `10.200.0.{1,10,21,22,23,24,29,50,
+103,121,122,123,124}` and `10.200.1.{101,103,173}`, plus `.150/.151` reserved for `Management`.
+
+**Keep the test IPs in their own group, not in `Management`.** Defect #10 redistributes a group
+as a unit, so test IPs sharing `Management` would drag the live `.150/.151` along with them.
+
+Budget ~5-8s per IP (see TC-5) — 200 IPs takes ~20 minutes. Back up first:
 `sudo cp /etc/pulseha/config.json /tmp/config.json.bak`.
+
+Re-verify the range is still free before reusing this plan; the scan is point-in-time and
+misses powered-off kit and addresses reserved only in the appliance's FIP database.
 
 ## 3. Test cases
 
@@ -166,8 +186,14 @@ noting, which means the SLA for a group of N floating IPs is currently ~4N secon
 
 **Current measured behaviour (2026-07-26, 201-IP group):**
 
-- One `AddIPToGroup` = **4.01s** wall, essentially all of it `arping -U -c 5`
-  (`packages/network/network.go:190`) — 5 packets at 1/s, blocking.
+- ~~One `AddIPToGroup` = **4.01s** wall, essentially all of it `arping`.~~ **Wrong — corrected
+  2026-07-27.** That was timed one `ssh` per IP, so it measured SSH + sudo + CLI startup. Re-measured
+  inside a single SSH session: **199 adds in 14s (~0.07s/IP)** with **zero** garp/arping journal
+  entries for the batch. The add path goes through the IP monitor's ENFORCE branch →
+  `network.BringIPup`, which does not announce at all (defect #11). Time any per-IP cost from inside
+  one session, or from sampling `ip addr` over wall clock — never one SSH per operation.
+- The 4s cost is real but confined to the **failover/move** paths, which call `SendGARP`
+  (`packages/network/network.go:190`) inline per IP — `arping -U -c 5`, 5 packets at 1/s, blocking.
 - Restoration ran at **~4s/IP**: node-3 went 12 → 193 IPs in ~11 minutes.
 - Confirmed end-to-end by TC-4: a full 201-IP failover took **13m 49s** at 4.12 s/IP.
   The predicted ~13.4 min and the measured 13m49s agree to within 3%, so the cost model
