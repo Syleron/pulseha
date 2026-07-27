@@ -495,3 +495,63 @@ not just `pulsectl`).
 | TC-6 | #17 the mode change is lost entirely if `SetMode` is interrupted | **Open** — cluster ended in active-passive; no retry, no propagation |
 | TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
+
+---
+
+## Result 2026-07-27 (3rd run) — TC-6 split-brain closed
+
+Fixes deployed and md5-verified on all four nodes (`c3446325782c`):
+`8ffc1c1` + `6791885` (plus `a740474`, `2dd7a65` which were the two non-working
+attempts described below).
+
+### Outcome: the promotion-over-a-wedged-Active split-brain is PREVENTED
+
+Switch triggered 10:03:25 on node-2 (the Active), wedged as always
+(`PULSECTL_RC=124`, no output). Throughout the whole wedge window the sampler
+recorded **`duplicated=0`**. node-4 logged 69 aborts:
+
+```
+PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released
+  its floating IPs unconfirmed_node=049-b22-093-2d3 target=125-6de-27a-3f4
+  peer_still_alive=true have_quorum=true reachable_nodes=3
+  error="rpc error: code = DeadlineExceeded desc = context deadline exceeded"
+```
+
+Compare the 2nd run, where the same test dual-homed 103–201 addresses.
+
+### It took three attempts; the first two were silently ineffective
+
+1. `a740474` branched on the error from `Server.MakePassive`. That method never
+   returns a non-nil error for a remote failure — every path returns
+   `(&Response{Success: false, Message: ...}, nil)`. So `err == nil` was always
+   true and the wedged-peer detection was dead code. Proof: with node-2's daemon
+   *stopped*, node-4 logged `Confirmed unreachable node released its floating IPs`
+   for a peer it had never reached. Fixed in `2dd7a65` by issuing the RPC directly
+   so the gRPC status survives.
+2. `2dd7a65` then got an honest transport answer but a dishonest application one.
+   `MakePassive` built its drop set from `s.config.Nodes[id].IPGroups`, which the
+   in-flight redistribution had already emptied, so `len(ipsToDrop) > 0` was false,
+   nothing was released, and `Success: true` was returned anyway. Fixed in `8ffc1c1`
+   (defect #21).
+3. Even then it was bypassed, via `force_demote` (defect #24). Fixed in `6791885`.
+
+### New defects
+
+| ID | Defect | Status |
+|----|--------|--------|
+| #21 | `MakePassive` reports success without releasing anything — drop set from the node's *assigned* groups, and `BringDownIPs` errors only `Warn`ed | **Fixed** `8ffc1c1` — drop set is now every group; release verified against the interfaces |
+| #24 | `force_demote` is not operator intent: `HealthChecker.tryForcePromote` (`health_check.go:1956`) sets it on *every* election-driven promotion, disabling the guard on exactly the TC-6 path | **Fixed** `6791885` — a live peer is unconditionally fatal. **Partly open:** still overloaded, so a minority-side election can bypass the quorum check for a provably-down peer. Needs a field distinct from `ForceDemote` (proto change) |
+| #25 | Refusing promotion leaves the group *unserved*, not served by the incumbent — node-2 released nearly everything before wedging (6 of 201 up anywhere at 10:06:47) | **Open** — this is the cost of the #21/#24 fix. Batching GARP (#4/#8) is what removes it |
+| #26 | In active-active, nodes claim the whole group instead of their share — correct 50/51/50/50 split appeared at 10:09:40 (n2=48, others 0), then node-4 took all 201 (10:11:41), then node-1 too (10:13:39) | **Open** — post-convergence redistribution, distinct from promotion |
+| #22 | Promotion storm — `performPromotionAsync` re-fires ~1/second for the same target, each repeating the full IP failover orchestration | **Open** — no in-flight dedup |
+| #23 | A freshly started node self-promotes on an unconverged memberlist. node-2 3s after boot: `prev_active="" reachable_nodes=4 unconfirmed_incumbents=0` while node-4 held all 201 | **Open, blocks testing** — reproduced on *every* staggered cold start (196/201/160 duplicates in three attempts). The #21/#24 guard cannot catch it: peers are recorded as a definite `Passive`, not `Unknown` |
+
+### Test-harness notes
+
+- **Do not cold-start all four nodes** to build a baseline (#23). Start one, let it
+  take the group, then stop/strip/start the others.
+- A sampler sharing one temp file across concurrent runs fabricates duplicates —
+  use `mktemp` per invocation.
+- The config key is `floating_ip_groups`, not `groups`.
+- Deploying without rebuilding after a commit is silent; check the binary md5
+  against the local build before trusting any run.
