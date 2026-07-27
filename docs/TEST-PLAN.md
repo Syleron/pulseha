@@ -496,9 +496,10 @@ not just `pulsectl`).
 | TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
 | TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
-| TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Root-caused and fixed in the working tree, NOT yet verified live.** The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
+| TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Fixed `2ae8189`, verified live run 16 (2026-07-28).** TC-8 ran `duplicated=0` across all 294 sampled seconds and consolidated in 4s; node-3/node-4 logged the `ConfigSync: LOCAL node demoted from Active` line that the fix resurrected. Original diagnosis: The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
 | TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Open, found while fixing #28.** `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
-| TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Same root shape as the rebalance gap (`OrchestrateIPFailover` releases before it claims) |
+| TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
+| TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
 ---
 
@@ -986,3 +987,96 @@ coordinator, while `enforceSingleActive` restricts the same decision to the
 coordinator.** Two deciders for one invariant will disagree again whenever their
 member maps differ. Making the switch delegate consolidation to the coordinator
 would collapse them into one, and is the better long-term shape.
+
+---
+
+## Result 2026-07-28 (run 16) — TC-8 PASSES; defect #28 verified fixed live
+
+Commit `427a456` (HEAD of `active-active-mode-join`, containing the #28 fix `2ae8189`),
+built linux/amd64 and deployed to all four whitecrane nodes, binary md5
+`9d7bf920cdd9c7b2bd3123911ee619cd` verified identical on every node. Rolling restart,
+passives first and the Active last — the 201-address baseline survived intact, including
+across the Active's own restart, so no #23 contamination.
+
+### Method
+
+A node-local sampler (`sampler.py`, 1s cadence, run under `sudo` so it can also read the
+on-disk mode) writes `ts / host / mode / address-set` to each node's own disk; the four
+files are correlated afterwards and a bucket is only scored once all four nodes have
+reported. This avoids both traps hit in earlier runs: SSH round-trip skew, and the shared
+temp file that fabricated duplicates. Note `fs.protected_regular` stops root reopening a
+`loadbalancer`-owned file in `/tmp` — the sampler must create its own output file.
+
+### TC-6 forward switch (active-passive → active-active), for context
+
+`RC=0` in 1.6s. Converged to **50/51/50/50, unique=201, duplicated=0 at t+68s** and held
+it flat for the remaining 170s. Transient during convergence: duplication peaked at 150
+over t+8..t+67, coverage gap peaked at 42 addresses over t+8..t+45. That transient is
+defect #29 (break-before-make) on the forward path, unchanged and expected.
+
+### TC-8 reverse switch (active-active → active-passive) — **PASS**
+
+`RC=0` in 1.6s.
+
+| t | node-1/2/3/4 | placements | unique | duplicated | down |
+|---|---|---|---|---|---|
+| -3 | 50 51 50 50 | 201 | 201 | 0 | 0 |
+| +2 | 50 51 50 0 | 151 | 151 | 0 | 50 |
+| +3 | 0 144 0 0 | 144 | 144 | 0 | 57 |
+| +4 | 0 **201** 0 0 | 201 | 201 | **0** | 0 |
+| … stable to +272 | 0 201 0 0 | 201 | 201 | 0 | 0 |
+
+**`duplicated=0` across all 294 sampled seconds.** Peak duplication for the whole run was
+zero. Final state confirmed independently by `pulsectl status` (one Active, three Passive)
+and a fresh `ip addr` read (201/0/0/0).
+
+**Defect #28 is fixed, verified live.** The ~20s `duplicated=201` window is gone, and
+consolidation now completes in **4 seconds** rather than 30+. The mechanism is directly
+visible in the journals: node-3 and node-4 each logged
+`ConfigSync: LOCAL node demoted from Active, releasing floating IPs newStatus=Passive`.
+That is exactly the branch which `2ae8189` resurrected — before the `preSyncEpoch`
+snapshot, `decisive` was structurally always false and this line could never be reached.
+
+### New finding — the listener-restart window is real, and it *did* fail a release RPC
+
+Run 15 watched for this and did not see it; run 16 did. node-1, driving the switch, logged:
+
+```
+WARN Failed to release IPs from demoted node during mode switch hostname=MC-LB-node-4
+     error="... dial tcp 10.200.0.124:9083: connect: connection refused"
+WARN Failed to release IPs from demoted node during mode switch hostname=MC-LB-node-3
+     error="... dial tcp 10.200.0.123:9083: connect: connection refused"
+```
+
+Neither daemon restarted (`NRestarts=0`, both up since the rolling restart 17 minutes
+earlier). The refusal window comes from the ConfigSync itself: node-3's journal shows
+`Reloading PulseHA config` → `Beginning initial member loading process...` →
+`Reconfiguring PulseHA server...`, i.e. the gRPC listener is cycled while the peer is
+mid-switch, so an RPC arriving in that window is refused.
+
+**Why the run still passed, and why this matters.** The demoted nodes released their
+addresses anyway — via their *own* `ConfigSync` demotion path, not via the RPC. So
+correctness came from a redundant path while the primary one failed silently and was
+never retried (the same shape as defects #13 and #21).
+
+**This is very likely #28's proximate trigger.** Before `2ae8189`'s fix the self-demotion
+branch was dead code, so a refused `BringDownIPs` left the peer holding the whole group
+with nothing to correct it — which is precisely the observed #28 symptom of a node reading
+`mode=active-passive` and `self=Active` at once. The dead `decisive` branch was the root
+cause; the listener-restart window is what exercised it. Logged as **#31** below.
+
+### Coverage gap unchanged (#29)
+
+`unique` dipped to 144/201 — **57 addresses momentarily on no node — for ~2s** at t+2..t+3.
+Run 15 measured 56 for ~2s. Consistent, and consistent with the scoping already recorded:
+`SetMode`'s goroutine runs all demotions to completion before the activation, by explicit
+design. #29 remains open and unchanged; the handover-vs-failover fix is still the shape.
+
+### New defect
+
+**#31 — a ConfigSync cycles the gRPC listener, refusing in-flight peer RPCs, and the
+failed `BringDownIPs` is never retried.** Only a `Warn`. Observed twice in one switch.
+Benign here solely because the demoted peer self-releases; any path where the peer does
+*not* self-release would lose the operation entirely. Fix shape: either avoid tearing down
+the listener on a config-only reload, or retry the release and verify it against
+interface state the way `8ffc1c1` made release confirmation work for promotion.
