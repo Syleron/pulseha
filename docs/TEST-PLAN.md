@@ -555,3 +555,73 @@ Compare the 2nd run, where the same test dual-homed 103–201 addresses.
 - The config key is `floating_ip_groups`, not `groups`.
 - Deploying without rebuilding after a commit is silent; check the binary md5
   against the local build before trusting any run.
+
+#### Result 2026-07-27 (4th run) — the wedge is fixed; distribution still fails
+
+Two fixes landed and were verified live on whitecrane (`Management` empty throughout, so no
+production VIP was ever at risk; only the verified-free `RealTest` range was in play).
+
+**Defect #4/#8 — serial GARP wedges the Active — FIXED.** `SendGARPBatch` announces a whole
+set with a bounded fan-out instead of one address at a time; `MakeActive` no longer holds the
+member lock across the bring-up; `SetMode` defers the new Active's bring-up until the server
+lock is dropped, and runs it after the demotion releases rather than before.
+
+| Measurement | Before | After |
+|---|---|---|
+| `pulsectl cluster mode set` | `RC=124`, wedged ~13 min | `RC=0` in 9s, and 26s from a clean baseline |
+| Full 201-address bring-up | ~13 min | under 30s |
+| Duplicated during the switch | 103–201 | 5–14 |
+
+This also removes the outage window defect #25 described: promotion no longer has to choose
+between a split group and an unserved one, because the Active stops falsely appearing dead.
+
+**Defect #2 — active-active thrash — root cause found and fixed, but TC-6 still fails.**
+The node-2 logs showed a three-second loop: `BringUpIP: Transitioned local node to Active` →
+`ConfigSync: LOCAL node demoted from Active` → `ENFORCE: Removing stale floating IP` → repeat.
+Cause: every node broadcast its whole view every three health checks at `epoch+1`, on
+*unchanged* state. The epoch orders authoritative decisions, so a keepalive claiming a new one
+meant the most recent speaker always won — a peer with a stale view could undo a coordinator
+assignment simply by speaking last. Fixed by broadcasting the nudge at the current epoch, and
+by having ConfigSync ignore a peer's equal-epoch opinion of the local node's own status (the
+rule already applied to the maintenance flag).
+
+Verified: all four loop signatures above are now **zero** in the logs, and steady-state
+duplication fell from 188–196 to 5–14.
+
+TC-6 nevertheless still **fails**. Over 17 minutes from a clean baseline the cluster converged
+slowly but never met the pass criteria:
+
+```
+12:18  22/49/86/189   duplicated=125
+12:23   7/77/127/113  duplicated=116
+12:29  33/95/80/75    duplicated=76
+12:33  24/71/31/59    duplicated=5    unique=180
+12:35  37/53/45/68    duplicated=14   unique=189
+```
+
+Two distinct failures remain:
+  - **Never balanced to within 1.** 37/53/45/68 against a target of ~50 each.
+  - **Addresses absent from every node.** `unique` fell to 180–189 of 205, so 12–21 configured
+    addresses were down cluster-wide — an explicit fail signature for this case.
+
+Not yet root-caused. Two hypotheses were tested and **disproved**, so don't spend time on them
+again: the bring-down is not a silent no-op (141 moves, 141 `Bringing down IPs on old node`,
+141 `Orchestration completed successfully`, zero failures, zero grouping errors), and
+`BringDownIP` does already maintain the local node's own `ActiveIPs` in active-active
+(server.go, the mirror of `BringUpIP`). The remaining suspects are the per-move
+`OrchestrateIPFailover` reporting success without verifying the source released — the same
+shape as defect #21, and the fix there is the model — and the fact that per-node IP
+assignments are never propagated to the nodes themselves, since `BroadcastClusterState`
+carries statuses and leases but no assignment map.
+
+**Defect #23 (startup race) reproduced twice more, and it contaminated a run.** Restarting all
+four nodes after a deploy produced 188–196 duplicates that had nothing to do with the code
+under test. Starting node-2 as the second node also had it claim all 202. The single-Active
+invariant did consolidate it within ~30s, cleanly. The rule stands: never cold-start all four;
+start one, let it take the group, then bring the rest up, and verify a clean baseline before
+reading anything into a run.
+
+Harness notes for next time:
+  - `zsh` does not word-split an unquoted `$SSHOPT` — use an array, or a script file.
+  - Check the binary md5 on every node against the local build before trusting a run. Two
+    deploys this session were verified this way (`d6b0c10c4be1`, then `c526b903b480`).
