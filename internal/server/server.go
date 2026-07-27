@@ -1485,6 +1485,45 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 	}, nil
 }
 
+// ipPresenceFunc reports whether an address is currently on a local interface.
+type ipPresenceFunc func(string) (bool, string, error)
+
+// filterStillHeld returns those of ips that present reports as still on an interface.
+//
+// An address whose presence cannot be determined is reported as still held. This is the
+// conservative direction: the result gates whether another node may claim these addresses,
+// so a false "it's gone" dual-homes the group, while a false "still there" only declines a
+// promotion the incumbent is already serving.
+func filterStillHeld(ips []string, present ipPresenceFunc) []string {
+	remaining := make([]string, 0)
+	for _, ip := range ips {
+		exists, _, err := present(ip)
+		if err != nil || exists {
+			remaining = append(remaining, ip)
+		}
+	}
+	return remaining
+}
+
+// stillHeldIPs returns those of ips still present on a local interface, or an error if that
+// could not be established at all.
+//
+// The interface inventory is built once for the whole set rather than per address: this runs
+// with the full floating-IP group as input, so a per-address rebuild meant hundreds of full
+// netlink enumerations per demotion. A failure to build it is returned as an error rather than
+// folded into the result, so the caller can distinguish "these are still up" from "I could not
+// look" instead of silently reporting every address as held.
+func stillHeldIPs(ips []string) ([]string, error) {
+	if len(ips) == 0 {
+		return nil, nil
+	}
+	inv, err := network.BuildIPInventory()
+	if err != nil {
+		return nil, err
+	}
+	return filterStillHeld(ips, inv.Exists), nil
+}
+
 // confirmPeerReleasedIPs asks an unreachable peer to release its floating IPs and reports
 // what could actually be established about it.
 //
@@ -1865,16 +1904,15 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 
 	// If local, make passive locally; otherwise forward to remote node and reflect state
 	if member.IsLocal() {
-		// Proactively bring down all floating IPs assigned to this node per config
+		// Becoming Passive means holding none of the cluster's floating IPs, so the drop set is
+		// every group rather than the ones this node is currently assigned. During a mode change
+		// the assignment is rewritten while the addresses are still up, which left this method
+		// dropping nothing and reporting success anyway — the exact shape of the TC-6 split-brain
+		// (docs/TEST-PLAN.md defect #21). This mirrors what the IP monitor's non-Active branch
+		// already does when it cleans up.
 		var ipsToDrop []string
-		if localNodeCfg := s.config.Nodes[member.ID]; localNodeCfg != nil {
-			for _, groups := range localNodeCfg.IPGroups {
-				for _, g := range groups {
-					if ipList, ok := s.config.Groups[g]; ok {
-						ipsToDrop = append(ipsToDrop, ipList...)
-					}
-				}
-			}
+		for _, ipList := range s.config.Groups {
+			ipsToDrop = append(ipsToDrop, ipList...)
 		}
 		// Release the IPs while the node still counts as Active: BringDownIPs
 		// on an already-Passive local node defers to the monitor instead.
@@ -1883,6 +1921,36 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 				s.logger.Warn("Failed to bring down IPs during demotion", "error", err)
 			}
 		}
+
+		// Verify against the interfaces instead of trusting the call above. Callers use this
+		// response to decide whether they may claim these addresses, so reporting success while
+		// any are still up is what dual-homes the group.
+		remaining, verifyErr := stillHeldIPs(ipsToDrop)
+		if verifyErr != nil {
+			// Unable to read the interfaces, so the release cannot be established either way.
+			// Report failure rather than a release we did not observe.
+			s.logger.Error("MakePassive: cannot verify floating IP release",
+				"node_id", req.NodeId, "error", verifyErr)
+			return &rpc.MakePassiveResponse{
+				Success: false,
+				Message: "unable to verify floating IP release: " + verifyErr.Error(),
+			}, nil
+		}
+		if len(remaining) > 0 {
+			// Deliberately leave the status as-is. This node is still serving these addresses;
+			// marking it Passive would have the monitor strip them from under live traffic while
+			// the promotion that requested the demotion has already been refused.
+			s.logger.Error("MakePassive: refusing to report a release that did not happen",
+				"node_id", req.NodeId,
+				"remaining", len(remaining),
+				"sample", remaining[:min(3, len(remaining))])
+			return &rpc.MakePassiveResponse{
+				Success: false,
+				Message: fmt.Sprintf("%d floating IP(s) still up after demotion (e.g. %s)",
+					len(remaining), strings.Join(remaining[:min(3, len(remaining))], ", ")),
+			}, nil
+		}
+
 		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil

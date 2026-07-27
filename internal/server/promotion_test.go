@@ -1,6 +1,50 @@
 package server
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+// Regression for TC-6 defect #21. MakePassive used to build its drop set from the node's
+// configured IP groups and return Success:true regardless of what actually happened — so a
+// node mid-mode-change dropped nothing, reported a successful demotion, and the promoting
+// node claimed 201 addresses it was still serving. Release is now confirmed against the
+// interfaces, and anything indeterminate counts as still held.
+// The real interface lookup is netlink-based and so Linux-only; the decision logic is tested
+// here through a stub. What matters is the direction of each verdict.
+func TestFilterStillHeld(t *testing.T) {
+	present := func(up map[string]bool, failOn string) ipPresenceFunc {
+		return func(ip string) (bool, string, error) {
+			if ip == failOn {
+				return false, "", errors.New("lookup failed")
+			}
+			return up[ip], "enX0", nil
+		}
+	}
+
+	ips := []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}
+
+	// A fully completed release must report nothing held, or promotion would never proceed.
+	if got := filterStillHeld(ips, present(map[string]bool{}, "")); len(got) != 0 {
+		t.Errorf("all released: got %v, want empty", got)
+	}
+
+	// The TC-6 case: addresses still up must be reported so the promotion is refused.
+	up := map[string]bool{"10.0.0.1": true, "10.0.0.3": true}
+	got := filterStillHeld(ips, present(up, ""))
+	if len(got) != 2 || got[0] != "10.0.0.1" || got[1] != "10.0.0.3" {
+		t.Errorf("partial release: got %v, want [10.0.0.1 10.0.0.3]", got)
+	}
+
+	// An address we cannot look up counts as held — never assume it is gone.
+	if got := filterStillHeld(ips, present(map[string]bool{}, "10.0.0.2")); len(got) != 1 || got[0] != "10.0.0.2" {
+		t.Errorf("lookup error: got %v, want [10.0.0.2] treated as held", got)
+	}
+
+	if got := filterStillHeld(nil, present(map[string]bool{}, "")); len(got) != 0 {
+		t.Errorf("empty input: got %v, want empty", got)
+	}
+}
 
 // Regression: TC-6 on the whitecrane cluster. Switching to active-active wedged the Active
 // node under s.Lock() while it ran serial per-IP GARP. Peers stopped seeing any Active at all,
