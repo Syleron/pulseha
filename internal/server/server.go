@@ -677,7 +677,13 @@ func (s *Server) loadInitialMembers() error {
 			member := s.memberList.GetMemberByID(localID)
 			node := s.config.Nodes[localID]
 			if member != nil && node != nil {
-				if member.Status == membership.StatusActive {
+				// Under the member lock: ConfigSync applies incoming member
+				// states concurrently with this reconcile, and reading the
+				// status bare raced with that write.
+				member.Lock()
+				isActive := member.Status == membership.StatusActive
+				member.Unlock()
+				if isActive {
 					// Bring up any missing expected VIPs
 					for iface, groups := range node.IPGroups {
 						var ips []string
@@ -1029,14 +1035,14 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 		}
 
 		members = append(members, &rpc.Member{
-			Hostname:      health.Hostname,
-			Status:        st,
+			Hostname:     health.Hostname,
+			Status:       st,
 			ActiveIps:    health.ActiveIPs,
 			LastResponse: lastResp,
 			Latency:      health.Latency,
 			Ip:           member.IP,
-			Port:          member.Port,
-			NodeId:        member.ID,
+			Port:         member.Port,
+			NodeId:       member.ID,
 		})
 	}
 
@@ -4093,6 +4099,15 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 	}
 
+	// The epoch this node held *before* this sync is what decides whether the
+	// payload carries a decision or merely re-asserts an already-agreed view.
+	// Both branches below adopt a higher incoming epoch as soon as they see one,
+	// so reading s.clusterEpoch after them compared the payload against the very
+	// epoch it had just installed — never greater, so nothing was ever decisive
+	// and every peer's view of the local node's own status was discarded,
+	// including a real demotion (docs/TEST-PLAN.md defect #28).
+	preSyncEpoch := s.clusterEpoch
+
 	if isFullConfig {
 		// Create a new config instance to hold incoming cluster-wide configuration
 		newConfig := &config.Config{}
@@ -4346,10 +4361,27 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// Whether this sync carries a decision or merely re-asserts an agreed view.
 			// Only a strictly higher epoch is a decision; an equal epoch is a peer's
 			// heartbeat, which has no authority over what this node knows about itself.
-			decisive := incomingEpoch > currentEpoch
+			// Compared against the epoch held on entry, not currentEpoch: by this
+			// point a higher incoming epoch has already been adopted above.
+			decisive := incomingEpoch > preSyncEpoch
 
 			for id, st := range incomingMemberStates {
-				if m := s.memberList.GetMemberByID(id); m != nil {
+				m := s.memberList.GetMemberByID(id)
+				if m == nil {
+					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
+					continue
+				}
+
+				// Status, ActiveIPs and LoadFactor are read under the member
+				// lock elsewhere — the post-load VIP reconcile in
+				// loadInitialMembers, GetActiveIPs — so this writer has to hold
+				// it too. A func literal rather than an inline block because
+				// the guard clauses below bail out early and each has to
+				// release the lock.
+				func() {
+					m.Lock()
+					defer m.Unlock()
+
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
@@ -4366,7 +4398,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 							s.logger.Debug("CONFIG_SYNC: Ignoring peer's equal-epoch view of local status",
 								"node_id", id, "local", membership.StatusToString(m.Status),
 								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
-							continue
+							return
 						}
 						if node := s.config.Nodes[id]; node != nil {
 							if node.Maintenance {
@@ -4375,12 +4407,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 									m.Status = membership.StatusMaintenance
 									s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
 								}
-								continue
+								return
 							}
 							// Config says we're NOT in maintenance — reject stale StatusMaintenance from peers.
 							if st == membership.StatusMaintenance {
 								s.logger.Debug("CONFIG_SYNC: Rejected stale maintenance status from peer; local config shows not in maintenance", "node_id", id)
-								continue
+								return
 							}
 						}
 					}
@@ -4398,9 +4430,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 						m.LoadFactor = 0
 					}
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
-				} else {
-					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
-				}
+				}()
 			}
 
 			// Check if LOCAL node transitioned to Active - if so, bring up VIPs
