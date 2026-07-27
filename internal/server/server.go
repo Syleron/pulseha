@@ -1485,11 +1485,57 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 	}, nil
 }
 
+// confirmPeerReleasedIPs asks an unreachable peer to release its floating IPs and reports
+// what could actually be established about it.
+//
+// This deliberately does NOT go through s.MakePassive. That method flattens every remote
+// failure into (&Response{Success: false}, nil) — a nil error — so a caller cannot tell a
+// refused connection from a wedged peer from a successful demotion. Promotion safety turns
+// entirely on that distinction, so the RPC is issued directly and the gRPC status preserved.
+//
+// Returns:
+//   - released:     the peer answered and confirmed it is now Passive with its IPs down.
+//   - provablyDown: the transport itself failed in a way that means no daemon is listening.
+//     Anything indeterminate (deadline, local fault, a peer that answers but
+//     declines) is reported as NOT provably down, so the caller stays conservative.
+func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (released bool, provablyDown bool, err error) {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return false, false, fmt.Errorf("no configuration for node %s", nodeID)
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		// A local fault tells us nothing about the peer. Never read it as "the peer is gone".
+		return false, false, fmt.Errorf("failed to create client for %s: %w", nodeID, err)
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		// Nothing accepted the connection, so no daemon is holding those addresses. This is
+		// also what a network partition looks like from here, which is why the caller still
+		// requires quorum before acting on it.
+		return false, true, fmt.Errorf("failed to connect to %s: %w", nodeID, err)
+	}
+
+	resp, err := remoteClient.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
+	if err != nil {
+		// Unavailable means the transport dropped; the daemon is not serving. A deadline means
+		// it accepted the call and never finished — it is alive and still owns its IPs.
+		return false, status.Code(err) == codes.Unavailable, err
+	}
+	if !resp.Success {
+		// The peer is alive enough to answer and told us it did not demote.
+		return false, false, fmt.Errorf("peer %s declined to release: %s", nodeID, resp.Message)
+	}
+	return true, false, nil
+}
+
 // canPromoteWithoutConfirmedRelease decides whether a promotion may claim the floating IPs
 // when the previous Active is unreachable and its release could not be confirmed.
 //
-//   - peerStillAlive: the demotion RPC hit its deadline rather than being refused, so the peer's
-//     daemon is running and still owns its addresses. No amount of quorum makes claiming them
+//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
+//     still own every floating IP. No amount of quorum makes claiming them
 //     safe, so only an explicit force may override this.
 //   - haveQuorum: this node is on the majority side. A minority must never claim addresses it
 //     cannot prove were released, or both sides of a partition serve the same IPs.
@@ -1621,17 +1667,17 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// Must be bounded: without a deadline a wedged peer hangs this goroutine forever
 			// instead of surfacing the DeadlineExceeded the decision below relies on.
 			mpCtx, mpCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, err := s.MakePassive(mpCtx, &rpc.MakePassiveRequest{NodeId: id})
+			released, provablyDown, err := s.confirmPeerReleasedIPs(mpCtx, id)
 			mpCancel()
-			if err == nil {
+			if released {
 				s.logger.Info("PROMOTE_ASYNC: Confirmed unreachable node released its floating IPs", "node_id", id)
 				continue
 			}
 
-			// A DeadlineExceeded means the daemon accepted the connection but did not finish —
-			// it is alive and still owns its addresses. Quorum cannot make that safe, so this
-			// never proceeds without an explicit force.
-			stillAlive := status.Code(err) == codes.DeadlineExceeded
+			// Only a transport-level failure proves nothing is holding those addresses. A wedged
+			// peer that accepted the connection but never answered is alive and still owns every
+			// floating IP, so quorum cannot make claiming them safe.
+			stillAlive := !provablyDown
 			// Otherwise the peer is genuinely unreachable. Promote only from the majority side:
 			// a minority must never claim addresses it cannot prove were released.
 			haveQuorum := s.quorumManager != nil && s.quorumManager.HasQuorum(reachableCount)

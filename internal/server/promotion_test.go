@@ -9,9 +9,17 @@ import "testing"
 // all 201 addresses, so 103 of them ended up live on two nodes at once for ~5 minutes.
 //
 // The fix must distinguish three situations that all look like "the Active is unreachable":
-//   - the peer is wedged but alive (deadline exceeded) — it definitely still owns its IPs
+//   - the peer is wedged but alive — it definitely still owns its IPs
 //   - the peer is gone and we are on the majority side — normal failover, must still work
 //   - the peer is gone and we are on the minority side — claiming would split the cluster
+//
+// peerStillAlive is derived from confirmPeerReleasedIPs, which issues the demotion RPC to the
+// peer directly. Do NOT route that through Server.MakePassive: it flattens every remote failure
+// into (&Response{Success: false}, nil), so the error is always nil and every peer — wedged,
+// refused, or demoted — looks identical. The first cut of this fix did exactly that and the
+// guard silently degraded to a no-op that logged "confirmed released" for a stopped daemon.
+// Only a transport-level failure proves nothing is holding the addresses; everything
+// indeterminate must count as still-alive.
 func TestCanPromoteWithoutConfirmedRelease(t *testing.T) {
 	cases := []struct {
 		name           string
