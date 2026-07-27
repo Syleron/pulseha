@@ -496,7 +496,8 @@ not just `pulsectl`).
 | TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
 | TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
-| TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Open** — run 15: `duplicated=201` for ~20s (was ~90-100s). A peer can hold `mode=active-passive` and `self=Active` at once, so its ENFORCE loop widens expectations to all 201 and out-races the incoming demotion. TC-8's settled pass criterion still met. See run 15 below |
+| TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Root-caused and fixed in the working tree, NOT yet verified live.** The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
+| TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Open, found while fixing #28.** `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Same root shape as the rebalance gap (`OrchestrateIPFailover` releases before it claims) |
 
 ---
@@ -914,15 +915,66 @@ expectations widen from its 51-address share to all 201, and the ENFORCE loop re
 every address the incoming demotion strips — racing it to 202. It only backs off ~20s
 later when its status actually changes.
 
-The combined ConfigSync carries `member_states` saying node-4 is Passive, but a peer's
-opinion of *the local node's own status* is deliberately not applied (the rule that also
-protects the maintenance flag), so node-4 cannot learn it is Passive from the message
-that tells it the mode changed. **Propagating mode and states atomically is necessary but
-not sufficient**: as long as a node can hold `mode=active-passive` and `self=Active`
-simultaneously, its own monitor will claim the whole group. The next fix has to close
-that specific window — either the monitor refuses to widen expectations while a mode
-change is in flight, or the demotion is what applies the mode locally, so the two can
-never be observed out of step.
+The combined ConfigSync carries `member_states` saying node-4 is Passive, but node-4 did
+not apply it. ~~A peer's opinion of *the local node's own status* is deliberately not
+applied (the rule that also protects the maintenance flag), so node-4 cannot learn it is
+Passive from the message that tells it the mode changed.~~ **Wrong — that rule has an
+escape hatch for exactly this case, and the escape hatch was broken. See "Root cause
+(defect #28)" below.**
+
+#### Root cause (defect #28) — `decisive` was structurally always false
+
+The rule is not "a peer never overrides the local node's own status", it is "an
+*equal-epoch* peer never does". An equal epoch is a heartbeat and has no authority over
+what a node knows about itself; a real demotion — election, mode switch, explicit
+promote — arrives at a strictly higher epoch and is meant to apply. `SetMode` bumps the
+epoch by 2 precisely so its demotions carry that authority.
+
+`ConfigSync` computed that distinction against an epoch it had already overwritten:
+
+```go
+// full-config branch, ~line 4256
+if incomingEpoch > s.clusterEpoch {
+    s.clusterEpoch = incomingEpoch          // ← incoming epoch adopted here
+    s.leaderID = incomingLeaderID
+}
+...
+currentEpoch := s.clusterEpoch               // ← == incomingEpoch
+decisive := incomingEpoch > currentEpoch     // ← can never be true
+```
+
+The envelope-only branch adopts the epoch the same way, so `decisive` was false on
+**both** paths, for **every** payload: if the incoming epoch was higher it had just been
+installed, and if it was not higher the comparison failed anyway. The guard at
+`if !decisive && st != m.Status { continue }` therefore discarded every peer's view of
+the local node's own status unconditionally, real demotions included. The comment
+promising that "a real demotion ... always arrives at a higher epoch and still applies"
+described intended behaviour that the code could not reach.
+
+That is why node-4 held `mode=active-passive` and `self=Active` at once: it took the mode
+off the config it had just saved and threw away the status that came in the same message.
+Everything downstream follows from those two beliefs — an Active node in active-passive
+expects the whole group, so its expectations widen from its 51-address share to all 201.
+
+**Fixed:** snapshot the epoch on entry to `ConfigSync`, before either branch can adopt
+the incoming one, and compare against that. Tests:
+`TestDecisiveConfigSyncDemotesTheLocalNode` (a higher-epoch sync demotes the local node)
+and `TestEqualEpochConfigSyncDoesNotDemoteTheLocalNode` (the defect #2 rule still holds —
+this one passed before the fix too, so it pins the behaviour the fix must not invert).
+
+**Also fixed, surfaced by that test under `-race`:** `ConfigSync` wrote `m.Status`,
+`m.ActiveIPs` and `m.LoadFactor` while holding no member lock, and the post-load VIP
+reconcile in `loadInitialMembers` read `member.Status` bare. Both now take the member
+lock. This was a live race on the exact field the switch turns on.
+
+**Not fixed — new defect #30, found in the same goroutine.** That post-load reconcile
+brings up **every** group IP when it reads the local node as Active, with no
+active-active filtering, 500ms after every full ConfigSync. It is a third whole-group
+claimant alongside the monitor's enforce loop and the consolidation path, and it is
+mode-blind in the way `expectedIfaceIPs` and `deriveExpectedIPs` were fixed not to be
+(defects #2/#26 — this site was missed). In active-active `releaseUnassignedIPs` undoes
+it within a tick, which is why TC-6 still passes, but it is a likely source of the
+residual 5–14 steady-state duplication.
 
 Second thing watched on this run and **not** observed: peers receiving a full config
 mid-switch do restart their gRPC listener, but no `BringDownIPs` failure resulted —
