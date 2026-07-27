@@ -625,3 +625,69 @@ Harness notes for next time:
   - `zsh` does not word-split an unquoted `$SSHOPT` — use an array, or a script file.
   - Check the binary md5 on every node against the local build before trusting a run. Two
     deploys this session were verified this way (`d6b0c10c4be1`, then `c526b903b480`).
+
+### Result 2026-07-27 (runs 5-7) — expectation bug fixed; the real blocker is assignment propagation
+
+The previous run's two suspects were both wrong. The engine of the TC-6 distribution
+failure was the IP monitor's *expectation set*, not the failover path.
+
+**Root cause (fixed, commit `ddcd433`).** Every site that seeded the monitor's expected IPs
+rebuilt them from the whole configured group, ignoring cluster mode — `initializeExpectedIPs`
+at daemon start, and four copies in the server, one of them inside `OrchestrateIPFailover`
+itself. In active-passive that is correct: the sole Active owns the group. In active-active
+the group is shared, so every Active node's enforce tick re-added all 201 RealTest addresses.
+The copy inside `OrchestrateIPFailover` was the worst of them: it ran on every move and
+cleared the accurate per-IP set that `BringUpIP` had just recorded, widening it straight back
+out to the whole group.
+
+Measured on node-4 over four minutes before the fix: **1485 enforce passes, 769 enforce
+bring-ups**, no promotion and no election involved. After: **2 bring-ups on node-4, 0 on
+node-3.** That churn is gone.
+
+Two changes were needed, because fixing the five seeding sites was not enough on its own:
+  - Derive the expectation set from the node's own assignments in active-active, via one
+    helper per package instead of five duplicated whole-group loops.
+  - Recompute in the enforce loop each tick. The set has several writers and the case that
+    matters has *none* of them fire: a node that was the sole active-passive Active keeps the
+    whole group across a switch to active-active, and nothing recomputes it. Observed
+    directly — node-2 reported 199 expected addresses after the switch.
+
+Also fixed: "assigned nothing" and "no restriction" were collapsed by a `len()==0` check, so
+an active-active node awaiting its first assignment claimed the entire group.
+
+**TC-6 still fails, and the reason is now identified.** Per-node IP *assignments* are never
+propagated to the assigned node. `BroadcastClusterState` carries statuses and leases, no
+assignment map, and `rebalanceActiveActive` updates only the **coordinator's** copies of
+`src.ActiveIPs`/`dst.ActiveIPs`. So each node's own `ActiveIPs` disagrees with the
+coordinator's decision. Measured mid-run: node-3's own `ActiveIPs` held **1** address while it
+physically served ~100 that the coordinator had assigned it; node-2's sat at ~201 decaying one
+address at a time.
+
+That decay rate is the second half of the problem: **switching to active-active leaves the
+whole group assigned to the former sole Active**, and the coordinator drains it one
+`OrchestrateIPFailover` at a time at roughly one address per 11s. Draining ~150 addresses that
+way takes ~27 minutes, which is why every run so far has been observed mid-convergence rather
+than converged. `SetMode` needs to do an initial redistribution instead of relying on
+incremental rebalancing.
+
+**A release pass was tried and reverted — do not retry it in this form.** Making the Active
+branch of `enforceExpectations` bring down group addresses it holds but is not assigned looks
+like the obvious complement to the passive-branch cleanup, and it does fire (154/56/171
+releases across nodes). But it acts on `member.ActiveIPs`, which per the above is only
+authoritative **on the coordinator**. On node-3 it therefore tore down ~100 addresses the
+coordinator had legitimately assigned, and `unique` fell to 184/205 — real addresses down
+cluster-wide. Any such teardown must wait until assignments are actually propagated; on a
+cluster carrying live VIPs it would drop traffic. The guard that skips the pass when nothing
+is assigned was necessary but nowhere near sufficient.
+
+Order of work implied: propagate assignments (needs a proto field) → give `SetMode` an initial
+redistribution → only then consider an Active-side release pass.
+
+Harness notes:
+  - A rolling restart (passives first, Active last, one at a time) preserved a clean 205/205
+    baseline — no defect #23. Prefer it to the full stop/strip/start reset when only the
+    binary changed.
+  - Building with `-mod=mod` to work around the vendor drift rewrites `go.mod`/`go.sum` (it
+    bumped the go directive to 1.25.0). Revert those two files before committing.
+  - Verified md5 on every node against the local build for all three deploys this session
+    (`2f841c12315a`, `6ac61c718741`, `e53fb888e239`).
