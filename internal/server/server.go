@@ -1574,18 +1574,22 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 // when the previous Active is unreachable and its release could not be confirmed.
 //
 //   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
-//     still own every floating IP. No amount of quorum makes claiming them
-//     safe, so only an explicit force may override this.
+//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
+//     still own every floating IP. Nothing overrides this, including forceDemote.
 //   - haveQuorum: this node is on the majority side. A minority must never claim addresses it
 //     cannot prove were released, or both sides of a partition serve the same IPs.
+//
+// forceDemote deliberately does NOT override a live peer. It cannot serve as an operator escape
+// here because HealthChecker.tryForcePromote sets it on every promotion the automatic election
+// drives, so honouring it disabled this check for precisely the case it exists to catch — an
+// election promoting over an Active wedged by SetMode (docs/TEST-PLAN.md TC-6). The operator
+// escape for a permanently wedged Active is to stop its daemon, which makes it provably down.
 func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
-	if forceDemote {
-		return true
-	}
 	if peerStillAlive {
 		return false
 	}
-	return haveQuorum
+	// The peer is provably down: promote from the majority side, or when explicitly forced.
+	return haveQuorum || forceDemote
 }
 
 // performPromotionAsync executes the promotion operation asynchronously

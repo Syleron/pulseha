@@ -83,9 +83,15 @@ func TestCanPromoteWithoutConfirmedRelease(t *testing.T) {
 		// Minority side of a partition must not claim addresses it cannot prove were released.
 		{"dead peer without quorum must not be claimed", false, false, false, false},
 
-		// An operator forcing the issue overrides every case above.
-		{"force overrides a wedged peer", true, true, true, true},
-		{"force overrides a lack of quorum", false, false, true, true},
+		// force must NOT rescue a live peer. HealthChecker.tryForcePromote sets ForceDemote on
+		// every election-driven promotion, so treating it as an operator override disabled this
+		// check for the exact TC-6 path — observed live: "Proceeding without a confirmed release
+		// force_demote=true peer_still_alive=true" while the wedged peer held all 201 IPs.
+		{"force must not override a wedged peer", true, true, true, false},
+		{"force must not override a wedged peer without quorum", true, false, true, false},
+
+		// force still applies once the peer is provably down — a minority-side operator recovery.
+		{"force overrides a lack of quorum when peer is down", false, false, true, true},
 	}
 
 	for _, tc := range cases {
