@@ -779,3 +779,20 @@ Harness notes:
   - md5 verified on all four nodes against the local build for all six deploys this session
     (`456d5e3d41fc`, `413acef2bd4a`, `ef7cf869c985`, `b110efc2c489`, `6204d0a70c2e`,
     `57548b8698f8`, `c3e6b43e80ba`).
+
+### Reverse transition (active-active → active-passive), run 14
+
+Returns to a correct baseline but with a large transient. Immediately after
+`cluster mode set --mode active-passive` the whole group was up on **two** nodes
+(node-2 and node-3 both at 202 live, `duplicated=201`); `enforceSingleActive`
+resolved it and the cluster settled to node-2 Active with 202, the other three
+Passive with 1 each, `placements=205 unique=205 duplicated=0`, exactly one Active,
+cluster online. Total time about 100 seconds.
+
+So the invariant holds and the end state is right, but `SetMode`'s active-passive
+branch consolidates onto `ConsolidationTarget` and something else promotes a second
+node anyway — the same shape as the two-Active defect that `enforceSingleActive` was
+added to catch, which means the promotion is racing the switch rather than being
+prevented by it. Every address is doubly-claimed for a minute and a half, which on a
+cluster carrying live VIPs is an ARP fight over all of them. Needs its own
+investigation; not folded into the active-active work.
