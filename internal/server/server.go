@@ -26,7 +26,9 @@ import (
 	rpc "github.com/syleron/pulseha/rpc"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // Object pools to reduce memory allocations
@@ -1483,6 +1485,24 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 	}, nil
 }
 
+// canPromoteWithoutConfirmedRelease decides whether a promotion may claim the floating IPs
+// when the previous Active is unreachable and its release could not be confirmed.
+//
+//   - peerStillAlive: the demotion RPC hit its deadline rather than being refused, so the peer's
+//     daemon is running and still owns its addresses. No amount of quorum makes claiming them
+//     safe, so only an explicit force may override this.
+//   - haveQuorum: this node is on the majority side. A minority must never claim addresses it
+//     cannot prove were released, or both sides of a partition serve the same IPs.
+func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
+	if forceDemote {
+		return true
+	}
+	if peerStillAlive {
+		return false
+	}
+	return haveQuorum
+}
+
 // performPromotionAsync executes the promotion operation asynchronously
 // This prevents frontend timeouts on long-running IP failover operations
 func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceDemote bool) {
@@ -1496,17 +1516,34 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 
 	// Identify current active (if any)
 	prevActiveID := ""
+	// Nodes whose release of the floating IPs we cannot confirm. A member marked Unknown is
+	// unreachable, which is NOT the same as known-idle — it may still hold every group IP.
+	// Promoting over one of these without confirming the release dual-homes the whole group
+	// (see docs/TEST-PLAN.md TC-6). Only populated when no reachable Active is present.
+	unconfirmedIncumbents := make([]string, 0, 1)
+	reachableCount := 0
 	if s.config.Pulse.Mode == "active-passive" {
 		for id, m := range s.memberList.MembersSnapshot() {
-			if m.Status == membership.StatusActive {
+			if m.Status != membership.StatusUnknown {
+				reachableCount++
+			}
+			if m.Status == membership.StatusActive && prevActiveID == "" {
 				prevActiveID = id
 				s.logger.Info("PROMOTE_ASYNC: Found current active node", "active_node", id, "hostname", m.Hostname)
-				break
+			}
+		}
+		if prevActiveID == "" {
+			for id, m := range s.memberList.MembersSnapshot() {
+				if id != targetNodeID && m.Status == membership.StatusUnknown {
+					unconfirmedIncumbents = append(unconfirmedIncumbents, id)
+				}
 			}
 		}
 	}
 	if prevActiveID == "" {
-		s.logger.Info("PROMOTE_ASYNC: No active node found in cluster")
+		s.logger.Info("PROMOTE_ASYNC: No active node found in cluster",
+			"unconfirmed_incumbents", len(unconfirmedIncumbents),
+			"reachable_nodes", reachableCount)
 	}
 
 	// Get the member
@@ -1572,6 +1609,61 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		s.logger.Info("PROMOTE_ASYNC: Skipping demotion (remote-initiated promotion)",
 			"previous_active", prevActiveID,
 			"new_active", targetNodeID)
+	}
+
+	// Step 1b: There is no reachable Active, but an unreachable peer may still be holding the
+	// entire group. Try to confirm it has released before claiming its addresses. This runs
+	// independently of shouldDemote/isTargetNodePromotion, because an election-driven
+	// self-promotion takes neither of those paths yet is exactly the case that dual-homes the
+	// group (docs/TEST-PLAN.md TC-6).
+	if prevActiveID == "" && len(unconfirmedIncumbents) > 0 {
+		for _, id := range unconfirmedIncumbents {
+			// Must be bounded: without a deadline a wedged peer hangs this goroutine forever
+			// instead of surfacing the DeadlineExceeded the decision below relies on.
+			mpCtx, mpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, err := s.MakePassive(mpCtx, &rpc.MakePassiveRequest{NodeId: id})
+			mpCancel()
+			if err == nil {
+				s.logger.Info("PROMOTE_ASYNC: Confirmed unreachable node released its floating IPs", "node_id", id)
+				continue
+			}
+
+			// A DeadlineExceeded means the daemon accepted the connection but did not finish —
+			// it is alive and still owns its addresses. Quorum cannot make that safe, so this
+			// never proceeds without an explicit force.
+			stillAlive := status.Code(err) == codes.DeadlineExceeded
+			// Otherwise the peer is genuinely unreachable. Promote only from the majority side:
+			// a minority must never claim addresses it cannot prove were released.
+			haveQuorum := s.quorumManager != nil && s.quorumManager.HasQuorum(reachableCount)
+
+			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote) {
+				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",
+					"unconfirmed_node", id,
+					"target", targetNodeID,
+					"peer_still_alive", stillAlive,
+					"have_quorum", haveQuorum,
+					"reachable_nodes", reachableCount,
+					"error", err)
+				for rid, st := range originalStates {
+					if mm := s.memberList.GetMemberByID(rid); mm != nil {
+						mm.Status = st
+					}
+				}
+				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+				return
+			}
+
+			s.logger.Warn("PROMOTE_ASYNC: Proceeding without a confirmed release",
+				"unconfirmed_node", id,
+				"force_demote", forceDemote,
+				"peer_still_alive", stillAlive,
+				"have_quorum", haveQuorum,
+				"error", err)
+			if mm := s.memberList.GetMemberByID(id); mm != nil {
+				mm.Status = membership.StatusUnknown
+				mm.ActiveIPs = nil
+			}
+		}
 	}
 
 	// Step 2: Promote target node
