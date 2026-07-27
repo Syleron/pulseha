@@ -334,5 +334,76 @@ func (m *IPMonitor) enforceExpectations() {
 			m.logger.Debug("ENFORCE: No missing IPs for interface", "iface", iface)
 		}
 	}
+
+	// Active nodes in active-active must also give up what is no longer theirs.
+	// The Active branch only ever added, so a node that handed addresses to a
+	// peer kept serving them: after a mode switch the former sole Active sat at
+	// 172 addresses against an expectation of 50, every one of the surplus also
+	// up on its new owner (docs/TEST-PLAN.md defects #2/#26).
+	//
+	// This keys off the expectation set, which in this mode is recomputed from
+	// the node's own assignments at the top of this function. An earlier attempt
+	// at this pass was reverted because that record could not be trusted — a
+	// node listed one address while serving a hundred the coordinator had given
+	// it, so the pass tore down legitimate traffic. What made the record
+	// reliable was fixing its writers: the mode switch now seeds the owner's
+	// assignments on every node, and a busy coordinator is no longer declared
+	// failed and its addresses re-placed behind its back.
+	if m.members.config.Pulse.Mode == "active-active" {
+		m.releaseUnassignedIPs(localID, expectations, ipInventory)
+	}
+
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
+}
+
+// releaseUnassignedIPs brings down cluster floating IPs held on an interface
+// that this node is not assigned. Only configured group IPs are considered, so
+// the node's own addresses are never touched.
+func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string][]string, ipInventory *network.IPInventory) {
+	localNodeCfg, ok := m.members.config.Nodes[localID]
+	if !ok || localNodeCfg == nil {
+		return
+	}
+
+	for iface, groups := range localNodeCfg.IPGroups {
+		expected := make(map[string]bool, len(expectations[iface]))
+		for _, ip := range expectations[iface] {
+			expected[ip] = true
+		}
+
+		var surplus []string
+		for _, groupName := range groups {
+			for _, ip := range m.members.config.Groups[groupName] {
+				if expected[ip] {
+					continue
+				}
+				ipOnly, _ := utils.GetCIDR(ip)
+				if ipOnly == nil {
+					continue
+				}
+				var exists bool
+				var foundIface string
+				if ipInventory != nil {
+					exists, foundIface, _ = ipInventory.Exists(ipOnly.String())
+				} else {
+					exists, foundIface, _ = network.CheckIfIPExists(ipOnly.String())
+				}
+				if exists && foundIface == iface {
+					surplus = append(surplus, ip)
+				}
+			}
+		}
+
+		if len(surplus) == 0 {
+			continue
+		}
+		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
+			"iface", iface, "count", len(surplus))
+		for _, ip := range surplus {
+			if err := network.BringIPdown(iface, ip); err != nil {
+				m.logger.Error("ENFORCE: failed to release unassigned floating IP",
+					"ip", ip, "iface", iface, "error", err)
+			}
+		}
+	}
 }

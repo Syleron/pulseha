@@ -2667,24 +2667,32 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 		}, nil
 	}
 
-	// If switching to active-active, redistribute IPs
+	// If switching to active-active, record where the floating IPs already are
+	// and let the coordinator spread them from there.
+	//
+	// Clearing every assignment and redistributing the whole group was wrong on
+	// both counts. It left the former sole Active still physically holding all
+	// of the group while three peers were told to bring the same addresses up,
+	// so the switch produced ~150 duplicated addresses immediately; and it ran
+	// those bring-ups under s.Lock(), stalling this daemon long enough for peers
+	// to mark it unreachable — which made each of them appoint itself
+	// coordinator and redistribute too (docs/TEST-PLAN.md defects #2/#26).
+	//
+	// Seeding the current owner instead means the reconciler sees the addresses
+	// as hosted, so it rebalances rather than re-places: every move goes through
+	// OrchestrateIPFailover, which brings the address down on the source before
+	// bringing it up on the destination.
 	if req.Mode == "active-active" {
-		s.logger.Info("Redistributing IPs for active-active mode")
-		// Use config.Groups as the authoritative IP source.
-		// member.ActiveIPs is nil when the active node was promoted via election
-		// (elections set Status=StatusActive but never populate ActiveIPs).
-		var allIPs []string
-		for _, ips := range s.config.Groups {
-			allIPs = append(allIPs, ips...)
-		}
-		// Clear current per-member assignments before redistributing
-		for _, member := range s.memberList.MembersSnapshot() {
-			member.ActiveIPs = nil
-		}
-
-		if err := s.memberList.RedistributeIPs(allIPs); err != nil {
-			s.logger.Error("Failed to redistribute IPs", "error", err)
-			// Continue anyway as the mode change is already saved
+		if !s.seedActiveActiveAssignments() {
+			s.logger.Warn("No active node found on switch to active-active; redistributing the whole group")
+			var allIPs []string
+			for _, ips := range s.config.Groups {
+				allIPs = append(allIPs, ips...)
+			}
+			if err := s.memberList.RedistributeIPs(allIPs); err != nil {
+				s.logger.Error("Failed to redistribute IPs", "error", err)
+				// Continue anyway as the mode change is already saved
+			}
 		}
 	}
 
@@ -2811,6 +2819,50 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 		Success: true,
 		Message: fmt.Sprintf("cluster mode changed to %s", req.Mode),
 	}, nil
+}
+
+// seedActiveActiveAssignments records the Active node as the owner of every
+// group IP it can host, and clears the rest. It reports whether an Active node
+// was found; if not, nothing holds the group and the caller must place it.
+//
+// Takes no server lock — it only reads config maps and locks members
+// individually — so it is safe to call with s.Lock() held or not.
+func (s *Server) seedActiveActiveAssignments() bool {
+	members := s.memberList.MembersSnapshot()
+
+	var owner *membership.Member
+	for _, member := range members {
+		member.Lock()
+		isActive := member.Status == membership.StatusActive
+		member.Unlock()
+		if isActive {
+			owner = member
+			break
+		}
+	}
+	if owner == nil {
+		return false
+	}
+
+	// config.Groups is the authoritative IP source. member.ActiveIPs is nil when
+	// the Active node was promoted via election (elections set StatusActive but
+	// never populate ActiveIPs), which is exactly the case that made the whole
+	// group look orphaned to the reconciler.
+	ownedIPs := s.groupIPsForNode(owner.ID)
+	s.logger.Info("Seeding active-active assignments from the current owner",
+		"hostname", owner.Hostname, "ip_count", len(ownedIPs))
+
+	for _, member := range members {
+		member.Lock()
+		if member.ID == owner.ID {
+			member.ActiveIPs = ownedIPs
+		} else {
+			member.ActiveIPs = nil
+			member.LoadFactor = 0
+		}
+		member.Unlock()
+	}
+	return true
 }
 
 // groupIPsForNode returns every configured group IP the given node can host —
@@ -4070,6 +4122,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		syslogAddressPreserve := s.config.Pulse.SyslogAddress
 		syslogFacilityPreserve := s.config.Pulse.SyslogFacility
 		syslogTagPreserve := s.config.Pulse.SyslogTag
+		// Whether this sync is the one that flips us into active-active decides
+		// whether we have to seed the assignment map below.
+		prevMode := s.config.Pulse.Mode
 
 		s.Lock()
 
@@ -4201,6 +4256,22 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		s.logger.Debug("CONFIG_SYNC: Loading initial members")
 		if err := s.loadInitialMembers(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to load members after sync", "error", err)
+		}
+
+		// Seed the assignment map on the node that learns the mode changed, not
+		// only on the node that handled the request. Whoever ends up
+		// active-active coordinator makes the redistribute-or-rebalance decision
+		// from its own member list, and on whitecrane that was a different node:
+		// it saw no assignments anywhere, called all 201 addresses orphaned and
+		// placed them on top of the ones the previous Active still held
+		// (docs/TEST-PLAN.md defects #2/#26). Every node derives the same answer
+		// from the config it just applied, so seeding here is consistent rather
+		// than a second opinion.
+		if prevMode != "active-active" && s.config.Pulse.Mode == "active-active" {
+			s.logger.Info("CONFIG_SYNC: cluster switched to active-active, seeding assignments")
+			if !s.seedActiveActiveAssignments() {
+				s.logger.Warn("CONFIG_SYNC: no active node found while seeding active-active assignments")
+			}
 		}
 	} else {
 		// Envelope-only update: do NOT overwrite config; just apply incoming states and metadata

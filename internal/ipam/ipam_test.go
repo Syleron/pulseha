@@ -149,6 +149,78 @@ func TestPlanMoveNoEligibleDestination(t *testing.T) {
 	}
 }
 
+// PlanMoves must agree with the incremental loop it replaces: applying it once
+// has to leave the cluster in the same state as calling PlanMove until it stops.
+func TestPlanMovesMatchesIncrementalPlanMove(t *testing.T) {
+	cases := [][]Node{
+		{{Hostname: "node1", IPCount: 200}, {Hostname: "node2"}, {Hostname: "node3"}, {Hostname: "node4"}},
+		{{Hostname: "node1", IPCount: 5}, {Hostname: "node2", IPCount: 4}},
+		{{Hostname: "node1", IPCount: 7}, {Hostname: "node2", IPCount: 1, Capacity: 2}, {Hostname: "node3"}},
+		{{Hostname: "node1", IPCount: 3}, {Hostname: "node2", IPCount: 3}},
+	}
+
+	for _, nodes := range cases {
+		batched := make([]int, len(nodes))
+		incremental := make([]int, len(nodes))
+		for i, node := range nodes {
+			batched[i], incremental[i] = node.IPCount, node.IPCount
+		}
+
+		for _, move := range PlanMoves(nodes) {
+			batched[move.Src] -= move.Count
+			batched[move.Dst] += move.Count
+		}
+
+		sim := make([]Node, len(nodes))
+		copy(sim, nodes)
+		for {
+			src, dst, ok := PlanMove(sim)
+			if !ok {
+				break
+			}
+			sim[src].IPCount--
+			sim[dst].IPCount++
+			incremental[src]--
+			incremental[dst]++
+		}
+
+		if !reflect.DeepEqual(batched, incremental) {
+			t.Errorf("PlanMoves gave %v, incremental PlanMove gave %v for %v", batched, incremental, nodes)
+		}
+	}
+}
+
+func TestPlanMovesBatchesPerDestination(t *testing.T) {
+	nodes := []Node{
+		{Hostname: "node1", IPCount: 200},
+		{Hostname: "node2"},
+		{Hostname: "node3"},
+		{Hostname: "node4"},
+	}
+
+	moves := PlanMoves(nodes)
+
+	if len(moves) != 3 {
+		t.Fatalf("expected one batch per destination, got %d: %+v", len(moves), moves)
+	}
+	for _, move := range moves {
+		if move.Src != 0 || move.Count != 50 {
+			t.Errorf("expected 50 IPs from node1 per destination, got %+v", move)
+		}
+	}
+}
+
+func TestPlanMovesAlreadyBalanced(t *testing.T) {
+	nodes := []Node{
+		{Hostname: "node1", IPCount: 2},
+		{Hostname: "node2", IPCount: 1},
+	}
+
+	if moves := PlanMoves(nodes); len(moves) != 0 {
+		t.Fatalf("expected no moves when max-min <= 1, got %+v", moves)
+	}
+}
+
 func TestHasCapacity(t *testing.T) {
 	if !(Node{IPCount: 100}).HasCapacity() {
 		t.Fatal("capacity 0 should mean unlimited")

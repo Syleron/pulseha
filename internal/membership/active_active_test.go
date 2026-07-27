@@ -1,10 +1,12 @@
 package membership
 
 import (
+	"fmt"
 	"io"
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/config"
@@ -112,24 +114,60 @@ func TestCalculateIPDistributionRespectsCapacity(t *testing.T) {
 	}
 }
 
-func TestPlanRebalanceMove(t *testing.T) {
+func TestPlanRebalanceMoves(t *testing.T) {
 	t.Run("moves from most to least loaded", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, nil)
-		src, dst, ip := planRebalanceMove([]*Member{a, b})
-		if src != a || dst != b {
-			t.Fatalf("expected move from node-a to node-b, got src=%v dst=%v", src, dst)
+		moves := planRebalanceMoves([]*Member{a, b})
+		if len(moves) != 1 {
+			t.Fatalf("expected a single batched move, got %v", moves)
 		}
-		if ip != "10.0.0.3/24" {
-			t.Errorf("expected last IP of source to move, got %s", ip)
+		if moves[0].Src != 0 || moves[0].Dst != 1 {
+			t.Errorf("expected move from node-a to node-b, got %+v", moves[0])
+		}
+		if moves[0].Count != 1 {
+			t.Errorf("expected 1 IP to reach a 2/1 split, got %d", moves[0].Count)
+		}
+	})
+
+	// The mode-switch case: the whole group sits on the former sole Active and
+	// has to reach the other three nodes in one batch per pair, not one address
+	// per IP-failover round trip (docs/TEST-PLAN.md defects #2/#26).
+	t.Run("drains a whole group in one batch per destination", func(t *testing.T) {
+		var group []string
+		for i := 1; i <= 200; i++ {
+			group = append(group, fmt.Sprintf("10.0.0.%d/24", i))
+		}
+		a := newAATestMember("node-a", "host-a", StatusActive, group)
+		b := newAATestMember("node-b", "host-b", StatusActive, nil)
+		c := newAATestMember("node-c", "host-c", StatusActive, nil)
+		d := newAATestMember("node-d", "host-d", StatusActive, nil)
+
+		moves := planRebalanceMoves([]*Member{a, b, c, d})
+
+		if len(moves) != 3 {
+			t.Fatalf("expected one batch per destination, got %d: %+v", len(moves), moves)
+		}
+		total := 0
+		for _, move := range moves {
+			if move.Src != 0 {
+				t.Errorf("expected every batch to come from the loaded node, got %+v", move)
+			}
+			if move.Count != 50 {
+				t.Errorf("expected 50 IPs per destination, got %+v", move)
+			}
+			total += move.Count
+		}
+		if total != 150 {
+			t.Errorf("expected 150 IPs moved to reach an even 50/50/50/50, got %d", total)
 		}
 	})
 
 	t.Run("balanced cluster plans no move", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.3/24"})
-		if src, _, _ := planRebalanceMove([]*Member{a, b}); src != nil {
-			t.Errorf("expected no move for max-min diff of 1, got move from %s", src.Hostname)
+		if moves := planRebalanceMoves([]*Member{a, b}); len(moves) != 0 {
+			t.Errorf("expected no move for max-min diff of 1, got %+v", moves)
 		}
 	})
 
@@ -137,17 +175,31 @@ func TestPlanRebalanceMove(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.4/24"})
 		b.Capacity = 1
-		if src, _, _ := planRebalanceMove([]*Member{a, b}); src != nil {
-			t.Errorf("expected no move when only destination is at capacity, got move from %s", src.Hostname)
+		if moves := planRebalanceMoves([]*Member{a, b}); len(moves) != 0 {
+			t.Errorf("expected no move when only destination is at capacity, got %+v", moves)
 		}
 	})
 
 	t.Run("single node plans no move", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24"})
-		if src, _, _ := planRebalanceMove([]*Member{a}); src != nil {
+		if moves := planRebalanceMoves([]*Member{a}); len(moves) != 0 {
 			t.Error("expected no move with a single node")
 		}
 	})
+}
+
+// Regression for docs/TEST-PLAN.md defects #2/#26: recovering an active-active
+// node to Passive costs it every floating IP it was assigned.
+func TestRecoveredStatus(t *testing.T) {
+	if got := recoveredStatus("active-active"); got != StatusActive {
+		t.Errorf("active-active recovery = %s, want Active", StatusToString(got))
+	}
+	if got := recoveredStatus("active-passive"); got != StatusPassive {
+		t.Errorf("active-passive recovery = %s, want Passive", StatusToString(got))
+	}
+	if got := recoveredStatus(""); got != StatusPassive {
+		t.Errorf("unset mode recovery = %s, want Passive", StatusToString(got))
+	}
 }
 
 func TestClusterCoordinator(t *testing.T) {
@@ -157,14 +209,64 @@ func TestClusterCoordinator(t *testing.T) {
 		"node-b": newAATestMember("node-b", "host-b", StatusPassive, nil),
 		"node-d": newAATestMember("node-d", "host-d", StatusMaintenance, nil),
 	}
-	if got := clusterCoordinator(members); got != "node-b" {
+	if got := clusterCoordinator(members, 10*time.Second); got != "node-b" {
 		t.Errorf("expected lowest healthy node-b as coordinator, got %q", got)
 	}
 
 	if got := clusterCoordinator(map[string]*Member{
 		"node-a": newAATestMember("node-a", "host-a", StatusUnknown, nil),
-	}); got != "" {
+	}, 10*time.Second); got != "" {
 		t.Errorf("expected no coordinator with no healthy nodes, got %q", got)
+	}
+}
+
+// Regression for docs/TEST-PLAN.md defects #2/#26. A coordinator part-way
+// through a batch of moves is slow enough to miss a health check; handing the
+// role to the next node in ID order there had it re-place addresses the first
+// one was still holding.
+func TestClusterCoordinatorKeepsBrieflySilentNode(t *testing.T) {
+	busy := newAATestMember("node-a", "host-a", StatusUnknown, nil)
+	busy.LastHCResponse = time.Now().Add(-2 * time.Second)
+	peer := newAATestMember("node-b", "host-b", StatusActive, nil)
+	members := map[string]*Member{"node-a": busy, "node-b": peer}
+
+	if got := clusterCoordinator(members, 10*time.Second); got != "node-a" {
+		t.Errorf("expected the briefly silent node-a to keep the role, got %q", got)
+	}
+
+	busy.LastHCResponse = time.Now().Add(-30 * time.Second)
+	if got := clusterCoordinator(members, 10*time.Second); got != "node-b" {
+		t.Errorf("expected the role to move once node-a passed the grace window, got %q", got)
+	}
+}
+
+// Regression for docs/TEST-PLAN.md defects #2/#26. Reclaiming a node's
+// addresses on its first missed health check took them off a node that was only
+// busy, and brought them up elsewhere while it was still serving them.
+func TestRedistributeOrphanedIPsWaitsOutTheFailoverLimit(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"group1": {"10.0.0.1/24", "10.0.0.2/24"},
+	})
+	cfg.Pulse.FailOverLimit = 10000
+
+	busy := newAATestMember("node-a", "host-a", StatusUnknown, []string{"10.0.0.1/24", "10.0.0.2/24"})
+	busy.LastHCResponse = time.Now().Add(-2 * time.Second)
+	peer := newAATestMember("node-b", "host-b", StatusActive, nil)
+	ml := newAATestMemberList(cfg, busy, peer)
+	h := NewHealthChecker(ml, log.New(io.Discard))
+
+	if h.redistributeOrphanedIPs(ml.Members) {
+		t.Error("expected no redistribution while the silent node is inside the failover limit")
+	}
+	if len(busy.ActiveIPs) != 2 {
+		t.Errorf("expected the busy node to keep its assignments, got %v", busy.ActiveIPs)
+	}
+
+	// Past the limit it is genuinely failed and its addresses are orphaned.
+	busy.LastHCResponse = time.Now().Add(-30 * time.Second)
+	h.redistributeOrphanedIPs(ml.Members)
+	if len(busy.ActiveIPs) != 0 {
+		t.Errorf("expected a failed node's assignments to be cleared, got %v", busy.ActiveIPs)
 	}
 }
 
@@ -241,6 +343,33 @@ func TestResolveDuplicateAssignments(t *testing.T) {
 
 	if h.resolveDuplicateAssignments(ml.Members) {
 		t.Error("expected no duplicates on second pass")
+	}
+}
+
+// Regression for docs/TEST-PLAN.md defects #2/#26. A node listing the same IP
+// twice used to be reported as "assigned to both host-a and host-a" and the
+// address was brought down, so a node lost an address it was the only owner of.
+func TestResolveDuplicateAssignmentsCollapsesSameNodeDuplicates(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"group1": {"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"},
+	})
+	a := newAATestMember("node-a", "host-a", StatusActive,
+		[]string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.1/24"})
+	b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.3/24"})
+	ml := newAATestMemberList(cfg, a, b)
+	h := NewHealthChecker(ml, log.New(io.Discard))
+
+	if !h.resolveDuplicateAssignments(ml.Members) {
+		t.Error("expected the doubled entry to be reported as resolved")
+	}
+	if !reflect.DeepEqual(a.ActiveIPs, []string{"10.0.0.1/24", "10.0.0.2/24"}) {
+		t.Errorf("expected node-a to keep one copy of each of its own IPs, got %v", a.ActiveIPs)
+	}
+	if !reflect.DeepEqual(b.ActiveIPs, []string{"10.0.0.3/24"}) {
+		t.Errorf("expected node-b untouched, got %v", b.ActiveIPs)
+	}
+	if h.resolveDuplicateAssignments(ml.Members) {
+		t.Error("expected a collapsed list to be stable on a second pass")
 	}
 }
 

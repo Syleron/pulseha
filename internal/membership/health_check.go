@@ -368,8 +368,9 @@ func (h *HealthChecker) performHealthChecks() {
 				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
 			}
 		} else if member.Status == StatusUnknown {
-			member.Status = StatusPassive
-			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to passive", member.Hostname))
+			member.Status = recoveredStatus(mode)
+			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
+				member.Hostname, StatusToString(member.Status)))
 		}
 
 		// Add to display status (with latency for display)
@@ -444,10 +445,12 @@ func (h *HealthChecker) performHealthChecks() {
 			h.logger.Debug("HEALTH_CHECK: Heartbeat convergence broadcast completed")
 		}
 
-		// Log periodic summary every 60 checks (roughly every minute with 1s interval)
-		if h.checksWithoutChange >= 60 {
-			h.logger.Infof("Cluster stable for 60 checks: %s", currentClusterDisplayState)
-			h.checksWithoutChange = 0
+		// Log periodic summary every 60 checks (roughly every minute with 1s interval).
+		// Counts up rather than resetting: reconcileActiveActive reads this as the
+		// number of consecutive unchanged cycles, and zeroing it here would stand
+		// the coordinator down once a minute on a perfectly stable cluster.
+		if h.checksWithoutChange%60 == 0 {
+			h.logger.Infof("Cluster stable for %d checks: %s", h.checksWithoutChange, currentClusterDisplayState)
 		}
 	}
 
@@ -655,7 +658,7 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 	if err != nil {
 		return false
 	}
-	if clusterCoordinator(members) != localID {
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
 		h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode; waiting for the coordinator to consolidate",
 			len(actives))
 		return false
@@ -711,6 +714,20 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 	return true
 }
 
+// viewStableCycles is how many consecutive unchanged health-check cycles a node
+// needs before it will act as active-active coordinator.
+//
+// Coordinator is a local decision — the lowest-ID node this node considers
+// healthy — so it is only single-writer while every node agrees on who is
+// healthy. Bulk IP work breaks that agreement: bringing up a hundred addresses
+// makes a node slow enough to answer that peers mark it Unknown, and each peer
+// that does then makes itself coordinator. On whitecrane all four nodes
+// redistributed at once and left ~170 addresses claimed by more than one owner.
+// Requiring a settled view means a node with a transient one stands down, and
+// the flap resolves before anyone moves an address (docs/TEST-PLAN.md defects
+// #2/#26).
+const viewStableCycles = 3
+
 // reconcileActiveActive keeps floating IPs assigned and balanced in
 // active-active mode. Group IPs no longer hosted by any healthy node are
 // redistributed, and IPs are moved onto underloaded nodes. Only the
@@ -725,7 +742,12 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 	if err != nil {
 		return
 	}
-	if clusterCoordinator(members) != localID {
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
+		return
+	}
+	if h.checksWithoutChange < viewStableCycles {
+		h.logger.Debug("ACTIVE_CHECK: cluster view still settling, deferring reconciliation",
+			"checksWithoutChange", h.checksWithoutChange)
 		return
 	}
 
@@ -750,17 +772,32 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 // cluster-wide IP decisions — active-active redistribution and active-passive
 // consolidation: the healthy (Active or Passive) node with the lowest ID.
 // Returns "" when no healthy node exists.
-func clusterCoordinator(members map[string]*Member) string {
+//
+// grace is how long a node that has gone Unknown still counts. Handing the role
+// over on a single missed check meant the busiest node lost it exactly when it
+// mattered: moving fifty addresses takes long enough that peers marked the
+// coordinator Unknown mid-batch, and the next node in ID order took over and
+// re-placed addresses the first one was still holding (docs/TEST-PLAN.md
+// defects #2/#26).
+func clusterCoordinator(members map[string]*Member, grace time.Duration) string {
 	coordinator := ""
 	for id, member := range members {
 		member.Lock()
-		healthy := member.Status == StatusActive || member.Status == StatusPassive
+		healthy := member.Status == StatusActive || member.Status == StatusPassive ||
+			(member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace)
 		member.Unlock()
 		if healthy && (coordinator == "" || id < coordinator) {
 			coordinator = id
 		}
 	}
 	return coordinator
+}
+
+// failoverGrace is how long a node may go without answering a health check
+// before the cluster acts on its absence — the same limit active-passive
+// failover already waits out before moving addresses.
+func (h *HealthChecker) failoverGrace() time.Duration {
+	return time.Duration(h.members.config.Pulse.FailOverLimit) * time.Millisecond
 }
 
 // resolveDuplicateAssignments finds IPs tracked by more than one healthy
@@ -775,6 +812,39 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 		node.Lock()
 		ips := append([]string{}, node.ActiveIPs...)
 		node.Unlock()
+
+		// A node listing the same IP twice is a bookkeeping duplicate, not a
+		// conflict: the address is up once and belongs here. Treating it as a
+		// conflict brought the node's own legitimate address down and left it
+		// hosted by nobody until the next orphan sweep re-placed it — the same
+		// address going missing cluster-wide that TC-6 kept measuring
+		// (docs/TEST-PLAN.md defects #2/#26). Collapse the list instead.
+		seenHere := make(map[string]bool, len(ips))
+		deduped := false
+		for _, ip := range ips {
+			if seenHere[ip] {
+				deduped = true
+				continue
+			}
+			seenHere[ip] = true
+		}
+		if deduped {
+			h.logger.Warnf("ACTIVE_CHECK: %s recorded the same IP more than once, collapsing its assignment list",
+				node.Hostname)
+			unique := make([]string, 0, len(seenHere))
+			for _, ip := range ips {
+				if seenHere[ip] {
+					unique = append(unique, ip)
+					delete(seenHere, ip)
+				}
+			}
+			node.Lock()
+			node.ActiveIPs = unique
+			node.Unlock()
+			ips = unique
+			resolved = true
+		}
+
 		for _, ip := range ips {
 			owner, seen := owners[ip]
 			if !seen {
@@ -802,18 +872,27 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool {
 	// Collect IPs hosted by healthy nodes; clear stranded assignments from
 	// failed nodes so their IPs count as orphaned.
+	//
+	// A node only counts as failed once it has been silent for the failover
+	// limit. Acting on the first missed check reclaimed addresses from a node
+	// that was merely busy — and the node that gets busiest is the coordinator
+	// part-way through a batch of moves, so its peers declared its addresses
+	// orphaned and brought them up alongside the copies it was still serving
+	// (docs/TEST-PLAN.md defects #2/#26).
+	grace := h.failoverGrace()
 	hosted := make(map[string]bool)
 	for _, member := range members {
 		member.Lock()
-		switch member.Status {
-		case StatusActive, StatusPassive:
+		switch {
+		case member.Status == StatusActive || member.Status == StatusPassive,
+			member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace:
 			for _, ip := range member.ActiveIPs {
 				hosted[ip] = true
 			}
-		case StatusUnknown:
+		case member.Status == StatusUnknown:
 			if len(member.ActiveIPs) > 0 {
-				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s",
-					len(member.ActiveIPs), member.Hostname)
+				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s (silent for %s)",
+					len(member.ActiveIPs), member.Hostname, time.Since(member.LastHCResponse).Round(time.Second))
 				member.ActiveIPs = nil
 				member.LoadFactor = 0
 			}
@@ -856,39 +935,68 @@ func orphanedGroupIPs(groups map[string][]string, hosted map[string]bool) []stri
 	return orphaned
 }
 
-// rebalanceActiveActive moves IPs from the most-loaded node to the
-// least-loaded one until the cluster is balanced (difference <= 1). This is
-// what tops up freshly joined and failed-back nodes, which otherwise sit
-// Active but empty forever. Returns true if any IP was moved.
+// rebalanceActiveActive moves IPs from over-loaded nodes to under-loaded ones
+// until the cluster is balanced (difference <= 1). This is what tops up
+// freshly joined and failed-back nodes, which otherwise sit Active but empty
+// forever. Returns true if any IP was moved.
+//
+// Moves are planned in one pass and applied a batch per node pair. Doing them
+// one address at a time cost a full IP-failover round trip each — roughly one
+// address every eleven seconds on the whitecrane cluster, so the ~150 moves a
+// switch out of active-passive needs took about 27 minutes to converge
+// (docs/TEST-PLAN.md defects #2/#26).
 func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 	if h.server == nil {
 		return false
 	}
 
-	totalIPs := 0
-	for _, ips := range h.members.config.Groups {
-		totalIPs += len(ips)
+	nodes := rebalanceCandidates(members)
+	moves := planRebalanceMoves(nodes)
+	if len(moves) == 0 {
+		return false
 	}
 
 	moved := false
-	// Each successful move shrinks the imbalance, so the total IP count
-	// bounds the loop.
-	for i := 0; i < totalIPs; i++ {
-		src, dst, ip := planRebalanceMove(rebalanceCandidates(members))
-		if src == nil {
-			break
-		}
-		h.logger.Infof("ACTIVE_CHECK: rebalancing IP %s from %s to %s", ip, src.Hostname, dst.Hostname)
-		if err := h.server.OrchestrateIPFailover(src.ID, dst.ID, []string{ip}); err != nil {
-			h.logger.Error("ACTIVE_CHECK: rebalance move failed", "ip", ip, "error", err)
-			break
-		}
+	for _, move := range moves {
+		src, dst := nodes[move.Src], nodes[move.Dst]
+
+		// Re-read under the lock: the plan came from a snapshot, and a
+		// concurrent ConfigSync self-report may have shrunk the source since.
 		src.Lock()
-		src.ActiveIPs = removeIPFromList(src.ActiveIPs, ip)
+		count := min(move.Count, len(src.ActiveIPs))
+		ips := append([]string{}, src.ActiveIPs[len(src.ActiveIPs)-count:]...)
 		src.Unlock()
+		if len(ips) == 0 {
+			continue
+		}
+
+		h.logger.Infof("ACTIVE_CHECK: rebalancing %d IP(s) from %s to %s", len(ips), src.Hostname, dst.Hostname)
+		if err := h.server.OrchestrateIPFailover(src.ID, dst.ID, ips); err != nil {
+			h.logger.Error("ACTIVE_CHECK: rebalance move failed", "count", len(ips), "error", err)
+			break
+		}
+
+		src.Lock()
+		for _, ip := range ips {
+			src.ActiveIPs = removeIPFromList(src.ActiveIPs, ip)
+		}
+		src.Unlock()
+
+		// Skip what the destination already records. A concurrent coordinator,
+		// or a self-report that landed mid-move, can have credited it already,
+		// and a doubled entry is worse than a missing one: the dedup pass then
+		// has to decide whether the address is a conflict.
 		dst.Lock()
+		held := make(map[string]bool, len(dst.ActiveIPs))
+		for _, ip := range dst.ActiveIPs {
+			held[ip] = true
+		}
+		for _, ip := range ips {
+			if !held[ip] {
+				dst.ActiveIPs = append(dst.ActiveIPs, ip)
+			}
+		}
 		dst.Status = StatusActive
-		dst.ActiveIPs = append(dst.ActiveIPs, ip)
 		dst.Unlock()
 		moved = true
 	}
@@ -911,10 +1019,10 @@ func rebalanceCandidates(members map[string]*Member) []*Member {
 	return nodes
 }
 
-// planRebalanceMove returns the next IP move that reduces imbalance across
-// nodes, or nils when the assignment is already balanced (max-min <= 1).
-// Nodes must be sorted by ID so ties resolve deterministically.
-func planRebalanceMove(nodes []*Member) (*Member, *Member, string) {
+// planRebalanceMoves returns every IP move needed to balance nodes, batched per
+// source/destination pair, or nothing when the assignment is already balanced
+// (max-min <= 1). Nodes must be sorted by ID so ties resolve deterministically.
+func planRebalanceMoves(nodes []*Member) []ipam.Move {
 	snapshots := make([]ipam.Node, 0, len(nodes))
 	for _, node := range nodes {
 		node.Lock()
@@ -925,17 +1033,26 @@ func planRebalanceMove(nodes []*Member) (*Member, *Member, string) {
 		})
 		node.Unlock()
 	}
+	return ipam.PlanMoves(snapshots)
+}
 
-	srcIdx, dstIdx, ok := ipam.PlanMove(snapshots)
-	if !ok {
-		return nil, nil, ""
+// recoveredStatus returns the status a reachable node that was Unknown should
+// return to.
+//
+// Every eligible node is Active in active-active, so recovering to Passive
+// there is a demotion the mode has no concept of — and an expensive one. A
+// non-Active node has its recorded assignments cleared on the next broadcast
+// and every cluster floating IP stripped by the IP monitor, so the coordinator
+// sees those addresses orphaned and re-places them, only for the node to go
+// Active again on the next BringUpIP. That loop kept addresses moving between
+// owners and briefly off the cluster entirely (docs/TEST-PLAN.md defects
+// #2/#26). The auto-failback path already makes this distinction; this is the
+// same decision with auto-failback off.
+func recoveredStatus(mode string) MemberStatus {
+	if mode == "active-active" {
+		return StatusActive
 	}
-
-	src, dst := nodes[srcIdx], nodes[dstIdx]
-	src.Lock()
-	ip := src.ActiveIPs[len(src.ActiveIPs)-1]
-	src.Unlock()
-	return src, dst, ip
+	return StatusPassive
 }
 
 // removeIPFromList returns ips with target removed.
