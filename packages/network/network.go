@@ -19,9 +19,11 @@ package network
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/utils"
@@ -191,6 +193,71 @@ func SendGARP(iface, ip string) error {
 	if err != nil {
 		log.Error("failed to GARP. " + err.Error())
 		return err
+	}
+	return nil
+}
+
+// garpFanout bounds how many arping processes announce at once.
+//
+// Each SendGARP blocks for roughly four seconds — arping paces five packets a
+// second apart — so announcing a large floating IP group one address at a time
+// takes minutes. The processes spend that time asleep rather than on CPU, so the
+// bound exists only to cap process and socket count, not to ration work.
+const garpFanout = 32
+
+// SendGARPBatch announces every ip on iface, up to garpFanout at a time.
+//
+// A group of 200 addresses announced serially blocks the caller for over ten
+// minutes. That is long enough for peers to stop seeing the node as Active and
+// elect a replacement while it is still holding every address — the origin of the
+// TC-6 split-brain (docs/TEST-PLAN.md defects #4/#8). Announcing concurrently
+// brings the same group down to seconds.
+//
+// Announcement is advisory: the addresses are already up and serving before this
+// runs, and a switch relearns them on the next ARP exchange regardless. So a
+// failure is reported for logging but never means the address is not up.
+func SendGARPBatch(iface string, ips []string) error {
+	if len(ips) == 0 {
+		return nil
+	}
+	if exists, _ := InterfaceExist(iface); !exists {
+		log.Error("Unable to GARP as the network interface does not exist", "iface", iface)
+		return errors.New("network interface does not exist")
+	}
+	return sendGARPBatch(iface, ips, SendGARP)
+}
+
+// announceFunc announces a single address on an interface.
+type announceFunc func(iface, ip string) error
+
+// sendGARPBatch is the fan-out half of SendGARPBatch, with the announcement
+// injected. The real one execs arping, so this is where the concurrency bound and
+// the failure reporting can be tested without a network or a Linux host.
+func sendGARPBatch(iface string, ips []string, announce announceFunc) error {
+	sem := make(chan struct{}, garpFanout)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var failed []string
+
+	for _, ip := range ips {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if err := announce(iface, ip); err != nil {
+				mu.Lock()
+				failed = append(failed, ip)
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+
+	if len(failed) > 0 {
+		return fmt.Errorf("failed to announce %d of %d address(es) on %s (e.g. %s)",
+			len(failed), len(ips), iface, strings.Join(failed[:min(3, len(failed))], ", "))
 	}
 	return nil
 }

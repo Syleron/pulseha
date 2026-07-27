@@ -116,8 +116,6 @@ func (m *Member) Close() {
 // In active-active mode the node receives its assigned subset of IPs.
 func (m *Member) MakeActive(ips []string) error {
 	m.Lock()
-	defer m.Unlock()
-
 	m.Status = StatusActive
 	m.ActiveIPs = ips
 	if m.Capacity > 0 {
@@ -125,7 +123,15 @@ func (m *Member) MakeActive(ips []string) error {
 	} else {
 		m.LoadFactor = 1.0
 	}
+	m.Unlock()
 
+	// Deliberately outside the lock. Bringing up a large group touches the network
+	// for every address, and every reader of this member's status — health check
+	// responses included — needs the same lock. Holding it across the bring-up made
+	// an Active node with a big group look dead to its peers (docs/TEST-PLAN.md
+	// defects #4/#8). The state above is already committed, so a concurrent reader
+	// sees this node as Active with its IPs assigned while they are coming up, which
+	// is the honest answer: it owns them.
 	return m.BringUpIPs(ips)
 }
 
@@ -201,6 +207,12 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 		m.memberList.ipMonitor.UpdateExpectedIPs(iface, ips)
 	}
 
+	// Announcement is deferred until every address is up, then done in one batch.
+	// Per-IP GARP inside this loop made the loop take four seconds an address, so a
+	// large group kept this node unresponsive long enough for peers to elect a
+	// replacement while it still held every IP (docs/TEST-PLAN.md defects #4/#8).
+	upIPs := make([]string, 0, len(ips))
+
 	for _, ip := range ips {
 		m.logger.Debug("Bringing up IP on interface", "ip", ip, "iface", iface)
 
@@ -224,13 +236,14 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 			return fmt.Errorf("failed to bring up IP %s on interface %s: %v", ip, iface, err)
 		}
 
-		// Send gratuitous ARP to update network
-		if err := network.SendGARP(iface, ip); err != nil {
-			m.logger.Warn("Failed to send GARP", "ip", ip, "iface", iface, "error", err)
-			// Don't return error as the IP is still up
-		}
-
+		upIPs = append(upIPs, ip)
 		m.logger.Info("Successfully brought up IP on interface", "ip", ip, "iface", iface)
+	}
+
+	// Announce the whole set. A failure here leaves the addresses up and serving,
+	// so it is logged rather than returned.
+	if err := network.SendGARPBatch(iface, upIPs); err != nil {
+		m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
 	}
 
 	return nil

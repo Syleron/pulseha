@@ -2588,10 +2588,11 @@ func (s *Server) BroadcastVoteRequest(sessionID string, voteType, subject, descr
 	return fmt.Errorf("failed to broadcast vote request to any nodes: %v", broadcastErrors)
 }
 
-// pendingDemotion is a node whose floating IPs still have to be released.
-// Releasing them on a remote node is a synchronous gRPC call, so the work is
-// deferred until the server lock has been dropped.
-type pendingDemotion struct {
+// pendingIPWork is a node whose floating IPs still have to be released or brought
+// up. Both are synchronous network operations — a gRPC call for a remote node, an
+// address-by-address bring-up locally — so the work is deferred until the server
+// lock has been dropped rather than blocking every other daemon operation.
+type pendingIPWork struct {
 	member *membership.Member
 	ips    []string
 }
@@ -2625,7 +2626,9 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	}
 
 	// IP releases owed by nodes demoted below, run after s.Unlock().
-	var demotions []pendingDemotion
+	var demotions []pendingIPWork
+	// The IPs the consolidated Active must bring up, likewise run after s.Unlock().
+	var activation *pendingIPWork
 
 	// Update mode in config
 	s.config.Pulse.Mode = req.Mode
@@ -2702,15 +2705,33 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 				// needs no call at all: refreshLocalMonitorExpectedIPs below
 				// makes the monitor strip the IPs now that it isn't Active.
 				if len(heldIPs) > 0 && !member.IsLocal() {
-					demotions = append(demotions, pendingDemotion{member: member, ips: heldIPs})
+					demotions = append(demotions, pendingIPWork{member: member, ips: heldIPs})
 				}
 			}
 
 			// config.Groups is the authoritative IP source: member.ActiveIPs is
 			// empty on nodes promoted by election, and only groups actually
 			// assigned to this node's interfaces can be brought up on it.
-			if err := activeNode.MakeActive(s.groupIPsForNode(activeNode.ID)); err != nil {
-				s.logger.Error("Failed to bring up IPs on active node during mode switch", "error", err)
+			activeIPs := s.groupIPsForNode(activeNode.ID)
+
+			// Record the promotion now so the epoch bump, monitor refresh and state
+			// broadcast below all see this node as the Active owner of these IPs, but
+			// leave the bring-up itself until s.Lock() is dropped. Bringing up a large
+			// group under the server lock stalled every other operation on this daemon
+			// — including the health checks peers use to decide it is still alive
+			// (docs/TEST-PLAN.md defects #4/#8) — and it claimed the addresses before
+			// the demoted nodes had released them.
+			activeNode.Lock()
+			activeNode.Status = membership.StatusActive
+			activeNode.ActiveIPs = activeIPs
+			if activeNode.Capacity > 0 {
+				activeNode.LoadFactor = float64(len(activeIPs)) / float64(activeNode.Capacity)
+			} else {
+				activeNode.LoadFactor = 1.0
+			}
+			activeNode.Unlock()
+			if len(activeIPs) > 0 {
+				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
 			}
 
 			// In active-passive the active node is the leader; peers accept
@@ -2737,6 +2758,15 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			if err := demotion.member.BringDownIPs(demotion.ips); err != nil {
 				s.logger.Warn("Failed to release IPs from demoted node during mode switch",
 					"hostname", demotion.member.Hostname, "error", err)
+			}
+		}
+
+		// Claim only after the releases above, so the group is not briefly up on both
+		// the old and the new owner.
+		if activation != nil {
+			if err := activation.member.BringUpIPs(activation.ips); err != nil {
+				s.logger.Error("Failed to bring up IPs on active node during mode switch",
+					"hostname", activation.member.Hostname, "error", err)
 			}
 		}
 
@@ -4938,6 +4968,12 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		return &rpc.UpIpResponse{Success: false, Message: "interface does not exist"}, nil
 	}
 
+	// Announcements are collected and sent as one batch once every address is up.
+	// Announcing inside this loop cost about four seconds per address, which for a
+	// large group held this RPC — and the caller waiting on it — open for minutes
+	// (docs/TEST-PLAN.md defects #4/#8).
+	upIPs := make([]string, 0, len(req.Ips))
+
 	for _, raw := range req.Ips {
 		ip := raw
 		// Normalize to CIDR
@@ -4962,9 +4998,9 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 			s.logger.Warn("DEBUG: CheckIfIPExists for IP", "ip", ipOnly.String(), "exists", ex, "iface", eIface, "targetIface", req.Iface, "error", checkErr)
 			if ex {
 				if eIface == req.Iface {
-					// Already present on desired interface: send GARP and continue
+					// Already present on desired interface: announce it and continue
 					s.logger.Info("IP already exists on target interface, skipping", "ip", ip, "iface", req.Iface)
-					_ = network.SendGARP(req.Iface, ip)
+					upIPs = append(upIPs, ip)
 					continue
 				}
 				// Present on a different interface: try to remove there first (best-effort)
@@ -4977,7 +5013,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
 				if ex && eIface == req.Iface {
 					s.logger.Info("BringUpIP: IP assignment failed but IP is now present on target interface", "ip", ip, "iface", req.Iface)
-					_ = network.SendGARP(req.Iface, ip)
+					upIPs = append(upIPs, ip)
 					continue
 				}
 			}
@@ -4987,7 +5023,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
 				if ex && eIface == req.Iface {
 					s.logger.Info("BringUpIP: Final check confirms IP is present on target interface, treating as success")
-					_ = network.SendGARP(req.Iface, ip)
+					upIPs = append(upIPs, ip)
 					continue
 				}
 			}
@@ -4995,8 +5031,12 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 			return &rpc.UpIpResponse{Success: false, Message: err.Error()}, nil
 		}
 
-		// Best-effort GARP
-		_ = network.SendGARP(req.Iface, ip)
+		upIPs = append(upIPs, ip)
+	}
+
+	// Best-effort announcement of the whole set; the addresses are already up.
+	if err := network.SendGARPBatch(req.Iface, upIPs); err != nil {
+		s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
 	}
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
