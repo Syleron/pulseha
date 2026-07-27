@@ -219,6 +219,19 @@ func (m *IPMonitor) enforceExpectations() {
 		expectations[iface] = cpy
 	}
 	m.RUnlock()
+
+	// In active-active the cached set is not trustworthy on its own: several code
+	// paths write it, and the one that matters here — a node that was the sole
+	// active-passive Active before a mode switch — keeps the whole group until
+	// something happens to recompute it. That node then re-adds all 201 addresses
+	// every tick and the cluster never converges (docs/TEST-PLAN.md defects #2/#26).
+	// Recomputing from the node's own assignments each tick makes the monitor
+	// self-correcting regardless of which writer last touched the cache.
+	if member.Status == StatusActive && m.members.config.Pulse.Mode == "active-active" {
+		expectations = m.deriveExpectedIPs(localID, member)
+		m.UpdateExpectedIPsAll(expectations)
+	}
+
 	m.logger.Info("ENFORCE: Current expectations", "expectations", expectations)
 
 	// Build snapshot of current interface assignments to avoid repeated netlink allocations during checks.

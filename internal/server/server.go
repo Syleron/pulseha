@@ -2355,6 +2355,52 @@ func (s *Server) RefreshLocalMonitorExpectedIPs() {
 	s.logger.Debug("REFRESH: RefreshLocalMonitorExpectedIPs completed")
 }
 
+// expectedIfaceIPs returns the floating IPs the given node should hold on iface.
+//
+// In active-passive the Active node owns every IP of every group mapped to that
+// interface. In active-active the groups are shared, so a node owns only the
+// subset assigned to it. Seeding the monitor with the whole group in that mode
+// makes every Active node's next enforce tick re-add all of them, which undoes
+// each rebalance move about as fast as the coordinator can make one — the
+// cluster then never converges and addresses flap between owners
+// (docs/TEST-PLAN.md defects #2/#26).
+//
+// An active-active node with no assignments expects nothing, which is the point:
+// it should hold no addresses until the coordinator gives it some.
+func (s *Server) expectedIfaceIPs(nodeID, iface string) []string {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return nil
+	}
+
+	// nil means "no restriction" (active-passive); an empty non-nil map means
+	// "assigned nothing", and the two must not collapse into each other.
+	var assigned map[string]bool
+	if s.config.Pulse.Mode == "active-active" {
+		assigned = make(map[string]bool)
+		if m := s.memberList.GetMemberByID(nodeID); m != nil {
+			for _, ip := range m.GetActiveIPs() {
+				assigned[ip] = true
+			}
+		}
+	}
+
+	var ifaceIPs []string
+	for _, g := range node.IPGroups[iface] {
+		ips, ok := s.config.Groups[g]
+		if !ok {
+			s.logger.Warn("Group not found in config", "group", g, "iface", iface)
+			continue
+		}
+		for _, ip := range ips {
+			if assigned == nil || assigned[ip] {
+				ifaceIPs = append(ifaceIPs, ip)
+			}
+		}
+	}
+	return ifaceIPs
+}
+
 // refreshLocalMonitorExpectedIPs updates the IP monitor's expected IPs for the local node
 // Only enforces when the local member is Active; clears expectations when not active
 func (s *Server) refreshLocalMonitorExpectedIPs() {
@@ -2394,30 +2440,10 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 		return
 	}
 
-	// In active-active, only expect the IPs assigned to this node, not all group IPs.
-	assignedIPs := make(map[string]bool)
-	if s.config.Pulse.Mode == "active-active" {
-		for _, ip := range member.ActiveIPs {
-			assignedIPs[ip] = true
-		}
-	}
-
 	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(member.Status))
 	for iface := range node.IPGroups {
-		var ifaceIPs []string
 		s.logger.Debug("REFRESH: Processing interface", "iface", iface, "groups", node.IPGroups[iface])
-		for _, g := range node.IPGroups[iface] {
-			if ips, ok := s.config.Groups[g]; ok {
-				for _, ip := range ips {
-					if len(assignedIPs) == 0 || assignedIPs[ip] {
-						ifaceIPs = append(ifaceIPs, ip)
-					}
-				}
-				s.logger.Debug("REFRESH: Added IPs from group", "group", g, "ips", ips)
-			} else {
-				s.logger.Warn("REFRESH: Group not found in config", "group", g)
-			}
-		}
+		ifaceIPs := s.expectedIfaceIPs(localID, iface)
 		s.ipMonitor.ClearExpectedIPs(iface)
 		if len(ifaceIPs) > 0 {
 			s.logger.Info("REFRESH: Updating expected IPs for Active node", "iface", iface, "ips", ifaceIPs)
@@ -3333,12 +3359,7 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 			node := s.config.Nodes[localID]
 			if node != nil {
 				iface := req.Interface
-				var ifaceIPs []string
-				for _, g := range node.IPGroups[iface] {
-					if ips, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, ips...)
-					}
-				}
+				ifaceIPs := s.expectedIfaceIPs(localID, iface)
 				s.ipMonitor.ClearExpectedIPs(iface)
 				if len(ifaceIPs) > 0 {
 					s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -3453,12 +3474,7 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 			node := s.config.Nodes[localID]
 			if node != nil {
 				iface := req.Interface
-				var ifaceIPs []string
-				for _, g := range node.IPGroups[iface] {
-					if ips, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, ips...)
-					}
-				}
+				ifaceIPs := s.expectedIfaceIPs(localID, iface)
 				s.ipMonitor.ClearExpectedIPs(iface)
 				if len(ifaceIPs) > 0 {
 					s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -4730,12 +4746,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 				if node != nil {
 					for iface := range node.IPGroups {
 						// Recompute expected IPs (likely empty at creation time)
-						var ifaceIPs []string
-						for _, g := range node.IPGroups[iface] {
-							if ips, ok := s.config.Groups[g]; ok {
-								ifaceIPs = append(ifaceIPs, ips...)
-							}
-						}
+						ifaceIPs := s.expectedIfaceIPs(localID, iface)
 						s.ipMonitor.ClearExpectedIPs(iface)
 						if len(ifaceIPs) > 0 {
 							s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -5423,15 +5434,10 @@ func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string
 	if s.ipMonitor != nil && newNodeID == s.config.Pulse.LocalNode {
 		s.logger.Debug("IP_FAILOVER: Refreshing IP monitor expected IPs", "interface_count", len(newIfaceToIPs))
 		for iface := range newIfaceToIPs {
-			// Recompute expected IPs for this interface from authoritative config
-			var ifaceIPs []string
-			if localNode := s.config.Nodes[newNodeID]; localNode != nil {
-				for _, g := range localNode.IPGroups[iface] {
-					if grpIPs, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, grpIPs...)
-					}
-				}
-			}
+			// Recompute from authoritative config, honouring this node's assignments.
+			// The BringUpIP above has already recorded the moved addresses per-IP, so
+			// in active-active this must not widen the set back out to the whole group.
+			ifaceIPs := s.expectedIfaceIPs(newNodeID, iface)
 			s.ipMonitor.ClearExpectedIPs(iface)
 			if len(ifaceIPs) > 0 {
 				s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)

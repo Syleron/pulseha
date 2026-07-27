@@ -101,6 +101,27 @@ func (m *IPMonitor) UpdateExpectedIPs(iface string, ips []string) {
 	m.TriggerEnforce()
 }
 
+// UpdateExpectedIPsAll replaces the whole expectation map.
+//
+// Deliberately does not TriggerEnforce: the caller is the enforce loop itself,
+// which is about to act on this set, and re-arming from inside it would spin.
+func (m *IPMonitor) UpdateExpectedIPsAll(expected map[string][]string) {
+	if m == nil {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	replacement := make(map[string][]string, len(expected))
+	for iface, ips := range expected {
+		ipsCopy := make([]string, len(ips))
+		copy(ipsCopy, ips)
+		slices.Sort(ipsCopy)
+		replacement[iface] = ipsCopy
+	}
+	m.expectedIPs = replacement
+}
+
 // AddExpectedIPs adds IPs to the expected list for an interface
 func (m *IPMonitor) AddExpectedIPs(iface string, ips []string) {
 	if m == nil {
@@ -175,6 +196,56 @@ func (m *IPMonitor) GetExpectedIPs(iface string) []string {
 	return []string{}
 }
 
+// deriveExpectedIPs returns iface -> floating IPs the given Active member should
+// hold, according to config and cluster mode.
+//
+// In active-passive the sole Active owns every IP of every group mapped to the
+// interface. In active-active the groups are shared, so the node owns only the
+// subset assigned to it; expecting the whole group there made each Active node's
+// enforce tick re-add all of it, undoing the coordinator's rebalance moves as
+// fast as they were made (docs/TEST-PLAN.md defects #2/#26).
+//
+// The member's own ActiveIPs is the authority for that subset. It is safe to
+// trust: BroadcastClusterState carries statuses and leases but never assignments,
+// so no peer can overwrite what this node knows it was given.
+func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string][]string {
+	nodeCfg, ok := m.members.config.Nodes[nodeID]
+	if !ok || nodeCfg == nil {
+		return nil
+	}
+
+	// nil means "no restriction"; an empty non-nil map means "assigned nothing".
+	// Collapsing the two is what let an unassigned node claim the whole group.
+	var assigned map[string]bool
+	if m.members.config.Pulse.Mode == "active-active" {
+		assigned = make(map[string]bool)
+		for _, ip := range member.GetActiveIPs() {
+			assigned[ip] = true
+		}
+	}
+
+	expected := make(map[string][]string, len(nodeCfg.IPGroups))
+	for iface, groups := range nodeCfg.IPGroups {
+		var ifaceIPs []string
+		for _, g := range groups {
+			ips, ok := m.members.config.Groups[g]
+			if !ok {
+				m.logger.Warn("IP monitor: group not found in config", "group", g, "iface", iface)
+				continue
+			}
+			for _, ip := range ips {
+				if assigned == nil || assigned[ip] {
+					ifaceIPs = append(ifaceIPs, ip)
+				}
+			}
+		}
+		if len(ifaceIPs) > 0 {
+			expected[iface] = ifaceIPs
+		}
+	}
+	return expected
+}
+
 // initializeExpectedIPs initializes the expected IPs from the current member
 func (m *IPMonitor) initializeExpectedIPs() error {
 	m.logger.Debug("IP monitor: starting initializeExpectedIPs")
@@ -208,24 +279,9 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 
 	if localMember.Status == StatusActive {
 		m.logger.Info("IP monitor init: node is Active, setting up expected IPs")
-		// Build expected IPs from group assignments in config
-		for iface, groups := range nodeCfg.IPGroups {
-			var ifaceIPs []string
-			m.logger.Debug("IP monitor init: processing interface", "iface", iface, "groups", groups)
-			for _, g := range groups {
-				if ips, ok := m.members.config.Groups[g]; ok {
-					ifaceIPs = append(ifaceIPs, ips...)
-					m.logger.Debug("IP monitor init: added IPs from group", "group", g, "ips", ips)
-				} else {
-					m.logger.Warn("IP monitor init: group not found in config", "group", g)
-				}
-			}
-			if len(ifaceIPs) > 0 {
-				ipsCopy := make([]string, len(ifaceIPs))
-				copy(ipsCopy, ifaceIPs)
-				m.expectedIPs[iface] = ipsCopy
-				m.logger.Info("IP monitor init: set expected IPs for interface", "iface", iface, "ips", ipsCopy)
-			}
+		for iface, ips := range m.deriveExpectedIPs(localNodeID, localMember) {
+			m.expectedIPs[iface] = ips
+			m.logger.Info("IP monitor init: set expected IPs for interface", "iface", iface, "ips", ips)
 		}
 		m.logger.Info("IP monitor initialization complete for Active node", "expected_ifaces", len(m.expectedIPs), "expectedIPs", m.expectedIPs)
 	} else {

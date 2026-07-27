@@ -168,6 +168,22 @@ func (m *Member) AddActiveIPs(ips []string) error {
 	return m.BringUpIPs(added)
 }
 
+// GetActiveIPs returns a copy of the IPs this member currently hosts.
+//
+// Callers deciding what a node should hold need this under the member lock —
+// the health check loop and the IP monitor both read it while promotions and
+// rebalance moves are writing it.
+func (m *Member) GetActiveIPs() []string {
+	m.Lock()
+	defer m.Unlock()
+	if len(m.ActiveIPs) == 0 {
+		return nil
+	}
+	ips := make([]string, len(m.ActiveIPs))
+	copy(ips, m.ActiveIPs)
+	return ips
+}
+
 // BringUpIPs brings up the specified IPs on this member
 func (m *Member) BringUpIPs(ips []string) error {
 	// Resolve interface per IP using group assignments
