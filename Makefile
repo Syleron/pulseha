@@ -1,4 +1,4 @@
-.PHONEY: clean get protos test integration-test quiet-integration-test test-all
+.PHONEY: clean get tools protos test integration-test quiet-integration-test test-all
 
 VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
@@ -22,8 +22,16 @@ genemailalerts: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
 	 go mod download
-	 go get -u google.golang.org/protobuf/cmd/protoc-gen-go
-	 go get -u google.golang.org/grpc/cmd/protoc-gen-go-grpc
+# Installs the protoc plugins that `protos` needs on PATH. Run once, or after
+# changing the protobuf/grpc versions — deliberately not a prerequisite of
+# `build`: `go install pkg@ver` is module-agnostic and leaves go.mod alone,
+# whereas the `go get -u` calls this replaces rewrote go.mod and go.sum on every
+# single build. Keep the versions in step with .github/workflows/{dev,master}.yml
+# — rpc/*.pb.go is generated rather than committed, so a skew between a
+# developer and CI surfaces as differing generated code.
+tools:
+	 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.7
+	 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 cli: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulsectl/bin/pulsectl ./cmd/pulsectl
 protos:
