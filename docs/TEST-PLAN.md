@@ -495,7 +495,9 @@ not just `pulsectl`).
 | TC-6 | #17 the mode change is lost entirely if `SetMode` is interrupted | **Open** — cluster ended in active-passive; no retry, no propagation |
 | TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
-| TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, unverified live** — `SetMode` now propagates mode + states in one ConfigSync before moving any address. See "Root cause (defect #27)" below |
+| TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
+| TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Open** — run 15: `duplicated=201` for ~20s (was ~90-100s). A peer can hold `mode=active-passive` and `self=Active` at once, so its ENFORCE loop widens expectations to all 201 and out-races the incoming demotion. TC-8's settled pass criterion still met. See run 15 below |
+| TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Same root shape as the rebalance gap (`OrchestrateIPFailover` releases before it claims) |
 
 ---
 
@@ -838,10 +840,17 @@ Two things ruled out along the way, so they need not be re-examined:
   `checksWithoutChange < viewStableCycles` guard that `reconcileActiveActive`
   already has would not have prevented this: node-2's competing consolidation fired
   31 seconds after the switch, far outside any 3-cycle window.
-- **Not the monitor re-widening its expectations.** The per-tick recompute at
+- ~~**Not the monitor re-widening its expectations.** The per-tick recompute at
   `ip_monitor_linux.go:230` is gated on active-active, so in active-passive the
   cached set is used and a demoted peer's stale expectation is its old ~50, not the
-  whole group. The whole-group claim comes from the consolidation path only.
+  whole group. The whole-group claim comes from the consolidation path only.~~
+  **Wrong — disproved by the run-15 journals below.** Checking only the gate at
+  `ip_monitor_linux.go:230` was too narrow. That gate guards the *per-tick* recompute,
+  but the config-update path refreshes the monitor's expectations by a different route,
+  and it widens them to the whole group the moment the mode becomes active-passive
+  while the node still reads its own status as Active. The monitor is not the only
+  source of a whole-group claim, but it is *a* source, and on run 15 it was the
+  dominant one.
 
 **Fixed:** `SetMode` now sends the config and the member states in a single
 ConfigSync, before any address moves. `ConfigSync` already recognises a full config
@@ -852,20 +861,72 @@ acting as coordinator at all. Demoted peers also now release from their own IP
 monitors as soon as the message lands, rather than waiting on the serial
 `BringDownIPs` calls. Unit test: `TestConfigAndStatePayloadCarriesModeAndStatesTogether`.
 
-**Not yet verified live** — needs a TC-8 pass on whitecrane, and the cluster must be
-rebuilt and redeployed first (it is still running the pre-dependency-upgrade binary).
-Two things to watch on that run:
-- The target is now promoted in the same message that demotes the others, so the
-  monitor-driven bring-up on the target can overlap the monitor-driven release on
-  the demoted nodes by up to one enforce tick. `SetMode`'s own explicit IP work
-  still runs releases-before-activation, so the overlap is bounded by a tick rather
-  than by the length of the switch — but confirm the peak `duplicated` is small
-  rather than assuming it.
-- Peers now receive a full config mid-switch, which triggers their `Reconfigure()`
-  and restarts their gRPC listener, so node-1's subsequent `BringDownIPs` RPCs may
-  fail transiently. That is survivable by design — the demoted peer strips the group
-  itself once it knows it is Passive — but the release should be confirmed against
-  `ip addr`, not the absence of an error.
+#### Verified live, run 15 (2026-07-27 22:56) — partially fixed
+
+Binary `e56c22289697` on all four nodes (md5 verified), reached by a rolling restart
+(passives first, Active last) which again preserved a clean `205/205 duplicated=0`
+baseline — no defect #23. Switch to active-active converged to `51/52/51/51`,
+`placements=205 unique=205 duplicated=0`, stable across three samples. TC-8 was then
+issued **from node-1, a non-coordinator** (node IDs make `049-…`/node-2 the
+coordinator), which is the configuration that produced run 14.
+
+Measured with a 2s-resolution `ip addr` sampler running on all four nodes across the
+switch, bucketed into 2s bins and de-duplicated per (bin, node, address):
+
+```
+  t(rel)  n1   n2    n3   n4    placements  unique  duplicated
+   -1      51   52    51   51      205       205        0
+   +1       1  121     1  142      265       149      116
+   +3       1  185     1  202      389       205      184
+   +5..+19  1  202     1  202      406       205      201
+   +21      1  202     1    1      205       205        0
+```
+
+**TC-8's stated pass criterion is met**: from t+21 onward exactly one Active (node-2)
+holds all 201 group addresses, the other three hold none, `205/205 duplicated=0`,
+cluster online — stable across every sample for the following 8 minutes.
+
+**The transient is reduced, not eliminated.** The two-Active window fell from ~90-100s
+(run 14) to **~20s**, but the peak is unchanged: the whole 201-address group is still up
+on two nodes for the duration. There is also a new, previously unmeasured **~2s window
+where 56 addresses are on no node at all** (`unique=149` at t+1) — the per-address
+down-then-up gap, visible here only because this run sampled at 2s.
+
+What the fix did achieve: the two deciders now **agree on the target**. node-1 logged
+`Consolidating floating IPs onto ... hostname=MC-LB-node-2`, i.e. it picked the
+coordinator, not a third node as in run 14 — so the "two consolidations onto two
+different targets" mechanism is genuinely gone, and node-1 and node-3 released
+immediately (both at 1 address by t+1).
+
+What still breaks, from node-4's journal — all of it inside 35ms:
+
+```
+22:56:33.052  node-4  Reconfiguring PulseHA server...              ← mode now active-passive
+22:56:33.075  node-4  RPC BringDownIP on iface enX0 for 50 IP(s)   ← node-1's demotion lands
+22:56:33.078  node-4  ENFORCE: Current node status ... status=Active
+22:56:33.087  node-4  ENFORCE: Node is Active, ensuring expected IPs are present
+22:56:33.088  node-4  ENFORCE: Bringing up missing IPs on Active node ...
+```
+
+node-4 applies the new mode, but its IP monitor still reads **its own status as Active**,
+and in active-passive an Active node's expectation set is the whole group. So its
+expectations widen from its 51-address share to all 201, and the ENFORCE loop re-adds
+every address the incoming demotion strips — racing it to 202. It only backs off ~20s
+later when its status actually changes.
+
+The combined ConfigSync carries `member_states` saying node-4 is Passive, but a peer's
+opinion of *the local node's own status* is deliberately not applied (the rule that also
+protects the maintenance flag), so node-4 cannot learn it is Passive from the message
+that tells it the mode changed. **Propagating mode and states atomically is necessary but
+not sufficient**: as long as a node can hold `mode=active-passive` and `self=Active`
+simultaneously, its own monitor will claim the whole group. The next fix has to close
+that specific window — either the monitor refuses to widen expectations while a mode
+change is in flight, or the demotion is what applies the mode locally, so the two can
+never be observed out of step.
+
+Second thing watched on this run and **not** observed: peers receiving a full config
+mid-switch do restart their gRPC listener, but no `BringDownIPs` failure resulted —
+releases were confirmed against `ip addr`, and node-1/node-3 reached zero immediately.
 
 The deeper fragility is untouched and still worth its own entry: **`SetMode`
 consolidates from whichever node received the CLI request, which need not be the
