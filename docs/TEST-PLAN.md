@@ -495,6 +495,7 @@ not just `pulsectl`).
 | TC-6 | #17 the mode change is lost entirely if `SetMode` is interrupted | **Open** — cluster ended in active-passive; no retry, no propagation |
 | TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
+| TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, unverified live** — `SetMode` now propagates mode + states in one ConfigSync before moving any address. See "Root cause (defect #27)" below |
 
 ---
 
@@ -790,9 +791,85 @@ Passive with 1 each, `placements=205 unique=205 duplicated=0`, exactly one Activ
 cluster online. Total time about 100 seconds.
 
 So the invariant holds and the end state is right, but `SetMode`'s active-passive
-branch consolidates onto `ConsolidationTarget` and something else promotes a second
-node anyway — the same shape as the two-Active defect that `enforceSingleActive` was
-added to catch, which means the promotion is racing the switch rather than being
-prevented by it. Every address is doubly-claimed for a minute and a half, which on a
-cluster carrying live VIPs is an ARP fight over all of them. Needs its own
-investigation; not folded into the active-active work.
+branch consolidates onto `ConsolidationTarget` and every address is doubly-claimed
+for a minute and a half, which on a cluster carrying live VIPs is an ARP fight over
+all of them.
+
+#### Root cause (defect #27) — two consolidations, not a stray promotion
+
+**The hypothesis recorded above was wrong.** Nothing "promotes a second node", and
+this is not `enforceSingleActive` losing a race with the switch. The journals for
+the 19:52:00 switch on 2026-07-27 show **two whole-group consolidations running at
+once, onto two different targets**:
+
+```
+19:52:00  node-1  Received request to change cluster mode to: active-passive
+19:52:00  node-1  Consolidating floating IPs onto ... hostname=MC-LB-node-4   ← target A
+19:52:00  node-1  Demoted node to passive ... node-2 / node-3 / node-1
+19:52:01  node-1  ACTIVE_CHECK: 3 nodes are Active ...; waiting for the coordinator
+19:52:05  node-2  ACTIVE_CHECK: redistributing 150 orphaned floating IP(s)     ← still active-active
+19:52:31  node-2  ACTIVE_CHECK: 3 nodes are Active, consolidating onto MC-LB-node-2  ← target B
+19:52:31  node-2  ACTIVE_CHECK: demotion of extra Active node was rejected hostname=MC-LB-node-3
+19:52:58  node-2  ACTIVE_CHECK: demoted extra Active node hostname=MC-LB-node-1
+19:52:59  node-2  ACTIVE_CHECK: demoted extra Active node hostname=MC-LB-node-4  ← undoes target A
+```
+
+node-1 consolidated onto node-4; node-2 — the node the cluster actually agreed was
+coordinator, as the other three all logged "waiting for the coordinator" — then
+consolidated onto *itself* and demoted node-4. In active-passive an Active node's
+expectation set is the whole group (`deriveExpectedIPs` leaves `assigned == nil`, so
+there is no per-node restriction), so two consolidation targets means the entire
+group up on two nodes. That is the `duplicated=201`.
+
+The two deciders disagreed because **`SetMode` propagated the mode change and the
+demotions it implies only after its IP work had finished, and as two separate
+messages**: `broadcastFullConfigToPeers` sends config with no states, and
+`BroadcastClusterState` sends an envelope-only payload with no config. So for over
+thirty seconds the peers held none of the switch: node-2 was still in active-active,
+still Active, still acting as active-active coordinator — hence it declaring 150
+addresses orphaned at 19:52:05 — and its member map still showed four Actives with
+active-active loads. `ConsolidationTarget` prefers the most-loaded Active, which is
+exactly the input that differs between nodes mid-rebalance, so node-1 and node-2
+computed different answers from their different maps. node-1's own demotions were
+undone within a second, which is why it was reporting three Actives at 19:52:01.
+
+Two things ruled out along the way, so they need not be re-examined:
+- **Not a view-stability problem.** Giving `enforceSingleActive` the
+  `checksWithoutChange < viewStableCycles` guard that `reconcileActiveActive`
+  already has would not have prevented this: node-2's competing consolidation fired
+  31 seconds after the switch, far outside any 3-cycle window.
+- **Not the monitor re-widening its expectations.** The per-tick recompute at
+  `ip_monitor_linux.go:230` is gated on active-active, so in active-passive the
+  cached set is used and a demoted peer's stale expectation is its old ~50, not the
+  whole group. The whole-group claim comes from the consolidation path only.
+
+**Fixed:** `SetMode` now sends the config and the member states in a single
+ConfigSync, before any address moves. `ConfigSync` already recognises a full config
+by its `pulseha` root and reads `member_states`/`epoch`/`leader_id` off the same
+object, so one payload carries both and no proto change was needed. Peers therefore
+leave active-active and learn their new status together, which stops a second node
+acting as coordinator at all. Demoted peers also now release from their own IP
+monitors as soon as the message lands, rather than waiting on the serial
+`BringDownIPs` calls. Unit test: `TestConfigAndStatePayloadCarriesModeAndStatesTogether`.
+
+**Not yet verified live** — needs a TC-8 pass on whitecrane, and the cluster must be
+rebuilt and redeployed first (it is still running the pre-dependency-upgrade binary).
+Two things to watch on that run:
+- The target is now promoted in the same message that demotes the others, so the
+  monitor-driven bring-up on the target can overlap the monitor-driven release on
+  the demoted nodes by up to one enforce tick. `SetMode`'s own explicit IP work
+  still runs releases-before-activation, so the overlap is bounded by a tick rather
+  than by the length of the switch — but confirm the peak `duplicated` is small
+  rather than assuming it.
+- Peers now receive a full config mid-switch, which triggers their `Reconfigure()`
+  and restarts their gRPC listener, so node-1's subsequent `BringDownIPs` RPCs may
+  fail transiently. That is survivable by design — the demoted peer strips the group
+  itself once it knows it is Passive — but the release should be confirmed against
+  `ip addr`, not the absence of an error.
+
+The deeper fragility is untouched and still worth its own entry: **`SetMode`
+consolidates from whichever node received the CLI request, which need not be the
+coordinator, while `enforceSingleActive` restricts the same decision to the
+coordinator.** Two deciders for one invariant will disagree again whenever their
+member maps differ. Making the switch delegate consolidation to the coordinator
+would collapse them into one, and is the better long-term shape.

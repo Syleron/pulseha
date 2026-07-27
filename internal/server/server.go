@@ -2783,11 +2783,34 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
 
-	// Propagate the new config (including the mode change) and the resulting
-	// member states to all peers, so demoted nodes stop claiming IPs instead of
-	// waiting for the next health-check broadcast to notice the change.
-	// The goroutine runs after s.Lock() is released via the deferred s.Unlock().
+	// Snapshot the decision while still holding the lock, so the goroutine below
+	// broadcasts exactly what was decided here rather than re-reading state that
+	// a health check may have moved on in the meantime.
+	switchStates := getStatusMap()
+	for id, member := range s.memberList.MembersSnapshot() {
+		member.Lock()
+		switchStates[id] = member.Status
+		member.Unlock()
+	}
+	switchEpoch := s.clusterEpoch
+	switchLeader := s.leaderID
+
+	// The goroutine runs after s.Lock() is released via the deferred s.Unlock():
+	// both the broadcast and the IP work below make blocking gRPC calls, and
+	// holding the server lock across those stalled every other operation on this
+	// daemon — including the health checks peers use to decide it is still alive
+	// (docs/TEST-PLAN.md defects #4/#8).
 	go func() {
+		// Propagate the new mode and the statuses it implies together, and before
+		// any address moves. Peers that know only half of it behave as if the
+		// switch never happened: still in active-active, still Active, still
+		// willing to act as active-active coordinator and consolidate the group
+		// somewhere else (docs/TEST-PLAN.md defect #27). Demoted peers also then
+		// release on their own, from their own IP monitors, rather than waiting on
+		// the serial BringDownIPs calls below.
+		s.broadcastConfigAndStates(switchStates, switchEpoch, switchLeader)
+		putStatusMap(switchStates)
+
 		for _, demotion := range demotions {
 			if err := demotion.member.BringDownIPs(demotion.ips); err != nil {
 				s.logger.Warn("Failed to release IPs from demoted node during mode switch",
@@ -2803,16 +2826,6 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 					"hostname", activation.member.Hostname, "error", err)
 			}
 		}
-
-		s.broadcastFullConfigToPeers()
-		states := getStatusMap()
-		for id, member := range s.memberList.MembersSnapshot() {
-			member.Lock()
-			states[id] = member.Status
-			member.Unlock()
-		}
-		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.GetLeaderID(), nil)
-		putStatusMap(states)
 	}()
 
 	return &rpc.SetModeResponse{
@@ -5764,6 +5777,82 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 		cancel()
 	}
 	return nil
+}
+
+// buildConfigAndStatePayload renders the cluster config and the member states
+// that belong with it into a single ConfigSync payload.
+//
+// ConfigSync recognises a full config by its "pulseha" root key and reads
+// member_states/epoch/leader_id off the same JSON object, so one message can
+// carry both. Keeping them in one message is the whole point — see
+// broadcastConfigAndStates.
+func buildConfigAndStatePayload(cfg *config.Config, states map[string]membership.MemberStatus,
+	epoch int64, leaderID string) ([]byte, error) {
+
+	configBytes, err := json.Marshal(cfg)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]interface{}{}
+	if err := json.Unmarshal(configBytes, &payload); err != nil {
+		return nil, err
+	}
+
+	ms := make(map[string]int, len(states))
+	for id, st := range states {
+		ms[id] = int(st)
+	}
+	payload["member_states"] = ms
+	payload["epoch"] = epoch
+	payload["leader_id"] = leaderID
+
+	return json.Marshal(payload)
+}
+
+// broadcastConfigAndStates pushes the config and the member states it implies to
+// every peer in one ConfigSync.
+//
+// Splitting the two is what broke the return to active-passive. SetMode used to
+// send the config on its own and the states afterwards, both only once its IP
+// work had finished, which left every peer holding two contradictory beliefs for
+// the length of the switch: the cluster is active-passive, and I am still Active.
+// On whitecrane at 19:52 on 2026-07-27 that window was over thirty seconds, and
+// a peer spent it still acting as active-active coordinator — redistributing 150
+// addresses it considered orphaned, then consolidating the group onto a target of
+// its own choosing while the node handling the request consolidated onto another.
+// Two whole-group consolidations onto two different nodes is how the entire group
+// ended up on two nodes at once (docs/TEST-PLAN.md defect #27).
+//
+// Peers must therefore learn the mode and their new status together, and before
+// any address moves.
+func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberStatus,
+	epoch int64, leaderID string) {
+
+	s.Lock()
+	payloadBytes, buildErr := buildConfigAndStatePayload(s.config, states, epoch, leaderID)
+	localID, _ := s.config.GetLocalNodeUUID()
+	peers := make(map[string]*config.Node, len(s.config.Nodes))
+	for id, node := range s.config.Nodes {
+		if id != localID {
+			peers[id] = node
+		}
+	}
+	s.Unlock()
+
+	if buildErr != nil {
+		s.logger.Error("Failed to build the combined config and state payload", "error", buildErr)
+		return
+	}
+
+	for id, node := range peers {
+		remoteClient, err := s.getPeerClient(id, node)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
+		cancel()
+	}
 }
 
 func (s *Server) broadcastFullConfigToPeers() {
