@@ -430,7 +430,16 @@ func (h *HealthChecker) performHealthChecks() {
 				m.LastHCResponse = time.Now()
 				m.Unlock()
 			}
-			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
+			// Deliberately the current epoch, not epoch+1. This fires on *unchanged*
+			// state, so it carries no decision — it exists to advance LastResponse and
+			// re-assert an already-agreed view. Claiming a new epoch made every node's
+			// three-second keepalive outrank the last real decision, so a peer holding a
+			// stale view could undo a coordinator assignment simply by being the most
+			// recent to speak. In active-active that became an endless loop: the
+			// coordinator assigned IPs to a node, the node went Active, a peer's next
+			// nudge demoted it at a higher epoch, its IPs were stripped, and the
+			// coordinator assigned them again ~3s later (docs/TEST-PLAN.md defect #2).
+			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch(), h.getCurrentLeaderID(), nil)
 			putMemberStatusMap(states)
 			h.logger.Debug("HEALTH_CHECK: Heartbeat convergence broadcast completed")
 		}

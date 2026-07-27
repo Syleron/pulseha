@@ -4242,11 +4242,32 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 			s.logger.Debug("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
 			syncLocalID, _ := s.config.GetLocalNodeUUID()
+
+			// Whether this sync carries a decision or merely re-asserts an agreed view.
+			// Only a strictly higher epoch is a decision; an equal epoch is a peer's
+			// heartbeat, which has no authority over what this node knows about itself.
+			decisive := incomingEpoch > currentEpoch
+
 			for id, st := range incomingMemberStates {
 				if m := s.memberList.GetMemberByID(id); m != nil {
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
+						// The same principle applied to status generally. This node knows
+						// its own status better than a peer whose view may predate the
+						// change — most importantly when a coordinator has just assigned
+						// it IPs in active-active and it has gone Active in response. An
+						// equal-epoch peer that still remembers it as Passive would
+						// otherwise demote it and have its new IPs stripped, only for the
+						// coordinator to assign them again (docs/TEST-PLAN.md defect #2).
+						// A real demotion — election, mode switch, explicit promote —
+						// always arrives at a higher epoch and still applies.
+						if !decisive && st != m.Status {
+							s.logger.Debug("CONFIG_SYNC: Ignoring peer's equal-epoch view of local status",
+								"node_id", id, "local", membership.StatusToString(m.Status),
+								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
+							continue
+						}
 						if node := s.config.Nodes[id]; node != nil {
 							if node.Maintenance {
 								// Config says we're in maintenance — enforce it.
