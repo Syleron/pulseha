@@ -5712,10 +5712,20 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 			// enforces that on the interface — so clear any stale claim before
 			// reporting state. Otherwise peers keep counting these IPs as
 			// hosted and the reconciler never re-places them, and status shows
-			// IPs on a node that doesn't actually hold them. This applies in
-			// both modes: active-passive demotions (mode switch, failover,
-			// maintenance) leave the same stale claims behind.
-			if localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
+			// IPs on a node that doesn't actually hold them. Active-passive
+			// demotions (mode switch, failover, maintenance) all leave the same
+			// stale claims behind.
+			//
+			// Active-active is excluded because there is no demotion to clean up
+			// after: every eligible node is Active, so a non-Active status there
+			// is a transient — a missed health check, a peer's stale broadcast.
+			// Discarding the assignment map over one of those cost the node every
+			// address the coordinator had given it, and the addresses were off the
+			// cluster until it noticed and re-placed them (docs/TEST-PLAN.md
+			// defects #2/#26). The map is what the coordinator decided, not a
+			// claim about this node's health.
+			if s.config.Pulse.Mode != "active-active" &&
+				localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
 				localMember.ActiveIPs = nil
 				localMember.LoadFactor = 0
 			}

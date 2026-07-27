@@ -691,3 +691,91 @@ Harness notes:
     bumped the go directive to 1.25.0). Revert those two files before committing.
   - Verified md5 on every node against the local build for all three deploys this session
     (`2f841c12315a`, `6ac61c718741`, `e53fb888e239`).
+
+## Result 2026-07-27 (runs 8-14) — TC-6 passes
+
+The switch to active-active now converges. Run 13: `50/50/50/51` RealTest addresses across
+the four nodes, `placements=205 unique=205 duplicated=0`, all four Active, cluster online,
+stable across three samples. Convergence takes about 90 seconds; the three rebalance batches
+themselves take 23.
+
+Five faults, each independently sufficient to prevent convergence. The order below is the
+order they were found, which is also the order they had to be fixed — each one hid the next.
+
+1. **`SetMode` re-placed the group instead of recording where it was.** The active-active
+   branch cleared every member's `ActiveIPs` and called `RedistributeIPs` on the whole group.
+   The former sole Active still physically held all 201 addresses, so three peers were told to
+   bring the same addresses up: ~150 duplicates before any node had made a decision. It also
+   ran those bring-ups under `s.Lock()`, so the call took 17-21s and the daemon was unavailable
+   throughout — the `pendingIPWork` deferral that the active-passive branch already used was
+   never applied here. Fixed by `seedActiveActiveAssignments`, which records the current Active
+   as owner of the group it can host and clears the rest; the coordinator's rebalance moves
+   them out, and that path brings each address down on the source. The switch call is now
+   instant.
+
+2. **The seed had to reach the coordinator, not just the node handling the request.** Run 10
+   seeded correctly on node-1 (`ip_count=201`) and node-2 — the coordinator — still logged
+   `redistributing 201 orphaned floating IP(s)`. Every node derives the same answer from the
+   config it has, so `ConfigSync` seeds on the mode transition too. No wire-format change was
+   needed: `ConfigSyncRequest.config` is free-form JSON, which also corrects the earlier note
+   that assignment propagation needs a proto field.
+
+3. **One IP-failover round trip per address.** `rebalanceActiveActive` applied
+   `ipam.PlanMove` one address at a time, about one every eleven seconds — ~27 minutes for the
+   ~150 moves the switch needs, which is why every earlier run was observed mid-convergence.
+   `ipam.PlanMoves` now plans the whole pass and aggregates per node pair, and
+   `OrchestrateIPFailover` already accepted a batch. Three calls, 23 seconds. A test asserts
+   the batched plan leaves the cluster in the same state as the incremental loop.
+
+4. **Concurrent coordinators.** Coordinator is a local decision — lowest-ID node *this node*
+   considers healthy — so it is only single-writer while every node agrees on who is healthy.
+   Bulk IP work breaks that: a node moving fifty addresses is slow enough that peers mark it
+   Unknown, and each peer that does appoints itself. Run 8 had all four nodes redistributing
+   at once, ~170 addresses claimed by more than one owner. Two changes: `clusterCoordinator`
+   and the stranded-IP sweep now wait out `FailOverLimit` before acting on a node's silence —
+   the same patience active-passive failover already applies — and `reconcileActiveActive`
+   requires `viewStableCycles` unchanged health checks before it acts. The 60-check counter
+   reset was removed so `checksWithoutChange` really counts consecutive unchanged cycles.
+
+5. **`resolveDuplicateAssignments` brought down addresses that were not duplicated.** A node
+   listing the same IP twice produced `IP 10.200.0.180/23 assigned to both MC-LB-node-3 and
+   MC-LB-node-3, removing from MC-LB-node-3` — same node both sides — and the address was
+   brought down, so a node lost an address it was the only owner of. Collapse the list instead;
+   only a *different* node's claim is a conflict. `rebalanceActiveActive` also no longer
+   credits the destination with addresses it already records.
+
+6. **The Active branch only ever added.** With the above fixed, node-2 sat at 172 live
+   addresses against a correctly-computed expectation of 50, every surplus one also up on its
+   new owner, and 3069 futile enforce bring-ups. `releaseUnassignedIPs` now brings down group
+   addresses the node is not assigned. This is the pass that was reverted in runs 5-7 as
+   unsafe, and it was: it keys off `ActiveIPs`, which back then diverged from reality. Faults
+   1-5 are what made the record trustworthy. It is also what made faults 1-5 measurable — with
+   nothing releasing, every over-assignment looked like a duplicate rather than a decision.
+
+Transient loss during convergence, reduced but not eliminated. Run 13 dipped to
+`unique=172/205` before recovering. Two writers discarded a node's assignments on a
+*transient* non-Active status, which in active-active is a missed health check rather than a
+demotion — `BroadcastClusterState` nil'd `ActiveIPs`, and the monitor's non-Active branch
+stripped every cluster floating IP (defect #14). Both are now active-active aware: the map
+survives the blip, and a non-Active node releases only what it is not assigned. A genuinely
+failed node still gives everything up, via the coordinator after `FailOverLimit`.
+
+Run 14 with those in: worst dip `unique=199/205`, peak duplication 13 (was 89-141), settling
+to `50/50/50/51`, `placements=205 unique=205 duplicated=0` and holding across three samples.
+The remaining dip is inherent to the move ordering rather than a defect: `OrchestrateIPFailover`
+brings an address down on the source before bringing it up on the destination, so each moved
+address is briefly absent. The alternative ordering would duplicate it instead, which is worse.
+A rebalance move is not a failover and could in principle hand over without a gap, but that
+needs the destination to be ready before the source releases — a larger change than this, and
+worth its own defect entry rather than being folded in here.
+
+Harness notes:
+  - Sampling every 10s is optimistic; `state.sh` opens 12 SSH connections per pass and takes
+    1-2 minutes when the nodes are busy. Read the sampler log rather than assuming a cadence.
+  - `nohup ... &` from a backgrounded Bash tool call dies with the call. Run the sampler as
+    the background command itself.
+  - `cut -c1-125` on journal lines truncated `ip_count=201` to `ip_count=2` and briefly looked
+    like a real defect. Widen the cut before believing a suspicious number.
+  - md5 verified on all four nodes against the local build for all six deploys this session
+    (`456d5e3d41fc`, `413acef2bd4a`, `ef7cf869c985`, `b110efc2c489`, `6204d0a70c2e`,
+    `57548b8698f8`, `c3e6b43e80ba`).

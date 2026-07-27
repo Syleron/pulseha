@@ -244,6 +244,20 @@ func (m *IPMonitor) enforceExpectations() {
 	if member.Status != StatusActive {
 		m.logger.Info("ENFORCE: Node is not Active, removing floating IPs", "status", StatusToString(member.Status))
 
+		// In active-active a non-Active status is a transient, not a demotion:
+		// every eligible node is Active, so this is a missed health check or a
+		// peer's stale broadcast. Dropping every cluster floating IP over one of
+		// those took fifty addresses off a node that was only busy, and they were
+		// off the cluster entirely until the coordinator noticed and re-placed
+		// them (docs/TEST-PLAN.md defects #2/#26, #14). Release only what this
+		// node is not assigned; if it really has failed, the coordinator reclaims
+		// the rest after the failover limit and that path brings them down.
+		if m.members.config.Pulse.Mode == "active-active" {
+			m.releaseUnassignedIPs(localID, m.deriveExpectedIPs(localID, member), ipInventory)
+			m.logger.Info("ENFORCE: Completed cleanup for non-Active active-active node")
+			return
+		}
+
 		// CRITICAL: Passive nodes must remove ALL cluster floating IPs, not just expected IPs
 		// This prevents split-brain IP conflicts when a node loses active status
 		// Build a complete list of all floating IPs from cluster groups
