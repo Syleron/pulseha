@@ -526,7 +526,8 @@ as neither fixed nor reproduced.
 | TC-6 | rebalance dual-homes a batch for ~20s | **Open, found run 17.** Destination brings up before source releases: n1&n4 shared 46 addresses for 20s, n1&n3 shared 2 for 22s. The opposite order from #29, so the two bound the problem from both sides. Also non-monotonic: node-2 released a batch it had already claimed (50 → 0 → 25 → 50), putting 50 addresses on no node for ~8s. Only visible at 1s sampling; earlier 30s sampling could not see it |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
 | TC-3 | #37 `AddIPToGroup` brings each new address up on every assigned node, serially, with inline per-IP GARP | **Open, found run 19.** ~13s per `add-ip` in a four-node cluster (200 adds = 43 min): node-1 sends `BringUpIP` to each peer in turn, waiting ~4s on each, then brings it up locally. Pre-existing (`4f09169`, 2025-03-17), not a regression. Mode-blind — in active-active a new address is momentarily live on all four before the enforce loop releases three. #4's `SendGARPBatch` covered the failover paths, not this one |
-| TC-3 | #38 an add reported successful is erased from every node | **Fixed (this commit), not yet verified live.** Found run 19: 9 of 200 adds ended absent from all four configs, the identical set on each — *uniform loss, not divergence*, so TC-3's "all four agree" criterion cannot detect it and scored that run a pass. Root cause is the #5 fix's per-sender generation: it ordered a sender's snapshots against that sender's own previous ones and nothing else, so it was structurally blind to a peer that was simply **behind**. The coordinator re-broadcasts once a minute and is not the node taking the mutations, so its stale view arrived on a sequence of its own and was applied wholesale. Made certain by a second mechanism: the counter only moved on a node's *own* mutations, so a coordinator that had never mutated stayed at 0 and broadcast **unversioned**, which the receiver applies unconditionally — run 19 caught exactly that on the wire (node-2 pushing at `generation=0` inside the window where `.181`/`.182` were lost). Replaced by a Lamport clock over the config's *content*: a mutation sets it one above everything seen, applying a peer's config adopts that config's version, and a lower version is stale whoever sent it. Ties broken on node ID so concurrent mutations converge instead of each rejecting the other. The `2af3b80` safety argument — one speaker per cluster — guaranteed only that one node could corrupt the cluster, not that none would |
+| TC-3 | #38 an add reported successful is erased from every node | **Fixed `e2c7143`, VERIFIED LIVE run 20 (2026-07-28).** 44 adds issued across three batches, each with node-2 (the coordinator) deliberately made to fall behind mid-batch — 0 losses, all four configs identical at 245, every added address present on every node. The guard was observed rejecting a behind coordinator on the wire, which is the first live confirmation of the mechanism: node-2 re-broadcast at `version=44` after a restart and all three peers replied superseded (`peer holds a newer config … version=44`), while node-3 logged `ignoring superseded config sender=049… version=20 held=20`. Original finding, run 19: 9 of 200 adds ended absent from all four configs, the identical set on each — *uniform loss, not divergence*, so TC-3's "all four agree" criterion cannot detect it and scored that run a pass. Root cause is the #5 fix's per-sender generation: it ordered a sender's snapshots against that sender's own previous ones and nothing else, so it was structurally blind to a peer that was simply **behind**. The coordinator re-broadcasts once a minute and is not the node taking the mutations, so its stale view arrived on a sequence of its own and was applied wholesale. Made certain by a second mechanism: the counter only moved on a node's *own* mutations, so a coordinator that had never mutated stayed at 0 and broadcast **unversioned**, which the receiver applies unconditionally — run 19 caught exactly that on the wire (node-2 pushing at `generation=0` inside the window where `.181`/`.182` were lost). Replaced by a Lamport clock over the config's *content*: a mutation sets it one above everything seen, applying a peer's config adopts that config's version, and a lower version is stale whoever sent it. Ties broken on node ID so concurrent mutations converge instead of each rejecting the other. The `2af3b80` safety argument — one speaker per cluster — guaranteed only that one node could corrupt the cluster, not that none would |
+| TC-3 | #39 an `add-ip` that returns rc=1 has still been applied | **Open, found run 20.** `10.200.1.105` and `.112` exited 1 with `DeadlineExceeded … RST_STREAM` yet were present in the configured group on all four nodes afterwards (221, not 219). The caller's deadline expires while the mutation has already been applied and broadcast server-side. Same family as #13/#21/#31 — the returned status is not evidence of what happened — but inverted: a failure is reported for work that succeeded, so a non-zero add cannot be excluded from an expected count. Reachable because #37 makes an add take ~13s normally and ~28s with one peer unreachable |
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
 ---
@@ -1487,3 +1488,105 @@ only node that re-broadcasts. Worth knowing before attributing any coordinator-g
 Clearing a group leaves the addresses up on the interfaces: 158 orphans survived 201 → 1 and did not
 drain in 30s+ (§4 teardown's documented "orphans survive group deletion"). Strip them with
 `ip addr del` before re-adding or the next run's counts are meaningless.
+
+## Result 2026-07-28 (run 20) — defect #38 VERIFIED FIXED LIVE; #39 opened
+
+Binary `6884eb0f2149` (code `e2c7143`), deployed and md5-verified on all four, rolling restart
+(one node at a time) from run 19's settled `51/50/50/50`. Cluster stayed in **active-active**
+throughout. Debug enabled on all four first, with the `heartbeat convergence nudge` control
+checked (13 lines in 60s on node-2) so that no absence-of-logs conclusion could be drawn from a
+Debug-off node — the trap that produced a wrong conclusion in run 19.
+
+**Method — deliberately make the coordinator fall behind, two ways.** TC-3's own criterion
+("all four agree") structurally cannot detect #38, so the criterion here is *the configured
+count equals the number of adds issued*. node-2 is the coordinator (lowest UUID `049…`) and is
+the node that re-broadcasts, so it is the one that has to be put behind.
+
+- **Variant A — SIGSTOP/SIGCONT (20 adds, `10.200.1.97-119`).** Paused after add 5, resumed
+  after add 12, so it missed 7 adds while **keeping** its in-memory `configVersion`.
+- **Variant B — stop/start (12 adds, `10.200.1.132-143`).** Stopped after add 3, started after
+  add 9, so it missed 6 adds and booted at `configVersion 0` reading 236 against the cluster's
+  242. This is the sharper test: `buildFullConfigPayload` omits the metadata at 0 and
+  `configIsNewer` returns true for an unversioned payload (`server.go:6027`, `6287`), so an
+  unversioned push from a behind coordinator would be applied unconditionally — a path
+  `e2c7143` deliberately does **not** guard.
+- A middle batch of 12 (`10.200.1.120-131`) ran with node-2 up throughout.
+
+**Result: PASS. 44 adds issued, 44 landed, 0 losses.** 201 → 245, all four configs byte-identical
+at every checkpoint, all 44 addresses present on all four, settled `61/61/61/62` with
+`placements=245 unique=245 duplicated=0`. Pre-fix rate was 9/200 ≈ 4.5%, so ~2 losses were
+expected without the fix.
+
+**The guard was observed working on the wire — the first live confirmation.** Both halves:
+- Sender side, new in `e2c7143`: `CONFIG_BROADCAST: peer holds a newer config; this node's
+  change will not propagate and will be reverted by the next sync peer=… version=44`, once per
+  peer, on each of node-2's two post-restart reconcile firings.
+- Receiver side: `CONFIG_SYNC: ignoring superseded config sender=049-b22-093-2d3 version=20
+  held=20` on node-3.
+
+**Variant B is the one that reproduced #38's actual mechanism; variant A did not.** In A the
+rejection was `version=20 held=20` — *equal*, so it was the node-ID tiebreak, not staleness:
+node-2 had already adopted the current version and content before its reconcile fired, so it
+never held stale content to push. In B the rejection was a genuine `version < held` from a
+coordinator that really was behind — exactly the broadcast that erased adds in run 19.
+
+**The unversioned (version-0) hole did not materialise, and remains a narrow open race.** In
+both restart attempts `adoptConfigVersion` raised node-2 from 0 to the cluster's version off an
+inbound full ConfigSync *before* its once-a-minute reconcile timer fired, so it never broadcast
+unversioned. The window is real but small: it needs a reconcile to fire before the first inbound
+full config lands. Not demonstrated as a defect; recorded so it is not mistaken for tested.
+
+### New defect
+
+- **#39 — an `add-ip` that returns rc=1 has still been applied. NEW, OPEN.** Two of the 20
+  variant-A adds (`10.200.1.105`, `.112`) exited **1** with
+  `Failed to add IP to group: rpc error: code = DeadlineExceeded desc = stream terminated by
+  RST_STREAM with error code: CANCEL`, and both addresses were nonetheless present in the
+  configured group on **all four** nodes afterwards (201 + 20 = 221, not 219). The RPC deadline
+  expires on the caller while the mutation has already been applied and broadcast server-side.
+  Same family as #13/#21/#31 — the status returned to the operator is not evidence of what
+  happened — but inverted: here a *failure* is reported for work that succeeded. Consequence for
+  testing: an add that returns non-zero cannot be excluded from the expected count, which is the
+  opposite of what the run-20 runbook assumed. The deadline is reachable because of #37: each
+  add fans out serially with inline per-IP GARP, so an add takes ~13s normally and ~28s with one
+  peer unreachable.
+
+### Other observations
+
+- **#37 reconfirmed and refined.** ~12-13s per add with all four up, ~28s with node-2
+  unreachable (the fan-out waits on the dead peer), and as low as 4-9s once the cluster was
+  mid-churn. The 28s figure is what makes #39's deadline reachable.
+- **A single node restart churns placement hard.** Immediately after variant B's restart:
+  `n1=67 n2=60 n3=66 n4=108`, `placements=301 unique=220 duplicated=73` — 24 addresses down
+  cluster-wide and node-4 holding 108 against a ~61 target. It converged fully to
+  `duplicated=0` within ~4 min without intervention. Same family as #23, but from a *rolling*
+  restart of one node rather than a cold start of four.
+- The rolling restart onto the new binary preserved the `51/50/50/50` baseline exactly, as in
+  run 19 — that procedure is reliable and should stay the default.
+
+### Harness notes
+
+- **`journalctl --since "-20min"` and `--since "18:05:00"` did not return the same window** on
+  these hosts: the relative form gave 9 `CONFIG_RECONCILE` hits where the absolute form gave 3,
+  and it initially reported **zero** `peer holds a newer config` lines that the absolute form
+  found. Use absolute timestamps when a count is the evidence.
+- `grep -c pattern file || echo 0` prints **two** zeroes when nothing matches (grep prints `0`
+  *and* exits 1), so any `[ "$(count)" -lt N ]` downstream dies with `integer expected`. This
+  silently collapsed the first variant-B attempt into a stop+start 1s apart, before the batch had
+  even begun. Drop the fallback — `grep -c` already prints 0.
+- The configured group stores addresses **with the prefix** (`10.200.0.152/23`) while
+  `ip -o addr` yields bare addresses; comparing the two sets without stripping `/23` scores
+  every node as holding nothing.
+- Address probing: `10.200.1.101`, `.102`, `.103` are genuinely occupied by something on the
+  segment — `arping -D` with a positive control (gateway + two cluster IPs must come back LIVE)
+  correctly excluded them. `10.200.1.97-100` and `.104-.143` were free.
+
+### Leave-behind
+
+`RealTest` = **245** addresses (`10.200.0.152-255`, `10.200.1.0-96`, `.97-100`, `.104-143`),
+mode **active-active**, settled `61/61/61/62`. `logging_level` = **debug on node-1 and node-2**
+(the runbook's prescription), restored to **info on node-3 and node-4** — note the level is
+applied only at startup, so nodes 3 and 4 keep logging at debug until their next restart.
+`/run/lbBootFlag` is **absent on all four**, unchanged by this run, as run 19 left it: restoring
+it would let `lbClearRestart` wipe the 245 hand-added test addresses on the next daemon start
+(defect #3).
