@@ -295,6 +295,62 @@ func surplusFloatingIPs(groups map[string][]string, expectations map[string][]st
 	return surplus
 }
 
+// releaseAttempt is the outcome of trying to release one surplus address.
+type releaseAttempt struct {
+	Iface string
+	IP    string
+	// Vanished means the address was already gone, so there was nothing to
+	// release. The pass got the state it wanted; another hand produced it.
+	Vanished bool
+	// Err is set only when the release of an address the node still holds
+	// genuinely failed — the case worth an error in the log.
+	Err error
+}
+
+// releaseSurplusFloatingIPs brings down each surplus address, checking that the
+// node still holds it immediately before the attempt and, if the attempt fails,
+// immediately after.
+//
+// docs/TEST-PLAN.md defect #41: the release pass decided from an IP inventory
+// snapshot taken at the top of the enforce tick, before the Active branch's
+// bring-up loop, so by the time it ran the snapshot could be seconds old and
+// addresses had moved. Releasing one that had already gone fails with
+// `cannot assign requested address` — a no-op, logged at error level, which is
+// exactly the noise that would hide a release that mattered.
+//
+// stillHeld must be a live check, not a read of whatever snapshot chose the
+// surplus set; the point is to be newer than that snapshot. Consulting it again
+// after a failure is what distinguishes "lost the race" from "could not do it":
+// the residual window between the check and the kernel call cannot be closed,
+// only classified.
+func releaseSurplusFloatingIPs(surplus map[string][]string,
+	stillHeld func(iface, ip string) bool,
+	bringDown func(iface, ip string) error) []releaseAttempt {
+
+	ifaces := make([]string, 0, len(surplus))
+	for iface := range surplus {
+		ifaces = append(ifaces, iface)
+	}
+	sort.Strings(ifaces)
+
+	var attempts []releaseAttempt
+	for _, iface := range ifaces {
+		for _, ip := range surplus[iface] {
+			if !stillHeld(iface, ip) {
+				attempts = append(attempts, releaseAttempt{Iface: iface, IP: ip, Vanished: true})
+				continue
+			}
+			err := bringDown(iface, ip)
+			if err != nil && !stillHeld(iface, ip) {
+				attempts = append(attempts, releaseAttempt{Iface: iface, IP: ip, Vanished: true})
+				continue
+			}
+			attempts = append(attempts, releaseAttempt{Iface: iface, IP: ip, Err: err})
+		}
+	}
+	return attempts
+}
+
 // initializeExpectedIPs initializes the expected IPs from the current member
 func (m *IPMonitor) initializeExpectedIPs() error {
 	m.logger.Debug("IP monitor: starting initializeExpectedIPs")

@@ -253,7 +253,7 @@ func (m *IPMonitor) enforceExpectations() {
 		// node is not assigned; if it really has failed, the coordinator reclaims
 		// the rest after the failover limit and that path brings them down.
 		if m.members.config.Pulse.Mode == "active-active" {
-			m.releaseUnassignedIPs(localID, m.deriveExpectedIPs(localID, member), ipInventory)
+			m.releaseUnassignedIPs(localID, m.deriveExpectedIPs(localID, member))
 			m.logger.Info("ENFORCE: Completed cleanup for non-Active active-active node")
 			return
 		}
@@ -364,7 +364,7 @@ func (m *IPMonitor) enforceExpectations() {
 	// assignments on every node, and a busy coordinator is no longer declared
 	// failed and its addresses re-placed behind its back.
 	if m.members.config.Pulse.Mode == "active-active" {
-		m.releaseUnassignedIPs(localID, expectations, ipInventory)
+		m.releaseUnassignedIPs(localID, expectations)
 	}
 
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
@@ -379,8 +379,20 @@ func (m *IPMonitor) enforceExpectations() {
 // its expectation set would be empty for want of configuration, not because it
 // should be serving nothing, and acting on that would tear down live traffic on
 // a cluster mid-sync.
-func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string][]string, ipInventory *network.IPInventory) {
+func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string][]string) {
 	if localNodeCfg, ok := m.members.config.Nodes[localID]; !ok || localNodeCfg == nil {
+		return
+	}
+
+	// Deliberately a fresh inventory rather than the one enforceExpectations
+	// built at the top of the tick. The Active branch's bring-up loop runs
+	// between the two, so that snapshot can be seconds old and every address it
+	// moved is one this pass would try to release from where it no longer is
+	// (docs/TEST-PLAN.md defect #41).
+	inventory, invErr := network.BuildIPInventory()
+	if invErr != nil {
+		m.logger.Error("ENFORCE: failed to build the IP inventory for the release pass",
+			"error", invErr)
 		return
 	}
 
@@ -389,24 +401,37 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 		if ipOnly == nil {
 			return "", false
 		}
-		var exists bool
-		var foundIface string
-		if ipInventory != nil {
-			exists, foundIface, _ = ipInventory.Exists(ipOnly.String())
-		} else {
-			exists, foundIface, _ = network.CheckIfIPExists(ipOnly.String())
-		}
+		exists, foundIface, _ := inventory.Exists(ipOnly.String())
 		return foundIface, exists
 	}
 
-	for iface, surplus := range surplusFloatingIPs(m.members.config.Groups, expectations, locate) {
+	// A live check, not a read of the inventory above: this runs immediately
+	// before each bring-down and its whole purpose is to be newer.
+	stillHeld := func(iface, ip string) bool {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			return false
+		}
+		exists, foundIface, err := network.CheckIfIPExists(ipOnly.String())
+		return err == nil && exists && foundIface == iface
+	}
+
+	surplus := surplusFloatingIPs(m.members.config.Groups, expectations, locate)
+	for iface, ips := range surplus {
 		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
-			"iface", iface, "count", len(surplus))
-		for _, ip := range surplus {
-			if err := network.BringIPdown(iface, ip); err != nil {
-				m.logger.Error("ENFORCE: failed to release unassigned floating IP",
-					"ip", ip, "iface", iface, "error", err)
-			}
+			"iface", iface, "count", len(ips))
+	}
+
+	for _, attempt := range releaseSurplusFloatingIPs(surplus, stillHeld, network.BringIPdown) {
+		switch {
+		case attempt.Vanished:
+			// Nothing to do and nothing wrong: the address left before this pass
+			// reached it, which is the state the pass was trying to produce.
+			m.logger.Debug("ENFORCE: unassigned floating IP had already gone",
+				"ip", attempt.IP, "iface", attempt.Iface)
+		case attempt.Err != nil:
+			m.logger.Error("ENFORCE: failed to release unassigned floating IP",
+				"ip", attempt.IP, "iface", attempt.Iface, "error", attempt.Err)
 		}
 	}
 }
