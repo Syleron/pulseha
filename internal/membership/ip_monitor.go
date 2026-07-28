@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"sort"
 	"sync"
 
 	log "github.com/charmbracelet/log"
@@ -244,6 +245,54 @@ func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string]
 		}
 	}
 	return expected
+}
+
+// surplusFloatingIPs returns, per interface, the configured floating IPs this
+// node is currently holding there but is not expected to hold. locate reports
+// the interface an address is up on, and whether it is up at all.
+//
+// Every configured group is scanned, not just the groups still assigned to the
+// node. Scoping the scan to assigned groups was the quieter half of
+// docs/TEST-PLAN.md defect #40: unassigning a group removed it from the loop
+// entirely, so the 61 addresses the node was still serving fell outside every
+// set the pass could compute. The node logged "Current expectations
+// expectations=map[]" and released nothing, on every tick, while `unassign`
+// reported success — the operator-visible lie of that defect.
+//
+// Addresses outside every configured group are never touched: those are the
+// node's own, not cluster floating IPs.
+func surplusFloatingIPs(groups map[string][]string, expectations map[string][]string,
+	locate func(ip string) (iface string, held bool)) map[string][]string {
+
+	expected := make(map[string]map[string]bool, len(expectations))
+	for iface, ips := range expectations {
+		set := make(map[string]bool, len(ips))
+		for _, ip := range ips {
+			set[ip] = true
+		}
+		expected[iface] = set
+	}
+
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	surplus := make(map[string][]string)
+	for _, name := range names {
+		for _, ip := range groups[name] {
+			iface, held := locate(ip)
+			if !held || iface == "" || expected[iface][ip] {
+				continue
+			}
+			surplus[iface] = append(surplus[iface], ip)
+		}
+	}
+	for iface := range surplus {
+		sort.Strings(surplus[iface])
+	}
+	return surplus
 }
 
 // initializeExpectedIPs initializes the expected IPs from the current member

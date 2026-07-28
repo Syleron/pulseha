@@ -370,47 +370,36 @@ func (m *IPMonitor) enforceExpectations() {
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
 }
 
-// releaseUnassignedIPs brings down cluster floating IPs held on an interface
-// that this node is not assigned. Only configured group IPs are considered, so
-// the node's own addresses are never touched.
+// releaseUnassignedIPs brings down cluster floating IPs this node is holding but
+// is not expected to hold. Only configured group IPs are considered, so the
+// node's own addresses are never touched.
+//
+// The decision is surplusFloatingIPs'; this supplies where each address actually
+// is and applies the result. A node the config has no entry for is left alone:
+// its expectation set would be empty for want of configuration, not because it
+// should be serving nothing, and acting on that would tear down live traffic on
+// a cluster mid-sync.
 func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string][]string, ipInventory *network.IPInventory) {
-	localNodeCfg, ok := m.members.config.Nodes[localID]
-	if !ok || localNodeCfg == nil {
+	if localNodeCfg, ok := m.members.config.Nodes[localID]; !ok || localNodeCfg == nil {
 		return
 	}
 
-	for iface, groups := range localNodeCfg.IPGroups {
-		expected := make(map[string]bool, len(expectations[iface]))
-		for _, ip := range expectations[iface] {
-			expected[ip] = true
+	locate := func(ip string) (string, bool) {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			return "", false
 		}
+		var exists bool
+		var foundIface string
+		if ipInventory != nil {
+			exists, foundIface, _ = ipInventory.Exists(ipOnly.String())
+		} else {
+			exists, foundIface, _ = network.CheckIfIPExists(ipOnly.String())
+		}
+		return foundIface, exists
+	}
 
-		var surplus []string
-		for _, groupName := range groups {
-			for _, ip := range m.members.config.Groups[groupName] {
-				if expected[ip] {
-					continue
-				}
-				ipOnly, _ := utils.GetCIDR(ip)
-				if ipOnly == nil {
-					continue
-				}
-				var exists bool
-				var foundIface string
-				if ipInventory != nil {
-					exists, foundIface, _ = ipInventory.Exists(ipOnly.String())
-				} else {
-					exists, foundIface, _ = network.CheckIfIPExists(ipOnly.String())
-				}
-				if exists && foundIface == iface {
-					surplus = append(surplus, ip)
-				}
-			}
-		}
-
-		if len(surplus) == 0 {
-			continue
-		}
+	for iface, surplus := range surplusFloatingIPs(m.members.config.Groups, expectations, locate) {
 		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
 			"iface", iface, "count", len(surplus))
 		for _, ip := range surplus {

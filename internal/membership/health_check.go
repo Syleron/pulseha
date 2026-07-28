@@ -14,6 +14,7 @@ import (
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/internal/quorum"
+	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
 )
@@ -987,7 +988,7 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 	}
 
 	nodes := rebalanceCandidates(members)
-	moves := planRebalanceMoves(nodes)
+	moves := planRebalanceMoves(nodes, h.members.config)
 	if len(moves) == 0 {
 		return false
 	}
@@ -998,10 +999,9 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 
 		// Re-read under the lock: the plan came from a snapshot, and a
 		// concurrent ConfigSync self-report may have shrunk the source since.
-		src.Lock()
-		count := min(move.Count, len(src.ActiveIPs))
-		ips := append([]string{}, src.ActiveIPs[len(src.ActiveIPs)-count:]...)
-		src.Unlock()
+		// The addresses must come from the batch's own group — an arbitrary tail
+		// of ActiveIPs can belong to a group the destination cannot host.
+		ips := rebalanceMoveIPs(src, h.members.config, move.Group, move.Count)
 		if len(ips) == 0 {
 			continue
 		}
@@ -1056,20 +1056,77 @@ func rebalanceCandidates(members map[string]*Member) []*Member {
 }
 
 // planRebalanceMoves returns every IP move needed to balance nodes, batched per
-// source/destination pair, or nothing when the assignment is already balanced
-// (max-min <= 1). Nodes must be sorted by ID so ties resolve deterministically.
-func planRebalanceMoves(nodes []*Member) []ipam.Move {
+// source/destination/group triple, or nothing when the assignment is already
+// balanced (max-min <= 1). Nodes must be sorted by ID so ties resolve
+// deterministically.
+//
+// Group eligibility constrains the plan in both directions: a destination can
+// only receive groups assigned to it, and a source can only give up groups the
+// destination will accept. Planning blind to that sent addresses to a node that
+// could not bring them up, and rebalanceActiveActive abandons the whole pass on
+// the first failed move — so a single node the group had been unassigned from
+// stalled all rebalancing (docs/TEST-PLAN.md defect #40).
+//
+// A nil cfg plans group-blind, which is what a caller with no config to consult
+// can safely assume.
+func planRebalanceMoves(nodes []*Member, cfg *config.Config) []ipam.Move {
+	var index map[string]string
+	if cfg != nil {
+		index = groupIndex(cfg.Groups)
+	}
+
 	snapshots := make([]ipam.Node, 0, len(nodes))
 	for _, node := range nodes {
 		node.Lock()
-		snapshots = append(snapshots, ipam.Node{
+		snapshot := ipam.Node{
 			Hostname: node.Hostname,
 			IPCount:  len(node.ActiveIPs),
 			Capacity: node.Capacity,
-		})
+			Groups:   nodeHostableGroups(cfg, node.ID),
+		}
+		if index != nil {
+			held := make(map[string]int)
+			for _, ip := range node.ActiveIPs {
+				if group, ok := index[ip]; ok {
+					held[group]++
+				}
+			}
+			snapshot.Held = held
+		}
 		node.Unlock()
+		snapshots = append(snapshots, snapshot)
 	}
 	return ipam.PlanMoves(snapshots)
+}
+
+// rebalanceMoveIPs picks up to count addresses of the given group off node, for
+// a planned move to hand to the destination. An empty group takes any address,
+// which is what a group-blind plan asks for.
+//
+// Addresses are taken from the end of the list: the tail is the most recently
+// assigned, so a rebalance gives back what it most recently took.
+func rebalanceMoveIPs(node *Member, cfg *config.Config, group string, count int) []string {
+	if count <= 0 {
+		return nil
+	}
+
+	var index map[string]string
+	if group != "" && cfg != nil {
+		index = groupIndex(cfg.Groups)
+	}
+
+	node.Lock()
+	defer node.Unlock()
+
+	picked := make([]string, 0, count)
+	for i := len(node.ActiveIPs) - 1; i >= 0 && len(picked) < count; i-- {
+		ip := node.ActiveIPs[i]
+		if index != nil && index[ip] != group {
+			continue
+		}
+		picked = append(picked, ip)
+	}
+	return picked
 }
 
 // recoveredStatus returns the status a reachable node that was Unknown should

@@ -166,9 +166,10 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 
 // getAvailableNodes returns a list of nodes that can accept new IPs,
 // sorted by node ID so distribution decisions are deterministic.
-// Capacity is deliberately not checked here: active-passive assigns all IPs
-// to a single node regardless of capacity, and active-active placement
-// enforces capacity in ipam.Distribute.
+// Capacity and group eligibility are deliberately not checked here:
+// active-passive assigns all IPs to a single node regardless of capacity, and
+// active-active placement enforces both in ipam.Distribute, which knows which
+// group each address belongs to.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
@@ -201,23 +202,100 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 		// Balance by IP count: each IP goes to the node currently holding the
 		// fewest IPs (existing assignments plus IPs handed out in this pass),
 		// ties broken by node order (sorted by ID for determinism).
+		//
+		// Only nodes the address's group is assigned to are candidates. A node
+		// without the group cannot bring the address up — AddActiveIPs refuses
+		// it — and the refusal used to end the address's journey: unassigning a
+		// group left the coordinator picking the node it had just been removed
+		// from, over and over, with 61 addresses down cluster-wide behind a
+		// passing quorum vote (docs/TEST-PLAN.md defect #40).
+		index := groupIndex(m.config.Groups)
+		placements := make([]ipam.IP, 0, len(ips))
+		for _, ip := range ips {
+			placements = append(placements, ipam.IP{Addr: ip, Group: index[ip]})
+		}
+
 		snapshots := make([]ipam.Node, 0, len(nodes))
 		for _, node := range nodes {
 			snapshots = append(snapshots, ipam.Node{
 				Hostname: node.Hostname,
 				IPCount:  len(node.ActiveIPs),
 				Capacity: node.Capacity,
+				Groups:   nodeHostableGroups(m.config, node.ID),
 			})
 		}
 
-		assignments, unplaced := ipam.Distribute(ips, snapshots)
-		for _, ip := range unplaced {
-			m.logger.Warn("No nodes with available capacity for IP", "ip", ip)
+		// Aggregate per group rather than per address. Unassigning a group from
+		// every node leaves its whole set unplaceable, and one line per address
+		// was 245 warnings per reclaim cycle on the test cluster.
+		assignments, unplaced := ipam.Distribute(placements, snapshots)
+		if len(unplaced) > 0 {
+			byGroup := make(map[string]int, len(unplaced))
+			for _, ip := range unplaced {
+				byGroup[index[ip]]++
+			}
+			groups := make([]string, 0, len(byGroup))
+			for group := range byGroup {
+				groups = append(groups, group)
+			}
+			sort.Strings(groups)
+			for _, group := range groups {
+				m.logger.Warn("No eligible node with available capacity for floating IPs",
+					"group", group, "count", byGroup[group], "nodes_considered", len(nodes))
+			}
 		}
 		distribution = assignments
 	}
 
 	return distribution
+}
+
+// groupIndex maps every configured floating IP to the group it belongs to.
+// Group names are visited in sorted order, so an address configured into more
+// than one group resolves to the same group on every node.
+func groupIndex(groups map[string][]string) map[string]string {
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	index := make(map[string]string)
+	for _, name := range names {
+		for _, ip := range groups[name] {
+			if _, seen := index[ip]; !seen {
+				index[ip] = name
+			}
+		}
+	}
+	return index
+}
+
+// nodeHostableGroups returns the groups a node may host, as ipam expects them:
+// the union of the groups mapped to its interfaces.
+//
+// A nil result means unrestricted, and is returned only when the config has no
+// entry for the node at all. Absent configuration is not evidence that a node
+// cannot host a group — a cluster whose config has not finished syncing would
+// otherwise have every placement refused — whereas an *empty* mapping is
+// evidence, because unassigning a node's last group deletes the interface entry
+// outright.
+func nodeHostableGroups(cfg *config.Config, nodeID string) map[string]bool {
+	if cfg == nil {
+		return nil
+	}
+	nodeCfg, ok := cfg.Nodes[nodeID]
+	if !ok || nodeCfg == nil {
+		return nil
+	}
+
+	groups := make(map[string]bool)
+	for _, assigned := range nodeCfg.IPGroups {
+		for _, group := range assigned {
+			groups[group] = true
+		}
+	}
+	return groups
 }
 
 // getActiveNode returns the current active node in the cluster

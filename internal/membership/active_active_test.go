@@ -118,7 +118,7 @@ func TestPlanRebalanceMoves(t *testing.T) {
 	t.Run("moves from most to least loaded", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, nil)
-		moves := planRebalanceMoves([]*Member{a, b})
+		moves := planRebalanceMoves([]*Member{a, b}, nil)
 		if len(moves) != 1 {
 			t.Fatalf("expected a single batched move, got %v", moves)
 		}
@@ -143,7 +143,7 @@ func TestPlanRebalanceMoves(t *testing.T) {
 		c := newAATestMember("node-c", "host-c", StatusActive, nil)
 		d := newAATestMember("node-d", "host-d", StatusActive, nil)
 
-		moves := planRebalanceMoves([]*Member{a, b, c, d})
+		moves := planRebalanceMoves([]*Member{a, b, c, d}, nil)
 
 		if len(moves) != 3 {
 			t.Fatalf("expected one batch per destination, got %d: %+v", len(moves), moves)
@@ -166,7 +166,7 @@ func TestPlanRebalanceMoves(t *testing.T) {
 	t.Run("balanced cluster plans no move", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.3/24"})
-		if moves := planRebalanceMoves([]*Member{a, b}); len(moves) != 0 {
+		if moves := planRebalanceMoves([]*Member{a, b}, nil); len(moves) != 0 {
 			t.Errorf("expected no move for max-min diff of 1, got %+v", moves)
 		}
 	})
@@ -175,14 +175,14 @@ func TestPlanRebalanceMoves(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"})
 		b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.4/24"})
 		b.Capacity = 1
-		if moves := planRebalanceMoves([]*Member{a, b}); len(moves) != 0 {
+		if moves := planRebalanceMoves([]*Member{a, b}, nil); len(moves) != 0 {
 			t.Errorf("expected no move when only destination is at capacity, got %+v", moves)
 		}
 	})
 
 	t.Run("single node plans no move", func(t *testing.T) {
 		a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24"})
-		if moves := planRebalanceMoves([]*Member{a}); len(moves) != 0 {
+		if moves := planRebalanceMoves([]*Member{a}, nil); len(moves) != 0 {
 			t.Error("expected no move with a single node")
 		}
 	})
@@ -501,5 +501,200 @@ func TestUpdateConfigRefreshesCapacity(t *testing.T) {
 
 	if got := a.Capacity; got != 2 {
 		t.Errorf("expected capacity refreshed to 2 after config sync, got %d", got)
+	}
+}
+
+// assignGroups records a node's group->interface mapping in the config, the way
+// `pulsectl group assign` does.
+func assignGroups(cfg *config.Config, nodeID string, ipGroups map[string][]string) {
+	cfg.Nodes[nodeID] = &config.Node{IPGroups: ipGroups}
+}
+
+// Regression for docs/TEST-PLAN.md defect #40. Placement offered every healthy
+// node as a candidate regardless of whether the group was assigned to it, so the
+// coordinator picked the node the group had just been unassigned from. The
+// assign was correctly refused and the addresses were placed nowhere: 61 down
+// cluster-wide behind a passing quorum vote.
+func TestCalculateIPDistributionSkipsNodesWithoutTheGroup(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"RealTest": {"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24", "10.0.0.4/24"},
+	})
+	assignGroups(cfg, "node-a", map[string][]string{"eth0": {"RealTest"}})
+	assignGroups(cfg, "node-b", map[string][]string{"eth0": {"Management"}})
+	assignGroups(cfg, "node-c", map[string][]string{"eth0": {"RealTest"}})
+	a := newAATestMember("node-a", "host-a", StatusActive, nil)
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+	c := newAATestMember("node-c", "host-c", StatusActive, nil)
+	ml := newAATestMemberList(cfg, a, b, c)
+
+	dist := ml.calculateIPDistribution(cfg.Groups["RealTest"], []*Member{a, b, c})
+
+	if len(dist["host-b"]) != 0 {
+		t.Errorf("expected nothing placed on the node without the group, got %v", dist["host-b"])
+	}
+	if len(dist["host-a"]) != 2 || len(dist["host-c"]) != 2 {
+		t.Errorf("expected an even split across the eligible nodes, got %v", dist)
+	}
+}
+
+// A node whose only group was unassigned has its interface entry deleted
+// entirely, so an empty IPGroups map means "hosts nothing", not "unknown".
+func TestCalculateIPDistributionTreatsEmptyAssignmentsAsIneligible(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{"RealTest": {"10.0.0.1/24", "10.0.0.2/24"}})
+	assignGroups(cfg, "node-a", map[string][]string{"eth0": {"RealTest"}})
+	assignGroups(cfg, "node-b", map[string][]string{})
+	a := newAATestMember("node-a", "host-a", StatusActive, nil)
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+	ml := newAATestMemberList(cfg, a, b)
+
+	dist := ml.calculateIPDistribution(cfg.Groups["RealTest"], []*Member{a, b})
+
+	if len(dist["host-b"]) != 0 {
+		t.Errorf("expected nothing placed on the node with no groups assigned, got %v", dist["host-b"])
+	}
+	if len(dist["host-a"]) != 2 {
+		t.Errorf("expected both IPs on the only eligible node, got %v", dist["host-a"])
+	}
+}
+
+// A node the config has no entry for is unconstrained: absent configuration is
+// not evidence that the node cannot host a group, and refusing to place on that
+// basis would strand addresses on a cluster whose config has not synced yet.
+func TestCalculateIPDistributionTreatsUnknownNodesAsEligible(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{"RealTest": {"10.0.0.1/24", "10.0.0.2/24"}})
+	a := newAATestMember("node-a", "host-a", StatusActive, nil)
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+	ml := newAATestMemberList(cfg, a, b)
+
+	dist := ml.calculateIPDistribution(cfg.Groups["RealTest"], []*Member{a, b})
+
+	if len(dist["host-a"]) != 1 || len(dist["host-b"]) != 1 {
+		t.Errorf("expected an even split when no node declares its groups, got %v", dist)
+	}
+}
+
+func TestRedistributeIPsSkipsNodeWithoutTheGroup(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"RealTest": {"10.0.0.1/24", "10.0.0.2/24"},
+	})
+	assignGroups(cfg, "node-a", map[string][]string{"eth0": {"RealTest"}})
+	assignGroups(cfg, "node-b", map[string][]string{"eth0": {"Management"}})
+	a := newAATestMember("node-a", "host-a", StatusActive, nil)
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+	ml := newAATestMemberList(cfg, a, b)
+
+	if err := ml.RedistributeIPs(cfg.Groups["RealTest"]); err != nil {
+		t.Fatalf("RedistributeIPs returned error: %v", err)
+	}
+
+	if len(b.ActiveIPs) != 0 {
+		t.Errorf("expected no assignment recorded against the ineligible node, got %v", b.ActiveIPs)
+	}
+	if len(a.ActiveIPs) != 2 {
+		t.Errorf("expected both addresses recorded against the eligible node, got %v", a.ActiveIPs)
+	}
+}
+
+func TestGroupIndex(t *testing.T) {
+	index := groupIndex(map[string][]string{
+		"RealTest":   {"10.0.0.1/24", "10.0.0.2/24"},
+		"Management": {"10.0.1.1/24"},
+	})
+
+	if index["10.0.0.2/24"] != "RealTest" {
+		t.Errorf("10.0.0.2/24 indexed as %q, want RealTest", index["10.0.0.2/24"])
+	}
+	if index["10.0.1.1/24"] != "Management" {
+		t.Errorf("10.0.1.1/24 indexed as %q, want Management", index["10.0.1.1/24"])
+	}
+	if _, ok := index["192.168.1.1/24"]; ok {
+		t.Error("expected an address outside every group to have no group")
+	}
+}
+
+// An address configured into two groups must index to the same one every time,
+// or placement decisions for it would differ between nodes.
+func TestGroupIndexIsDeterministic(t *testing.T) {
+	groups := map[string][]string{
+		"beta":  {"10.0.0.1/24"},
+		"alpha": {"10.0.0.1/24"},
+	}
+
+	for i := 0; i < 20; i++ {
+		if got := groupIndex(groups)["10.0.0.1/24"]; got != "alpha" {
+			t.Fatalf("indexed as %q, want alpha on every pass", got)
+		}
+	}
+}
+
+// Regression for docs/TEST-PLAN.md defect #40, rebalance direction. An empty
+// node that cannot host the loaded node's group is not a valid destination:
+// OrchestrateIPFailover fails for it and rebalanceActiveActive breaks out of its
+// loop on error, so one ineligible node stalled all rebalancing.
+func TestPlanRebalanceMovesSkipsDestinationWithoutTheGroup(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"RealTest": {"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24", "10.0.0.4/24"},
+	})
+	assignGroups(cfg, "node-a", map[string][]string{"eth0": {"RealTest"}})
+	assignGroups(cfg, "node-b", map[string][]string{"eth0": {"Management"}})
+	a := newAATestMember("node-a", "host-a", StatusActive, cfg.Groups["RealTest"])
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+
+	if moves := planRebalanceMoves([]*Member{a, b}, cfg); len(moves) != 0 {
+		t.Errorf("expected no move to a node that cannot host the group, got %+v", moves)
+	}
+}
+
+// The batch has to name the group it drains so the caller can pick those
+// addresses off the source. Taking an arbitrary tail of ActiveIPs would hand the
+// destination addresses of a group it cannot host.
+func TestPlanRebalanceMovesNamesTheGroupItMoves(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"RealTest":   {"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"},
+		"Management": {"10.0.1.1/24"},
+	})
+	assignGroups(cfg, "node-a", map[string][]string{"eth0": {"RealTest", "Management"}})
+	assignGroups(cfg, "node-b", map[string][]string{"eth0": {"Management"}})
+	a := newAATestMember("node-a", "host-a", StatusActive,
+		[]string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24", "10.0.1.1/24"})
+	b := newAATestMember("node-b", "host-b", StatusActive, nil)
+
+	moves := planRebalanceMoves([]*Member{a, b}, cfg)
+
+	if len(moves) != 1 {
+		t.Fatalf("expected a single move of the one address the destination can host, got %+v", moves)
+	}
+	if moves[0].Group != "Management" || moves[0].Count != 1 {
+		t.Errorf("expected 1 Management address moved, got %+v", moves[0])
+	}
+}
+
+// The addresses handed to a failover must come from the batch's group, not from
+// wherever the source's list happens to end.
+func TestRebalanceMoveIPsPicksTheBatchesGroup(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{
+		"RealTest":   {"10.0.0.1/24", "10.0.0.2/24"},
+		"Management": {"10.0.1.1/24", "10.0.1.2/24"},
+	})
+	held := []string{"10.0.0.1/24", "10.0.1.1/24", "10.0.0.2/24", "10.0.1.2/24"}
+	a := newAATestMember("node-a", "host-a", StatusActive, held)
+
+	got := rebalanceMoveIPs(a, cfg, "Management", 2)
+
+	sort.Strings(got)
+	want := []string{"10.0.1.1/24", "10.0.1.2/24"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("rebalanceMoveIPs picked %v, want %v", got, want)
+	}
+}
+
+// A group-blind batch (no group named, as planned for a cluster whose nodes
+// declare no assignments) still takes addresses off the source.
+func TestRebalanceMoveIPsWithoutAGroupTakesAnyAddresses(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{"RealTest": {"10.0.0.1/24", "10.0.0.2/24"}})
+	a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24", "10.0.0.2/24"})
+
+	if got := rebalanceMoveIPs(a, cfg, "", 1); len(got) != 1 {
+		t.Errorf("expected 1 address picked, got %v", got)
 	}
 }
