@@ -669,52 +669,101 @@ func (s *Server) loadInitialMembers() error {
 	s.logger.Info("All members loaded successfully from configuration")
 	s.logger.Debugf("Final member list contains %d members", s.memberList.GetMemberCount())
 
-	// After members are loaded, perform one-shot VIP reconcile on local node
-	go func() {
-		// small delay to ensure listeners up
-		time.Sleep(500 * time.Millisecond)
-		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
-			member := s.memberList.GetMemberByID(localID)
-			node := s.config.Nodes[localID]
-			if member != nil && node != nil {
-				// Under the member lock: ConfigSync applies incoming member
-				// states concurrently with this reconcile, and reading the
-				// status bare raced with that write.
-				member.Lock()
-				isActive := member.Status == membership.StatusActive
-				member.Unlock()
-				if isActive {
-					// Bring up any missing expected VIPs
-					for iface, groups := range node.IPGroups {
-						var ips []string
-						for _, g := range groups {
-							if gips, ok := s.config.Groups[g]; ok {
-								ips = append(ips, gips...)
-							}
-						}
-						if len(ips) > 0 {
-							_, _ = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ips})
-						}
-					}
+	// After members are loaded, perform one-shot VIP reconcile on local node.
+	// The config half of the decision is taken here, synchronously; see
+	// snapshotVIPGroups for why it cannot wait for the goroutine.
+	if localID, err := s.config.GetLocalNodeUUID(); err == nil {
+		groupIPs, activeActive := s.snapshotVIPGroups(localID)
+		go func() {
+			// small delay to ensure listeners up
+			time.Sleep(500 * time.Millisecond)
+			plan, claim := s.reconcileVIPPlan(localID, groupIPs, activeActive)
+			for iface, ips := range plan {
+				if claim {
+					_, _ = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ips})
 				} else {
-					// Passive: drop any VIPs found on local interfaces
-					for iface, groups := range node.IPGroups {
-						var ips []string
-						for _, g := range groups {
-							if gips, ok := s.config.Groups[g]; ok {
-								ips = append(ips, gips...)
-							}
-						}
-						if len(ips) > 0 {
-							_, _ = s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips})
-						}
-					}
+					_, _ = s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips})
 				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return nil
+}
+
+// snapshotVIPGroups captures the config half of the post-load VIP reconcile:
+// whether the cluster is active-active, and every floating IP configured on
+// each of the local node's interfaces.
+//
+// It is taken synchronously, before the reconcile goroutine sleeps, because
+// ConfigSync also spawns Reconfigure() -> config.Reload(), which unmarshals a
+// freshly read file straight over the live *Config. Touching s.config after the
+// sleep is a data race against that rewrite — the config the reconcile is for
+// is the one loaded here, so read it here.
+func (s *Server) snapshotVIPGroups(localID string) (map[string][]string, bool) {
+	node := s.config.Nodes[localID]
+	if node == nil {
+		return nil, false
+	}
+
+	groupIPs := make(map[string][]string, len(node.IPGroups))
+	for iface, groups := range node.IPGroups {
+		var ips []string
+		for _, g := range groups {
+			if gips, ok := s.config.Groups[g]; ok {
+				ips = append(ips, gips...)
+			}
+		}
+		if len(ips) > 0 {
+			groupIPs[iface] = ips
+		}
+	}
+	return groupIPs, s.config.Pulse.Mode == "active-active"
+}
+
+// reconcileVIPPlan turns that snapshot into what the local node should do now:
+// iface -> addresses, and whether they are to be claimed or released. Member
+// state is read here rather than in the snapshot because ConfigSync applies the
+// incoming statuses and assignments after loadInitialMembers returns — reading
+// them early would act on the pre-sync view.
+//
+// The claim set is mode-aware. In active-passive the Active node owns every IP
+// of every group mapped to the interface; in active-active the group is shared,
+// so it owns only its assigned subset. Claiming the whole group regardless of
+// mode made this a third whole-group claimant alongside the monitor's enforce
+// loop and the consolidation path — and it runs 500ms after every full
+// ConfigSync, so in active-active each Active peer re-claimed all 201 whitecrane
+// addresses and releaseUnassignedIPs had to undo it a tick later
+// (docs/TEST-PLAN.md defect #30 — the mode-blindness of #2/#26 at a site those
+// fixes missed).
+//
+// The release set stays deliberately whole-group: a node that has just been
+// demoted may be holding anything, including addresses it was never assigned,
+// and the point of the pass is to leave it holding none.
+func (s *Server) reconcileVIPPlan(localID string, groupIPs map[string][]string, activeActive bool) (map[string][]string, bool) {
+	member := s.memberList.GetMemberByID(localID)
+	if member == nil {
+		return nil, false
+	}
+
+	// Under the member lock: ConfigSync applies incoming member states
+	// concurrently with this reconcile, and reading the status bare raced with
+	// that write.
+	member.Lock()
+	claim := member.Status == membership.StatusActive
+	member.Unlock()
+
+	if !claim || !activeActive {
+		return groupIPs, claim
+	}
+
+	plan := make(map[string][]string, len(groupIPs))
+	for iface, ips := range groupIPs {
+		if mine := s.filterToAssigned(localID, ips); len(mine) > 0 {
+			plan[iface] = mine
+		}
+	}
+	return plan, true
 }
 
 // HandleNodeJoin processes a new node joining the cluster
@@ -2379,32 +2428,46 @@ func (s *Server) expectedIfaceIPs(nodeID, iface string) []string {
 		return nil
 	}
 
-	// nil means "no restriction" (active-passive); an empty non-nil map means
-	// "assigned nothing", and the two must not collapse into each other.
-	var assigned map[string]bool
-	if s.config.Pulse.Mode == "active-active" {
-		assigned = make(map[string]bool)
-		if m := s.memberList.GetMemberByID(nodeID); m != nil {
-			for _, ip := range m.GetActiveIPs() {
-				assigned[ip] = true
-			}
-		}
-	}
-
-	var ifaceIPs []string
+	var groupIPs []string
 	for _, g := range node.IPGroups[iface] {
 		ips, ok := s.config.Groups[g]
 		if !ok {
 			s.logger.Warn("Group not found in config", "group", g, "iface", iface)
 			continue
 		}
-		for _, ip := range ips {
-			if assigned == nil || assigned[ip] {
-				ifaceIPs = append(ifaceIPs, ip)
-			}
+		groupIPs = append(groupIPs, ips...)
+	}
+
+	if s.config.Pulse.Mode != "active-active" {
+		return groupIPs
+	}
+	return s.filterToAssigned(nodeID, groupIPs)
+}
+
+// filterToAssigned narrows a whole-group address list to the subset currently
+// assigned to nodeID, preserving order.
+//
+// "Assigned nothing" must not collapse into "no restriction" — a node awaiting
+// its first assignment holds nothing, rather than the entire group — so callers
+// decide by mode whether to filter at all, and this returns nil when the node
+// has no assignments. It is shared by every site that has to answer "which of
+// these addresses are mine", because the last time two sites answered it
+// separately one of them missed a fix (defect #30 missing #2/#26).
+func (s *Server) filterToAssigned(nodeID string, ips []string) []string {
+	assigned := make(map[string]bool)
+	if m := s.memberList.GetMemberByID(nodeID); m != nil {
+		for _, ip := range m.GetActiveIPs() {
+			assigned[ip] = true
 		}
 	}
-	return ifaceIPs
+
+	var mine []string
+	for _, ip := range ips {
+		if assigned[ip] {
+			mine = append(mine, ip)
+		}
+	}
+	return mine
 }
 
 // refreshLocalMonitorExpectedIPs updates the IP monitor's expected IPs for the local node
