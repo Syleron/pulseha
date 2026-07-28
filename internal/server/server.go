@@ -3223,115 +3223,106 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}, nil
 	}
 
-	// Find nodes that have this group assigned and try to bring up the IP
-	ipBroughtUp := false
+	// Commit the configuration before touching a single interface.
+	//
+	// docs/TEST-PLAN.md defect #39: the bring-up below fans out to every node the
+	// group is assigned to, costing ~4s per peer and ~28s when one is unreachable
+	// (defect #37) — against the 30s deadline Client.Send puts on every CLI call,
+	// which `group add-ip` does not override. When that deadline fired the caller
+	// got rc=1 while this handler carried on to append, Save and broadcast, so a
+	// failure was reported for a mutation that had in fact been applied and a
+	// non-zero add could not be excluded from an expected count.
+	//
+	// Checking ctx instead is not the fix and is arguably worse: aborting
+	// mid-fan-out leaves the address up on some nodes and absent from the config.
+	// The config is the record of intent and the IP monitor's ENFORCE pass is what
+	// puts the address on an interface, so committing first is what makes the
+	// returned status describe the committed state.
+	s.config.Groups[req.GroupName] = append(s.config.Groups[req.GroupName], ipToUse)
+	if err := s.config.Save(); err != nil {
+		// Roll the append back so the in-memory config still matches the disk
+		// we failed to write, and nothing broadcasts a change that did not land.
+		group := s.config.Groups[req.GroupName]
+		s.config.Groups[req.GroupName] = group[:len(group)-1]
+		s.logger.Error("Failed to save config", "error", err)
+		return &rpc.AddIPToGroupResponse{
+			Success:  false,
+			Message:  fmt.Sprintf("failed to save config: %v", err),
+			Warnings: warnings,
+		}, nil
+	}
+	// Broadcast updated config to peers
+	s.markConfigDirty()
+
+	// Bring the address up locally now — a netlink add with no announcement, so
+	// it is cheap — and collect the peers for the asynchronous fan-out below.
 	localBroughtUp := false
+	var peerTargets []peerBringUpTarget
 	for nodeID, node := range s.config.Nodes {
 		for iface, groups := range node.IPGroups {
 			for _, g := range groups {
-				if g == req.GroupName {
-					// In active-passive mode, only enforce on the current active node
-					if activePassive && activeID != "" && nodeID != activeID {
-						// Skip bringing IP up on passive nodes; config still records the IP
+				if g != req.GroupName {
+					continue
+				}
+				// In active-passive mode, only enforce on the current active node
+				if activePassive && activeID != "" && nodeID != activeID {
+					// Skip bringing IP up on passive nodes; config still records the IP
+					continue
+				}
+				if nodeID != s.config.Pulse.LocalNode {
+					// Snapshot the endpoint: the fan-out runs outside s.Lock().
+					peerTargets = append(peerTargets, peerBringUpTarget{
+						hostname: node.Hostname,
+						ip:       node.IP,
+						port:     node.Port,
+						iface:    iface,
+					})
+					continue
+				}
+
+				// This is the local node, bring up the IP locally
+				s.logger.Infof("Bringing up IP %s on interface %s", ipToUse, iface)
+
+				// Check if interface exists
+				exists, _ := network.InterfaceExist(iface)
+				if !exists {
+					warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
+					continue
+				}
+
+				// Unconditionally add the IP to the expected IPs for the local monitor
+				s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
+
+				// Check if IP is already present; treat as success if on target iface
+				ipObj, _ := utils.GetCIDR(ipToUse)
+				if ipObj != nil {
+					exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
+					if err != nil {
+						warnings = append(warnings, fmt.Sprintf("Failed to check if IP exists: %v", err))
 						continue
 					}
-					// Check if this is the local node
-					if nodeID == s.config.Pulse.LocalNode {
-						// This is the local node, bring up the IP locally
-						s.logger.Infof("Bringing up IP %s on interface %s", ipToUse, iface)
-
-						// Check if interface exists
-						exists, _ := network.InterfaceExist(iface)
-						if !exists {
-							warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
+					if exists {
+						if existingIface == iface {
+							// Already configured on desired iface; mark success and update expected IPs
+							localBroughtUp = true
+							s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
 							continue
 						}
-
-						// Unconditionally add the IP to the expected IPs for the local monitor
-						s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
-
-						// Check if IP is already present; treat as success if on target iface
-						ipObj, _ := utils.GetCIDR(ipToUse)
-						if ipObj != nil {
-							exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
-							if err != nil {
-								warnings = append(warnings, fmt.Sprintf("Failed to check if IP exists: %v", err))
-								continue
-							}
-							if exists {
-								if existingIface == iface {
-									// Already configured on desired iface; mark success and update expected IPs
-									ipBroughtUp = true
-									localBroughtUp = true
-									s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
-									continue
-								}
-								// Present on a different iface; try to bring it down there first
-								if derr := network.BringIPdown(existingIface, ipToUse); derr != nil {
-									warnings = append(warnings, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ipToUse, existingIface, derr))
-									continue
-								}
-							}
-						}
-
-						if err := network.BringIPup(iface, ipToUse); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ipToUse, iface, err))
+						// Present on a different iface; try to bring it down there first
+						if derr := network.BringIPdown(existingIface, ipToUse); derr != nil {
+							warnings = append(warnings, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ipToUse, existingIface, derr))
 							continue
 						}
-						ipBroughtUp = true
-						localBroughtUp = true
-						s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
-					} else {
-						// This is a remote node, send RPC to bring up the IP
-						s.logger.Infof("Sending request to bring up IP %s on node %s", ipToUse, node.Hostname)
-						remoteClient, err := client.New()
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to create client for node %s: %v", node.Hostname, err))
-							continue
-						}
-						defer remoteClient.Close()
-
-						// Connect to remote node
-						if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to connect to node %s: %v", node.Hostname, err))
-							continue
-						}
-
-						// Send request to bring up IP
-						resp, err := remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{
-							Iface: iface,
-							Ips:   []string{ipToUse},
-						})
-
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on node %s: %v", ipToUse, node.Hostname, err))
-							continue
-						}
-
-						if !resp.Success {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on node %s: %s", ipToUse, node.Hostname, resp.Message))
-							continue
-						}
-
-						ipBroughtUp = true
-						s.logger.Infof("Successfully brought up IP %s on node %s", ipToUse, node.Hostname)
 					}
 				}
-			}
-		}
-	}
 
-	// If we couldn't bring up the IP immediately, decide whether to treat as fatal
-	if !ipBroughtUp && len(warnings) > 0 {
-		if activePassive {
-			// In active-passive mode, lack of immediate bring-up may be expected (no active yet or gated)
-			s.logger.Info("IP not brought up immediately due to active-passive gating or no active present", "ip", ipToUse)
-		} else {
-			return &rpc.AddIPToGroupResponse{
-				Success:  false,
-				Message:  "Failed to bring up IP on any node",
-				Warnings: warnings,
-			}, nil
+				if err := network.BringIPup(iface, ipToUse); err != nil {
+					warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ipToUse, iface, err))
+					continue
+				}
+				localBroughtUp = true
+				s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
+			}
 		}
 	}
 
@@ -3359,20 +3350,13 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}
 	}
 
-	// Add IP to group in config
-	s.config.Groups[req.GroupName] = append(s.config.Groups[req.GroupName], ipToUse)
-
-	// Save config
-	if err := s.config.Save(); err != nil {
-		s.logger.Error("Failed to save config", "error", err)
-		return &rpc.AddIPToGroupResponse{
-			Success:  false,
-			Message:  fmt.Sprintf("failed to save config: %v", err),
-			Warnings: warnings,
-		}, nil
+	// Announce to the peers off the request path. Waiting on this was the whole
+	// of defect #39 (see the commit-first comment above) and the whole of #37's
+	// ~13s per add: the calls are independent, so they run concurrently and on a
+	// context of their own — the caller's is cancelled the moment we return.
+	if len(peerTargets) > 0 {
+		go s.bringUpGroupIPOnPeers(peerTargets, ipToUse)
 	}
-	// Broadcast updated config to peers
-	s.markConfigDirty()
 
 	s.logger.Infof("Successfully added IP %s to group %s", ipToUse, req.GroupName)
 	return &rpc.AddIPToGroupResponse{
@@ -3380,6 +3364,70 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		Message:  fmt.Sprintf("successfully added IP %s to group %s", ipToUse, req.GroupName),
 		Warnings: warnings,
 	}, nil
+}
+
+// peerBringUpTarget is one peer bring-up for a newly configured group address,
+// snapshotted under s.Lock() because the fan-out that consumes it does not hold
+// the lock and must not walk s.config.Nodes.
+type peerBringUpTarget struct {
+	hostname string
+	ip       string
+	port     string
+	iface    string
+}
+
+// bringUpGroupIPOnPeers asks every peer holding the group to bring a newly
+// configured address up, concurrently and outside the request that added it.
+//
+// It is best-effort by design: the address is already committed to the config
+// and broadcast, so each peer's IP monitor converges on it regardless — this
+// only shortens the wait for the ENFORCE pass. Failures are therefore logged
+// rather than returned, and a single unreachable peer no longer decides the
+// latency of an add (docs/TEST-PLAN.md defects #37 and #39).
+func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ip string) {
+	// Generous enough for the callee's inline per-IP GARP on a slow peer, but
+	// bounded so a wedged node cannot leak this goroutine indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		wg.Add(1)
+		go func(target peerBringUpTarget) {
+			defer wg.Done()
+
+			s.logger.Infof("Sending request to bring up IP %s on node %s", ip, target.hostname)
+			remoteClient, err := client.New()
+			if err != nil {
+				s.logger.Warn("Failed to create client to bring up a new group IP",
+					"ip", ip, "node", target.hostname, "error", err)
+				return
+			}
+			defer remoteClient.Close()
+
+			if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+				s.logger.Warn("Failed to connect to peer to bring up a new group IP",
+					"ip", ip, "node", target.hostname, "error", err)
+				return
+			}
+
+			resp, err := remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{
+				Iface: target.iface,
+				Ips:   []string{ip},
+			})
+			switch {
+			case err != nil:
+				s.logger.Warn("Failed to bring up a new group IP on peer; its IP monitor will converge",
+					"ip", ip, "node", target.hostname, "error", err)
+			case !resp.Success:
+				s.logger.Warn("Peer refused to bring up a new group IP; its IP monitor will converge",
+					"ip", ip, "node", target.hostname, "message", resp.Message)
+			default:
+				s.logger.Infof("Successfully brought up IP %s on node %s", ip, target.hostname)
+			}
+		}(target)
+	}
+	wg.Wait()
 }
 
 // RemoveIPFromGroup implements the CLI.RemoveIPFromGroup RPC method
