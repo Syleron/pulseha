@@ -2326,15 +2326,26 @@ func (s *Server) Reconfigure() error {
 
 	s.logger.Info("Reconfiguring PulseHA server...")
 
-	// Reload config (uses config's own lock)
+	// Reload the config from disk into a fresh instance, then swap the
+	// pointer. Reloading in place would rewrite the config while the health
+	// checker, the IP monitor and every in-flight RPC are reading it
+	// (defect #32); a pointer swap leaves those readers on a consistent
+	// snapshot. Same shape as ConfigSync's `s.config = newConfig`.
 	s.logger.Debug("Reloading configuration...")
-	if err := s.config.Reload(); err != nil {
+	newConfig, err := s.config.Reload()
+	if err != nil {
 		return fmt.Errorf("failed to reload config: %v", err)
 	}
+	s.Lock()
+	s.config = newConfig
+	s.Unlock()
+	// The member list holds its own pointer, and the health checker reads
+	// the config through it, so both go stale without this.
+	s.memberList.UpdateConfig(newConfig)
 
 	// Get local node config (no server lock needed)
 	s.logger.Debug("Getting updated local node configuration...")
-	localNode, err := s.config.GetLocalNode()
+	localNode, err := newConfig.GetLocalNode()
 	if err != nil {
 		return fmt.Errorf("failed to get local node config: %v", err)
 	}
