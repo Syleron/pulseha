@@ -70,10 +70,9 @@ func peerConfigWithGroup(s *Server, group string, n int) *config.Config {
 // a single node left the four configs at 200/189/192/193, still diverged after
 // two minutes, and one further serialised add-ip snapped all four into line.
 //
-// The generation is per sender because generations from different nodes are not
-// comparable. It deliberately does not reuse clusterEpoch: bumping the epoch
-// per add-ip would collide with defect #2's rule that an equal-epoch peer
-// opinion of the local node's own status is ignored.
+// The version deliberately does not reuse clusterEpoch: bumping the epoch per
+// add-ip would collide with defect #2's rule that an equal-epoch peer opinion of
+// the local node's own status is ignored.
 func TestStaleConfigSyncDoesNotOverwriteNewerGroups(t *testing.T) {
 	const localID, peerID = "node-local", "node-peer"
 	s, _ := newConfigSyncTestServer(t, localID, peerID)
@@ -83,17 +82,17 @@ func TestStaleConfigSyncDoesNotOverwriteNewerGroups(t *testing.T) {
 		peerID:  membership.StatusActive,
 	}
 
-	// The peer's config as of its 200th add, generation 200.
+	// The peer's config as of its 200th add, version 200.
 	newer := peerConfigWithGroup(s, "group1", 200)
 	payload, err := buildFullConfigPayload(newer, states, 1, peerID, peerID, 200)
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
-		t.Fatalf("ConfigSync(gen 200): %v", err)
+		t.Fatalf("ConfigSync(version 200): %v", err)
 	}
 	if got := groupIPCount(s, "group1"); got != 200 {
-		t.Fatalf("group size after the generation-200 sync = %d, want 200", got)
+		t.Fatalf("group size after the version-200 sync = %d, want 200", got)
 	}
 
 	// The same peer's older snapshot, delayed in flight and delivered second.
@@ -104,20 +103,20 @@ func TestStaleConfigSyncDoesNotOverwriteNewerGroups(t *testing.T) {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: stalePayload}); err != nil {
-		t.Fatalf("ConfigSync(gen 189): %v", err)
+		t.Fatalf("ConfigSync(version 189): %v", err)
 	}
 
 	if got := groupIPCount(s, "group1"); got != 200 {
-		t.Errorf("a generation-189 snapshot overwrote generation 200: group size = %d, want 200 "+
+		t.Errorf("a version-189 snapshot overwrote version 200: group size = %d, want 200 "+
 			"(11 addresses this node would never bring up on failover)", got)
 	}
 }
 
-// Re-sending the current generation must be a no-op rather than a rejection
-// that loses data, because that is exactly what the periodic reconcile does: it
-// re-broadcasts the current generation so a peer that missed a delivery heals,
-// while a peer already holding it ignores the message.
-func TestReconcileResendOfCurrentGenerationIsIdempotent(t *testing.T) {
+// The periodic reconcile re-sends the current config repeatedly, so receiving the
+// same payload more than once must leave the group exactly as it was — whether the
+// receiver applies it again or rejects it as already held. Either answer is
+// correct; losing addresses is not.
+func TestReconcileResendOfTheSameConfigIsIdempotent(t *testing.T) {
 	const localID, peerID = "node-local", "node-peer"
 	s, _ := newConfigSyncTestServer(t, localID, peerID)
 
@@ -141,40 +140,181 @@ func TestReconcileResendOfCurrentGenerationIsIdempotent(t *testing.T) {
 	}
 }
 
-// A payload from a different sender is ordered on its own generation sequence.
-// Tracking one global high-water mark would make the first node to reach a high
-// generation permanently silence every other node.
-func TestConfigGenerationIsTrackedPerSender(t *testing.T) {
-	const localID, peerA, peerB = "node-local", "node-a", "node-b"
-	s, _ := newConfigSyncTestServer(t, localID, peerA, peerB)
+// Regression for docs/TEST-PLAN.md defect #38: a peer that is *behind* must not
+// be able to erase a newer config, whoever it heard the newer one from.
+//
+// This is the case a per-sender generation structurally cannot catch, and it is
+// why #38 survived the #5 fix. Generations from different senders were held in
+// separate sequences, so a snapshot was only ever compared against that sender's
+// own previous high-water mark — never against how current the *content* was.
+// The coordinator, which re-broadcasts once a minute, is a different sender from
+// the node taking the add-ip calls, so its stale view always passed the guard and
+// was applied wholesale.
+//
+// On whitecrane, run 19: node-1 took 200 serial add-ip calls; node-2 (lowest UUID,
+// therefore coordinator, therefore the only node allowed to re-broadcast) declined
+// 16 of node-1's pushes and so was missing those adds. Its next reconcile pushed
+// its own older config to everyone, and 9 addresses that had each been reported
+// `Successfully added IP … to group RealTest` went missing from all four configs at
+// once — uniform loss rather than divergence, which is why TC-3's "all four agree"
+// criterion scored the run a pass.
+func TestABehindPeerCannotEraseANewerConfigFromAnotherSender(t *testing.T) {
+	const localID, mutator, coordinator = "node-local", "node-mutator", "node-coordinator"
+	s, _ := newConfigSyncTestServer(t, localID, mutator, coordinator)
+
+	states := map[string]membership.MemberStatus{
+		localID:     membership.StatusActive,
+		mutator:     membership.StatusActive,
+		coordinator: membership.StatusActive,
+	}
+
+	// The node taking the add-ip calls reaches 200 addresses.
+	newer := peerConfigWithGroup(s, "group1", 200)
+	payload, err := buildFullConfigPayload(newer, states, 1, mutator, mutator, 200)
+	if err != nil {
+		t.Fatalf("buildFullConfigPayload: %v", err)
+	}
+	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+		t.Fatalf("ConfigSync(mutator, version 200): %v", err)
+	}
+	if got := groupIPCount(s, "group1"); got != 200 {
+		t.Fatalf("group size after the mutator's sync = %d, want 200", got)
+	}
+
+	// The coordinator missed the last 11 adds, so its own view is version 189.
+	// It is a different sender and has never spoken before, so under a per-sender
+	// guard this is its generation 189 against a high-water mark of 0 — applied,
+	// and 11 addresses that reported success vanish.
+	behind := peerConfigWithGroup(s, "group1", 189)
+	stale, err := buildFullConfigPayload(behind, states, 1, coordinator, coordinator, 189)
+	if err != nil {
+		t.Fatalf("buildFullConfigPayload: %v", err)
+	}
+	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: stale}); err != nil {
+		t.Fatalf("ConfigSync(coordinator, version 189): %v", err)
+	}
+
+	if got := groupIPCount(s, "group1"); got != 200 {
+		t.Errorf("a behind coordinator's version-189 reconcile erased version 200: "+
+			"group size = %d, want 200 (11 addresses whose add-ip reported success)", got)
+	}
+}
+
+// A node that only ever *receives* configs must still broadcast a meaningful
+// version, because the coordinator — the one node allowed to re-broadcast — is
+// usually not the node taking the mutations.
+//
+// This is the mechanism that made defect #38 certain rather than merely possible.
+// The version was a count of the node's *own* mutations, so a coordinator that had
+// never mutated sat at 0 forever; buildFullConfigPayload omits the metadata at 0 to
+// leave rolling upgrades working, so every reconcile it sent went out unversioned
+// and the receiver applied it unconditionally. Run 19 caught one on the wire:
+// node-2 pushing its own config at generation=0, inside the window where
+// 10.200.0.181 and .182 were added and lost.
+//
+// Adopting the version on apply is what closes it: the number describes the config,
+// not the speaker.
+func TestApplyingAPeerConfigAdoptsItsVersion(t *testing.T) {
+	const localID, peerID = "node-local", "node-peer"
+	s, _ := newConfigSyncTestServer(t, localID, peerID)
 
 	states := map[string]membership.MemberStatus{
 		localID: membership.StatusActive,
-		peerA:   membership.StatusActive,
-		peerB:   membership.StatusActive,
+		peerID:  membership.StatusActive,
 	}
-
-	high := peerConfigWithGroup(s, "group1", 50)
-	payloadA, err := buildFullConfigPayload(high, states, 1, peerA, peerA, 500)
+	cfg := peerConfigWithGroup(s, "group1", 200)
+	payload, err := buildFullConfigPayload(cfg, states, 1, peerID, peerID, 200)
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
-	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payloadA}); err != nil {
-		t.Fatalf("ConfigSync(peerA gen 500): %v", err)
+	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+		t.Fatalf("ConfigSync(version 200): %v", err)
 	}
 
-	// peerB's generation 3 is not stale — it is a different sequence entirely.
-	low := peerConfigWithGroup(s, "group1", 60)
-	payloadB, err := buildFullConfigPayload(low, states, 1, peerB, peerB, 3)
+	if got := s.configVersion.Load(); got != 200 {
+		t.Errorf("config version after applying a version-200 config = %d, want 200; "+
+			"at 0 this node's reconcile goes out unversioned and overwrites everyone", got)
+	}
+
+	// And a mutation of its own must land strictly above what it adopted, or the
+	// change is invisible to every peer that already holds 200.
+	s.Lock()
+	s.markConfigDirty()
+	s.Unlock()
+	if got := s.configVersion.Load(); got != 201 {
+		t.Errorf("config version after a local mutation = %d, want 201", got)
+	}
+}
+
+// Two nodes mutating at the same version have to converge on one of them.
+//
+// Rejecting on anything but a strictly greater version would leave each holding
+// its own and rejecting the other's, with the periodic reconcile — also at the
+// equal version — unable to break the tie. The node ID is the tiebreak because it
+// is the one input both sides agree on. The losing mutation is lost, which is the
+// pre-existing limitation of applying a config wholesale; the point here is that
+// the cluster converges rather than diverging permanently.
+func TestEqualVersionsFromTwoSendersConvergeDeterministically(t *testing.T) {
+	const localID, lowPeer, highPeer = "node-b", "node-a", "node-c"
+
+	states := map[string]membership.MemberStatus{
+		localID:  membership.StatusActive,
+		lowPeer:  membership.StatusActive,
+		highPeer: membership.StatusActive,
+	}
+
+	t.Run("a higher node ID wins the tie", func(t *testing.T) {
+		s, _ := newConfigSyncTestServer(t, localID, lowPeer, highPeer)
+		seed(t, s, states, lowPeer, 50, 10)
+
+		contender := peerConfigWithGroup(s, "group1", 60)
+		payload, err := buildFullConfigPayload(contender, states, 1, highPeer, highPeer, 10)
+		if err != nil {
+			t.Fatalf("buildFullConfigPayload: %v", err)
+		}
+		if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+			t.Fatalf("ConfigSync(%s, version 10): %v", highPeer, err)
+		}
+		if got := groupIPCount(s, "group1"); got != 60 {
+			t.Errorf("group size = %d, want 60 — %s outranks %s so its config must win",
+				got, highPeer, localID)
+		}
+	})
+
+	t.Run("a lower node ID loses the tie", func(t *testing.T) {
+		s, _ := newConfigSyncTestServer(t, localID, lowPeer, highPeer)
+		seed(t, s, states, highPeer, 50, 10)
+
+		contender := peerConfigWithGroup(s, "group1", 60)
+		payload, err := buildFullConfigPayload(contender, states, 1, lowPeer, lowPeer, 10)
+		if err != nil {
+			t.Fatalf("buildFullConfigPayload: %v", err)
+		}
+		if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+			t.Fatalf("ConfigSync(%s, version 10): %v", lowPeer, err)
+		}
+		if got := groupIPCount(s, "group1"); got != 50 {
+			t.Errorf("group size = %d, want 50 — %s is outranked by %s so its config must lose",
+				got, lowPeer, localID)
+		}
+	})
+}
+
+// seed applies a starting config so a test can begin from a known version.
+func seed(t *testing.T, s *Server, states map[string]membership.MemberStatus,
+	senderID string, ips int, version int64) {
+
+	t.Helper()
+	cfg := peerConfigWithGroup(s, "group1", ips)
+	payload, err := buildFullConfigPayload(cfg, states, 1, senderID, senderID, version)
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
-	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payloadB}); err != nil {
-		t.Fatalf("ConfigSync(peerB gen 3): %v", err)
+	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+		t.Fatalf("seed ConfigSync: %v", err)
 	}
-
-	if got := groupIPCount(s, "group1"); got != 60 {
-		t.Errorf("peerB's generation 3 was rejected against peerA's 500: group size = %d, want 60", got)
+	if got := groupIPCount(s, "group1"); got != ips {
+		t.Fatalf("seed group size = %d, want %d", got, ips)
 	}
 }
 
@@ -213,11 +353,11 @@ func TestUnversionedConfigSyncStillApplies(t *testing.T) {
 	}
 }
 
-// The generation must be allocated under the same lock that mutates the config,
-// or two concurrent mutations can be handed the same number and the receiver
-// cannot order them. Bumping it is what makes a mutation visible to the
-// broadcaster, so this is the property the whole guard rests on.
-func TestConcurrentMutationsGetDistinctGenerations(t *testing.T) {
+// The version must be allocated atomically, or two concurrent mutations can be
+// handed the same number and the receiver cannot order them. Bumping it is what
+// makes a mutation visible to the broadcaster, so this is the property the whole
+// guard rests on.
+func TestConcurrentMutationsGetDistinctVersions(t *testing.T) {
 	const localID, peerID = "node-local", "node-peer"
 	s, _ := newConfigSyncTestServer(t, localID, peerID)
 
@@ -228,7 +368,7 @@ func TestConcurrentMutationsGetDistinctGenerations(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			seen[i] = s.nextConfigGeneration()
+			seen[i] = s.nextConfigVersion()
 		}(i)
 	}
 	wg.Wait()
@@ -236,15 +376,15 @@ func TestConcurrentMutationsGetDistinctGenerations(t *testing.T) {
 	unique := make(map[int64]bool, mutations)
 	for _, g := range seen {
 		if g == 0 {
-			t.Fatal("generation 0 was allocated; 0 means unversioned and must never be handed out")
+			t.Fatal("version 0 was allocated; 0 means unversioned and must never be handed out")
 		}
 		if unique[g] {
-			t.Fatalf("generation %d allocated twice", g)
+			t.Fatalf("version %d allocated twice", g)
 		}
 		unique[g] = true
 	}
 	if len(unique) != mutations {
-		t.Errorf("allocated %d distinct generations for %d mutations", len(unique), mutations)
+		t.Errorf("allocated %d distinct versions for %d mutations", len(unique), mutations)
 	}
 }
 
@@ -280,7 +420,43 @@ func TestMarkConfigDirtyUnderServerLockDoesNotDeadlock(t *testing.T) {
 			"every group mutation calls it that way")
 	}
 
-	if got := s.configGeneration.Load(); got != 1 {
-		t.Errorf("config generation after one mutation = %d, want 1", got)
+	if got := s.configVersion.Load(); got != 1 {
+		t.Errorf("config version after one mutation = %d, want 1", got)
+	}
+}
+
+// The comparison itself, pinned directly. ConfigSync runs it twice — once before
+// taking s.Lock() and again under it, since a local mutation can land in that
+// window — so it has to be a pure function of its inputs rather than a method
+// that reaches for a lock it may already hold.
+func TestConfigIsNewer(t *testing.T) {
+	const local, lower, higher = "node-b", "node-a", "node-c"
+
+	cases := []struct {
+		name     string
+		senderID string
+		version  int64
+		held     int64
+		localID  string
+		want     bool
+	}{
+		{"a newer version applies", higher, 11, 10, local, true},
+		{"an older version is dropped", higher, 9, 10, local, false},
+		{"a behind coordinator is dropped whoever it is", lower, 189, 200, local, false},
+		{"an equal version from a higher node ID wins", higher, 10, 10, local, true},
+		{"an equal version from a lower node ID loses", lower, 10, 10, local, false},
+		{"an unversioned payload always applies", higher, 0, 200, local, true},
+		{"a payload with no sender always applies", "", 500, 200, local, true},
+		{"an unknown local ID loses every tie", higher, 10, 10, "", true},
+		{"a fresh node accepts anything", higher, 1, 0, local, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := configIsNewer(tc.senderID, tc.version, tc.held, tc.localID); got != tc.want {
+				t.Errorf("configIsNewer(%q, %d, held %d, local %q) = %v, want %v",
+					tc.senderID, tc.version, tc.held, tc.localID, got, tc.want)
+			}
+		})
 	}
 }

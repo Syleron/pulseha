@@ -495,7 +495,7 @@ as neither fixed nor reproduced.
 |------|--------|--------|
 | TC-1, TC-8 | #1 two-Active in active-passive | **Fixed `5b1e6bf`, verified live.** `enforceSingleActive` runs every health-check cycle, coordinator-gated |
 | TC-2 | #6 Active self-strips VIPs on Unknown | **Fixed, verified live.** `isDemotion(old, new)` — only Passive and Maintenance count; Unknown is left to the health checker |
-| TC-3 | #5 config diverges under mutation | **Open, and broader than recorded.** Reproduced 2026-07-27 under *concurrent* mutation: 200 rapid `add-ip` calls left the four configs at 200/190/188/193, still diverged after 90s. **Run 17 reproduced it under *serial* mutation too** — 200 one-at-a-time `add-ip` calls left node-3 at 196, precisely the last four added (`10.200.1.92-95`), not self-healing after 30s+. So "serial adds converge" is false; a serial batch can lose its tail on one node. One further serialized `add-ip` snaps all four into line. Fire-and-forget `go s.broadcastFullConfigToPeers()` per mutation, no version guard. **Test-setup consequence:** always verify the configured count on all four nodes before trusting a baseline |
+| TC-3 | #5 config diverges under mutation | **Fixed `2af3b80`, verified live run 19 (2026-07-28).** All four configs were identical at every sample across a 43-minute mutation run in active-active — 200 back-to-back `add-ip` then 200 serial `remove-ip` — and identical at the end. The historic 200/189/192/193 signature did not occur. A single broadcaster goroutine coalesces concurrent mutations, the push is retried, and the coordinator re-broadcasts once a minute to repair a peer that outlasted the retries |
 | TC-4, TC-5 | #4 serial 4s GARP per IP | **Fixed `348ca0f`, verified live.** `SendGARPBatch` announces a set with bounded fan-out. Mode switch `RC=124`/~13 min → **`RC=0` in 9s**; full 201-address bring-up ~13 min → **under 30s** |
 | TC-6 | #2 active-active distribution — split-brain, then non-convergence | **Fixed, verified live (runs 8-14).** TC-6 converges to `50/50/50/51`, `placements=205 unique=205 duplicated=0`, stable across three samples, ~90s. Took five independent fixes (`348ca0f`, `bf1c3eb`, `ddcd433`, `0bdf7b9`, `655d5b7`, `65dedb9`) — each hid the next |
 | TC-6 | #7 GARP starvation → false death of the Active | **Fixed via #4/#8, verified live.** The Active no longer blocks long enough to be marked dead, so the election that drove the split-brain no longer fires. Note the original attribution to orphan reclaim was wrong — the trigger was a promotion election |
@@ -525,6 +525,8 @@ as neither fixed nor reproduced.
 | TC-6 | #34 the enforce loop retries releases of addresses it does not hold | **Open, found run 17.** 925 `ENFORCE: failed to release unassigned floating IP ... cannot assign requested address` on node-1 in one switch, ~18 per address. Harmless in effect, but it is the noise that would hide a release that mattered. Same shape as #33. Related: node-4 got `RPC BringDownIP for 201 IP(s)` for a group it held none of |
 | TC-6 | rebalance dual-homes a batch for ~20s | **Open, found run 17.** Destination brings up before source releases: n1&n4 shared 46 addresses for 20s, n1&n3 shared 2 for 22s. The opposite order from #29, so the two bound the problem from both sides. Also non-monotonic: node-2 released a batch it had already claimed (50 → 0 → 25 → 50), putting 50 addresses on no node for ~8s. Only visible at 1s sampling; earlier 30s sampling could not see it |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
+| TC-3 | #37 `AddIPToGroup` brings each new address up on every assigned node, serially, with inline per-IP GARP | **Open, found run 19.** ~13s per `add-ip` in a four-node cluster (200 adds = 43 min): node-1 sends `BringUpIP` to each peer in turn, waiting ~4s on each, then brings it up locally. Pre-existing (`4f09169`, 2025-03-17), not a regression. Mode-blind — in active-active a new address is momentarily live on all four before the enforce loop releases three. #4's `SendGARPBatch` covered the failover paths, not this one |
+| TC-3 | #38 an add reported successful is erased from every node | **Fixed (this commit), not yet verified live.** Found run 19: 9 of 200 adds ended absent from all four configs, the identical set on each — *uniform loss, not divergence*, so TC-3's "all four agree" criterion cannot detect it and scored that run a pass. Root cause is the #5 fix's per-sender generation: it ordered a sender's snapshots against that sender's own previous ones and nothing else, so it was structurally blind to a peer that was simply **behind**. The coordinator re-broadcasts once a minute and is not the node taking the mutations, so its stale view arrived on a sequence of its own and was applied wholesale. Made certain by a second mechanism: the counter only moved on a node's *own* mutations, so a coordinator that had never mutated stayed at 0 and broadcast **unversioned**, which the receiver applies unconditionally — run 19 caught exactly that on the wire (node-2 pushing at `generation=0` inside the window where `.181`/`.182` were lost). Replaced by a Lamport clock over the config's *content*: a mutation sets it one above everything seen, applying a peer's config adopts that config's version, and a lower version is stale whoever sent it. Ties broken on node ID so concurrent mutations converge instead of each rejecting the other. The `2af3b80` safety argument — one speaker per cluster — guaranteed only that one node could corrupt the cluster, not that none would |
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
 ---
@@ -1422,3 +1424,66 @@ mis-scored as "no change" this way before direct `ip addr` measurement corrected
 phase-boundary checks like TC-7 — where the question is the settled distribution, not a
 sub-second transient — poll `ip addr` directly and skip the sampler. If the sampler is
 needed, start it once for the whole run and never restart it mid-run.
+
+## Result 2026-07-28 (run 19) — TC-3 PASSES, defect #5 verified fixed live; #37 and #38 opened
+
+Binary `2189d015cd11` (build `2af3b80`), deployed to all four and md5-verified, rolling restart one
+node at a time, which preserved the `51/50/50/50` baseline exactly. The cluster stayed in
+**active-active** for the whole run — the harder variant, since every mutation also drives
+placement. The `RealTest` group was cleared 201 → 1, then 200 addresses added back-to-back from
+node-1.
+
+### TC-3 — **PASS**
+
+All four configs were identical at every sample during a 43-minute mutation run (97/97/97/97;
+139/139/139/140 as the single transient; 181×4) and identical at the end. The historic signature —
+200/189/192/193 diverging and *staying* diverged — did not occur. The removal direction converged
+too: 200 serial `remove-ip` calls took all four from 201 to 1 with zero divergence. Final settled
+state `51/50/50/50`, `placements=201 unique=201 duplicated=0`.
+
+### Defect #38 — uniform loss, which TC-3 cannot see
+
+Nine of the 200 adds (`10.200.0.156/181/182/192/197/203/220/222/224`) ended absent from **all four**
+configs, the identical set on each. node-1 logged `Successfully added IP … to group RealTest` for
+each, and only 2 of the 200 CLI calls returned non-zero. Because every node agreed, TC-3's "all four
+configs match" criterion scored the run a pass — the case is uniform loss, not divergence, and needs
+a separate check that the configured set matches what was asked for.
+
+Correlated evidence on the wire: 17 × `CONFIG_BROADCAST: peers did not accept the config after all
+retries` on node-1, 16 of them naming node-2, plus one push from node-2 at `generation=0` at
+16:04:57 — inside the window where `.181` and `.182` were added and lost. Re-adding the nine one at
+a time stuck permanently, so it bites only under sustained back-to-back mutation.
+
+Root cause, found by reading the `2af3b80` guard rather than by re-running the cluster: the
+per-sender generation could not express "this peer is behind". See the #38 row in §5 for the
+mechanism and the fix. Two detectors, each verified to fail with the mechanism removed:
+`TestABehindPeerCannotEraseANewerConfigFromAnotherSender` (reproduces the 200 → 189 erasure under
+the old comparison) and `TestApplyingAPeerConfigAdoptsItsVersion` (pins the `generation=0` half).
+
+**Still to verify live**, from run 19's settled baseline: a ~40-add stress batch (9/200 ≈ 4.5%, so
+expect ~2 losses pre-fix) with `logging_level=debug` on both node-1 and node-2, checking that the
+configured count on all four nodes equals the number of adds issued. node-2 was left on
+`logging_level=debug` for this.
+
+### Logging trap that cost time and produced one wrong conclusion
+
+Every `CONFIG_BROADCAST` / `CONFIG_RECONCILE` line except the "did not accept" Warn is `Debug`, and
+the shipped default is `logging_level: info`, so they are invisible. "The periodic reconcile never
+fires" was concluded from 25 `reconcileConfigAcrossPeers` calls with zero log lines on all four
+nodes — **that was wrong**. With `logging_level=debug` on node-2 it fires exactly as designed, once
+a minute on the coordinator. Run a control first: a Debug line known to be frequent, e.g. `heartbeat
+convergence nudge` (every 3 checks). If that is absent, Debug is off and no absence proves anything.
+Log level is applied only at startup (`cmd/pulseha/main.go:77`) and is deliberately preserved across
+ConfigSync (`server.go`), so set it per node in `config.json` and restart that node.
+
+### Coordinator identity on whitecrane
+
+`clusterCoordinator` is the lowest UUID among healthy nodes, and the UUIDs are `049…`=node-2,
+`125…`=node-4, `16f…`=node-3, `b83…`=node-1 — so **node-2 is the coordinator**, and therefore the
+only node that re-broadcasts. Worth knowing before attributing any coordinator-gated behaviour.
+
+### Harness
+
+Clearing a group leaves the addresses up on the interfaces: 158 orphans survived 201 → 1 and did not
+drain in 30s+ (§4 teardown's documented "orphans survive group deletion"). Strip them with
+`ip addr del` before re-adding or the next run's counts are meaningless.
