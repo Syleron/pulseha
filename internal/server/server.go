@@ -1111,26 +1111,65 @@ func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*r
 	return &rpc.LeaveResponse{Success: true, Message: "Successfully left the cluster"}, nil
 }
 
+// deriveMemberStatus maps a member's stored health, plus how many floating IPs
+// it is recorded as holding, to the status reported to an operator.
+//
+// Active carried two independent facts — "this daemon is healthy and eligible"
+// and "this node is serving floating IPs" — which came apart the moment
+// active-active existed. Standby separates them for display: healthy, eligible
+// for promotion, serving nothing.
+//
+// Tenancy is derived here and nowhere else. It is not stored on the member, not
+// put on the wire between nodes, and not consulted by any placement or demotion
+// decision, because a stored copy would be the #1/#21 defect with a new name:
+// MakePassive returned success having released nothing, since ActiveIPs was
+// empty on a node that in fact held every address.
+//
+// hasAssignmentTruth is the reason this takes three arguments rather than two.
+// An empty assignment list only means "holds nothing" where the list is
+// knowledge; elsewhere it means "this node does not know". Peers self-report
+// their hosted IPs over ConfigSync in active-active only (see the sender at the
+// buildFullConfigPayload self-report and its application in ConfigSync), so a
+// remote member's list is current in that mode. In active-passive there is no
+// self-report and a node promoted by election "holds them all while its
+// ActiveIPs is still empty" (internal/membership/health_check.go) — reporting
+// that node as Standby would be the most misleading answer available. A node's
+// record of itself is authoritative in either mode.
+func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, hasAssignmentTruth bool) rpc.MemberStatusEnum {
+	switch status {
+	case membership.StatusActive:
+		if assignedIPs == 0 && hasAssignmentTruth {
+			return rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY
+		}
+		return rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
+	case membership.StatusPassive:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
+	case membership.StatusMaintenance:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
+	default:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
+	}
+}
+
 // GetClusterStatus returns the current status of all nodes
 func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (*rpc.StatusResponse, error) {
 	s.RLock()
 	defer s.RUnlock()
 
+	// Resolved once rather than per member: IsLocal() re-reads the config and
+	// logs on every call, and this loop runs for every node in the cluster.
+	localID, _ := s.config.GetLocalNodeUUID()
+	selfReportsAssignments := s.config.Pulse.Mode == "active-active"
+
 	var members []*rpc.Member
 	membersSnapshot := s.memberList.MembersSnapshot()
 	for _, member := range membersSnapshot {
 		health := member.GetHealthStatus()
-		var st rpc.MemberStatusEnum
-		switch health.Status {
-		case membership.StatusActive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
-		case membership.StatusPassive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
-		case membership.StatusMaintenance:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
-		default:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
-		}
+		st := deriveMemberStatus(
+			health.Status,
+			len(health.ActiveIPs),
+			selfReportsAssignments || (localID != "" && member.ID == localID),
+		)
 
 		// Stamp a fresh last response for local display if empty/stale
 		lastResp := ""

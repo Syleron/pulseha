@@ -446,6 +446,8 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Passive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			statusStr = "Maintenance"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY:
+			statusStr = "Standby"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
 			statusStr = "Unknown"
 		}

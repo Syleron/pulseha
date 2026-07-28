@@ -79,6 +79,8 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			s = "Passive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			s = "Maintenance"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY:
+			s = "Standby"
 		}
 
 		nodeID := m.NodeId
@@ -113,8 +115,13 @@ func calculateClusterHealth(members []client.Member) string {
 	activeCount := 0
 	totalCount := len(members)
 
+	// Counts reachable nodes, not serving ones. Standby belongs here for the
+	// same reason Passive does: the node is up and answering, it just holds no
+	// floating IPs. Omitting it would report a fully healthy cluster as
+	// "degraded" purely because a node's label changed.
 	for _, member := range members {
-		if member.Status == "Active" || member.Status == "Passive" {
+		switch member.Status {
+		case "Active", "Passive", "Standby":
 			activeCount++
 		}
 	}

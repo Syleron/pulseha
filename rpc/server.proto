@@ -134,6 +134,13 @@ enum MemberStatusEnum {
     reserved 3;
     reserved "MEMBER_STATUS_PARTIAL_ACTIVE";
     MEMBER_STATUS_MAINTENANCE = 4;
+    // Healthy and eligible for promotion, holding no floating IPs. Derived at
+    // the status boundary from the member's health plus its assignment list —
+    // it is never stored, never sent between nodes, and never used to make a
+    // placement decision. Reporting such a node as ACTIVE said nothing about
+    // whether it was serving anything, which is what PARTIAL_ACTIVE (3, now
+    // reserved) failed to fix by adding a stored value to this same enum.
+    MEMBER_STATUS_STANDBY = 5;
 }
 
 message Member {
