@@ -215,7 +215,9 @@ Both `Server.BringUpIP` (`internal/server/server.go:~4714`) and `Member.BringUpI
    plausible-looking active-passive cluster for its whole duration. This cost a 75-minute run
    on 2026-07-26 — the mode never changed and every sample read `n4=201`, which is correct
    active-passive behaviour and so looked like real data.
-3. Sample all four nodes' IP counts every 30s for 10 minutes.
+3. Sample all four nodes' IP counts every 30s for 10 minutes. Prefer the **node-local
+   sampler** introduced in run 16 (see the run-16 harness notes) over sampling via SSH per
+   tick — SSH sampling skews the timeline, and a shared temp file fabricates duplicates.
 
 **Pass:** counts converge to within 1 of each other (`ipam.PlanMove` stops at `max-min <= 1`)
 and then **stay put**. No IP appears on more than one node in any sample. No IP is absent from
@@ -224,10 +226,12 @@ all nodes.
 **Fail signature:** IPs bouncing between nodes every ~20s, the same IP up on three nodes at
 once, or a VIP vanishing entirely. Previously never converged over ~85s.
 
-**Note:** the rebalance loop (`internal/membership/health_check.go:~866`) performs up to
-`totalIPs` single-IP `OrchestrateIPFailover` calls **within one health-check cycle**, each
-paying the TC-5 4s cost. Expect ~10 minutes to rebalance 200 IPs from 1 node to 4, with the
-health-check loop blocked throughout. Distinguish "slow but converging" from "thrashing".
+**Expected timing as of 2026-07-28:** convergence to `50/50/50/51` in **~90s**
+(runs 8-14). `ipam.PlanMoves` batches per node pair, so a 150-address redistribution is 3
+`OrchestrateIPFailover` calls taking ~23s, not one call per address. The earlier note here —
+up to `totalIPs` single-IP calls in one health-check cycle at ~4s each, ~10 minutes to
+rebalance 200 addresses — described the code before `348ca0f` (batch GARP) and `ddcd433`, and
+no longer applies. Anything materially slower than ~90s is now itself a finding.
 
 #### Result 2026-07-26 — **FAILED, aborted, manual recovery required**
 
@@ -278,6 +282,11 @@ GARP and could not process SIGTERM), `ip addr del` of every stray address, hand-
 **Do not re-run TC-6 on a cluster carrying live addresses** until the GARP is made
 non-blocking and the orphan-reclaim path requires quorum. On this cluster it duplicated a
 production VIP for roughly 15 minutes.
+
+> **Superseded 2026-07-28.** Both preconditions are met — GARP is batched (`348ca0f`) and a
+> live peer unconditionally blocks promotion (`6791885`). TC-6 has since converged cleanly
+> (runs 8-14). Keep live VIPs out of the group under test anyway; defect #10 means the
+> `Management` group is still redistributed like any other.
 
 #### Result 2026-07-27 (2nd run) — FAILED again, with an exact root cause
 
@@ -476,29 +485,40 @@ not just `pulsectl`).
 
 ## 5. Coverage
 
+Row statuses are maintained as of **2026-07-28**. Where a row and a dated narrative
+section below disagree, the narrative is the record of what was actually observed;
+the row is the summary. "Unconfirmed" means the code the defect described has since
+been rewritten by another fix, but the defect itself was never re-tested — treat it
+as neither fixed nor reproduced.
+
 | Case | Defect | Status |
 |------|--------|--------|
-| TC-1, TC-8 | #1 two-Active in active-passive | Fixed `5b1e6bf`, needs live re-verification |
-| TC-2 | #6 Active self-strips VIPs on Unknown | Fixed, needs live verification |
-| TC-3 | #5 config diverges under concurrent mutation | **Open** |
-| TC-4, TC-5 | #4 serial 4s GARP per IP | **Open** — quantified 2026-07-26: 13m49s to fail over 201 IPs |
-| TC-6 | #2 active-active — **split-brain, not thrash** | **Open, blocker.** Every node claimed all 203 IPs; live VIP triple-homed; manual recovery |
-| TC-6 | #7 GARP starvation → false death of the Active | **Open, root cause of #2.** Re-run 2026-07-27 refined this: the trigger is a *promotion election*, not orphan reclaim |
-| TC-6 | #12 promotion never demotes an *absent* incumbent (`shouldDemote=false`) | **Open, the core split-brain defect** — 103/201 IPs dual-homed |
-| TC-6 | #13 failed `assign IPs` RPCs are never retried | **Open** — nodes 3 and 4 got 0 and 1 IP; 100 planned placements dropped |
-| TC-6 | #14 non-Active branch strips *all* group IPs, not just unassigned | **Open** — 92/201 addresses down cluster-wide at once |
-| TC-6 | #15 GARP re-announces addresses that never moved | **Open** — 200s for 50 already-present IPs; amplifies #4 |
-| TC-6 | #16 `BringUpIP` swallows "IP already present" as success | **Open** — free split-brain detector currently discarded |
-| TC-6 | #8 `SetMode` unabortable — blocks on `s.Lock()` | **Open** — no CLI escape from a bad switch |
-| TC-6 | #9 `ConsolidationTarget` selects a node with a dead daemon | **Open** |
-| TC-6 | #10 `Management` group redistributed like any other | **Open** — spreads live VIPs |
-| TC-6 | #17 the mode change is lost entirely if `SetMode` is interrupted | **Open** — cluster ended in active-passive; no retry, no propagation |
-| TC-7 | capacity enforcement | **Not runnable** — requires active-active, which cannot be entered (TC-6) |
-| TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
+| TC-1, TC-8 | #1 two-Active in active-passive | **Fixed `5b1e6bf`, verified live.** `enforceSingleActive` runs every health-check cycle, coordinator-gated |
+| TC-2 | #6 Active self-strips VIPs on Unknown | **Fixed, verified live.** `isDemotion(old, new)` — only Passive and Maintenance count; Unknown is left to the health checker |
+| TC-3 | #5 config diverges under concurrent mutation | **Open.** Reproduced on freshly reset boxes 2026-07-27: 200 rapid `add-ip` calls left the four configs at 200/190/188/193, still diverged after 90s; one further serialized `add-ip` snapped all four to 201. Fire-and-forget `go s.broadcastFullConfigToPeers()` per mutation, no version guard |
+| TC-4, TC-5 | #4 serial 4s GARP per IP | **Fixed `348ca0f`, verified live.** `SendGARPBatch` announces a set with bounded fan-out. Mode switch `RC=124`/~13 min → **`RC=0` in 9s**; full 201-address bring-up ~13 min → **under 30s** |
+| TC-6 | #2 active-active distribution — split-brain, then non-convergence | **Fixed, verified live (runs 8-14).** TC-6 converges to `50/50/50/51`, `placements=205 unique=205 duplicated=0`, stable across three samples, ~90s. Took five independent fixes (`348ca0f`, `bf1c3eb`, `ddcd433`, `0bdf7b9`, `655d5b7`, `65dedb9`) — each hid the next |
+| TC-6 | #7 GARP starvation → false death of the Active | **Fixed via #4/#8, verified live.** The Active no longer blocks long enough to be marked dead, so the election that drove the split-brain no longer fires. Note the original attribution to orphan reclaim was wrong — the trigger was a promotion election |
+| TC-6 | #12 promotion never demotes an *absent* incumbent (`shouldDemote=false`) | **Fixed `8ffc1c1` + `6791885`, verified live.** Release is verified against observable interface state and a live peer unconditionally blocks promotion. TC-6 run held `duplicated=0` through the wedge window with 69 logged aborts |
+| TC-6 | #21 `MakePassive` returns `Success: true` without releasing anything | **Fixed `8ffc1c1`, verified live.** A boolean from `MakePassive` is no longer treated as evidence; interface state is checked |
+| TC-6 | #26 in active-active, nodes claim the whole group instead of their share | **Fixed `ddcd433`, verified live.** The expectation set was rebuilt from the whole configured group at every seeding site, mode-blind; the enforce loop now recomputes per tick. Node-4: 769 enforce bring-ups per 4 min → 2 |
+| TC-6 | #13 failed `assign IPs` RPCs are never retried | **Open** — nodes 3 and 4 got 0 and 1 IP; 100 planned placements dropped silently. Same shape as #21/#31 |
+| TC-6 | #14 non-Active branch strips *all* group IPs, not just unassigned | **Unconfirmed.** The branch was rewritten by `ddcd433` and `releaseUnassignedIPs`; teardown-vs-recovery asymmetry is also much smaller now GARP is batched (#4). Never re-tested in isolation |
+| TC-6 | #15 GARP re-announces addresses that never moved | **Unconfirmed.** `348ca0f` removed the amplification (the 4s-per-IP inline cost), but whether a no-op address is still announced was not re-checked |
+| TC-6 | #16 `BringUpIP` swallows "IP already present" as success | **Open** — free split-brain detector currently discarded. **Prerequisite for #29**: a deliberate make-before-break duplicate would be indistinguishable from a split-brain in the logs until this is fixed |
+| TC-6 | #8 `SetMode` unabortable — blocks on `s.Lock()` | **Fixed `348ca0f`, verified live.** `MakeActive` no longer holds the member lock across bring-up; `SetMode` defers the new Active's bring-up until `s.Lock()` is dropped. `RC=0` in 9s, 26s from a clean baseline |
+| TC-6 | #9 `ConsolidationTarget` selects a node with a dead daemon | **Open** — reachability is not part of the selection. Not re-tested |
+| TC-6 | #10 `Management` group redistributed like any other | **Open** — spreads live VIPs. Live groups probably need pinning to active-passive semantics regardless of cluster mode |
+| TC-6 | #17/#19 interrupted `SetMode` loses the mode change and leaves the cluster mode-diverged, with no CLI path back | **Open** — `mode set` early-returns on the local node's view, so it cannot repair divergence. Less reachable now `SetMode` returns in 9s rather than timing out, but nothing retries the propagation |
+| TC-6 | #22 promotion storm — `performPromotionAsync` re-fires ~1/s for the same target | **Open** — no idempotence or in-flight dedup |
+| TC-6 | #23 freshly started node self-promotes on an unconverged memberlist | **Open, blocking for test setup.** Every staggered cold start of all four nodes produced two nodes holding the full group (196/201/160 duplicates across three attempts). Workaround: rolling restart, never cold-start all four |
+| TC-6 | #24 `ForceDemote` is not operator intent | **Partly fixed `6791885`** — a live peer is unconditionally fatal. **Still overloaded:** a minority-side election can bypass the quorum check for a provably-down peer. Needs a field distinct from `ForceDemote` (proto change) |
+| TC-7 | capacity enforcement | **Unblocked, never run.** Active-active is stable as of runs 8-14, so the precondition now holds |
+| TC-8 | return to active-passive | **Passes (run 16, 2026-07-28)** via `mode set` as specified — `duplicated=0` across all 294 sampled seconds, consolidation in 4s |
 | TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
 | TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Fixed `2ae8189`, verified live run 16 (2026-07-28).** TC-8 ran `duplicated=0` across all 294 sampled seconds and consolidated in 4s; node-3/node-4 logged the `ConfigSync: LOCAL node demoted from Active` line that the fix resurrected. Original diagnosis: The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
 | TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Fixed `c50f027`, not yet verified live.** The claim set now goes through the same assigned-subset filter as every other seeding site (`filterToAssigned`, extracted so the two cannot diverge again); the release set stays whole-group on purpose. Original diagnosis: `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
-| TC-8 | #32 `config.Reload()` unmarshals over the live `*Config` while readers are in flight | **Partially mitigated `c50f027`, open.** `ConfigSync` spawns the post-load reconcile and `Reconfigure()` -> `Reload()` concurrently; `Reload` is a `json.Unmarshal` straight over the shared struct. Measured on the demotion tests under `-race`: **22/40 runs before, 3/40 after** hoisting the reconcile's config read out of the goroutine. The residual is `BringUpIP`/`BringDownIP` reading `s.config` on that same goroutine, and the general problem is untouched — `Config` carries a `sync.Mutex` that almost no reader or writer takes |
+| TC-8 | #32 `config.Reload()` unmarshals over the live `*Config` while readers are in flight | **Fixed `291564f`, not yet verified live.** `Reload()` now returns a fresh deep clone with disk state loaded over it and leaves the receiver alone; `Server.Reconfigure` and main.go's SIGUSR2 handler swap their pointer, and `Reconfigure` also calls `memberList.UpdateConfig` so the member list and health checker don't keep the stale pointer. Signature changed to `Reload() (*Config, error)`. Detector is `packages/config/reload_race_test.go` — **20/20 fail before, 20/20 pass after**. The earlier "22/40 before, 3/40 after" figure from the demotion tests **did not reproduce** and should not be used: those are 0/40 at HEAD and `make testrace` is 0/20 either side of the fix. **Residual, deliberately open:** ~278 unsynchronized `s.config` pointer reads in `internal/server` — the pointer race predates this (ConfigSync and RESYNC already swap it) but `Reconfigure` runs on every full ConfigSync, so the swap is now more frequent. Readers always see a fully-built immutable config, so closing it properly means an accessor or `atomic.Pointer` across all 278 sites |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
@@ -1106,32 +1126,67 @@ the test: if the fix works, `duplicated` should settle at 0 rather than
 drifting in single digits, and the per-sync re-claim spike 500ms after each
 ConfigSync should disappear.
 
-### New defect #32 — `Reload()` unmarshals over the live `*Config`
+### Defect #32 — `Reload()` unmarshals over the live `*Config` (fixed `291564f`)
 
 Found while testing the above, and it is the more serious of the two.
 `ConfigSync` spawns the post-load reconcile *and* `go s.Reconfigure()`, and
-`Reconfigure` calls `config.Reload()` — which is `json.Unmarshal` straight into
+`Reconfigure` called `config.Reload()` — which is `json.Unmarshal` straight into
 the shared `*Config` every other goroutine is reading. `Config` does carry a
 `sync.Mutex`, but neither `Load`/`Reload` nor readers like `ClusterCheck`,
-`GetLocalNodeUUID` or `s.config.Nodes[...]` take it.
+`GetLocalNodeUUID` or `s.config.Nodes[...]` take it. Under `-race` that is a data
+race; in production it is a `concurrent map read and map write` fatal error.
 
-Measured on `TestEqualEpochConfigSync` + `TestDecisiveConfigSync` under `-race`,
-40 runs each:
+**Fix.** `Reload()` returns a fresh `*Config` and leaves the receiver untouched;
+`Server.Reconfigure` and main.go's SIGUSR2 handler swap their pointer, so a
+goroutine still holding the old pointer keeps reading a consistent snapshot. This
+is the shape `ConfigSync` already uses at `s.config = newConfig`. Signature
+changed to `Reload() (*Config, error)`.
+
+Two details that are load-bearing:
+
+- The fresh config is a **deep** clone of the receiver with disk state loaded over
+  it. Deep because `json.Unmarshal` reuses an existing map, unmarshals into the
+  existing `*Node` behind a map value, and reuses a slice's backing array when
+  capacity allows — so a shallow copy still writes the structures readers walk.
+  Cloning rather than starting from `config.New()` preserves `Load()`'s semantics:
+  absent keys keep their current value, and under `PULSEHA_TEST=true` the reload
+  stays a genuine no-op, which `TestReconfigureConcurrent_NoBindRace` depends on.
+- `Reconfigure` had to start calling `memberList.UpdateConfig`. The member list
+  holds its own config pointer and the health checker reads the config through it,
+  so swapping only the server's pointer leaves both stale. Verified safe:
+  `UpdateConfig` is a pointer assignment plus a `Capacity` refresh, and no
+  `Reconfigure` caller holds the member-list or server lock.
+
+**Measurement — the important lesson.** The figure recorded here earlier
+("22/40 races before, 3/40 after", from `TestEqualEpochConfigSync` +
+`TestDecisiveConfigSync` under `-race`) **did not reproduce**. Those two are 0/40
+at HEAD, and the whole `make testrace` set (`./internal/... ./cmd/...
+./packages/...`) is **0/20 both before and after the fix**. The existing suite is
+simply not a detector for this.
+
+`packages/config/reload_race_test.go` (`TestReloadDoesNotRaceLiveReaders`) is —
+8 reader goroutines against 200 `Reload()` calls with a real on-disk config:
 
 | | races |
 |---|---|
-| before | 22 / 40 |
-| after hoisting the reconcile's config read | 3 / 40 |
+| at HEAD before the fix | 20 / 20 |
+| with the fix | 0 / 20 |
 
-So `make testrace` has been flaky on this for some time, not newly. `c50f027`
-only removes this goroutine's *own* config reads from after the sleep — the
-config half of the decision is snapshotted synchronously, while member status
-and assignments are still read late, because `ConfigSync` applies those after
-`loadInitialMembers` returns. The residual 3/40 is `BringUpIP`/`BringDownIP`
-reading `s.config` on the same goroutine.
+Use that test, not `make testrace`, for anything in this area.
 
-Fixing it properly means giving `Config` real read/write locking, or making
-`Reload` build a new struct and swap the pointer under `s.Lock()` rather than
-mutating in place. The pointer swap is the smaller change and matches what
-`ConfigSync` already does at `s.config = newConfig`. Worth doing before #29,
-since a make-before-break handover will add more concurrent config readers.
+**Residual, deliberately not closed.** ~278 unsynchronized `s.config` pointer
+reads in `internal/server`. The pointer swap is now a third writer alongside the
+pre-existing `s.config = newConfig` (ConfigSync) and `s.config = cfg` (RESYNC), so
+the *pointer* race predates this and is unchanged in kind — but the swap makes it
+more frequent, since `Reconfigure` runs on every full ConfigSync. Reads now always
+see a fully-built immutable config either way, which is why this was left alone;
+closing it properly means an accessor or `atomic.Pointer` across all 278 sites.
+`tests/unit` under `-race` (8 concurrent `Reconfigure()` goroutines) is 0/20, so
+nothing detectable was introduced.
+
+**Pre-existing bug spotted in passing, NOT fixed.** `Load()` holds `c.Lock()` via
+defer and calls `migrateConfig()`, which calls `c.Save()`, which takes `c.Lock()`
+again — a self-deadlock on a non-reentrant `sync.Mutex`. Near-unreachable in
+practice: `New()` populates the syslog defaults before `Load()`, so
+`migrateConfig`'s "all four syslog fields empty" condition is false unless a
+config file explicitly contains empty strings for all four.
