@@ -1590,3 +1590,85 @@ applied only at startup, so nodes 3 and 4 keep logging at debug until their next
 `/run/lbBootFlag` is **absent on all four**, unchanged by this run, as run 19 left it: restoring
 it would let `lbClearRestart` wipe the 245 hand-added test addresses on the next daemon start
 (defect #3).
+
+## Result 2026-07-28 (run 21) — Standby VERIFIED FIXED LIVE; #40 opened
+
+Binary `4aca395059229e0b8837454155a900b0` (code `5caf136`: `ac1e103` plus the `origin/dev` merge),
+deployed to all four and md5-verified. Rolling restart one node at a time, coordinator (node-2)
+last, from run 20's `61/61/61/62`.
+
+**The rolling restart was seamless this time** — each node kept its exact share across its own
+restart and total coverage never left 245. Run 20's `duplicated=73` churn did not recur, so that
+is not an inevitable consequence of restarting; worth knowing before attributing churn to a
+deploy.
+
+### Standby: PASSES
+
+`Status: Standby` observed on node-3 both **locally** and **from node-1's peer view**, in
+active-active, with `Cluster Status: online` — so the `calculateClusterHealth` half of `ac1e103`
+holds too: a node serving nothing does not drag the cluster to degraded. The `Active IPs:` line is
+absent for a Standby node, and `RealTest`'s `Assigned to:` correctly listed only nodes 1, 2 and 4.
+
+**Getting a node to that state took three attempts, and the two failures are the instructive
+part** — both looked like the feature not working and were in fact correct output from a stale
+input:
+
+1. **Peer view from an un-upgraded daemon.** During node-3's own restart it briefly held nothing
+   and node-1 reported it `Active`. `pulsectl status` is answered by the *local* daemon, and
+   node-1 was still on the old binary. A status assertion is only meaningful once the **queried**
+   node is upgraded — not merely the node in question.
+2. **Hand-stripping addresses does not update the record.** After `ip addr del` of node-3's 61
+   addresses it still reported `Active` with `activeIPs=61`. The derivation reads the *assignment
+   record*, not interface state, and nothing reconciles the record against reality — so `Active`
+   was the correct answer for the input it had. Restarting node-3 cleared the record and `Standby`
+   appeared immediately.
+
+So the deterministic recipe is: unassign the group, strip the addresses, **restart the node**.
+
+### #40 — unassigning a group from a node strands its addresses permanently. NEW, OPEN.
+
+`group unassign --group RealTest --node-id <node-3> --interface enX0` returned rc=0 and the
+config propagated correctly to all four nodes (node-3's `group_assignments` became
+`{'enX0': ['Management']}` everywhere). Node-3 nonetheless **kept serving all 61 of its RealTest
+addresses**, and after they were stripped by hand the cluster sat at **184/245 — 61 addresses
+down cluster-wide — indefinitely** (still 61 short after 7 minutes and 15 reclaim attempts).
+Recovered fully within 20s by reassigning the group.
+
+Two independent halves, either sufficient:
+
+1. **The release pass cannot see them.** `releaseUnassignedIPs`
+   (`internal/membership/ip_monitor_linux.go:376`) iterates `localNodeCfg.IPGroups` and draws its
+   surplus set only from `config.Groups[groupName]` for those **currently assigned** groups
+   (lines 382, 389-390). Unassigning removes `RealTest` from that loop entirely, so the 61 held
+   addresses fall outside every set the pass can compute. node-3's journal shows it knew perfectly
+   well it expected nothing — `ENFORCE: Current expectations expectations=map[]`, `status=Active` —
+   and released nothing on every tick. The Active branch only adds; the release counterpart
+   (runs 8-14, fault 6) is scoped to assigned groups.
+2. **The orphan reclaim targets the node it just unassigned, and never retries elsewhere.** Once
+   the addresses are on no node, the coordinator does detect them and does the right thing up to
+   the last step: `Initiating vote for redistribution of 61 IPs` → `Concluded voting session:
+   passed=true, quorum=true, yes=3, no=0, total=3` → `ACTIVE_CHECK: redistributing 61 orphaned
+   floating IP(s)` → `ERRO Failed to assign IPs to node hostname=MC-LB-node-3 error="group
+   RealTest not assigned to any interface on node MC-LB-node-3"`. Placement does not filter
+   candidates by group assignment, the assign is correctly refused, and **nothing retries onto an
+   eligible node** — 15 cycles, 33 passed votes, ~30s apart, zero addresses placed.
+
+Half 2 is the more serious: a permanent outage behind a *passing* quorum vote, on a path whose
+whole purpose is to recover orphans. It is #13's shape (a failed assign is never retried) with an
+additional planner bug (an ineligible target is chosen in the first place). Half 1 is the quieter
+one but is the operator-visible lie: `unassign` reports success while the node it removed keeps
+serving the group's traffic, with no log line anywhere saying so.
+
+Fix shape: filter placement candidates to nodes the group is actually assigned to (half 2), retry
+the assign against the remaining candidates rather than dropping it (half 2, #13), and give the
+release pass a whole-group view that survives unassignment — the same tension #30 recorded, where
+the release direction was deliberately kept whole-group *because* a node may hold addresses it was
+never assigned. Unassignment is exactly that case and the current scoping misses it.
+
+### Leave-behind
+
+`RealTest` = **245**, mode **active-active**, settled `61/62/61/61`,
+`placements=245 unique=245 duplicated=0` verified. All four on
+`4aca395059229e0b8837454155a900b0`. `logging_level` = debug on node-1 and node-2, info on node-3
+and node-4 (and now actually running at info, since all four were restarted this run).
+`/run/lbBootFlag` **absent on all four**, unchanged.
