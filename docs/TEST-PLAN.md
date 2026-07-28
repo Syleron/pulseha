@@ -1350,3 +1350,73 @@ for a group it held **none** of, producing 201 consecutive error lines.
   SSH options, so pass IPs: `DEPLOY_HOSTS='10.200.0.121 ... .124' ./deploy.sh`.
 - Host keys differ between the hostname and IP entries in `known_hosts` after node
   rebuilds; the run used a helper that bypasses `known_hosts` deliberately.
+
+---
+
+## Result 2026-07-28 (run 18) — TC-7 first ever run: PARTIAL PASS
+
+Same binary as run 17 (`fa1935bff2d8`), same 201-address `RealTest` group, starting from
+run 17's settled `51/50/50/50` active-active baseline. Measured directly from `ip addr` on
+each node rather than via the 1s sampler (see the harness note at the end).
+
+| Phase | Action | Result | Verdict |
+|-------|--------|--------|---------|
+| 1 | `node capacity 10` on node-2, no other action | `51/50/50/50` unchanged after 150s | see #35 |
+| 1b | same cap, then a mode round-trip to force re-placement | **n1=64 n2=10 n3=63 n4=64** | **PASS** |
+| 2 | `node capacity 0` on node-2 | **`51/50/50/50` within 60s, unprompted** | **PASS** |
+| 3 | all four capped at 40 (total 160 < 201), then a round-trip | **n1=81** n2=40 n3=40 n4=40 | **FAIL** — see #36 |
+
+**Phase 1b passes all three of TC-7's placement criteria.** The capped node holds exactly
+its limit, the remaining 191 addresses are spread 64/63/64 across the uncapped nodes —
+balanced within 1 — and nothing is left unplaced while capacity is spare. `ipam.Distribute`
+/ `HasCapacity` do their job once they are actually invoked.
+
+**Phase 2 passes, and reveals the asymmetry.** Removing the cap needed no trigger at all:
+the coordinator saw node-2 under-loaded and rebalanced it from 10 back to 50 within 60s.
+
+### New defect #35 — lowering a capacity never triggers re-placement
+
+Setting a cap is config-only. It propagated correctly to all four nodes' `config.json`
+(`node-2=10`), but produced **one** log line cluster-wide (`Node capacity updated` on the
+node that took the CLI request) and no rebalance, distribute, or eviction on any node.
+node-2 sat at 50 against a cap of 10 indefinitely — 150s, then across a further 5 minutes
+of other activity.
+
+This is consistent with the documented intent that lowering a capacity does not evict
+existing IPs, and it is arguably the safe default. But the effect is that a cap is
+unenforced until some *other* event happens to trigger placement, so an operator who caps
+a node has no way to tell whether the cap is in force. It is also asymmetric with phase 2,
+where *raising* a cap rebalances within one cycle — the under-loaded branch of the
+coordinator's reconcile fires, the over-loaded branch has no counterpart. Fix shape: either
+a bounded drain when a cap is lowered below current holdings, or report the node as
+over-capacity so the state is at least visible.
+
+### New defect #36 — overflow silently violates a cap instead of being reported unplaced
+
+With all four nodes capped at 40 — total capacity 160 against 201 addresses — the excess
+did **not** come back as `unplaced`. All 41 surplus addresses were placed on node-1, which
+ended at **81 against its own cap of 40**, while nodes 2/3/4 held exactly 40.
+
+Coverage stayed at 201/201, so this is not an outage, and node-1 was the former sole Active
+(the consolidation target) — the seeding path lets the incumbent keep everything it already
+holds without testing its own cap. So capacity is enforced against nodes *receiving*
+addresses and not against the node *already holding* them.
+
+**It is entirely silent.** Across all four nodes there are **zero** log lines matching
+`unplaced`, `capacity exceeded`, `no capacity` or `over capacity` for the whole window. The
+TC-7 expectation that `ipam.Distribute` returns the overflow as `unplaced` and that those
+addresses are "reported rather than silently dropped" is not met: they are neither dropped
+nor reported, they are quietly over-committed onto one node. An operator capping every node
+to protect them would get one node at double its limit and no indication of it.
+
+Restoring all four caps to 0 recovered `51/50/50/50` cleanly within 90s.
+
+### Harness note
+
+The 1s sampler is unreliable across a `pkill`/restart cycle: `sudo rm -f` of the sample file
+leaves the old process writing to the unlinked inode while the replacement writes a new one,
+and a `tail -1` then reports a stale count that looks plausible. Two switches were briefly
+mis-scored as "no change" this way before direct `ip addr` measurement corrected it. For
+phase-boundary checks like TC-7 — where the question is the settled distribution, not a
+sub-second transient — poll `ip addr` directly and skip the sampler. If the sampler is
+needed, start it once for the whole run and never restart it mid-run.
