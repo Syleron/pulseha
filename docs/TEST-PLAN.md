@@ -495,7 +495,7 @@ as neither fixed nor reproduced.
 |------|--------|--------|
 | TC-1, TC-8 | #1 two-Active in active-passive | **Fixed `5b1e6bf`, verified live.** `enforceSingleActive` runs every health-check cycle, coordinator-gated |
 | TC-2 | #6 Active self-strips VIPs on Unknown | **Fixed, verified live.** `isDemotion(old, new)` — only Passive and Maintenance count; Unknown is left to the health checker |
-| TC-3 | #5 config diverges under concurrent mutation | **Open.** Reproduced on freshly reset boxes 2026-07-27: 200 rapid `add-ip` calls left the four configs at 200/190/188/193, still diverged after 90s; one further serialized `add-ip` snapped all four to 201. Fire-and-forget `go s.broadcastFullConfigToPeers()` per mutation, no version guard |
+| TC-3 | #5 config diverges under mutation | **Open, and broader than recorded.** Reproduced 2026-07-27 under *concurrent* mutation: 200 rapid `add-ip` calls left the four configs at 200/190/188/193, still diverged after 90s. **Run 17 reproduced it under *serial* mutation too** — 200 one-at-a-time `add-ip` calls left node-3 at 196, precisely the last four added (`10.200.1.92-95`), not self-healing after 30s+. So "serial adds converge" is false; a serial batch can lose its tail on one node. One further serialized `add-ip` snaps all four into line. Fire-and-forget `go s.broadcastFullConfigToPeers()` per mutation, no version guard. **Test-setup consequence:** always verify the configured count on all four nodes before trusting a baseline |
 | TC-4, TC-5 | #4 serial 4s GARP per IP | **Fixed `348ca0f`, verified live.** `SendGARPBatch` announces a set with bounded fan-out. Mode switch `RC=124`/~13 min → **`RC=0` in 9s**; full 201-address bring-up ~13 min → **under 30s** |
 | TC-6 | #2 active-active distribution — split-brain, then non-convergence | **Fixed, verified live (runs 8-14).** TC-6 converges to `50/50/50/51`, `placements=205 unique=205 duplicated=0`, stable across three samples, ~90s. Took five independent fixes (`348ca0f`, `bf1c3eb`, `ddcd433`, `0bdf7b9`, `655d5b7`, `65dedb9`) — each hid the next |
 | TC-6 | #7 GARP starvation → false death of the Active | **Fixed via #4/#8, verified live.** The Active no longer blocks long enough to be marked dead, so the election that drove the split-brain no longer fires. Note the original attribution to orphan reclaim was wrong — the trigger was a promotion election |
@@ -517,8 +517,11 @@ as neither fixed nor reproduced.
 | TC-8 | return to active-passive | **Passes (run 16, 2026-07-28)** via `mode set` as specified — `duplicated=0` across all 294 sampled seconds, consolidation in 4s |
 | TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
 | TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Fixed `2ae8189`, verified live run 16 (2026-07-28).** TC-8 ran `duplicated=0` across all 294 sampled seconds and consolidated in 4s; node-3/node-4 logged the `ConfigSync: LOCAL node demoted from Active` line that the fix resurrected. Original diagnosis: The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
-| TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Fixed `c50f027`, not yet verified live.** The claim set now goes through the same assigned-subset filter as every other seeding site (`filterToAssigned`, extracted so the two cannot diverge again); the release set stays whole-group on purpose. Original diagnosis: `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
+| TC-6, TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Fixed `c50f027`, verified live run 17 (2026-07-28).** Steady-state duplication is **0 across 617 consecutive scored seconds** (was 5-14), and no node ever re-claims the group — node-1 only descends after the switch, the other three never exceed 50, across three config reloads. See "Result 2026-07-28 (run 17)" below. Original diagnosis: The claim set now goes through the same assigned-subset filter as every other seeding site (`filterToAssigned`, extracted so the two cannot diverge again); the release set stays whole-group on purpose. Original diagnosis: `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
 | TC-8 | #32 `config.Reload()` unmarshals over the live `*Config` while readers are in flight | **Fixed `291564f`, not yet verified live.** `Reload()` now returns a fresh deep clone with disk state loaded over it and leaves the receiver alone; `Server.Reconfigure` and main.go's SIGUSR2 handler swap their pointer, and `Reconfigure` also calls `memberList.UpdateConfig` so the member list and health checker don't keep the stale pointer. Signature changed to `Reload() (*Config, error)`. Detector is `packages/config/reload_race_test.go` — **20/20 fail before, 20/20 pass after**. The earlier "22/40 before, 3/40 after" figure from the demotion tests **did not reproduce** and should not be used: those are 0/40 at HEAD and `make testrace` is 0/20 either side of the fix. **Residual, deliberately open:** ~278 unsynchronized `s.config` pointer reads in `internal/server` — the pointer race predates this (ConfigSync and RESYNC already swap it) but `Reconfigure` runs on every full ConfigSync, so the swap is now more frequent. Readers always see a fully-built immutable config, so closing it properly means an accessor or `atomic.Pointer` across all 278 sites |
+| TC-6 | #33 batched GARP announces addresses the node does not hold | **Open, found run 17.** 173 `failed to GARP. exit status 2` in one convergence (n2=74, n3=49, n4=50). Confirmed by hand: `arping -U` exits 0 on a held address, 2 on an unheld one, and 40 in parallel all succeed — so it is a stale announce set, not a fan-out limit. Carries #11's risk: an address that did come up can be missing from a successful announcement |
+| TC-6 | #34 the enforce loop retries releases of addresses it does not hold | **Open, found run 17.** 925 `ENFORCE: failed to release unassigned floating IP ... cannot assign requested address` on node-1 in one switch, ~18 per address. Harmless in effect, but it is the noise that would hide a release that mattered. Same shape as #33. Related: node-4 got `RPC BringDownIP for 201 IP(s)` for a group it held none of |
+| TC-6 | rebalance dual-homes a batch for ~20s | **Open, found run 17.** Destination brings up before source releases: n1&n4 shared 46 addresses for 20s, n1&n3 shared 2 for 22s. The opposite order from #29, so the two bound the problem from both sides. Also non-monotonic: node-2 released a batch it had already claimed (50 → 0 → 25 → 50), putting 50 addresses on no node for ~8s. Only visible at 1s sampling; earlier 30s sampling could not see it |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
@@ -1190,3 +1193,160 @@ again — a self-deadlock on a non-reentrant `sync.Mutex`. Near-unreachable in
 practice: `New()` populates the syslog defaults before `Load()`, so
 `migrateConfig`'s "all four syslog fields empty" condition is false unless a
 config file explicitly contains empty strings for all four.
+
+---
+
+## Result 2026-07-28 (run 17) — TC-6 PASSES; defect #30 verified fixed live
+
+Commit `291564f` (code at `065e2b0`), binary md5 `fa1935bff2d8`, md5-verified on all
+four nodes. Rebuilt the `RealTest` group from scratch — the previous group had been
+wiped by `lbClearRestart` after the run-16 restarts (defect #3, working as documented).
+
+### Method
+
+Baseline rebuilt to 201 addresses on the real `10.200.0.0/23` range
+(`10.200.0.152-255` + `10.200.1.0-96`). Range re-verified free before claiming it:
+ping sweep (0 responders), then `arping -D` from node-1 across all 200 with a positive
+control on the gateway and two cluster nodes. **The ping sweep alone is not
+sufficient** — the cluster nodes themselves do not answer ICMP, so a silent host would
+be missed; `arping` is the test that matters. Equally, `arp -an` on a workstation that
+watched an earlier run is a **false positive** for "address in use": 199 of the 200
+resolved to node-2's MAC purely as stale cache from run 16, while node-2 held only
+its own `.122` and `proxy_arp=0`.
+
+Sampling was the run-16 node-local sampler at 1s for 700s (`sampler.py`/`analyse.py`),
+one file per node, correlated afterwards, scoring a second only when all four reported.
+691 of 708 buckets scored; the 17 partial ones are all the sampler start stagger at the
+head of the run, not skipped mid-run events.
+
+Rolling restart (passives first, Active last) onto the new binary, while the groups were
+still empty — the cheapest moment to take the restart, and it sidesteps #23.
+
+### TC-6 forward switch (active-passive → active-active) — **PASS**
+
+`mode set` returned **RC=0 in 0.53s**. Mode landed on all four nodes, CLI and on-disk
+in agreement — no #17 divergence.
+
+| t+ | mode | n1 | n2 | n3 | n4 | placements | unique | dup |
+|----|------|----|----|----|----|-----------|--------|-----|
+| 0 | active-passive | 201 | 0 | 0 | 0 | 201 | 201 | 0 |
+| 16 | active-active | 151 | 50 | 0 | 0 | 201 | 201 | 0 |
+| 25 | active-active | 134 | 0 | 0 | 50 | 184 | 151 | **33** |
+| 26-44 | active-active | 147 | 0→25 | 0→25 | 50 | 197→247 | 151→201 | **46** |
+| 45 | active-active | 93 | 25 | 25 | 50 | 193 | 193 | 0 |
+| 54-75 | active-active | 53 | 50 | 50 | 50 | 203 | 201 | **2** |
+| **76-693** | active-active | **51** | **50** | **50** | **50** | **201** | **201** | **0** |
+
+**Settled at t+76 and held for 617 consecutive seconds** — `51/50/50/50`, spread 1,
+`placements=201 unique=201 duplicated=0`. That is TC-6's pass condition.
+
+### Defect #30 — verified FIXED live
+
+#30's signature was 5-14 addresses of residual steady-state duplication in
+active-active, from the post-load VIP reconcile re-claiming the whole group 500ms after
+every full ConfigSync. Both halves are gone:
+
+- **Steady-state duplication is 0**, not 5-14, across 617 consecutive scored seconds.
+- **No node ever re-claims the group.** After the switch node-1 only ever descends
+  (201 → 197 → 151 → 147 → 93 → 76 → 53 → 51); after t+50 the only values it takes are
+  `{51, 53, 76, 93, 147}`. The other three never exceed 50. Under #30 an Active node in
+  active-active re-claimed all 201 on each ConfigSync; three config reloads happened
+  during this run (one each on nodes 2/3/4) and none produced a claim spike.
+
+Beware the numbering trap when re-checking this: each sample file's own `t0` differs by
+up to 10s from the first *full* bucket, so a naive per-file `max(held after t+20)`
+reports 201 for node-1 — those readings are the pre-switch baseline, not a re-claim.
+
+### Defect #32 — consistent with the fix, but the live run is weak evidence
+
+No fatals, no panics, no `concurrent map read and map write`, `NRestarts=0` on all four,
+uptime spanning the whole run including the switch and three config reloads. That is the
+expected outcome, but the absence of a race in a single run is not proof — the real
+evidence remains `packages/config/reload_race_test.go` (20/20 fail before, 0/20 after).
+
+### The convergence transient, newly visible at 1s resolution
+
+Previous TC-6 runs sampled every 30s, which cannot see a 20s window. At 1s the
+convergence is **not monotonic** and violates the literal "no IP on more than one node
+in *any* sample" wording, though the settled state is clean:
+
+- **A rebalance batch is dual-homed for ~20s.** node-4 brought up its 50 at t+25 while
+  node-1 still held 46 of them until t+45. A second, smaller instance followed: node-1
+  and node-3 shared 2 addresses from t+54 to t+75 (22s). The destination claims before
+  the source releases — the *opposite* order from #29's break-before-make, so the two
+  findings bound the problem from both sides: this path duplicates for 20s, #29's path
+  gaps for 2s.
+- **Assignments churn: a node releases a batch it had already claimed.** node-2 held 50
+  at t+16, dropped to **0** at t+25, and only returned to 25 at t+33 and 50 at t+50.
+  During that window 50 addresses were up nowhere (`unique=151/201`), which is where the
+  worst coverage gap comes from — not from a handover gap.
+- Worst duplication **46** (in 42 of 691 scored seconds); worst coverage gap **50** (in
+  25 of 691).
+
+### New defect #33 — batched GARP announces addresses the node does not hold
+
+**173 `failed to GARP. exit status 2`** in one convergence (node-2: 74, node-3: 49,
+node-4: 50, node-1: 0). Root cause confirmed by hand on node-2:
+
+| `arping -U -c 5 -I enX0 <ip>` | exit |
+|---|---|
+| address the node holds | **0** |
+| address the node does not hold | **2** |
+| 40 in parallel, all held | **all 0** |
+
+So it is not a resource or concurrency limit (which `SendGARPBatch`'s fan-out would
+have made the obvious suspect) — every failure is an announcement for an address that
+was not on the interface at announce time. Surrounding context confirms it: `IP monitor:
+IP removed but node is not Active, NOT restoring ip=10.200.1.96` immediately precedes a
+burst of them.
+
+The announcement is harmless in itself, but the announce set being wider than what is
+actually held is the same class of bug as #15 (announcing addresses that never moved)
+and carries #11's real risk: if the set is stale, an address that *did* just come up can
+be missing from a successful announcement, leaving neighbours pointing at the old owner.
+
+### New defect #34 — the enforce loop retries releases of addresses it does not hold
+
+**925** `ENFORCE: failed to release unassigned floating IP ... cannot assign requested
+address` on node-1 alone (nodes 2/3/4: 35/3/7), roughly 18 attempts per address. The
+release set is computed from a view that still lists addresses the node has already
+lost, and each attempt fails at the kernel. Benign in effect — the address is already
+gone, which is the desired end state — but it is 925 `ERRO` lines per mode switch, which
+is exactly the noise that would hide a release that genuinely mattered. Same root shape
+as #33: an operation computed against a set the node does not actually hold.
+
+Related, and cheap to fix: node-4 received `RPC BringDownIP on iface enX0 for 201 IP(s)`
+for a group it held **none** of, producing 201 consecutive error lines.
+
+### Defect status confirmed this run
+
+- **#31 did not recur** — `connection refused` count is **0** on all four nodes. The
+  listener cycle still happens (`Reconfiguring PulseHA server` once each on nodes 2/3/4),
+  so the window is still open; it simply did not coincide with an in-flight RPC. #31 is
+  a race, not a certainty — absence in one run is not a fix.
+- **#16 is actively discarding signal**: 5 `IP assignment failed but IP is now present`
+  across nodes 2/3/4. During a run with a real 46-address dual-homed window, the kernel's
+  duplicate report was swallowed 5 times. This is why #16 is a prerequisite for #29's
+  make-before-break: the log cannot currently distinguish a deliberate handover overlap
+  from a split-brain.
+- **#5 reproduced in a new, sharper form.** 200 *serial* `add-ip` calls left node-3 with
+  **196** — precisely the last four added (`10.200.1.92-95`) — and it did not self-heal
+  after 30s+. The recorded form of #5 was divergence under *concurrent* mutation, with
+  serial adds converging; this run shows a serial batch losing its tail on one node. One
+  further serialized `add-ip` snapped all four to 201, as previously recorded.
+
+### Harness notes
+
+- `pgrep -f sampler.py` over SSH is a **false positive** — it matches the command line
+  of the shell running the `pgrep` itself. Check `ps -eo pid,cmd | grep "[p]ython3
+  /tmp/sampler.py"` and whether the file is still growing.
+- Counting held addresses with `grep -cE` over whole `ip addr` lines over-counts by one
+  in this /23: every line carries `brd 10.200.1.255`, which matches a `10.200.1.` pattern.
+  Parse the address field.
+- The mode key in `config.json` is `pulseha.mode` (not `pulse.mode`).
+- SSH to these hosts must be forced to IPv4. The names resolve to AAAA records
+  (`2a02:1648:3008:1:202::12x`) with no route, so plain `ssh node-N.whitecrane.io` fails
+  with "No route to host" while the host is perfectly healthy. `deploy.sh` hardcodes its
+  SSH options, so pass IPs: `DEPLOY_HOSTS='10.200.0.121 ... .124' ./deploy.sh`.
+- Host keys differ between the hostname and IP entries in `known_hosts` after node
+  rebuilds; the run used a helper that bypasses `known_hosts` deliberately.
