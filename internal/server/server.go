@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -153,6 +154,36 @@ type Server struct {
 	// ConfigSync-triggered reconfigures) don't race on the cluster listener
 	// bind to IP:port.
 	reconfigureMu sync.Mutex
+
+	// Config propagation ordering (docs/TEST-PLAN.md defect #5).
+	//
+	// configGeneration counts this node's own config mutations, ordering them
+	// against each other. It is in-memory only and never persisted: the
+	// appliance rewrites config.json out from under us (defect #3), so a number
+	// on disk would be wrong exactly when that happens.
+	//
+	// Atomic rather than lock-guarded because every group mutation calls
+	// markConfigDirty while holding s.Lock() through a defer — taking the write
+	// lock to bump this would self-deadlock on a non-reentrant mutex and hang
+	// every add-ip. HandleNodeJoin calls it holding no lock at all, so the
+	// counter has to be safe under either.
+	//
+	// appliedConfigGen is the highest generation already applied from each
+	// sender, which is how a delayed older snapshot is recognised and dropped.
+	// Per sender, because generations from different nodes are separate
+	// sequences and comparing them would let the first node to reach a high
+	// number silence the rest.
+	configGeneration atomic.Int64
+	appliedConfigGen map[string]int64
+	configGenMu      sync.Mutex
+
+	// broadcastTrigger coalesces config broadcasts. It has capacity 1 and is
+	// signalled rather than written to: a single broadcaster goroutine drains
+	// it, so concurrent mutations collapse into one broadcast of the final
+	// state instead of racing each other onto the wire.
+	broadcastTrigger chan struct{}
+	broadcastStop    chan struct{}
+	broadcastOnce    sync.Once
 }
 
 // NewServer creates a new PulseHA server instance
@@ -178,6 +209,10 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 		clusterEpoch:  0,
 		leaderID:      "",
 		peerClients:   make(map[string]*client.Client), // Initialize connection pool
+
+		appliedConfigGen: make(map[string]int64),
+		broadcastTrigger: make(chan struct{}, 1),
+		broadcastStop:    make(chan struct{}),
 	}
 
 	// Set server reference in health checker
@@ -196,6 +231,10 @@ func (s *Server) Start() error {
 	if s.config == nil {
 		return fmt.Errorf("server config is nil")
 	}
+
+	// Owns every outbound config push, so that concurrent mutations coalesce
+	// into one ordered broadcast instead of racing each other (defect #5).
+	s.startConfigBroadcaster()
 
 	// Load initial members from config
 	s.logger.Debug("Loading initial members from configuration...")
@@ -429,6 +468,10 @@ func (s *Server) startHealthChecker() {
 // Stop gracefully shuts down the server
 func (s *Server) Stop() {
 	s.logger.Info("Stopping PulseHA server")
+
+	// Before the teardown below starts mutating state we no longer want to
+	// propagate, and so an in-flight retry loop cannot outlive the server.
+	s.stopConfigBroadcaster()
 
 	// Best-effort convergence hint: broadcast we're going down so peers can elect a new active
 	func() {
@@ -897,7 +940,7 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	} else {
 		s.logger.Debugf("Config saved successfully after node %s joined", req.Hostname)
 		// Defer/best-effort broadcast in a goroutine to avoid blocking join RPC
-		go s.broadcastFullConfigToPeers()
+		s.markConfigDirty()
 	}
 
 	// Post-join: ensure health checker is running and member list is initialized promptly (async)
@@ -3027,7 +3070,7 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	s.logger.Infof("Successfully created group: %s", req.Name)
 	return &rpc.CreateGroupResponse{
@@ -3267,7 +3310,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	s.logger.Infof("Successfully added IP %s to group %s", ipToUse, req.GroupName)
 	return &rpc.AddIPToGroupResponse{
@@ -3419,7 +3462,7 @@ func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGro
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	// If we couldn't bring down the IP on any node but it was in the config, add a warning
 	if !ipBroughtDown && len(warnings) > 0 {
@@ -3492,7 +3535,7 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
 	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
@@ -3607,7 +3650,7 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
 	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
@@ -3703,7 +3746,7 @@ func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	s.logger.Infof("Successfully deleted group %s", req.GroupName)
 	return &rpc.DeleteGroupResponse{
@@ -4140,6 +4183,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		incomingLeaderID     string
 		senderID             string
 		senderActiveIPs      []string
+		incomingConfigGen    int64
 	)
 	// Defer cleanup of any allocated maps
 	defer func() {
@@ -4155,6 +4199,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			Leases          map[string]string `json:"leases"`
 			SenderID        string            `json:"sender_id"`
 			SenderActiveIPs []string          `json:"sender_active_ips"`
+			ConfigGen       int64             `json:"config_generation"`
 		}
 		var e enhanced
 		if err := json.Unmarshal(req.Config, &e); err == nil {
@@ -4170,6 +4215,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			incomingLeaderID = e.LeaderID
 			senderID = e.SenderID
 			senderActiveIPs = e.SenderActiveIPs
+			incomingConfigGen = e.ConfigGen
 		}
 	}
 
@@ -4183,6 +4229,24 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	preSyncEpoch := s.clusterEpoch
 
 	if isFullConfig {
+		// Drop a snapshot the sender has already superseded. ConfigSync applies a
+		// group wholesale — local is preferred only when the incoming list is
+		// empty — so an older snapshot delivered late used to overwrite a newer
+		// one with no way back (docs/TEST-PLAN.md defect #5). Not an error: the
+		// sender has nothing to fix, the message is simply obsolete.
+		if !s.shouldApplyIncomingConfig(senderID, incomingConfigGen) {
+			s.logger.Debug("CONFIG_SYNC: ignoring superseded config",
+				"sender", senderID, "generation", incomingConfigGen)
+			return &rpc.ConfigSyncResponse{
+				Success: true,
+				Message: "superseded config generation ignored",
+			}, nil
+		}
+
+		// One snapshot of the live pointer for every preserve-read below, so a
+		// concurrent Reconfigure swapping it cannot be observed mid-function.
+		cur := s.currentConfig()
+
 		// Create a new config instance to hold incoming cluster-wide configuration
 		newConfig := &config.Config{}
 
@@ -4196,7 +4260,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		// Preserve the local node identity from our existing configuration to avoid adopting remote LocalNode
-		prevLocalID := s.config.Pulse.LocalNode
+		prevLocalID := cur.Pulse.LocalNode
 		if prevLocalID != "" && newConfig.Pulse.LocalNode != prevLocalID {
 			s.logger.Debugf("ConfigSync: preserving local node identity: %s (incoming had %s)", prevLocalID, newConfig.Pulse.LocalNode)
 			newConfig.Pulse.LocalNode = prevLocalID
@@ -4205,7 +4269,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Nodes = map[string]*config.Node{}
 			}
 			if _, ok := newConfig.Nodes[prevLocalID]; !ok {
-				if existing := s.config.Nodes[prevLocalID]; existing != nil {
+				if existing := cur.Nodes[prevLocalID]; existing != nil {
 					// Shallow copy to avoid aliasing
 					copied := *existing
 					newConfig.Nodes[prevLocalID] = &copied
@@ -4215,18 +4279,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 		// Preserve local-specific settings before applying cluster config
 		// These should not be overwritten by a remote ConfigSync
-		localIDPreserve := s.config.Pulse.LocalNode
-		loggingLevelPreserve := s.config.Pulse.LoggingLevel
-		logToFilePreserve := s.config.Pulse.LogToFile
-		logFileLocationPreserve := s.config.Pulse.LogFileLocation
-		logToSyslogPreserve := s.config.Pulse.LogToSyslog
-		syslogNetworkPreserve := s.config.Pulse.SyslogNetwork
-		syslogAddressPreserve := s.config.Pulse.SyslogAddress
-		syslogFacilityPreserve := s.config.Pulse.SyslogFacility
-		syslogTagPreserve := s.config.Pulse.SyslogTag
+		localIDPreserve := cur.Pulse.LocalNode
+		loggingLevelPreserve := cur.Pulse.LoggingLevel
+		logToFilePreserve := cur.Pulse.LogToFile
+		logFileLocationPreserve := cur.Pulse.LogFileLocation
+		logToSyslogPreserve := cur.Pulse.LogToSyslog
+		syslogNetworkPreserve := cur.Pulse.SyslogNetwork
+		syslogAddressPreserve := cur.Pulse.SyslogAddress
+		syslogFacilityPreserve := cur.Pulse.SyslogFacility
+		syslogTagPreserve := cur.Pulse.SyslogTag
 		// Whether this sync is the one that flips us into active-active decides
 		// whether we have to seed the assignment map below.
-		prevMode := s.config.Pulse.Mode
+		prevMode := cur.Pulse.Mode
 
 		s.Lock()
 
@@ -4340,6 +4404,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 		s.config = newConfig
 		s.Unlock()
+
+		// Recorded only once the config is actually in place, so a save failure
+		// above cannot make this node believe it holds a generation it rejected.
+		s.recordAppliedConfigGeneration(senderID, incomingConfigGen)
 
 		// Update convergence metadata if newer
 		if incomingEpoch > s.clusterEpoch {
@@ -4884,7 +4952,7 @@ func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (
 	}
 
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	limit := "unlimited"
 	if req.Capacity > 0 {
@@ -5893,6 +5961,20 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 func buildConfigAndStatePayload(cfg *config.Config, states map[string]membership.MemberStatus,
 	epoch int64, leaderID string) ([]byte, error) {
 
+	return buildFullConfigPayload(cfg, states, epoch, leaderID, "", 0)
+}
+
+// buildFullConfigPayload is buildConfigAndStatePayload plus the sender identity
+// and config generation that let the receiver order this payload against the
+// sender's other payloads (docs/TEST-PLAN.md defect #5).
+//
+// senderID "" / generation 0 means unversioned: the receiver cannot order it and
+// applies it. That is the required behaviour for a peer still running an older
+// binary during a rolling upgrade, so the guard degrades to today's
+// last-writer-wins rather than dropping the message.
+func buildFullConfigPayload(cfg *config.Config, states map[string]membership.MemberStatus,
+	epoch int64, leaderID, senderID string, configGen int64) ([]byte, error) {
+
 	configBytes, err := json.Marshal(cfg)
 	if err != nil {
 		return nil, err
@@ -5909,8 +5991,252 @@ func buildConfigAndStatePayload(cfg *config.Config, states map[string]membership
 	payload["member_states"] = ms
 	payload["epoch"] = epoch
 	payload["leader_id"] = leaderID
+	if senderID != "" && configGen > 0 {
+		payload["sender_id"] = senderID
+		payload["config_generation"] = configGen
+	}
 
 	return json.Marshal(payload)
+}
+
+// nextConfigGeneration allocates the generation number for a config mutation
+// this node is making. Two concurrent mutations can never be handed the same
+// number — the receiver's whole ability to order them depends on that. Starts at
+// 1, since 0 means "unversioned".
+//
+// Takes no lock deliberately: its callers hold s.Lock() (see configGeneration).
+func (s *Server) nextConfigGeneration() int64 {
+	return s.configGeneration.Add(1)
+}
+
+// markConfigDirty records that the local config changed and wakes the
+// broadcaster.
+//
+// This replaces the `go s.broadcastFullConfigToPeers()` that used to end every
+// group mutation. Each of those goroutines marshalled s.config whenever it was
+// scheduled, so N concurrent mutations put N unordered snapshots on the wire and
+// the last to arrive won even when it was the oldest — 200 rapid add-ip calls
+// left whitecrane's four nodes at 200/189/192/193, permanently. Signalling a
+// single broadcaster instead means concurrent mutations coalesce into one
+// broadcast of the final state, and only one broadcast from this node is ever in
+// flight.
+func (s *Server) markConfigDirty() {
+	s.nextConfigGeneration()
+	s.requestConfigBroadcast()
+}
+
+// RequestConfigReconcile re-sends the current config to every peer without
+// claiming a new generation, repairing a peer that missed a broadcast. Called by
+// the health checker's periodic reconcile, which gates it on this node being the
+// coordinator — see HealthChecker.reconcileConfigAcrossPeers for why that gate
+// matters. A peer already holding this generation ignores the message.
+func (s *Server) RequestConfigReconcile() {
+	s.requestConfigBroadcast()
+}
+
+// requestConfigBroadcast wakes the broadcaster without claiming a new
+// generation, for a re-send of the current config rather than a change to it.
+//
+// The trigger channel has capacity 1 and the send is non-blocking, so a signal
+// arriving while a broadcast is already queued is dropped: the queued broadcast
+// has not snapshotted the config yet and will pick up everything. A nil channel
+// (a Server built directly in a test) makes the select fall to default, so this
+// is inert rather than a panic.
+func (s *Server) requestConfigBroadcast() {
+	select {
+	case s.broadcastTrigger <- struct{}{}:
+	default:
+	}
+}
+
+// startConfigBroadcaster runs the single goroutine that owns pushing this node's
+// config to its peers. Idempotent — Start and the tests may both call it.
+func (s *Server) startConfigBroadcaster() {
+	s.broadcastOnce.Do(func() {
+		if s.broadcastTrigger == nil {
+			return
+		}
+		go func() {
+			for {
+				select {
+				case <-s.broadcastStop:
+					return
+				case <-s.broadcastTrigger:
+					s.broadcastConfigToPeersOnce()
+				}
+			}
+		}()
+	})
+}
+
+// stopConfigBroadcaster shuts the broadcaster down. Safe to call more than once.
+func (s *Server) stopConfigBroadcaster() {
+	if s.broadcastStop == nil {
+		return
+	}
+	select {
+	case <-s.broadcastStop:
+	default:
+		close(s.broadcastStop)
+	}
+}
+
+// broadcastConfigToPeersOnce snapshots the config under the read lock, then
+// pushes it to every peer, retrying the ones that fail.
+//
+// The retry is the other half of defect #5. The old code discarded both the
+// response and the error (`_, _ = ...ConfigSync(...)`) on a 2s timeout with
+// nothing behind it, so a single dropped RPC was permanent divergence — which is
+// how run 17 left node-3 holding precisely the last four adds it had missed,
+// under serial mutation where there was no reordering to blame. #31 (a
+// ConfigSync cycling the peer's gRPC listener) makes a refused RPC mid-switch a
+// routine event rather than a rare one.
+func (s *Server) broadcastConfigToPeersOnce() {
+	const (
+		maxAttempts = 4
+		baseBackoff = 250 * time.Millisecond
+	)
+
+	s.RLock()
+	generation := s.configGeneration.Load()
+	localID, _ := s.config.GetLocalNodeUUID()
+	states := s.memberStatesForBroadcast()
+	payloadBytes, err := buildFullConfigPayload(s.config, states, s.clusterEpoch, s.leaderID, localID, generation)
+	pending := make(map[string]*config.Node, len(s.config.Nodes))
+	for id, node := range s.config.Nodes {
+		if id != localID {
+			pending[id] = node
+		}
+	}
+	s.RUnlock()
+
+	if err != nil {
+		s.logger.Error("CONFIG_BROADCAST: failed to build payload", "error", err)
+		return
+	}
+
+	for attempt := 1; attempt <= maxAttempts && len(pending) > 0; attempt++ {
+		// A newer broadcast is already queued; it carries everything this one
+		// would have delivered, so stop rather than compete with it.
+		if attempt > 1 && len(s.broadcastTrigger) > 0 {
+			s.logger.Debug("CONFIG_BROADCAST: superseded by a newer broadcast, abandoning retries",
+				"generation", generation, "peersOutstanding", len(pending))
+			return
+		}
+
+		if attempt > 1 {
+			select {
+			case <-s.broadcastStop:
+				return
+			case <-time.After(baseBackoff * time.Duration(1<<uint(attempt-2))):
+			}
+		}
+
+		for id, node := range pending {
+			remoteClient, err := s.getPeerClient(id, node)
+			if err != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			resp, err := remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
+			cancel()
+			switch {
+			case err != nil:
+				s.logger.Debug("CONFIG_BROADCAST: ConfigSync failed, will retry",
+					"peer", id, "attempt", attempt, "generation", generation, "error", err)
+			case resp != nil && !resp.Success:
+				// The peer rejected the payload on its own terms (a stale
+				// generation, or a save failure). Retrying the same bytes cannot
+				// change that answer.
+				s.logger.Debug("CONFIG_BROADCAST: peer declined ConfigSync",
+					"peer", id, "generation", generation, "message", resp.Message)
+				delete(pending, id)
+			default:
+				delete(pending, id)
+			}
+		}
+	}
+
+	if len(pending) > 0 {
+		outstanding := make([]string, 0, len(pending))
+		for id := range pending {
+			outstanding = append(outstanding, id)
+		}
+		// Warn, not Debug: this is the state that diverges a config, and the
+		// periodic reconcile is what will eventually repair it.
+		s.logger.Warn("CONFIG_BROADCAST: peers did not accept the config after all retries; "+
+			"waiting for the periodic reconcile",
+			"generation", generation, "peers", outstanding)
+	}
+}
+
+// memberStatesForBroadcast reads the current member statuses to send alongside
+// the config, so a peer never has to reconcile a config against states that
+// arrived in a different message (defect #27).
+func (s *Server) memberStatesForBroadcast() map[string]membership.MemberStatus {
+	states := map[string]membership.MemberStatus{}
+	if s.memberList == nil {
+		return states
+	}
+	for id, m := range s.memberList.MembersSnapshot() {
+		if m == nil {
+			continue
+		}
+		m.Lock()
+		states[id] = m.Status
+		m.Unlock()
+	}
+	return states
+}
+
+// currentConfig returns the live config pointer, read under the read lock.
+//
+// ConfigSync spawns `go s.Reconfigure()`, which swaps the pointer under the write
+// lock, so a second ConfigSync arriving while that goroutine is still running
+// races every bare `s.config` read — and two ConfigSyncs landing close together
+// is ordinary behaviour on a four-node cluster, not an edge case. The race
+// detector catches it via the tests in config_generation_test.go.
+//
+// This closes the reads in ConfigSync only. The wider residual noted against
+// defect #32 stands: ~278 unsynchronized s.config reads remain across
+// internal/server, and closing those properly means this accessor (or an
+// atomic.Pointer) applied at every one of them.
+func (s *Server) currentConfig() *config.Config {
+	s.RLock()
+	defer s.RUnlock()
+	return s.config
+}
+
+// shouldApplyIncomingConfig decides whether a full config payload is newer than
+// what this node already applied from the same sender.
+//
+// Equal generations return true: the periodic reconcile re-sends the current
+// generation so a peer that missed a delivery heals, and re-applying an
+// identical config is a no-op, whereas rejecting it would leave the divergence
+// in place. Only a strictly lower generation is stale.
+func (s *Server) shouldApplyIncomingConfig(senderID string, generation int64) bool {
+	if senderID == "" || generation <= 0 {
+		return true // unversioned: cannot be ordered, so apply it
+	}
+	s.configGenMu.Lock()
+	defer s.configGenMu.Unlock()
+	return generation >= s.appliedConfigGen[senderID]
+}
+
+// recordAppliedConfigGeneration remembers the generation just applied, so a
+// later-arriving older snapshot from the same sender can be recognised.
+func (s *Server) recordAppliedConfigGeneration(senderID string, generation int64) {
+	if senderID == "" || generation <= 0 {
+		return
+	}
+	s.configGenMu.Lock()
+	defer s.configGenMu.Unlock()
+	if s.appliedConfigGen == nil {
+		s.appliedConfigGen = make(map[string]int64)
+	}
+	if generation > s.appliedConfigGen[senderID] {
+		s.appliedConfigGen[senderID] = generation
+	}
 }
 
 // broadcastConfigAndStates pushes the config and the member states it implies to

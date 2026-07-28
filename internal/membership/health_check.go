@@ -63,6 +63,41 @@ type ServerReference interface {
 	Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error)
 	// Demotion orchestration; releases every group IP the node could host
 	MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error)
+	// Re-broadcast of the current config, for the periodic reconcile below
+	RequestConfigReconcile()
+}
+
+// reconcileConfigAcrossPeers re-broadcasts the coordinator's config once a
+// minute on an otherwise stable cluster, so a peer that missed a config
+// broadcast is repaired instead of staying diverged forever.
+//
+// This is the "it never self-heals" half of docs/TEST-PLAN.md defect #5. A
+// mutation's broadcast was fire-and-forget with the RPC error discarded, so a
+// single dropped ConfigSync diverged a node permanently: on whitecrane 200 serial
+// add-ip calls left node-3 holding precisely the last four it had missed, and it
+// stayed that way. The broadcaster now retries, but retries are bounded and a
+// peer can be down for longer than they last.
+//
+// Coordinator-gated, and that gate is the load-bearing part. The receiver applies
+// a config wholesale, so if every node re-broadcast its own view, a node that was
+// *behind* would push its stale config at a generation its peers had not seen
+// from it and they would adopt it — turning the repair into the corruption. One
+// speaker per cluster is what makes a re-broadcast safe. clusterCoordinator waits
+// out FailOverLimit before appointing anyone, so a node doing bulk IP work does
+// not get a second coordinator appointed beside it (the runs 8-14 fix).
+func (h *HealthChecker) reconcileConfigAcrossPeers(members map[string]*Member) {
+	if h.server == nil || h.members == nil || h.members.config == nil {
+		return
+	}
+	localID, err := h.members.config.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
+		return
+	}
+	h.logger.Debug("CONFIG_RECONCILE: re-broadcasting config from the coordinator")
+	h.server.RequestConfigReconcile()
 }
 
 // HealthCheck represents the result of a health check
@@ -451,6 +486,7 @@ func (h *HealthChecker) performHealthChecks() {
 		// the coordinator down once a minute on a perfectly stable cluster.
 		if h.checksWithoutChange%60 == 0 {
 			h.logger.Infof("Cluster stable for %d checks: %s", h.checksWithoutChange, currentClusterDisplayState)
+			h.reconcileConfigAcrossPeers(membersSnapshot)
 		}
 	}
 

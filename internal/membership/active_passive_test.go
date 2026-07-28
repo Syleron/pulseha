@@ -25,6 +25,7 @@ type stubServer struct {
 	broadcastEpoch   int64
 	broadcastStates  map[string]MemberStatus
 	makePassiveFails bool
+	configReconciles int
 }
 
 func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return nil }
@@ -49,6 +50,8 @@ func (s *stubServer) BroadcastClusterState(memberStates map[string]MemberStatus,
 func (s *stubServer) GetLeaderID() string             { return s.leaderID }
 func (s *stubServer) GetLeaderLeaseUntil() time.Time  { return time.Time{} }
 func (s *stubServer) RefreshLocalMonitorExpectedIPs() {}
+
+func (s *stubServer) RequestConfigReconcile() { s.configReconciles++ }
 
 func (s *stubServer) BroadcastVoteRequest(sessionID string, voteType, subject, description string,
 	timeoutSeconds int64) error {
