@@ -497,7 +497,8 @@ not just `pulsectl`).
 | TC-8 | return to active-passive | **Not runnable as specified** — the cluster returns to active-passive *by itself* after a failed switch. Its pass condition (one Active holding all group IPs, others zero) was met at 00:37, but via the failure path, not via `mode set` |
 | TC-8 | #27 reverse switch runs two whole-group consolidations onto two different targets | **Fixed, verified live (run 15)** — `SetMode` propagates mode + states in one ConfigSync before moving any address; both deciders now pick the same target. See "Root cause (defect #27)" below |
 | TC-8 | #28 a demoted peer's own IP monitor re-claims the whole group | **Fixed `2ae8189`, verified live run 16 (2026-07-28).** TC-8 ran `duplicated=0` across all 294 sampled seconds and consolidated in 4s; node-3/node-4 logged the `ConfigSync: LOCAL node demoted from Active` line that the fix resurrected. Original diagnosis: The peer could hold `mode=active-passive` and `self=Active` because `ConfigSync` adopted the incoming epoch *before* testing whether the payload was decisive, so `decisive` was structurally always false and every peer's view of the local node's own status was discarded — including a real demotion. See "Root cause (defect #28)" below |
-| TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Open, found while fixing #28.** `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
+| TC-8 | #30 the post-load VIP reconcile brings up the whole group, mode-blind | **Fixed `c50f027`, not yet verified live.** The claim set now goes through the same assigned-subset filter as every other seeding site (`filterToAssigned`, extracted so the two cannot diverge again); the release set stays whole-group on purpose. Original diagnosis: `loadInitialMembers` spawns a goroutine that 500ms later brings up every group IP if the local node reads Active, with no active-active filtering. It runs on every full ConfigSync, so in active-active each Active peer re-claims the whole group and the enforce loop's `releaseUnassignedIPs` has to undo it — a likely source of the residual 5–14 steady-state duplication |
+| TC-8 | #32 `config.Reload()` unmarshals over the live `*Config` while readers are in flight | **Partially mitigated `c50f027`, open.** `ConfigSync` spawns the post-load reconcile and `Reconfigure()` -> `Reload()` concurrently; `Reload` is a `json.Unmarshal` straight over the shared struct. Measured on the demotion tests under `-race`: **22/40 runs before, 3/40 after** hoisting the reconcile's config read out of the goroutine. The residual is `BringUpIP`/`BringDownIP` reading `s.config` on that same goroutine, and the general problem is untouched — `Config` carries a `sync.Mutex` that almost no reader or writer takes |
 | TC-8 | #29 per-address down-then-up gap during consolidation | **Open** — run 15 measured `unique=149/205` for ~2s at t+1: 56 addresses momentarily on no node. Run 16 reproduced it at 57 for ~2s. Not per-address: `SetMode`'s goroutine runs all demotions to completion before the activation, by design. Fix shape is handover (make-before-break) vs failover |
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16.** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger |
 
@@ -1080,3 +1081,57 @@ Benign here solely because the demoted peer self-releases; any path where the pe
 *not* self-release would lose the operation entirely. Fix shape: either avoid tearing down
 the listener on a config-only reload, or retry the release and verify it against
 interface state the way `8ffc1c1` made release confirmation work for promotion.
+
+---
+
+## Fix 2026-07-28 — defect #30, and a race it exposed (`c50f027`)
+
+**#30 fixed.** The one-shot VIP reconcile at the end of `loadInitialMembers` now
+decides its claim set the same way every other seeding site does. The
+whole-group expansion and the assigned-subset filter were pulled apart into
+`snapshotVIPGroups` and `filterToAssigned`, and `expectedIfaceIPs` was rewritten
+in terms of the latter — so there is now one implementation of "which of these
+addresses are mine", rather than two that can drift. Drift is exactly how this
+defect happened: the #2/#26 fix taught `expectedIfaceIPs` and `deriveExpectedIPs`
+about active-active and missed this site.
+
+The release direction was deliberately left whole-group. A node that has just
+been demoted may be holding addresses it was never assigned — the point of the
+pass is to leave it holding none, so narrowing the release set to its
+assignments would strand exactly the addresses that most need dropping.
+
+**Not yet verified live.** #30's signature is the residual 5–14 addresses of
+steady-state duplication in active-active, so TC-6 with the run-16 sampler is
+the test: if the fix works, `duplicated` should settle at 0 rather than
+drifting in single digits, and the per-sync re-claim spike 500ms after each
+ConfigSync should disappear.
+
+### New defect #32 — `Reload()` unmarshals over the live `*Config`
+
+Found while testing the above, and it is the more serious of the two.
+`ConfigSync` spawns the post-load reconcile *and* `go s.Reconfigure()`, and
+`Reconfigure` calls `config.Reload()` — which is `json.Unmarshal` straight into
+the shared `*Config` every other goroutine is reading. `Config` does carry a
+`sync.Mutex`, but neither `Load`/`Reload` nor readers like `ClusterCheck`,
+`GetLocalNodeUUID` or `s.config.Nodes[...]` take it.
+
+Measured on `TestEqualEpochConfigSync` + `TestDecisiveConfigSync` under `-race`,
+40 runs each:
+
+| | races |
+|---|---|
+| before | 22 / 40 |
+| after hoisting the reconcile's config read | 3 / 40 |
+
+So `make testrace` has been flaky on this for some time, not newly. `c50f027`
+only removes this goroutine's *own* config reads from after the sleep — the
+config half of the decision is snapshotted synchronously, while member status
+and assignments are still read late, because `ConfigSync` applies those after
+`loadInitialMembers` returns. The residual 3/40 is `BringUpIP`/`BringDownIP`
+reading `s.config` on the same goroutine.
+
+Fixing it properly means giving `Config` real read/write locking, or making
+`Reload` build a new struct and swap the pointer under `s.Lock()` rather than
+mutating in place. The pointer swap is the smaller change and matches what
+`ConfigSync` already does at `s.config = newConfig`. Worth doing before #29,
+since a make-before-break handover will add more concurrent config readers.
