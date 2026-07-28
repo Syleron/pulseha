@@ -1672,3 +1672,80 @@ never assigned. Unassignment is exactly that case and the current scoping misses
 `4aca395059229e0b8837454155a900b0`. `logging_level` = debug on node-1 and node-2, info on node-3
 and node-4 (and now actually running at info, since all four were restarted this run).
 `/run/lbBootFlag` **absent on all four**, unchanged.
+
+## Result 2026-07-28 (run 22) — #40 VERIFIED FIXED LIVE, both halves and the rebalance direction
+
+Binary `70708a5fc74ccf59088ed72390dab67f` / `pulsectl 3fceaadc4dde2a0a5edef213f473042b`
+(code `b6c2431`), deployed to all four and md5-verified on disk. Mode active-active, `RealTest`
+= 245 addresses, starting from run 21's leave-behind `61/62/61/61`.
+
+### The restart that did not happen — check the *running* binary, not the deployed file
+
+The first rolling restart silently failed on three of four nodes: the restarts were issued from a
+shell function whose `ssh` calls had their stdin consumed by the enclosing loop, with stderr sent
+to `/dev/null`. `systemctl restart` never ran, and every subsequent measurement was the old binary
+still running untouched. This looked exactly like the fix not working: `unassign` returned rc=0,
+the config propagated to node-3 (`group_assignments` became `{'enX0': ['Management']}`),
+expectations went correctly empty (`ENFORCE: Current expectations expectations=map[]` from
+20:49:35), node-3 stayed `Active` holding all 61 addresses, and nothing was released — for four
+and a half minutes.
+
+The on-disk md5 was correct on all four, so the usual check passed. What caught it was
+`md5sum /proc/$(pgrep -f /usr/local/sbin/pulseha)/exe` together with the process start time:
+node-3's daemon had been up since 19:31:34, before the deploy, running `4aca3950…`. **Verify the
+running process, not the installed file** — this is run 21's lesson ("a status assertion is only
+meaningful once the *queried* node is upgraded") in a new form, and it cost the same wasted
+diagnosis. Incidentally it re-confirmed #40 on the old binary independently.
+
+### #40: PASSES — all three parts
+
+Restarting node-3 on the new binary at 19:53:57 UTC, with `RealTest` still unassigned from it:
+
+1. **The release pass sees the unassigned group.** Two seconds later, node-3:
+   `WARN ENFORCE: releasing floating IPs this node is no longer assigned iface=enX0 count=61`.
+   All 61 addresses of the group it no longer holds an assignment for, released by the node itself
+   — the half that used to compute an empty surplus set on every tick while `unassign` reported
+   success.
+2. **The reclaim places them on eligible nodes.** Coverage went to `81/82/0/82` within ~15s:
+   `unique=245/245 missing=0 duplicated=0`. Across eight minutes and every reclaim cycle there
+   were **zero** `group RealTest not assigned to any interface on node MC-LB-node-3` refusals and
+   zero `Failed to assign IPs to node` on any of the four nodes. Run 21's 33 passed votes with
+   zero placements are gone: the vote now concludes and the addresses land.
+3. **Rebalance declines instead of stalling.** With node-3 correctly ineligible and holding
+   nothing, the cluster is deliberately imbalanced — and `ACTIVE_CHECK: rebalancing` fired **zero**
+   times, with zero `rebalance move failed`. The planner rules the ineligible destination out
+   rather than choosing it, failing `OrchestrateIPFailover` and breaking out of the loop. Without
+   this the reclaim fix would only have moved the stall: the empty fourth node is exactly the
+   least-loaded destination the old planner would have picked. `81/82/0/82` held steady for 100s+
+   with no oscillation.
+
+node-3 reported `Status: Standby` with `Cluster Status: online` throughout — `ac1e103` holding for
+a second run, on the state that produced it naturally rather than a hand-built one.
+
+### Recovery
+
+`group assign --group RealTest --node-id <node-3> --interface enX0` at 19:57:11 UTC returned rc=0
+and the cluster rebalanced `81/82/0/82` → **`62/61/61/61`** within ~75s, `unique=245/245
+missing=0 duplicated=0`, all four `Active`, cluster `online`.
+
+Transient duplication during the moves: `duplicated=18` at T+25s, `1` at T+50s, `0` at T+75s, with
+`missing=0` at every sample. Addresses are up on the destination before the source lets go and the
+dedup pass converges behind the batch — no address was ever off the cluster during recovery.
+
+### Errors, and what is not new
+
+Two error classes appear in the run and **both predate this change**, measured on the old binary in
+the 19:00–20:45 window: `failed to GARP. exit status 2` (61 on node-1) and
+`ENFORCE: failed to release unassigned floating IP ... cannot assign requested address` (27 on
+node-1, 31 on node-2). The second is the release pass racing its own inventory snapshot — the
+address moved between the snapshot at the top of `enforceExpectations` and the bring-down — and it
+is logged at error level for what is a no-op. It self-corrects (coverage was exact at rest), but
+the widened release pass will hit it more often, and it is worth a defect of its own: re-check
+existence at bring-down, or demote the message when the address is simply already gone.
+
+### Leave-behind
+
+`RealTest` = **245**, mode **active-active**, settled **`62/61/61/61`**, `unique=245 missing=0
+duplicated=0`. `RealTest` reassigned to all four on `enX0` (`{'enX0': ['Management', 'RealTest']}`
+on every node). All four running `70708a5fc74ccf59088ed72390dab67f`, verified via `/proc/pid/exe`.
+`logging_level` = **info**. `/run/lbBootFlag` **absent on all four**, unchanged.
