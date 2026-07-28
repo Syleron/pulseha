@@ -1,4 +1,12 @@
-.PHONEY: clean get tools protos test integration-test quiet-integration-test test-all
+# Every target here is a recipe, not a file. This MUST stay .PHONY (it read
+# .PHONEY until 2026-07-28, which make treats as an ordinary target, leaving
+# every rule below file-shadowable): build.sh generates PHP proto stubs into
+# ./test/, and that directory silently turned `make test` into
+# "make: 'test' is up to date" — a green run that executed no tests at all.
+.PHONY: default all build buildrace netcore hcping hcserial genemailalerts \
+	get tools cli protos test testrace integration-test \
+	quiet-integration-test test-all clean install install-netcore \
+	install-hcping install-hcserial install-genemailalerts
 
 VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
