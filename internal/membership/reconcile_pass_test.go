@@ -48,7 +48,7 @@ func TestReconcilePassDoesNotBlockTheHealthCheckTick(t *testing.T) {
 	stub.makePassiveDelay = 2 * time.Second
 
 	start := time.Now()
-	h.startReconcilePass()
+	h.startReconcilePassLocked()
 	elapsed := time.Since(start)
 
 	if elapsed > 250*time.Millisecond {
@@ -79,10 +79,10 @@ func TestReconcilePassesDoNotStackAndTheGuardIsReleased(t *testing.T) {
 
 	before, _ := h.reconcileCounters()
 
-	h.startReconcilePass()
+	h.startReconcilePassLocked()
 	// Three more ticks while the first pass is still demoting.
 	for i := 0; i < 3; i++ {
-		h.startReconcilePass()
+		h.startReconcilePassLocked()
 	}
 
 	waitForReconcileIdle(t, h, 20*time.Second)
@@ -111,10 +111,46 @@ func TestReconcilePassDoesNotStartWhenStopped(t *testing.T) {
 	h.ready = false
 
 	before, _ := h.reconcileCounters()
-	h.startReconcilePass()
+	h.startReconcilePassLocked()
 	waitForReconcileIdle(t, h, 5*time.Second)
 
 	if after, _ := h.reconcileCounters(); after != before {
 		t.Errorf("a stopped health checker ran %d reconciliation passes, want 0", after-before)
 	}
+}
+
+// Regression for docs/TEST-PLAN.md defect #56. performHealthChecks takes the
+// health checker's write lock for its whole body and, from inside that region,
+// advances the unchanged-cycles counter and dispatches the reconciliation pass.
+// The #51 fix put both behind helpers that took the same lock again — and
+// sync.RWMutex is not reentrant, so the first tick to reach either line wedged
+// the health-check goroutine *while holding the write lock*. On whitecrane run 24
+// that meant `ACTIVE_CHECK: Starting active node failure check` never appeared
+// once in six minutes: no node was promoted, nothing placed the 287-address
+// group, and all four nodes sat Standby/Passive with the whole group down.
+//
+// Called with the lock held, the way the tick calls them. A deadlock here would
+// hang the package rather than fail it, so the work runs on a goroutine and the
+// assertion is the timeout.
+func TestTheTickDoesNotSelfDeadlockOnItsOwnLock(t *testing.T) {
+	a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
+	h, _ := newAPTestChecker("node-a", a)
+	h.ready = true
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.Lock()
+		defer h.Unlock()
+		h.resetChecksWithoutChangeLocked()
+		h.incChecksWithoutChangeLocked()
+		h.startReconcilePassLocked()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the tick deadlocked on its own lock; the helpers it calls must not retake it")
+	}
+	waitForReconcileIdle(t, h, 20*time.Second)
 }

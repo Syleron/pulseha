@@ -449,7 +449,7 @@ func (h *HealthChecker) performHealthChecks() {
 		h.logger.Infof("HEALTH_CHECK: Cluster state changed - %s", currentClusterDisplayState)
 		h.logger.Debug("HEALTH_CHECK: Previous state was", "lastState", h.lastClusterState)
 		h.lastClusterState = currentClusterStateForComparison
-		h.resetChecksWithoutChange()
+		h.resetChecksWithoutChangeLocked()
 
 		// Proactively broadcast updated member states so all nodes converge quickly
 		if h.server != nil {
@@ -467,7 +467,7 @@ func (h *HealthChecker) performHealthChecks() {
 		}
 	} else {
 		// Increment counter for unchanged state
-		checksWithoutChange := h.incChecksWithoutChange()
+		checksWithoutChange := h.incChecksWithoutChangeLocked()
 
 		// Heartbeat convergence nudge every 3 checks (~3s) to advance LastResponse and align peers
 		if h.server != nil && checksWithoutChange%3 == 0 {
@@ -519,7 +519,7 @@ func (h *HealthChecker) performHealthChecks() {
 			localMember.Hostname, "status", StatusToString(localMember.Status))
 		// Always check for active node failure, not just when passive. Runs off
 		// the tick — see startReconcilePass for why.
-		h.startReconcilePass()
+		h.startReconcilePassLocked()
 	} else {
 		// Debug why no local member found - this indicates a serious configuration issue
 		localNodeID, err := h.members.config.GetLocalNodeUUID()
@@ -593,19 +593,22 @@ func (h *HealthChecker) reconcileCounters() (cycles, stable int) {
 	return h.reconcileCycles, h.checksWithoutChange
 }
 
-// resetChecksWithoutChange zeroes the consecutive-unchanged-cycles counter.
-func (h *HealthChecker) resetChecksWithoutChange() {
-	h.Lock()
-	defer h.Unlock()
+// resetChecksWithoutChangeLocked zeroes the consecutive-unchanged-cycles counter.
+//
+// The caller holds h's write lock. performHealthChecks takes it for its whole
+// body, so a helper that took it again wedged the health-check goroutine *with
+// the lock held* — no ticks, no promotion, no placement (docs/TEST-PLAN.md
+// defect #56).
+func (h *HealthChecker) resetChecksWithoutChangeLocked() {
 	h.checksWithoutChange = 0
 }
 
-// incChecksWithoutChange advances the consecutive-unchanged-cycles counter and
-// returns its new value, so the tick reads one consistent number for the rest of
-// the cycle rather than re-reading a field the reconciliation pass also consults.
-func (h *HealthChecker) incChecksWithoutChange() int {
-	h.Lock()
-	defer h.Unlock()
+// incChecksWithoutChangeLocked advances the consecutive-unchanged-cycles counter
+// and returns its new value, so the tick reads one consistent number for the rest
+// of the cycle rather than re-reading a field the reconciliation pass also
+// consults. The caller holds h's write lock — see
+// resetChecksWithoutChangeLocked.
+func (h *HealthChecker) incChecksWithoutChangeLocked() int {
 	h.checksWithoutChange++
 	return h.checksWithoutChange
 }
@@ -623,8 +626,15 @@ func (h *HealthChecker) incChecksWithoutChange() int {
 // At most one pass runs at a time. A tick arriving while one is in flight skips,
 // which is why the pass reads the counters live rather than a snapshot: it should
 // act on the cluster as it is when it gets there, not as it was several ticks ago.
-func (h *HealthChecker) startReconcilePass() {
-	if !h.IsRunning() {
+// The caller holds h's write lock: this is called from performHealthChecks, which
+// takes it for its whole body. Calling the exported IsRunning here took the read
+// lock on top of that write lock, and sync.RWMutex is not reentrant, so the first
+// tick to reach this line wedged the health-check goroutine *with the write lock
+// held*. On whitecrane run 24 that stopped reconciliation dead: no node was ever
+// promoted, nothing placed the 287-address group, and all four nodes sat
+// Standby/Passive with the whole group down (docs/TEST-PLAN.md defect #56).
+func (h *HealthChecker) startReconcilePassLocked() {
+	if !h.ready || h.stopped {
 		return
 	}
 	if !h.reconcileInFlight.CompareAndSwap(false, true) {
