@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -207,6 +208,23 @@ type Server struct {
 	broadcastTrigger chan struct{}
 	broadcastStop    chan struct{}
 	broadcastOnce    sync.Once
+
+	// unpropagated is the config this node committed and could not push to every
+	// peer, plus the retry that will (docs/TEST-PLAN.md defect #43). Guarded by
+	// its own mutex: the broadcaster writes it at the end of a pass and reads it
+	// to schedule the next one, and neither point can take s.RWMutex, which the
+	// mutation that started the broadcast may still hold.
+	propagationMu sync.Mutex
+	unpropagated  *unpropagatedConfig
+
+	// clusterListenSrv/clusterListenAddr record what the cluster gRPC listener is
+	// currently serving, so Reconfigure can tell a config-only change from one
+	// that actually moves the bind address (defect #31). Guarded by their own
+	// mutex because the serving goroutine clears them when Serve returns, off any
+	// path that holds s.RWMutex.
+	clusterListenMu   sync.Mutex
+	clusterListenSrv  *grpc.Server
+	clusterListenAddr string
 }
 
 // NewServer creates a new PulseHA server instance
@@ -414,20 +432,56 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 					s.logger.Debugf("Updated local node port to actual bound port: %s", actualPort)
 				}
 			}
+			// Record what was actually bound rather than "port 0". Reconfigure
+			// compares its config-derived address against this record, and the
+			// config now holds the real port, so a stale "0" would make every
+			// reconfigure look like a move of the bind address.
+			address = fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), actualPort)
 		}
 	}
 
 	// Capture the gRPC server pointer locally so a concurrent Reconfigure()
 	// swapping s.grpcServer doesn't race with this goroutine's read.
 	grpcSrv := s.grpcServer
+	s.setClusterListener(grpcSrv, address)
 	go func() {
 		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
 		if err := grpcSrv.Serve(listener); err != nil {
 			s.logger.Error("Cluster gRPC server failed", "error", err)
 		}
+		// Forget the record if this is still the serving instance, so a listener
+		// that died on its own is rebound by the next Reconfigure rather than
+		// skipped as still-serving. A GracefulStop from Reconfigure has already
+		// replaced the pointer by the time it gets here, so this leaves the new
+		// listener's record alone.
+		s.clearClusterListener(grpcSrv)
 	}()
 
 	return nil
+}
+
+// setClusterListener records the address a gRPC server instance is serving.
+func (s *Server) setClusterListener(srv *grpc.Server, address string) {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	s.clusterListenSrv, s.clusterListenAddr = srv, address
+}
+
+// clusterListenerServing reports whether a live listener is already serving
+// address, which is Reconfigure's licence to leave it alone.
+func (s *Server) clusterListenerServing(address string) bool {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	return s.clusterListenSrv != nil && s.clusterListenAddr == address
+}
+
+// clearClusterListener forgets the record if srv is still the serving instance.
+func (s *Server) clearClusterListener(srv *grpc.Server) {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	if s.clusterListenSrv == srv {
+		s.clusterListenSrv, s.clusterListenAddr = nil, ""
+	}
 }
 
 // listenTCPReuseAddr is net.Listen("tcp", addr) with SO_REUSEADDR (and
@@ -2476,29 +2530,50 @@ func (s *Server) Reconfigure() error {
 	}
 	s.logger.Infof("Updated local node configuration: IP=%s, Port=%s", localNode.IP, localNode.Port)
 
-	// Swap out old cluster gRPC server pointer quickly under lock, then stop outside lock
-	var oldSrv *grpc.Server
-	s.Lock()
-	oldSrv = s.grpcServer
-	s.grpcServer = nil
-	s.Unlock()
-	if oldSrv != nil {
-		s.logger.Debug("Stopping existing gRPC server...")
-		oldSrv.GracefulStop()
-	}
+	// Rebind the cluster listener only when the bind address actually moved.
+	//
+	// Almost every Reconfigure comes from a ConfigSync that changed the config and
+	// nothing else — a group gained an address, a peer changed status — and for
+	// those the listener is already serving the right endpoint. Rebinding it anyway
+	// is not free in a way that is easy to miss: GracefulStop plus a fresh bind
+	// refuses every inbound RPC for the gap, so peers see `connection refused` for
+	// seconds against a daemon that never restarted (docs/TEST-PLAN.md defect #31).
+	// Under a burst of mutations each broadcast then tore the listener down on every
+	// receiver, which is what refused 56 of 60 peer bring-up RPCs on whitecrane in
+	// run 23 and what starved the config broadcast's own retries into defect #43.
+	//
+	// The address is the whole of the listener's configuration here — the gRPC
+	// server is built with no credentials and no options — so an unchanged address
+	// means there is genuinely nothing to re-apply.
+	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
+	if s.clusterListenerServing(address) {
+		s.logger.Debug("Cluster bind address unchanged; keeping the listener serving",
+			"address", address)
+	} else {
+		// Swap out old cluster gRPC server pointer quickly under lock, then stop outside lock
+		var oldSrv *grpc.Server
+		s.Lock()
+		oldSrv = s.grpcServer
+		s.grpcServer = nil
+		s.Unlock()
+		if oldSrv != nil {
+			s.logger.Debug("Stopping existing gRPC server...")
+			oldSrv.GracefulStop()
+		}
 
-	// Create new gRPC server instance and assign pointer under a short lock
-	newSrv := grpc.NewServer()
-	rpc.RegisterServerServer(newSrv, s)
-	// Also register CLI service on the cluster listener for remote operations (e.g., join)
-	rpc.RegisterCLIServer(newSrv, s)
-	s.Lock()
-	s.grpcServer = newSrv
-	s.Unlock()
+		// Create new gRPC server instance and assign pointer under a short lock
+		newSrv := grpc.NewServer()
+		rpc.RegisterServerServer(newSrv, s)
+		// Also register CLI service on the cluster listener for remote operations (e.g., join)
+		rpc.RegisterCLIServer(newSrv, s)
+		s.Lock()
+		s.grpcServer = newSrv
+		s.Unlock()
 
-	s.logger.Debugf("Starting cluster listener on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
-	if err := s.startClusterListener(localNode); err != nil {
-		return fmt.Errorf("failed to start cluster listener: %v", err)
+		s.logger.Debugf("Starting cluster listener on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
+		if err := s.startClusterListener(localNode); err != nil {
+			return fmt.Errorf("failed to start cluster listener: %v", err)
+		}
 	}
 
 	// Ensure health checker is running after reconfigure
@@ -6413,22 +6488,130 @@ func (s *Server) requestConfigBroadcast() {
 
 // startConfigBroadcaster runs the single goroutine that owns pushing this node's
 // config to its peers. Idempotent — Start and the tests may both call it.
+//
+// It wakes on a mutation and on its own retry timer. The timer is the fix for
+// defect #43: a broadcast that exhausted its four attempts used to log a warning
+// deferring to "the periodic reconcile", which only runs on the coordinator, so a
+// mutation taken on any other node stayed local for an unbounded time. The node
+// that owns the change is the one that retries it now, regardless of who
+// coordinates.
 func (s *Server) startConfigBroadcaster() {
 	s.broadcastOnce.Do(func() {
 		if s.broadcastTrigger == nil {
 			return
 		}
 		go func() {
+			var (
+				retry      <-chan time.Time
+				retryTimer *time.Timer
+			)
+			// A nil retry channel blocks forever, which is the "nothing
+			// outstanding" state.
+			stopRetry := func() {
+				if retryTimer != nil {
+					retryTimer.Stop()
+					retryTimer = nil
+				}
+				retry = nil
+			}
 			for {
 				select {
 				case <-s.broadcastStop:
+					stopRetry()
 					return
 				case <-s.broadcastTrigger:
-					s.broadcastConfigToPeersOnce()
+				case <-retry:
+				}
+				stopRetry()
+
+				s.broadcastConfigToPeersOnce()
+
+				if outstanding, ok := s.pendingPropagation(); ok {
+					s.logger.Debug("CONFIG_PROPAGATION: scheduling a re-push of an unpropagated config",
+						"version", outstanding.version, "peers", outstanding.peers,
+						"attempt", outstanding.attempts, "in", outstanding.backoff)
+					retryTimer = time.NewTimer(outstanding.backoff)
+					retry = retryTimer.C
 				}
 			}
 		}()
 	})
+}
+
+// unpropagatedConfig is a config version this node committed but could not push
+// to every peer, together with the state of the retry that will.
+//
+// peers is the diagnostic rather than the work list: the retry re-snapshots and
+// re-pushes to everyone, because by then this node's config may have moved on
+// again and a peer not in this list may have fallen behind for its own reasons. A
+// peer already holding the version ignores the message, so the redundancy costs
+// one RPC and cannot diverge anything.
+type unpropagatedConfig struct {
+	version  int64
+	peers    []string
+	attempts int
+	backoff  time.Duration
+}
+
+// The retry schedule. The first wait deliberately outlasts a listener rebind:
+// under defect #31 a peer refuses connections for seconds at a time while it
+// reconfigures, which is precisely the window the four in-pass attempts (~1.75s
+// of backoff) fall inside, so retrying sooner just spends attempts against a
+// socket that is not there. The ceiling matches the coordinator's once-a-minute
+// reconcile, so a peer that is genuinely down is retried no more often than it
+// was before.
+const (
+	propagationRetryBase = 5 * time.Second
+	propagationRetryMax  = 60 * time.Second
+)
+
+// recordUnpropagated notes that a broadcast did not reach every peer and returns
+// the delay before the next attempt, doubling it on each consecutive failure.
+func (s *Server) recordUnpropagated(stamp configStamp, peers []string) time.Duration {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	next := propagationRetryBase
+	attempts := 0
+	if s.unpropagated != nil {
+		attempts = s.unpropagated.attempts
+		if next = s.unpropagated.backoff * 2; next > propagationRetryMax {
+			next = propagationRetryMax
+		}
+	}
+	s.unpropagated = &unpropagatedConfig{
+		version:  stamp.version,
+		peers:    peers,
+		attempts: attempts + 1,
+		backoff:  next,
+	}
+	return next
+}
+
+// clearUnpropagated drops the retry state after a broadcast every peer accepted,
+// reporting how many attempts it took so the repair is visible in the log rather
+// than only inferable from the absence of further warnings.
+func (s *Server) clearUnpropagated() (attempts int, wasOutstanding bool) {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	if s.unpropagated == nil {
+		return 0, false
+	}
+	attempts = s.unpropagated.attempts
+	s.unpropagated = nil
+	return attempts, true
+}
+
+// pendingPropagation returns the outstanding retry state, if any.
+func (s *Server) pendingPropagation() (unpropagatedConfig, bool) {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	if s.unpropagated == nil {
+		return unpropagatedConfig{}, false
+	}
+	return *s.unpropagated, true
 }
 
 // stopConfigBroadcaster shuts the broadcaster down. Safe to call more than once.
@@ -6535,11 +6718,21 @@ func (s *Server) broadcastConfigToPeersOnce() {
 		for id := range pending {
 			outstanding = append(outstanding, id)
 		}
-		// Warn, not Debug: this is the state that diverges a config, and the
-		// periodic reconcile is what will eventually repair it.
+		sort.Strings(outstanding)
+		// Warn, not Debug: this is the state that diverges a config. It used to say
+		// "waiting for the periodic reconcile", which was only true on the
+		// coordinator — see startConfigBroadcaster and defect #43.
 		s.logger.Warn("CONFIG_BROADCAST: peers did not accept the config after all retries; "+
-			"waiting for the periodic reconcile",
-			"version", stamp.version, "peers", outstanding)
+			"this node will keep retrying",
+			"version", stamp.version, "peers", outstanding,
+			"retryIn", s.recordUnpropagated(stamp, outstanding))
+		return
+	}
+	if attempts, wasOutstanding := s.clearUnpropagated(); wasOutstanding {
+		// Info: this is the repair landing, and the whole point of #43 is that it
+		// previously never did on a non-coordinator.
+		s.logger.Info("CONFIG_PROPAGATION: every peer accepted the config",
+			"version", stamp.version, "afterRetries", attempts)
 	}
 }
 
