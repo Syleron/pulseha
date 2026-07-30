@@ -1757,6 +1757,33 @@ func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote b
 	return haveQuorum || forceDemote
 }
 
+// demotionTimeout sizes a MakePassive deadline to the number of floating IPs the
+// target has to release and verify — see membership.DemotionTimeoutFor.
+func (s *Server) demotionTimeout() time.Duration {
+	s.RLock()
+	total := 0
+	for _, ips := range s.config.Groups {
+		total += len(ips)
+	}
+	s.RUnlock()
+
+	return membership.DemotionTimeoutFor(total)
+}
+
+// restoreMemberStates puts every member back to the status it held before a
+// promotion attempt began.
+//
+// Each write goes through SetStatus rather than assigning the field: the health
+// check loop, the IP monitor and the status RPC all read Status under the member
+// lock, and this runs on the promotion goroutine alongside them.
+func (s *Server) restoreMemberStates(originalStates map[string]membership.MemberStatus) {
+	for id, status := range originalStates {
+		if mm := s.memberList.GetMemberByID(id); mm != nil {
+			mm.SetStatus(status)
+		}
+	}
+}
+
 // performPromotionAsync executes the promotion operation asynchronously
 // This prevents frontend timeouts on long-running IP failover operations
 func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceDemote bool) {
@@ -1778,17 +1805,18 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 	reachableCount := 0
 	if s.config.Pulse.Mode == "active-passive" {
 		for id, m := range s.memberList.MembersSnapshot() {
-			if m.Status != membership.StatusUnknown {
+			status := m.GetStatus()
+			if status != membership.StatusUnknown {
 				reachableCount++
 			}
-			if m.Status == membership.StatusActive && prevActiveID == "" {
+			if status == membership.StatusActive && prevActiveID == "" {
 				prevActiveID = id
 				s.logger.Info("PROMOTE_ASYNC: Found current active node", "active_node", id, "hostname", m.Hostname)
 			}
 		}
 		if prevActiveID == "" {
 			for id, m := range s.memberList.MembersSnapshot() {
-				if id != targetNodeID && m.Status == membership.StatusUnknown {
+				if id != targetNodeID && m.GetStatus() == membership.StatusUnknown {
 					unconfirmedIncumbents = append(unconfirmedIncumbents, id)
 				}
 			}
@@ -1810,7 +1838,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 	// Snapshot current states for rollback
 	originalStates := make(map[string]membership.MemberStatus)
 	for id, m := range s.memberList.MembersSnapshot() {
-		originalStates[id] = m.Status
+		originalStates[id] = m.GetStatus()
 	}
 
 	// Determine demotion strategy
@@ -1839,11 +1867,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			if !forceDemote {
 				// Abort and restore
 				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion due to demotion failure")
-				for id, st := range originalStates {
-					if mm := s.memberList.GetMemberByID(id); mm != nil {
-						mm.Status = st
-					}
-				}
+				s.restoreMemberStates(originalStates)
 				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 				return
 			}
@@ -1853,8 +1877,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				"previous_active", prevActiveID)
 
 			if failingMember := s.memberList.GetMemberByID(prevActiveID); failingMember != nil {
-				failingMember.Status = membership.StatusUnknown
-				failingMember.ActiveIPs = nil
+				failingMember.MarkUnreachable()
 			}
 		} else {
 			s.logger.Info("PROMOTE_ASYNC: Successfully demoted previous active", "previous_active", prevActiveID)
@@ -1874,7 +1897,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		for _, id := range unconfirmedIncumbents {
 			// Must be bounded: without a deadline a wedged peer hangs this goroutine forever
 			// instead of surfacing the DeadlineExceeded the decision below relies on.
-			mpCtx, mpCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			//
+			// Sized to the group rather than fixed at 10s. The peer's MakePassive drops
+			// and verifies every configured group address, so on the 201-address topology
+			// a healthy but loaded incumbent overran the flat deadline — and an overrun is
+			// read as "still owns its IPs", which aborts a promotion that was safe.
+			mpCtx, mpCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
 			released, provablyDown, err := s.confirmPeerReleasedIPs(mpCtx, id)
 			mpCancel()
 			if released {
@@ -1898,11 +1926,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					"have_quorum", haveQuorum,
 					"reachable_nodes", reachableCount,
 					"error", err)
-				for rid, st := range originalStates {
-					if mm := s.memberList.GetMemberByID(rid); mm != nil {
-						mm.Status = st
-					}
-				}
+				s.restoreMemberStates(originalStates)
 				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 				return
 			}
@@ -1914,8 +1938,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				"have_quorum", haveQuorum,
 				"error", err)
 			if mm := s.memberList.GetMemberByID(id); mm != nil {
-				mm.Status = membership.StatusUnknown
-				mm.ActiveIPs = nil
+				mm.MarkUnreachable()
 			}
 		}
 	}
@@ -1936,11 +1959,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					_ = mm.MakeActive(nil)
 				}
 			}
-			for id, st := range originalStates {
-				if mm := s.memberList.GetMemberByID(id); mm != nil {
-					mm.Status = st
-				}
-			}
+			s.restoreMemberStates(originalStates)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 			return
 		}
@@ -1989,16 +2008,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					_ = mm.MakeActive(nil)
 				}
 			}
-			for id, st := range originalStates {
-				if mm := s.memberList.GetMemberByID(id); mm != nil {
-					mm.Status = st
-				}
-			}
+			s.restoreMemberStates(originalStates)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 			return
 		}
 
-		member.Status = membership.StatusActive
+		member.SetStatus(membership.StatusActive)
 		s.logger.Info("PROMOTE_ASYNC: Remote promotion succeeded", "node_id", targetNodeID)
 	}
 
@@ -3028,8 +3043,10 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 // group IP it can host, and clears the rest. It reports whether an Active node
 // was found; if not, nothing holds the group and the caller must place it.
 //
-// Takes no server lock — it only reads config maps and locks members
-// individually — so it is safe to call with s.Lock() held or not.
+// Callers must hold s.Lock() or s.RLock(): this reads the config maps through
+// groupIPsForNode, whose contract requires it. It takes no server lock of its own
+// — the lock is not reentrant and SetMode calls this with the write lock held —
+// and the member writes below take only the individual member locks.
 func (s *Server) seedActiveActiveAssignments() bool {
 	members := s.memberList.MembersSnapshot()
 
@@ -4428,7 +4445,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	// epoch it had just installed — never greater, so nothing was ever decisive
 	// and every peer's view of the local node's own status was discarded,
 	// including a real demotion (docs/TEST-PLAN.md defect #28).
-	preSyncEpoch := s.clusterEpoch
+	//
+	// Read under the lock: this runs before the branch below takes it, so a bare
+	// read races the config broadcaster and any concurrent sync.
+	preSyncEpoch := s.GetClusterEpoch()
 
 	if isFullConfig {
 		// Drop a snapshot the sender has already superseded. ConfigSync applies a
@@ -4668,18 +4688,32 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// (docs/TEST-PLAN.md defects #2/#26). Every node derives the same answer
 		// from the config it just applied, so seeding here is consistent rather
 		// than a second opinion.
-		if prevMode != "active-active" && s.config.Pulse.Mode == "active-active" {
+		//
+		// Under s.RLock(): this runs after the pointer swap released the write
+		// lock, and seedActiveActiveAssignments reads the config maps through
+		// groupIPsForNode. The read lock is enough — it writes only member state —
+		// and it must be the read lock, because the write lock is what the swap
+		// above already released.
+		s.RLock()
+		switchedToActiveActive := prevMode != "active-active" && s.config.Pulse.Mode == "active-active"
+		if switchedToActiveActive {
 			s.logger.Info("CONFIG_SYNC: cluster switched to active-active, seeding assignments")
-			if !s.seedActiveActiveAssignments() {
-				s.logger.Warn("CONFIG_SYNC: no active node found while seeding active-active assignments")
-			}
+		}
+		seeded := switchedToActiveActive && s.seedActiveActiveAssignments()
+		s.RUnlock()
+
+		if switchedToActiveActive && !seeded {
+			s.logger.Warn("CONFIG_SYNC: no active node found while seeding active-active assignments")
 		}
 	} else {
-		// Envelope-only update: do NOT overwrite config; just apply incoming states and metadata
-		if incomingEpoch > s.clusterEpoch {
-			s.clusterEpoch = incomingEpoch
-			s.leaderID = incomingLeaderID
-		}
+		// Envelope-only update: do NOT overwrite config; just apply incoming states
+		// and metadata.
+		//
+		// Adopted under the lock, like the full-config branch above. This branch
+		// never takes s.Lock() at all, so the compare-and-write here was the same
+		// unsynchronised access on a different path: the config broadcaster reads
+		// both fields under RLock, so -race flags it.
+		s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
 		// Keep member list as-is for envelope updates to avoid clobbering runtime states
 		// s.memberList.UpdateConfig(s.config)
 		// Skip loadInitialMembers here; members are stable
@@ -4689,8 +4723,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	if len(incomingMemberStates) > 0 {
 		// Decide whether to apply incoming states based on epoch and leader to avoid cross-over
 		applyStates := false
-		currentEpoch := s.clusterEpoch
-		currentLeader := s.leaderID
+		// Both branches above have released the lock by now, so read the pair
+		// under it — and as a pair, so the leader belongs to the epoch.
+		currentEpoch, currentLeader := s.convergenceMetadata()
 		s.logger.Debug("CONFIG_SYNC: Evaluating incoming member states", "incoming_epoch", incomingEpoch, "current_epoch", currentEpoch,
 			"incoming_leader", incomingLeaderID, "current_leader", currentLeader, "states", incomingMemberStates)
 
@@ -4710,10 +4745,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		if applyStates {
-			// Update epoch/leader if needed
-			if incomingEpoch >= currentEpoch {
-				s.clusterEpoch = incomingEpoch
-				s.leaderID = incomingLeaderID
+			// Update epoch/leader if needed. An equal epoch is adopted here as well
+			// as a higher one, which is why this takes the atLeast comparison.
+			if s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, true) {
 				s.logger.Debug("CONFIG_SYNC: Updated cluster epoch and leader", "epoch", incomingEpoch, "leader", incomingLeaderID)
 			}
 
@@ -6060,6 +6094,40 @@ func (s *Server) GetLeaderID() string {
 	s.RLock()
 	defer s.RUnlock()
 	return s.leaderID
+}
+
+// convergenceMetadata returns the cluster epoch and its leader as one consistent
+// pair.
+//
+// Reading the two fields separately can straddle an adopt and pair a new epoch
+// with the previous leader, which reads as a decision from the wrong node.
+func (s *Server) convergenceMetadata() (epoch int64, leaderID string) {
+	s.RLock()
+	defer s.RUnlock()
+	return s.clusterEpoch, s.leaderID
+}
+
+// adoptConvergenceMetadata records an incoming epoch and its leader, and reports
+// whether they were adopted.
+//
+// atLeast selects the comparison: false adopts a strictly newer epoch, true also
+// adopts an equal one (re-asserting the same epoch under its leader). The compare
+// and the write are one critical section, because two syncs arriving together
+// would otherwise both compare against the same stale read and the later writer
+// would win regardless of epoch.
+//
+// Must NOT be called with the server lock already held — the lock is not
+// reentrant. ConfigSync's full-config branch adopts inline for that reason.
+func (s *Server) adoptConvergenceMetadata(epoch int64, leaderID string, atLeast bool) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	if epoch < s.clusterEpoch || (epoch == s.clusterEpoch && !atLeast) {
+		return false
+	}
+	s.clusterEpoch = epoch
+	s.leaderID = leaderID
+	return true
 }
 
 // GetLeaderLeaseUntil returns the current leader lease expiry

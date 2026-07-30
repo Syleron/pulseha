@@ -155,7 +155,83 @@ func PlanMoves(nodes []Node) []Move {
 	for _, b := range order {
 		moves = append(moves, Move{Src: b.src, Dst: b.dst, Count: counts[b], Group: b.group})
 	}
-	return moves
+	return scheduleWithinCapacity(nodes, moves)
+}
+
+// scheduleWithinCapacity reorders and splits an aggregated plan so that applying
+// the batches in order never puts a destination over its capacity, not even
+// transiently.
+//
+// The simulation the plan comes from is capacity-safe at every step, but
+// aggregating by (src, dst, group) collapses moves that were interleaved with
+// others. A destination that has to shed before it can accept beyond its capacity
+// then sees its whole incoming batch applied first: the final state is still
+// correct, but a caller applying a batch atomically briefly overfills the node.
+//
+// Batches are emitted greedily in plan order, each trimmed to the room actually
+// available at that point; the remainder is retried once the batches that free the
+// space have been emitted. Where nothing is at capacity — the common case — the
+// plan is returned unchanged, so the batching that makes a bulk drain fast is
+// preserved.
+func scheduleWithinCapacity(nodes []Node, moves []Move) []Move {
+	capped := false
+	for _, node := range nodes {
+		if node.Capacity > 0 {
+			capped = true
+			break
+		}
+	}
+	if !capped || len(moves) < 2 {
+		return moves
+	}
+
+	live := make([]int, len(nodes))
+	for i, node := range nodes {
+		live[i] = node.IPCount
+	}
+
+	pending := make([]Move, len(moves))
+	copy(pending, moves)
+
+	scheduled := make([]Move, 0, len(moves))
+	for len(pending) > 0 {
+		progressed := false
+
+		for i, move := range pending {
+			room := move.Count
+			if nodes[move.Dst].Capacity > 0 {
+				room = nodes[move.Dst].Capacity - live[move.Dst]
+			}
+			if room <= 0 {
+				continue
+			}
+			if room > move.Count {
+				room = move.Count
+			}
+
+			scheduled = append(scheduled, Move{
+				Src: move.Src, Dst: move.Dst, Count: room, Group: move.Group,
+			})
+			live[move.Src] -= room
+			live[move.Dst] += room
+
+			if pending[i].Count -= room; pending[i].Count == 0 {
+				pending = append(pending[:i], pending[i+1:]...)
+			}
+			progressed = true
+			break
+		}
+
+		if !progressed {
+			// Unreachable for a plan the simulation produced: it ends within every
+			// capacity, so some destination always has room. Emit the remainder
+			// rather than drop it — the final assignment must not change.
+			scheduled = append(scheduled, pending...)
+			break
+		}
+	}
+
+	return scheduled
 }
 
 // PlanMove returns the next single-IP move that reduces imbalance: the

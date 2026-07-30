@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/charmbracelet/log"
@@ -15,6 +16,7 @@ import (
 	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
 )
@@ -128,7 +130,19 @@ type HealthChecker struct {
 	deepCheckCounter      int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
 	membershipCheckFailed map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
 	reconcileCycles       int             // cycles since startup; reconciliation waits for a grace period
+
+	// reconcileInFlight guards the reconciliation pass, which runs off the tick.
+	// While a pass is running later ticks skip it rather than queue behind it, so
+	// a slow peer cannot accumulate goroutines.
+	reconcileInFlight atomic.Bool
+
+	// ipPresence reports whether an address is up on a local interface. Overridden
+	// in tests; nil means read the real interfaces.
+	ipPresence ipPresenceFunc
 }
+
+// ipPresenceFunc reports whether an address is currently on a local interface.
+type ipPresenceFunc func(string) (bool, string, error)
 
 // NewHealthChecker creates a new health checker
 func NewHealthChecker(members *MemberList, logger *log.Logger) *HealthChecker {
@@ -435,7 +449,7 @@ func (h *HealthChecker) performHealthChecks() {
 		h.logger.Infof("HEALTH_CHECK: Cluster state changed - %s", currentClusterDisplayState)
 		h.logger.Debug("HEALTH_CHECK: Previous state was", "lastState", h.lastClusterState)
 		h.lastClusterState = currentClusterStateForComparison
-		h.checksWithoutChange = 0
+		h.resetChecksWithoutChange()
 
 		// Proactively broadcast updated member states so all nodes converge quickly
 		if h.server != nil {
@@ -453,12 +467,12 @@ func (h *HealthChecker) performHealthChecks() {
 		}
 	} else {
 		// Increment counter for unchanged state
-		h.checksWithoutChange++
+		checksWithoutChange := h.incChecksWithoutChange()
 
 		// Heartbeat convergence nudge every 3 checks (~3s) to advance LastResponse and align peers
-		if h.server != nil && h.checksWithoutChange%3 == 0 {
+		if h.server != nil && checksWithoutChange%3 == 0 {
 			h.logger.Debug("HEALTH_CHECK: Performing heartbeat convergence nudge", "checksWithoutChange",
-				h.checksWithoutChange)
+				checksWithoutChange)
 			states := getMemberStatusMap()
 			for id, m := range membersSnapshot {
 				m.Lock()
@@ -485,8 +499,8 @@ func (h *HealthChecker) performHealthChecks() {
 		// Counts up rather than resetting: reconcileActiveActive reads this as the
 		// number of consecutive unchanged cycles, and zeroing it here would stand
 		// the coordinator down once a minute on a perfectly stable cluster.
-		if h.checksWithoutChange%60 == 0 {
-			h.logger.Infof("Cluster stable for %d checks: %s", h.checksWithoutChange, currentClusterDisplayState)
+		if checksWithoutChange%60 == 0 {
+			h.logger.Infof("Cluster stable for %d checks: %s", checksWithoutChange, currentClusterDisplayState)
 			h.reconcileConfigAcrossPeers(membersSnapshot)
 		}
 	}
@@ -503,8 +517,9 @@ func (h *HealthChecker) performHealthChecks() {
 	if localMember != nil {
 		h.logger.Debug("HEALTH_CHECK: Local member has status, checking for active node failure", "hostname",
 			localMember.Hostname, "status", StatusToString(localMember.Status))
-		// Always check for active node failure, not just when passive
-		h.checkForActiveNodeFailure()
+		// Always check for active node failure, not just when passive. Runs off
+		// the tick — see startReconcilePass for why.
+		h.startReconcilePass()
 	} else {
 		// Debug why no local member found - this indicates a serious configuration issue
 		localNodeID, err := h.members.config.GetLocalNodeUUID()
@@ -549,11 +564,100 @@ func (h *HealthChecker) getCurrentLeaderID() string {
 	return ""
 }
 
+// reconcileBudget bounds one reconciliation pass. It exists so a pass that is
+// making no progress — a peer that accepts connections and never answers — cannot
+// hold the single-flight guard and stop reconciliation indefinitely.
+//
+// Comfortably above demoteMaxTimeout plus the quorum vote's 30s poll, so the
+// backstop only fires for work that is genuinely stuck rather than for a large
+// group being released legitimately. It bounds reconciliation latency, not
+// health-check responsiveness — the pass no longer runs on the tick.
+const reconcileBudget = 3 * time.Minute
+
+// nextReconcileCycle advances and returns the cycle counter, and reports the
+// consecutive-unchanged-cycles count alongside it.
+//
+// Both counters are written by the tick and read by the reconciliation pass, which
+// now runs on its own goroutine, so they move under the health checker lock.
+func (h *HealthChecker) nextReconcileCycle() (cycles, stable int) {
+	h.Lock()
+	defer h.Unlock()
+	h.reconcileCycles++
+	return h.reconcileCycles, h.checksWithoutChange
+}
+
+// reconcileCounters reads the two counters the reconciliation thresholds consult.
+func (h *HealthChecker) reconcileCounters() (cycles, stable int) {
+	h.RLock()
+	defer h.RUnlock()
+	return h.reconcileCycles, h.checksWithoutChange
+}
+
+// resetChecksWithoutChange zeroes the consecutive-unchanged-cycles counter.
+func (h *HealthChecker) resetChecksWithoutChange() {
+	h.Lock()
+	defer h.Unlock()
+	h.checksWithoutChange = 0
+}
+
+// incChecksWithoutChange advances the consecutive-unchanged-cycles counter and
+// returns its new value, so the tick reads one consistent number for the rest of
+// the cycle rather than re-reading a field the reconciliation pass also consults.
+func (h *HealthChecker) incChecksWithoutChange() int {
+	h.Lock()
+	defer h.Unlock()
+	h.checksWithoutChange++
+	return h.checksWithoutChange
+}
+
+// startReconcilePass runs cluster reconciliation off the health-check tick.
+//
+// Everything the pass reaches can block for tens of seconds: a serial MakePassive
+// per extra Active, a quorum vote that polls for 30s, a remote BringDownIPs per
+// duplicate address, and the bring-ups redistribution performs. Running that
+// inline meant a 1s tick could take a minute, so this node stopped answering its
+// own health checks, peers marked it Unknown and elected around it — the same
+// "busy node looks dead" failure the batched GARP and the coordinator grace period
+// were added to prevent (docs/TEST-PLAN.md defects #2/#26).
+//
+// At most one pass runs at a time. A tick arriving while one is in flight skips,
+// which is why the pass reads the counters live rather than a snapshot: it should
+// act on the cluster as it is when it gets there, not as it was several ticks ago.
+func (h *HealthChecker) startReconcilePass() {
+	if !h.IsRunning() {
+		return
+	}
+	if !h.reconcileInFlight.CompareAndSwap(false, true) {
+		h.logger.Debug("ACTIVE_CHECK: reconciliation still running, skipping this cycle")
+		return
+	}
+
+	go func() {
+		defer h.reconcileInFlight.Store(false)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.checkForActiveNodeFailure()
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(reconcileBudget):
+			// The pass is abandoned, not cancelled — the operations below it are
+			// bounded individually, so it will finish on its own. Releasing the
+			// guard here keeps a wedged peer from stopping reconciliation for good.
+			h.logger.Warn("ACTIVE_CHECK: reconciliation exceeded its budget, releasing it for the next cycle",
+				"budget", reconcileBudget)
+		}
+	}()
+}
+
 // checkForActiveNodeFailure checks if the active node has failed and initiates failover
 func (h *HealthChecker) checkForActiveNodeFailure() {
 	h.logger.Debug("ACTIVE_CHECK: Starting active node failure check")
 
-	h.reconcileCycles++
+	h.nextReconcileCycle()
 
 	members := h.members.MembersSnapshot()
 	config := h.members.config
@@ -653,9 +757,47 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 // the stale one we started up with.
 const reconcileGraceCycles = 10
 
-// makePassiveTimeout bounds a demotion issued by the consolidation invariant so
-// an unresponsive peer can't stall the health-check loop.
-const makePassiveTimeout = 10 * time.Second
+// Demotion deadline sizing.
+//
+// MakePassive drops every configured floating address on the target and then
+// verifies each one against its interfaces, so its cost scales with the size of
+// the group, not with the cluster. A flat 10s was right when demotion only
+// released the addresses recorded against a node; now, on the 201-address test
+// topology, a healthy but loaded incumbent can legitimately need longer.
+//
+// Overrunning is not a neutral outcome. A DeadlineExceeded is deliberately read as
+// "the peer is alive and may still own its IPs" — the conservative reading that
+// keeps a wedged Active from being promoted over — so a deadline that is merely
+// too short aborts promotions and consolidations that were safe.
+const (
+	demoteBaseTimeout  = 10 * time.Second
+	demotePerIPTimeout = 100 * time.Millisecond
+	demoteMaxTimeout   = 120 * time.Second
+)
+
+// DemotionTimeoutFor sizes a MakePassive deadline to the number of floating IPs
+// the target has to release and verify. Capped, so a huge or misconfigured group
+// cannot produce an effectively unbounded wait.
+func DemotionTimeoutFor(ipCount int) time.Duration {
+	if ipCount < 0 {
+		ipCount = 0
+	}
+	timeout := demoteBaseTimeout + time.Duration(ipCount)*demotePerIPTimeout
+	if timeout > demoteMaxTimeout {
+		return demoteMaxTimeout
+	}
+	return timeout
+}
+
+// makePassiveTimeout bounds a demotion issued by the consolidation invariant,
+// sized to the group it makes the target release.
+func (h *HealthChecker) makePassiveTimeout() time.Duration {
+	total := 0
+	for _, ips := range h.members.config.Groups {
+		total += len(ips)
+	}
+	return DemotionTimeoutFor(total)
+}
 
 // enforceSingleActive keeps the active-passive invariant that at most one node
 // is Active. Consolidating only when the mode changes cannot hold it: anything
@@ -674,7 +816,7 @@ const makePassiveTimeout = 10 * time.Second
 //
 // Returns true if any node was demoted.
 func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
-	if h.reconcileCycles < reconcileGraceCycles || h.server == nil {
+	if cycles, _ := h.reconcileCounters(); cycles < reconcileGraceCycles || h.server == nil {
 		return false
 	}
 
@@ -710,13 +852,24 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 	h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode, consolidating onto %s",
 		len(actives), target.Hostname)
 
+	// The demotions are issued serially, so the cost is makePassiveTimeout per
+	// extra Active. A shared deadline caps the pass regardless of how many there
+	// are; whatever is left over is picked up next cycle, since the invariant is
+	// re-checked every time.
+	deadline := time.Now().Add(reconcileBudget / 2)
+
 	demoted := false
 	for _, member := range actives {
 		if member.ID == target.ID {
 			continue
 		}
+		if time.Now().After(deadline) {
+			h.logger.Warn("ACTIVE_CHECK: consolidation budget spent, remaining Actives will be demoted next cycle",
+				"remaining_after", member.Hostname)
+			break
+		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), makePassiveTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), h.makePassiveTimeout())
 		resp, err := h.server.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: member.ID})
 		cancel()
 
@@ -771,7 +924,8 @@ const viewStableCycles = 3
 // coordinator — the healthy node with the lowest ID — acts, so concurrent
 // redistribution from multiple nodes can't race.
 func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
-	if h.reconcileCycles < reconcileGraceCycles {
+	cycles, stable := h.reconcileCounters()
+	if cycles < reconcileGraceCycles {
 		return
 	}
 
@@ -782,9 +936,9 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 	if clusterCoordinator(members, h.failoverGrace()) != localID {
 		return
 	}
-	if h.checksWithoutChange < viewStableCycles {
+	if stable < viewStableCycles {
 		h.logger.Debug("ACTIVE_CHECK: cluster view still settling, deferring reconciliation",
-			"checksWithoutChange", h.checksWithoutChange)
+			"checksWithoutChange", stable)
 		return
 	}
 
@@ -837,15 +991,95 @@ func (h *HealthChecker) failoverGrace() time.Duration {
 	return time.Duration(h.members.config.Pulse.FailOverLimit) * time.Millisecond
 }
 
+// localIPPresence returns a presence check over this node's interfaces, building
+// the inventory at most once and only if it is actually consulted.
+//
+// BuildIPInventory is a full netlink enumeration, and the common case is a pass
+// with no duplicates at all, so it must not be built up front — nor once per
+// address, which is what made demotion enumerate the interfaces hundreds of times
+// before stillHeldIPs was changed to share one inventory.
+func (h *HealthChecker) localIPPresence() ipPresenceFunc {
+	if h.ipPresence != nil {
+		return h.ipPresence
+	}
+
+	var (
+		inv   *network.IPInventory
+		err   error
+		built bool
+	)
+	return func(ip string) (bool, string, error) {
+		if !built {
+			inv, err = network.BuildIPInventory()
+			built = true
+		}
+		if err != nil {
+			return false, "", err
+		}
+		return inv.Exists(ip)
+	}
+}
+
+// pickDuplicateSurvivor decides which of two members recorded as holding the same
+// address keeps it.
+//
+// Record order — whichever of the two sorts first by node ID — is a coin flip
+// against reality. If the node that actually has the address up is the one that
+// loses, the coordinator brings down a live address and leaves the record on a node
+// that may not have it up at all, so the address is served by nobody until the next
+// orphan sweep re-places it: one avoidable flap per duplicate.
+//
+// Only the local node's interfaces are readable — no RPC exposes a peer's — so the
+// kernel decides whenever the local node is one of the two contenders, and record
+// order remains the fallback when neither is local or the interfaces cannot be
+// read. That covers the case that matters most in practice: the coordinator running
+// this pass is usually itself one of the holders.
+func pickDuplicateSurvivor(first, second *Member, ip string, present ipPresenceFunc) (winner, loser *Member) {
+	for _, candidate := range []*Member{first, second} {
+		if !candidate.IsLocal() {
+			continue
+		}
+		other := first
+		if candidate == first {
+			other = second
+		}
+
+		ipOnly := ip
+		if cidr, _ := utils.GetCIDR(ip); cidr != nil {
+			ipOnly = cidr.String()
+		}
+		holds, _, err := present(ipOnly)
+		if err != nil {
+			// Presence could not be established, so it is no better evidence than
+			// record order. Fall through to that.
+			break
+		}
+		if holds {
+			return candidate, other
+		}
+		// The local record is demonstrably stale: the peer is the better owner, and
+		// dropping the local record costs nothing because nothing is up here.
+		return other, candidate
+	}
+	return first, second
+}
+
 // resolveDuplicateAssignments finds IPs tracked by more than one healthy
-// member and removes them everywhere but the first owner (lowest node ID).
-// Convergence races can transiently double-assign an IP; left alone that
-// means two nodes ARP-fighting over the same address. Returns true if any
-// duplicate was resolved.
+// member and removes them everywhere but the surviving owner. Convergence races
+// can transiently double-assign an IP; left alone that means two nodes
+// ARP-fighting over the same address. Returns true if any duplicate was resolved.
 func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) bool {
 	resolved := false
 	owners := make(map[string]*Member)
-	for _, node := range rebalanceCandidates(members) {
+	present := h.localIPPresence()
+
+	// Losing addresses are collected per node and released in one call each, after
+	// every conflict is known: the survivor of a conflict can be a node already
+	// visited, so the loser is not always the one currently being examined.
+	surrender := make(map[string][]string)
+
+	candidates := rebalanceCandidates(members)
+	for _, node := range candidates {
 		node.Lock()
 		ips := append([]string{}, node.ActiveIPs...)
 		node.Unlock()
@@ -888,17 +1122,36 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 				owners[ip] = node
 				continue
 			}
-			h.logger.Warnf("ACTIVE_CHECK: IP %s assigned to both %s and %s, removing from %s",
-				ip, owner.Hostname, node.Hostname, node.Hostname)
-			node.Lock()
-			node.ActiveIPs = removeIPFromList(node.ActiveIPs, ip)
-			node.Unlock()
-			if err := node.BringDownIPs([]string{ip}); err != nil {
-				h.logger.Error("ACTIVE_CHECK: failed to bring down duplicate IP", "ip", ip,
-					"hostname", node.Hostname, "error", err)
-			}
-			resolved = true
+
+			winner, loser := pickDuplicateSurvivor(owner, node, ip, present)
+			owners[ip] = winner
+			surrender[loser.ID] = append(surrender[loser.ID], ip)
+			h.logger.Warnf("ACTIVE_CHECK: IP %s assigned to both %s and %s, keeping it on %s",
+				ip, owner.Hostname, node.Hostname, winner.Hostname)
 		}
+	}
+
+	// Released in one call per node. One BringDownIPs per address meant one RPC per
+	// address to a remote node, each with the client's own 30s deadline, so a node
+	// that had picked up a dozen duplicates could spend minutes here. Iterated in
+	// candidate order rather than map order so the work is deterministic.
+	for _, node := range candidates {
+		ips := surrender[node.ID]
+		if len(ips) == 0 {
+			continue
+		}
+
+		node.Lock()
+		for _, ip := range ips {
+			node.ActiveIPs = removeIPFromList(node.ActiveIPs, ip)
+		}
+		node.Unlock()
+
+		if err := node.BringDownIPs(ips); err != nil {
+			h.logger.Error("ACTIVE_CHECK: failed to bring down duplicate IPs", "ips", ips,
+				"hostname", node.Hostname, "error", err)
+		}
+		resolved = true
 	}
 	return resolved
 }

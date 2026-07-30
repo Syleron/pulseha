@@ -26,6 +26,11 @@ type stubServer struct {
 	broadcastStates  map[string]MemberStatus
 	makePassiveFails bool
 	configReconciles int
+
+	// makePassiveDelay stalls each demotion, standing in for the slow peer that
+	// made consolidation take tens of seconds on the health-check tick. Set before
+	// the pass starts and not written afterwards.
+	makePassiveDelay time.Duration
 }
 
 func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return nil }
@@ -63,6 +68,13 @@ func (s *stubServer) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc
 }
 
 func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error) {
+	if s.makePassiveDelay > 0 {
+		select {
+		case <-time.After(s.makePassiveDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	if s.makePassiveFails {
 		return &rpc.MakePassiveResponse{Success: false, Message: "node unreachable"}, nil
 	}

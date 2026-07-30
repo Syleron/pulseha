@@ -184,6 +184,38 @@ func (m *Member) GetActiveIPs() []string {
 	return ips
 }
 
+// GetStatus returns this member's status, read under the member lock.
+//
+// Status is written under that lock by promotions, the health check loop and the
+// maintenance transitions, so deciding anything from a bare read races with all
+// three.
+func (m *Member) GetStatus() MemberStatus {
+	m.Lock()
+	defer m.Unlock()
+	return m.Status
+}
+
+// SetStatus records this member's status under the member lock.
+func (m *Member) SetStatus(status MemberStatus) {
+	m.Lock()
+	defer m.Unlock()
+	m.Status = status
+}
+
+// MarkUnreachable records that this member is no longer known to hold any
+// floating IPs — status Unknown with an empty assignment set.
+//
+// Promotion uses this when an incumbent could not be reached, so the addresses
+// it may still be holding can be accounted for elsewhere. The two fields have to
+// move together under one lock: a reader seeing Unknown against the old ActiveIPs
+// would conclude a down node still owns the group.
+func (m *Member) MarkUnreachable() {
+	m.Lock()
+	defer m.Unlock()
+	m.Status = StatusUnknown
+	m.ActiveIPs = nil
+}
+
 // BringUpIPs brings up the specified IPs on this member
 func (m *Member) BringUpIPs(ips []string) error {
 	// Resolve interface per IP using group assignments

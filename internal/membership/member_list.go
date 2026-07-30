@@ -113,6 +113,16 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 	m.Lock()
 	defer m.Unlock()
 
+	return m.redistributeIPsLocked(failedIPs)
+}
+
+// redistributeIPsLocked is RedistributeIPs' body, split out because the member
+// list lock is not reentrant and RemoveMember redistributes while already
+// holding it — calling the exported method there deadlocked the daemon on every
+// removal of a node that still held addresses.
+//
+// Requires m.Lock() held.
+func (m *MemberList) redistributeIPsLocked(failedIPs []string) error {
 	// Get available nodes for redistribution
 	availableNodes := m.getAvailableNodes()
 	if len(availableNodes) == 0 {
@@ -170,11 +180,18 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 // active-passive assigns all IPs to a single node regardless of capacity, and
 // active-active placement enforces both in ipam.Distribute, which knows which
 // group each address belongs to.
+// Status is read under each member's own lock: the member list lock this runs
+// under does not cover it, because promotions and the health check loop write
+// Status while holding only the member lock.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
+		member.Lock()
+		status := member.Status
+		member.Unlock()
+
 		// Skip nodes that are down or in maintenance
-		if member.Status == StatusUnknown || member.Status == StatusMaintenance {
+		if status == StatusUnknown || status == StatusMaintenance {
 			continue
 		}
 		available = append(available, member)
@@ -215,12 +232,20 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 			placements = append(placements, ipam.IP{Addr: ip, Group: index[ip]})
 		}
 
+		// ActiveIPs and Capacity are both written under the member lock —
+		// AddActiveIPs appends, UpdateConfig refreshes capacity — so the counts
+		// feeding placement have to be snapshotted under it, not read raw.
 		snapshots := make([]ipam.Node, 0, len(nodes))
 		for _, node := range nodes {
+			node.Lock()
+			ipCount := len(node.ActiveIPs)
+			capacity := node.Capacity
+			node.Unlock()
+
 			snapshots = append(snapshots, ipam.Node{
 				Hostname: node.Hostname,
-				IPCount:  len(node.ActiveIPs),
-				Capacity: node.Capacity,
+				IPCount:  ipCount,
+				Capacity: capacity,
 				Groups:   nodeHostableGroups(m.config, node.ID),
 			})
 		}
@@ -298,10 +323,17 @@ func nodeHostableGroups(cfg *config.Config, nodeID string) map[string]bool {
 	return groups
 }
 
-// getActiveNode returns the current active node in the cluster
+// getActiveNode returns the current active node in the cluster.
+//
+// Callers hold the member list lock, which covers the map but not Status — that
+// is written under the member's own lock, so it is snapshotted under it here.
 func (m *MemberList) getActiveNode() *Member {
 	for _, member := range m.Members {
-		if member.Status == StatusActive {
+		member.Lock()
+		status := member.Status
+		member.Unlock()
+
+		if status == StatusActive {
 			return member
 		}
 	}
@@ -458,9 +490,11 @@ func (m *MemberList) RemoveMember(id string) error {
 	if member, exists := m.Members[id]; exists {
 		// Found by node ID
 		m.logger.Debug("Removing member", "id", id)
-		// Redistribute IPs if member was active
-		if len(member.ActiveIPs) > 0 {
-			if err := m.RedistributeIPs(member.ActiveIPs); err != nil {
+		// Redistribute IPs if member was active. GetActiveIPs reads under the
+		// member lock, and the locked variant is required here because this
+		// already holds the member list lock.
+		if held := member.GetActiveIPs(); len(held) > 0 {
+			if err := m.redistributeIPsLocked(held); err != nil {
 				m.logger.Error("Failed to redistribute IPs for removed member", "hostname", member.Hostname, "error", err)
 			}
 		}
@@ -478,9 +512,9 @@ func (m *MemberList) RemoveMember(id string) error {
 		if member.Hostname == id {
 			// Found by hostname
 			m.logger.Debug("Removing member by hostname", "hostname", id, "id", member.ID)
-			// Redistribute IPs if member was active
-			if len(member.ActiveIPs) > 0 {
-				if err := m.RedistributeIPs(member.ActiveIPs); err != nil {
+			// Redistribute IPs if member was active (see the by-ID branch above).
+			if held := member.GetActiveIPs(); len(held) > 0 {
+				if err := m.redistributeIPsLocked(held); err != nil {
 					m.logger.Error("Failed to redistribute IPs for removed member", "hostname", member.Hostname, "error", err)
 				}
 			}
