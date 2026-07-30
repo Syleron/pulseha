@@ -3063,6 +3063,16 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
 
+	// Hand the new mode to the broadcaster as well as sending it directly below.
+	// The direct send is one unretried pass per peer with its result discarded, so
+	// a peer that is briefly unreachable — a listener mid-rebind under defect #31
+	// is enough — stayed in the old mode indefinitely, and a cluster running two
+	// modes at once is the split-brain configuration quorum exists to prevent.
+	// Stamping it makes the retrying broadcaster own eventual propagation
+	// (defect #43's machinery), and a peer that already applied the direct send
+	// answers the re-push with `superseded config version ignored`.
+	s.markConfigDirty()
+
 	// Snapshot the decision while still holding the lock, so the goroutine below
 	// broadcasts exactly what was decided here rather than re-reading state that
 	// a health check may have moved on in the meantime.
@@ -5001,14 +5011,91 @@ func (s *Server) AddNode(nodeID string) error {
 	return nil
 }
 
+// configKeyScope says where a `pulsectl config set` key takes effect.
+type configKeyScope int
+
+const (
+	// scopeCluster keys describe how the cluster behaves as a whole, so every
+	// node has to hold the same value. A cluster running two different values
+	// for one of these is exactly the divergence quorum exists to prevent.
+	scopeCluster configKeyScope = iota
+	// scopeNode keys describe how this one daemon logs. ConfigSync deliberately
+	// preserves them when it applies an incoming full config, so that a peer
+	// left at debug for an investigation is not reset by the next broadcast —
+	// which also means a broadcast cannot carry them, and they are node-local by
+	// design rather than by omission.
+	scopeNode
+)
+
+// settableConfigKeys is every key `config set` accepts and the scope it takes
+// effect at.
+//
+// Keys absent from the table are refused rather than written. The tag-based
+// setter underneath will happily overwrite `local_node` or `cluster_token`, and
+// neither is a value an operator sets by hand: the first is this node's identity
+// in the member list, the second the shared cluster secret.
+var settableConfigKeys = map[string]configKeyScope{
+	"mode":              scopeCluster,
+	"hcs_interval":      scopeCluster,
+	"fos_interval":      scopeCluster,
+	"fo_limit":          scopeCluster,
+	"auto_failback":     scopeCluster,
+	"logging_level":     scopeNode,
+	"log_to_file":       scopeNode,
+	"log_file_location": scopeNode,
+	"log_to_syslog":     scopeNode,
+	"syslog_network":    scopeNode,
+	"syslog_address":    scopeNode,
+	"syslog_facility":   scopeNode,
+	"syslog_tag":        scopeNode,
+}
+
+// What UpdateConfig reports back about the reach of a change it applied. The CLI
+// prints these verbatim, because "Successfully updated mode to active-passive"
+// meant one node on whitecrane and the whole cluster in the help text.
+const (
+	configScopeClusterMessage = "applied to every node in the cluster"
+	configScopeNodeMessage    = "applied to this node only — this key is node-local and has to be set on each node"
+)
+
 // UpdateConfig implements CLI.UpdateConfig
 func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest) (*rpc.UpdateConfigResponse, error) {
-	s.Lock()
-	defer s.Unlock()
-
 	if req == nil || req.Key == "" {
 		return &rpc.UpdateConfigResponse{Success: false, Message: "invalid request"}, nil
 	}
+
+	scope, settable := settableConfigKeys[req.Key]
+	if !settable {
+		return &rpc.UpdateConfigResponse{
+			Success: false,
+			Message: fmt.Sprintf("%q is not a settable configuration key", req.Key),
+		}, nil
+	}
+
+	// The mode is not a value to write and push: changing it consolidates or
+	// spreads the floating IPs and re-broadcasts the member statuses that go with
+	// the new mode, and SetMode owns all of that. Writing `mode` into the config
+	// here instead left the node that ran the command in active-passive while its
+	// peers stayed in active-active — it logged "4 nodes are Active in
+	// active-passive mode; waiting for the coordinator to consolidate" 529 times
+	// against a coordinator that was not in active-passive and never would be
+	// (docs/TEST-PLAN.md defect #42).
+	//
+	// Delegated before the lock below is taken: SetMode takes s.Lock() itself and
+	// the lock is not reentrant.
+	if req.Key == "mode" {
+		resp, err := s.SetMode(ctx, &rpc.SetModeRequest{Mode: req.Value})
+		if err != nil {
+			return nil, err
+		}
+		if resp == nil {
+			return &rpc.UpdateConfigResponse{Success: false, Message: "mode change returned no result"}, nil
+		}
+		return &rpc.UpdateConfigResponse{Success: resp.Success, Message: resp.Message}, nil
+	}
+
+	s.Lock()
+	defer s.Unlock()
 
 	if err := s.config.UpdateValue(req.Key, req.Value); err != nil {
 		s.logger.Errorf("Failed to update config %s: %v", req.Key, err)
@@ -5022,7 +5109,18 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 		}
 	}
 
-	return &rpc.UpdateConfigResponse{Success: true, Message: "updated"}, nil
+	if scope == scopeNode {
+		return &rpc.UpdateConfigResponse{Success: true, Message: configScopeNodeMessage}, nil
+	}
+
+	// Stamp and broadcast, the same way a group mutation does. Without this the
+	// value only ever reached the node the CLI happened to run on, while the
+	// operator was told it had been applied to the cluster — and the broadcaster
+	// is also what retries a push a peer could not take (defect #43), so a peer
+	// that is briefly unreachable still converges.
+	s.markConfigDirty()
+
+	return &rpc.UpdateConfigResponse{Success: true, Message: configScopeClusterMessage}, nil
 }
 
 // ReadConfig implements CLI.ReadConfig — returns the daemon's live config as JSON.

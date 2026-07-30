@@ -291,7 +291,10 @@ func (c *Config) Load() error {
 	return nil
 }
 
-// migrateConfig ensures backward compatibility by setting default values for new fields
+// migrateConfig ensures backward compatibility by setting default values for new fields.
+//
+// Called from inside Load()'s locked region, so it persists through saveLocked
+// rather than Save.
 func (c *Config) migrateConfig() {
 	migrated := false
 
@@ -310,7 +313,7 @@ func (c *Config) migrateConfig() {
 
 	// Save the migrated config if changes were made
 	if migrated {
-		if err := c.Save(); err != nil {
+		if err := c.saveLocked(); err != nil {
 			log.Warn("Failed to save migrated config", "error", err)
 		} else {
 			log.Info("Config migrated successfully with new syslog settings")
@@ -579,15 +582,26 @@ func (c *Config) GenerateNodeID() string {
 }
 
 // UpdateValue - Update a key's value
+//
+// A value that fails validation, or that cannot be persisted, is rolled back. The
+// setter writes straight into the live struct, so a rejected value used to stay
+// there: `hcs_interval 500` returned an error to the operator and left 500 behind,
+// from where every later Save() failed the same validation — including saves
+// belonging to unrelated operations — and a config broadcast would have carried
+// the rejected value to the rest of the cluster.
 func (c *Config) UpdateValue(key string, value string) error {
+	previous := c.Pulse
+
 	if err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse); err != nil {
 		return err
 	}
 	if err := c.Validate(); err != nil {
-		return errors.New("invalid configuration value")
+		c.Pulse = previous
+		return fmt.Errorf("invalid configuration value: %v", err)
 	}
 	// Save our config with the updated info
 	if err := c.Save(); err != nil {
+		c.Pulse = previous
 		return err
 	}
 	return nil
@@ -632,6 +646,19 @@ func (c *Config) Save() error {
 	c.Lock()
 	defer c.Unlock()
 
+	return c.saveLocked()
+}
+
+// saveLocked is Save with the config mutex already held by the caller.
+//
+// The split exists for migrateConfig, which runs inside Load()'s locked region and
+// has to persist what it migrated. sync.Mutex is not reentrant, so calling the
+// exported Save() from there deadlocked Load() — and with it daemon startup and
+// every Reload() — for exactly the configs the migration exists to fix: one whose
+// four syslog fields are all empty. Named rather than an ad-hoc unlock/relock
+// because this is the sixth instance of the shape in the tree (see
+// docs/TEST-PLAN.md defect #55).
+func (c *Config) saveLocked() error {
 	// Ensure no null values in groups
 	for groupName, ips := range c.Groups {
 		if ips == nil {
