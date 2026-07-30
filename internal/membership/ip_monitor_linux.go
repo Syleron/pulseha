@@ -172,6 +172,21 @@ func (m *IPMonitor) restoreIP(iface string, ip string) {
 	m.logger.Debug("IP monitor restore: parsed address", "cidr", cidr)
 
 	if err := netlink.AddrAdd(link, addr); err != nil {
+		// The watcher restores on the removal event, so by the time it gets here
+		// another writer may already have put the address back — an add that
+		// fails with `file exists` did nothing because there was nothing left to
+		// do (docs/TEST-PLAN.md defect #45).
+		if network.AddrAddSatisfied(err, func() bool {
+			ipOnly, _ := utils.GetCIDR(cidr)
+			if ipOnly == nil {
+				return false
+			}
+			ex, eIface, cerr := network.CheckIfIPExists(ipOnly.String())
+			return cerr == nil && ex && eIface == iface
+		}) {
+			m.logger.Debug("IP monitor restore: expected IP was already back", "cidr", cidr, "iface", iface, "error", err)
+			return
+		}
 		m.logger.Error("IP monitor restore: failed to add addr", "cidr", cidr, "iface", iface, "error", err)
 		return
 	}

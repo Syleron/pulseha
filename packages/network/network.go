@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -290,6 +291,42 @@ func netInterfaceStatus(iface string) bool {
 	return attrs.OperState == netlink.OperUp
 }
 
+// AddrAddSatisfied reports whether a failed address add left the interface in
+// the state the caller wanted, so the failure is a no-op rather than a fault.
+//
+// docs/TEST-PLAN.md defect #45, the mirror of #41 on the bring-up path. Adding
+// an address that is already there fails with EEXIST — `file exists` — and that
+// was logged at error level and returned as a failure, which the enforce loop
+// re-reported and `OrchestrateIPFailover` escalated into
+// `IP_FAILOVER: Some interfaces failed to bring up IPs`: a failover reported as
+// broken because an address it wanted up was up already.
+//
+// Two ways to reach the wanted state without this call being the one that made
+// it. EEXIST is the kernel saying so directly — it only fires when this exact
+// address and prefix are already on this exact link, which is the goal. Any
+// other failure needs asking, so heldByTarget is consulted; like #41's
+// post-failure re-check it must be a live check, because its whole purpose is
+// to be newer than whatever decided to make the call. The window between a
+// pre-check and the syscall cannot be closed — several writers add addresses
+// here (the enforce loop, the netlink watcher's restore, the BringUpIP RPC's
+// per-interface goroutines) — so it is classified instead.
+//
+// A failure on an address that is genuinely not up is still a failure. That is
+// the line worth reading, and the noise was what would have hidden it.
+func AddrAddSatisfied(addErr error, heldByTarget func() bool) bool {
+	if addErr == nil {
+		return true
+	}
+	// errors.Is against os.ErrExist rather than a bare EEXIST comparison:
+	// netlink returns a syscall.Errno, sometimes wrapped with the kernel's
+	// extended-ack message, and syscall.Errno/unix.Errno are distinct types
+	// that both answer to os.ErrExist.
+	if errors.Is(addErr, os.ErrExist) {
+		return true
+	}
+	return heldByTarget != nil && heldByTarget()
+}
+
 /*
 *
 This function is to bring up a network interface
@@ -342,6 +379,16 @@ func BringIPup(iface, ip string) error {
 
 	log.Info("NETWORK: Adding IP to interface", "ip", ip, "iface", iface)
 	if err := netlink.AddrAdd(link, addr); err != nil {
+		if AddrAddSatisfied(err, func() bool {
+			ex, eIface, cerr := CheckIfIPExists(ipOb.String())
+			return cerr == nil && ex && eIface == iface
+		}) {
+			// Nothing to do and nothing wrong: the address arrived before this
+			// call reached the kernel, which is the state it was asking for
+			// (docs/TEST-PLAN.md defect #45).
+			log.Debug("NETWORK: IP was already up when adding it", "ip", ip, "iface", iface, "error", err)
+			return nil
+		}
 		log.Error("NETWORK: netlink.AddrAdd failed", "error", err, "ip", ip, "iface", iface)
 		return errors.New("unable to bring IP up as netlink failed to do so")
 	}
