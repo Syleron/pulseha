@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,4 +215,152 @@ func TestAddIPToGroupStillRejectsAnIPHeldByAnotherGroup(t *testing.T) {
 	if slices.Contains(s.config.Groups["group1"], "10.0.0.9/24") {
 		t.Errorf("group1 = %v, want the rejected IP absent", s.config.Groups["group1"])
 	}
+}
+
+// setMemberLoad puts a member into a known state for owner selection.
+func setMemberLoad(t *testing.T, s *Server, nodeID string, status membership.MemberStatus, ipCount int) {
+	t.Helper()
+
+	m := s.memberList.GetMemberByID(nodeID)
+	if m == nil {
+		t.Fatalf("no member %s", nodeID)
+	}
+	ips := make([]string, ipCount)
+	for i := range ips {
+		ips[i] = "10.99.0." + string(rune('1'+i)) + "/24"
+	}
+	m.Lock()
+	m.Status = status
+	m.ActiveIPs = ips
+	m.Unlock()
+}
+
+// A floating IP has one owner, so an add in active-active has to resolve to one
+// node before the bring-up fan-out.
+//
+// The fan-out had no active-active gate at all: it visited every node hosting the
+// group and each brought the same address up and appended it to its own ActiveIPs,
+// so a new address started life dual-homed and the coordinator's next pass had to
+// unwind it. That contradicts the single-ownership invariant the rest of this work
+// establishes.
+func TestLeastLoadedNodeForGroupPicksASingleOwner(t *testing.T) {
+	const localID, peerA, peerB = "local-node", "a-peer", "b-peer"
+
+	t.Run("the least loaded node wins", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:49152", "127.0.0.1:49153")
+		setMemberLoad(t, s, peerA, membership.StatusActive, 3)
+		setMemberLoad(t, s, peerB, membership.StatusActive, 1)
+		setMemberLoad(t, s, localID, membership.StatusActive, 5)
+
+		s.Lock()
+		got := s.leastLoadedNodeForGroup("group1")
+		s.Unlock()
+		if got != peerB {
+			t.Errorf("owner = %q, want %q (1 IP against 3 and 5)", got, peerB)
+		}
+	})
+
+	t.Run("an equal load breaks by node ID", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:49152", "127.0.0.1:49153")
+		setMemberLoad(t, s, peerA, membership.StatusActive, 2)
+		setMemberLoad(t, s, peerB, membership.StatusActive, 2)
+		setMemberLoad(t, s, localID, membership.StatusActive, 2)
+
+		s.Lock()
+		got := s.leastLoadedNodeForGroup("group1")
+		s.Unlock()
+		// Deterministic, and the same rule the coordinator applies, so placing the
+		// address here does not fight the next rebalance.
+		if got != peerA {
+			t.Errorf("owner = %q, want %q (lowest ID at equal load)", got, peerA)
+		}
+	})
+
+	t.Run("an unhealthy or draining node is not chosen", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:49152", "127.0.0.1:49153")
+		// The emptiest node is in maintenance, the next is unreachable; neither can
+		// hold the address, and picking one would only send it straight back off.
+		setMemberLoad(t, s, peerA, membership.StatusMaintenance, 0)
+		setMemberLoad(t, s, peerB, membership.StatusUnknown, 1)
+		setMemberLoad(t, s, localID, membership.StatusActive, 9)
+
+		s.Lock()
+		got := s.leastLoadedNodeForGroup("group1")
+		s.Unlock()
+		if got != localID {
+			t.Errorf("owner = %q, want %q — maintenance and unknown nodes are ineligible", got, localID)
+		}
+	})
+
+	t.Run("no owner when no node hosts the group", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:49152")
+		s.config.Groups["orphan"] = nil
+
+		s.Lock()
+		got := s.leastLoadedNodeForGroup("orphan")
+		s.Unlock()
+		// "" means "place it later" — the IP monitor's ENFORCE pass puts the address
+		// down once a node becomes eligible. It must never mean "place it everywhere".
+		if got != "" {
+			t.Errorf("owner = %q, want \"\" for a group assigned to no interface", got)
+		}
+	})
+}
+
+// The gate itself, not just the decision: the local node must be skipped when it
+// is not the owner.
+//
+// Observable through the warning the local branch produces — the test host has no
+// such interface, so reaching the local bring-up always warns. Before the fix the
+// active-active path had no gate, so that branch ran on every node hosting the
+// group and the warning appeared regardless of who owned the address.
+func TestAddIPToGroupBringsTheAddressUpOnTheOwnerOnly(t *testing.T) {
+	const localID, peerA = "local-node", "a-peer"
+	const localIfaceWarning = "does not exist on local node"
+
+	hasLocalWarning := func(warnings []string) bool {
+		for _, w := range warnings {
+			if strings.Contains(w, localIfaceWarning) {
+				return true
+			}
+		}
+		return false
+	}
+
+	t.Run("the local node owns it", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:1")
+		setMemberLoad(t, s, localID, membership.StatusActive, 0)
+		setMemberLoad(t, s, peerA, membership.StatusActive, 7)
+
+		resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
+			GroupName: "group1", Ip: "10.0.0.20/24",
+		})
+		if err != nil {
+			t.Fatalf("AddIPToGroup: %v", err)
+		}
+		if !hasLocalWarning(resp.Warnings) {
+			t.Errorf("warnings = %v, want the local bring-up to have been attempted", resp.Warnings)
+		}
+	})
+
+	t.Run("a peer owns it", func(t *testing.T) {
+		s := newAddIPTestServer(t, "127.0.0.1:1")
+		setMemberLoad(t, s, localID, membership.StatusActive, 7)
+		setMemberLoad(t, s, peerA, membership.StatusActive, 0)
+
+		resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
+			GroupName: "group1", Ip: "10.0.0.21/24",
+		})
+		if err != nil {
+			t.Fatalf("AddIPToGroup: %v", err)
+		}
+		if hasLocalWarning(resp.Warnings) {
+			t.Errorf("warnings = %v, want no local bring-up: %s owns this address and "+
+				"bringing it up here too dual-homes it", resp.Warnings, peerA)
+		}
+		// Either way the config is the record of intent and must carry the address.
+		if !slices.Contains(s.config.Groups["group1"], "10.0.0.21/24") {
+			t.Errorf("group1 = %v, want the address recorded", s.config.Groups["group1"])
+		}
+	})
 }

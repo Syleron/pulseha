@@ -17,7 +17,7 @@ import (
 type MemberStatus int
 
 const (
-	StatusUnknown    MemberStatus = iota
+	StatusUnknown MemberStatus = iota
 	StatusActive
 	StatusPassive
 	StatusMaintenance // Node is up but excluded from failover promotion
@@ -203,7 +203,7 @@ func (m *Member) BringUpIPs(ips []string) error {
 
 	// Remote: send one RPC per interface
 	if err := m.initializeClient(); err != nil {
-		return fmt.Errorf("failed to initialize client for member %s: %v", m.Hostname, err)
+		return fmt.Errorf("failed to initialize client for member %s: %w", m.Hostname, err)
 	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring up IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)
@@ -227,7 +227,21 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 	// Per-IP GARP inside this loop made the loop take four seconds an address, so a
 	// large group kept this node unresponsive long enough for peers to elect a
 	// replacement while it still held every IP (docs/TEST-PLAN.md defects #4/#8).
+	//
+	// Deferred, but not skippable: the loop gives up on the first address it cannot
+	// bring up, and the ones before it are already on the interface. Returning
+	// without announcing leaves them live and unreachable — peers still have the old
+	// MAC — so the announcement runs on every exit. A failure to announce is logged
+	// rather than returned, since the addresses are up either way.
 	upIPs := make([]string, 0, len(ips))
+	announceUpIPs := func() {
+		if len(upIPs) == 0 {
+			return
+		}
+		if err := network.SendGARPBatch(iface, upIPs); err != nil {
+			m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
+		}
+	}
 
 	for _, ip := range ips {
 		m.logger.Debug("Bringing up IP on interface", "ip", ip, "iface", iface)
@@ -235,7 +249,8 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 		// Check if IP is already up somewhere else
 		exists, existingIface, err := network.CheckIfIPExists(ip)
 		if err != nil {
-			return fmt.Errorf("failed to check IP existence: %v", err)
+			announceUpIPs()
+			return fmt.Errorf("failed to check IP existence: %w", err)
 		}
 
 		// If IP exists on another interface, bring it down first
@@ -249,7 +264,8 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 
 		// Bring up the IP on the specified interface
 		if err := network.BringIPup(iface, ip); err != nil {
-			return fmt.Errorf("failed to bring up IP %s on interface %s: %v", ip, iface, err)
+			announceUpIPs()
+			return fmt.Errorf("failed to bring up IP %s on interface %s: %w", ip, iface, err)
 		}
 
 		upIPs = append(upIPs, ip)
@@ -258,9 +274,7 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 
 	// Announce the whole set. A failure here leaves the addresses up and serving,
 	// so it is logged rather than returned.
-	if err := network.SendGARPBatch(iface, upIPs); err != nil {
-		m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
-	}
+	announceUpIPs()
 
 	return nil
 }
@@ -302,7 +316,7 @@ func (m *Member) BringDownIPs(ips []string) error {
 
 	// Remote: send one RPC per interface
 	if err := m.initializeClient(); err != nil {
-		return fmt.Errorf("failed to initialize client for member %s: %v", m.Hostname, err)
+		return fmt.Errorf("failed to initialize client for member %s: %w", m.Hostname, err)
 	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring down IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)

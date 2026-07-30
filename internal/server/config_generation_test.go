@@ -84,7 +84,7 @@ func TestStaleConfigSyncDoesNotOverwriteNewerGroups(t *testing.T) {
 
 	// The peer's config as of its 200th add, version 200.
 	newer := peerConfigWithGroup(s, "group1", 200)
-	payload, err := buildFullConfigPayload(newer, states, 1, peerID, peerID, 200)
+	payload, err := buildFullConfigPayload(newer, states, 1, peerID, peerID, configStamp{version: 200, origin: peerID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestStaleConfigSyncDoesNotOverwriteNewerGroups(t *testing.T) {
 	// The same peer's older snapshot, delayed in flight and delivered second.
 	// This is the 189 in 200/189/192/193.
 	older := peerConfigWithGroup(s, "group1", 189)
-	stalePayload, err := buildFullConfigPayload(older, states, 1, peerID, peerID, 189)
+	stalePayload, err := buildFullConfigPayload(older, states, 1, peerID, peerID, configStamp{version: 189, origin: peerID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestReconcileResendOfTheSameConfigIsIdempotent(t *testing.T) {
 		peerID:  membership.StatusActive,
 	}
 	cfg := peerConfigWithGroup(s, "group1", 201)
-	payload, err := buildFullConfigPayload(cfg, states, 1, peerID, peerID, 7)
+	payload, err := buildFullConfigPayload(cfg, states, 1, peerID, peerID, configStamp{version: 7, origin: peerID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestABehindPeerCannotEraseANewerConfigFromAnotherSender(t *testing.T) {
 
 	// The node taking the add-ip calls reaches 200 addresses.
 	newer := peerConfigWithGroup(s, "group1", 200)
-	payload, err := buildFullConfigPayload(newer, states, 1, mutator, mutator, 200)
+	payload, err := buildFullConfigPayload(newer, states, 1, mutator, mutator, configStamp{version: 200, origin: mutator})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestABehindPeerCannotEraseANewerConfigFromAnotherSender(t *testing.T) {
 	// guard this is its generation 189 against a high-water mark of 0 — applied,
 	// and 11 addresses that reported success vanish.
 	behind := peerConfigWithGroup(s, "group1", 189)
-	stale, err := buildFullConfigPayload(behind, states, 1, coordinator, coordinator, 189)
+	stale, err := buildFullConfigPayload(behind, states, 1, coordinator, coordinator, configStamp{version: 189, origin: coordinator})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestApplyingAPeerConfigAdoptsItsVersion(t *testing.T) {
 		peerID:  membership.StatusActive,
 	}
 	cfg := peerConfigWithGroup(s, "group1", 200)
-	payload, err := buildFullConfigPayload(cfg, states, 1, peerID, peerID, 200)
+	payload, err := buildFullConfigPayload(cfg, states, 1, peerID, peerID, configStamp{version: 200, origin: peerID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -231,7 +231,7 @@ func TestApplyingAPeerConfigAdoptsItsVersion(t *testing.T) {
 		t.Fatalf("ConfigSync(version 200): %v", err)
 	}
 
-	if got := s.configVersion.Load(); got != 200 {
+	if got := s.loadConfigStamp().version; got != 200 {
 		t.Errorf("config version after applying a version-200 config = %d, want 200; "+
 			"at 0 this node's reconcile goes out unversioned and overwrites everyone", got)
 	}
@@ -241,7 +241,7 @@ func TestApplyingAPeerConfigAdoptsItsVersion(t *testing.T) {
 	s.Lock()
 	s.markConfigDirty()
 	s.Unlock()
-	if got := s.configVersion.Load(); got != 201 {
+	if got := s.loadConfigStamp().version; got != 201 {
 		t.Errorf("config version after a local mutation = %d, want 201", got)
 	}
 }
@@ -268,7 +268,7 @@ func TestEqualVersionsFromTwoSendersConvergeDeterministically(t *testing.T) {
 		seed(t, s, states, lowPeer, 50, 10)
 
 		contender := peerConfigWithGroup(s, "group1", 60)
-		payload, err := buildFullConfigPayload(contender, states, 1, highPeer, highPeer, 10)
+		payload, err := buildFullConfigPayload(contender, states, 1, highPeer, highPeer, configStamp{version: 10, origin: highPeer})
 		if err != nil {
 			t.Fatalf("buildFullConfigPayload: %v", err)
 		}
@@ -286,7 +286,7 @@ func TestEqualVersionsFromTwoSendersConvergeDeterministically(t *testing.T) {
 		seed(t, s, states, highPeer, 50, 10)
 
 		contender := peerConfigWithGroup(s, "group1", 60)
-		payload, err := buildFullConfigPayload(contender, states, 1, lowPeer, lowPeer, 10)
+		payload, err := buildFullConfigPayload(contender, states, 1, lowPeer, lowPeer, configStamp{version: 10, origin: lowPeer})
 		if err != nil {
 			t.Fatalf("buildFullConfigPayload: %v", err)
 		}
@@ -306,7 +306,7 @@ func seed(t *testing.T, s *Server, states map[string]membership.MemberStatus,
 
 	t.Helper()
 	cfg := peerConfigWithGroup(s, "group1", ips)
-	payload, err := buildFullConfigPayload(cfg, states, 1, senderID, senderID, version)
+	payload, err := buildFullConfigPayload(cfg, states, 1, senderID, senderID, configStamp{version: version, origin: senderID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -331,7 +331,7 @@ func TestUnversionedConfigSyncStillApplies(t *testing.T) {
 		peerID:  membership.StatusActive,
 	}
 	versioned := peerConfigWithGroup(s, "group1", 100)
-	payload, err := buildFullConfigPayload(versioned, states, 1, peerID, peerID, 42)
+	payload, err := buildFullConfigPayload(versioned, states, 1, peerID, peerID, configStamp{version: 42, origin: peerID})
 	if err != nil {
 		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
@@ -368,7 +368,7 @@ func TestConcurrentMutationsGetDistinctVersions(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			seen[i] = s.nextConfigVersion()
+			seen[i] = s.nextConfigStamp(localID).version
 		}(i)
 	}
 	wg.Wait()
@@ -420,7 +420,7 @@ func TestMarkConfigDirtyUnderServerLockDoesNotDeadlock(t *testing.T) {
 			"every group mutation calls it that way")
 	}
 
-	if got := s.configVersion.Load(); got != 1 {
+	if got := s.loadConfigStamp().version; got != 1 {
 		t.Errorf("config version after one mutation = %d, want 1", got)
 	}
 }
@@ -434,29 +434,99 @@ func TestConfigIsNewer(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		senderID string
-		version  int64
-		held     int64
-		localID  string
+		incoming configStamp
+		held     configStamp
 		want     bool
 	}{
-		{"a newer version applies", higher, 11, 10, local, true},
-		{"an older version is dropped", higher, 9, 10, local, false},
-		{"a behind coordinator is dropped whoever it is", lower, 189, 200, local, false},
-		{"an equal version from a higher node ID wins", higher, 10, 10, local, true},
-		{"an equal version from a lower node ID loses", lower, 10, 10, local, false},
-		{"an unversioned payload always applies", higher, 0, 200, local, true},
-		{"a payload with no sender always applies", "", 500, 200, local, true},
-		{"an unknown local ID loses every tie", higher, 10, 10, "", true},
-		{"a fresh node accepts anything", higher, 1, 0, local, true},
+		{"a newer version applies",
+			configStamp{11, higher}, configStamp{10, local}, true},
+		{"an older version is dropped",
+			configStamp{9, higher}, configStamp{10, local}, false},
+		{"a behind coordinator is dropped whoever it is",
+			configStamp{189, lower}, configStamp{200, local}, false},
+		{"an equal version from a higher origin wins",
+			configStamp{10, higher}, configStamp{10, local}, true},
+		{"an equal version from a lower origin loses",
+			configStamp{10, lower}, configStamp{10, local}, false},
+		{"an equal version from the same origin has nothing to add",
+			configStamp{10, local}, configStamp{10, local}, false},
+		{"an unversioned payload always applies",
+			configStamp{0, higher}, configStamp{200, local}, true},
+		{"a payload with no origin always applies",
+			configStamp{500, ""}, configStamp{200, local}, true},
+		{"an unknown held origin loses every tie",
+			configStamp{10, higher}, configStamp{10, ""}, true},
+		{"a fresh node accepts anything",
+			configStamp{1, higher}, configStamp{}, true},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := configIsNewer(tc.senderID, tc.version, tc.held, tc.localID); got != tc.want {
-				t.Errorf("configIsNewer(%q, %d, held %d, local %q) = %v, want %v",
-					tc.senderID, tc.version, tc.held, tc.localID, got, tc.want)
+			if got := configIsNewer(tc.incoming, tc.held); got != tc.want {
+				t.Errorf("configIsNewer(%+v, held %+v) = %v, want %v",
+					tc.incoming, tc.held, got, tc.want)
 			}
 		})
+	}
+}
+
+// The tiebreak has to be origin-versus-origin, not sender-versus-receiver.
+//
+// Sender-versus-receiver looks right on two nodes and diverges permanently on
+// three. If A and B concurrently mint version N+1, then on a node C whose UUID
+// sorts above both, `sender > local` is false for each arrival, so C rejects both
+// and keeps whichever it happened to apply first — while A accepts B's and B
+// accepts A's, so those two settle on max(A,B). The periodic reconcile re-runs the
+// same receiver-relative comparison at the same equal version, so it cannot
+// separate them either: the split is stable, which is exactly what the Lamport
+// clock exists to rule out.
+//
+// Every node has to pick the same winner, so the comparison must not mention the
+// receiver at all. Held here is A's config; B outranks A; so every receiver
+// applies B regardless of its own ID.
+func TestEqualVersionTiebreakIsIndependentOfTheReceiver(t *testing.T) {
+	const nodeA, nodeB = "node-a", "node-b"
+
+	held := configStamp{version: 11, origin: nodeA}
+	incoming := configStamp{version: 11, origin: nodeB}
+
+	if !configIsNewer(incoming, held) {
+		t.Fatalf("origin %s must beat origin %s at equal versions", nodeB, nodeA)
+	}
+	// And the reverse never applies, on any node, so no receiver flips back.
+	if configIsNewer(held, incoming) {
+		t.Fatalf("origin %s must not beat origin %s at equal versions", nodeA, nodeB)
+	}
+
+	// The receiver's own ID is not an input, so a node sorting above both
+	// contenders reaches the same verdict rather than rejecting both. That node —
+	// "node-c" under the old comparison — was the one that stayed diverged.
+	for _, receiver := range []string{"node-a", "node-b", "node-c", "node-z", ""} {
+		s, _ := newConfigSyncTestServer(t, receiver, nodeA, nodeB)
+		s.configStamp.Store(&configStamp{version: held.version, origin: held.origin})
+
+		if !s.shouldApplyIncomingConfig(incoming) {
+			t.Errorf("receiver %q rejected the tie winner; every node must agree on %s",
+				receiver, nodeB)
+		}
+	}
+}
+
+// A stamp adopted at an equal version must still move the origin, or the node
+// keeps describing content it no longer holds — and then re-applies the loser's
+// config the next time it arrives, flapping between the two forever.
+func TestAdoptingATieWinnerMovesTheOrigin(t *testing.T) {
+	const localID, nodeA, nodeB = "node-local", "node-a", "node-b"
+	s, _ := newConfigSyncTestServer(t, localID, nodeA, nodeB)
+
+	s.adoptConfigStamp(configStamp{version: 11, origin: nodeA})
+	s.adoptConfigStamp(configStamp{version: 11, origin: nodeB})
+
+	if got := s.loadConfigStamp(); got.origin != nodeB || got.version != 11 {
+		t.Fatalf("stamp after adopting the tie winner = %+v, want {11 %s}", got, nodeB)
+	}
+	// The loser must now be rejected rather than re-applied.
+	if s.shouldApplyIncomingConfig(configStamp{version: 11, origin: nodeA}) {
+		t.Error("the losing config was accepted again; the two would flap indefinitely")
 	}
 }

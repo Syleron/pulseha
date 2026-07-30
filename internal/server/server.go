@@ -162,12 +162,13 @@ type Server struct {
 
 	// Config propagation ordering (docs/TEST-PLAN.md defects #5 and #38).
 	//
-	// configVersion is a Lamport clock over the cluster's config: it versions the
-	// config's *content*, not the node holding it. A mutation sets it to one above
-	// everything this node has seen, and applying a peer's config adopts that
-	// config's version, so every node holding the same content agrees on the
-	// number. A payload is stale if its version is below the one already held, no
-	// matter which node sent it.
+	// configStamp is a Lamport clock over the cluster's config, paired with the ID
+	// of the node whose mutation produced that content: it versions the config's
+	// *content*, not the node holding it. A mutation sets the version to one above
+	// everything this node has seen and stamps itself as the origin, and applying a
+	// peer's config adopts that config's stamp, so every node holding the same
+	// content agrees on both fields. A payload is stale if its version is below the
+	// one already held, no matter which node sent it.
 	//
 	// It replaced a per-sender generation, which ordered each node's snapshots
 	// against that node's own previous ones and nothing else. That caught a
@@ -192,8 +193,12 @@ type Server struct {
 	// markConfigDirty while holding s.Lock() through a defer — taking the write
 	// lock to bump this would self-deadlock on a non-reentrant mutex and hang
 	// every add-ip. HandleNodeJoin calls it holding no lock at all, so the
-	// counter has to be safe under either.
-	configVersion atomic.Int64
+	// counter has to be safe under either. A single pointer rather than two atomics
+	// because the version and its origin are only meaningful together: a reader
+	// that saw a new version against a previous origin would order the two
+	// concurrent mutations differently from its peers, which is the divergence the
+	// pair exists to prevent.
+	configStamp atomic.Pointer[configStamp]
 
 	// broadcastTrigger coalesces config broadcasts. It has capacity 1 and is
 	// signalled rather than written to: a single broadcaster goroutine drains
@@ -3063,6 +3068,58 @@ func (s *Server) seedActiveActiveAssignments() bool {
 	return true
 }
 
+// leastLoadedNodeForGroup picks the single node that should host a newly added
+// address in active-active: of the healthy nodes with the group assigned to one
+// of their interfaces, the one holding the fewest floating IPs, ties broken by
+// node ID.
+//
+// This is deliberately the same rule as the coordinator's active-active
+// distribution (see MemberList.calculateIPDistribution), so placing an address at
+// add time does not fight the next rebalance. Nodes in maintenance or of unknown
+// health are excluded — the address would only come straight back off.
+//
+// Returns "" when no node is eligible, which the caller reads as "place it later"
+// rather than "place it everywhere". Callers must hold s.Lock().
+func (s *Server) leastLoadedNodeForGroup(groupName string) string {
+	members := s.memberList.MembersSnapshot()
+
+	best := ""
+	bestCount := -1
+	for nodeID, node := range s.config.Nodes {
+		if node == nil || !nodeHostsGroup(node, groupName) {
+			continue
+		}
+		member := members[nodeID]
+		if member == nil {
+			continue
+		}
+		member.Lock()
+		status := member.Status
+		count := len(member.ActiveIPs)
+		member.Unlock()
+		if status == membership.StatusUnknown || status == membership.StatusMaintenance {
+			continue
+		}
+		if bestCount == -1 || count < bestCount || (count == bestCount && nodeID < best) {
+			best, bestCount = nodeID, count
+		}
+	}
+	return best
+}
+
+// nodeHostsGroup reports whether the group is assigned to any of the node's
+// interfaces, which is what makes the node able to bring its addresses up.
+func nodeHostsGroup(node *config.Node, groupName string) bool {
+	for _, groups := range node.IPGroups {
+		for _, g := range groups {
+			if g == groupName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // groupIPsForNode returns every configured group IP the given node can host —
 // the IPs of the groups assigned to one of its interfaces. Group IPs the node
 // cannot host are logged: in active-passive they have nowhere else to go.
@@ -3163,18 +3220,34 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	ipToUse := req.Ip
 	var warnings []string
 
-	// Determine active-passive gating context
+	// A floating IP has exactly one owner in either mode, so the bring-up below
+	// goes to exactly one node. In active-passive that is the Active node. In
+	// active-active it is the least-loaded node the group is assigned to.
+	//
+	// Active-active used to have no gate at all: the fan-out visited every node
+	// hosting the group and each one brought the same address up and appended it to
+	// its own ActiveIPs, so a new address started life dual-homed and the
+	// coordinator's next pass had to unwind it. Placing it once here is the same
+	// rule the coordinator applies (fewest current IPs, ties by node ID), so the
+	// two agree and there is nothing to unwind. If they disagree — the snapshot
+	// read here is a moment old — the coordinator still moves it, which is an
+	// ordinary rebalance rather than a duplicate.
 	activePassive := s.config.Pulse.Mode == "active-passive"
-	activeID := ""
+	ownerID := ""
 	if activePassive {
 		for id, m := range s.memberList.MembersSnapshot() {
 			if m.Status == membership.StatusActive {
-				activeID = id
+				ownerID = id
 				break
 			}
 		}
-		if activeID == "" {
+		if ownerID == "" {
 			warnings = append(warnings, "No active node currently; IP will be enforced when a node becomes active")
+		}
+	} else {
+		ownerID = s.leastLoadedNodeForGroup(req.GroupName)
+		if ownerID == "" {
+			warnings = append(warnings, "No node is currently able to host this group; IP will be placed when one is")
 		}
 	}
 
@@ -3264,9 +3337,12 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 				if g != req.GroupName {
 					continue
 				}
-				// In active-passive mode, only enforce on the current active node
-				if activePassive && activeID != "" && nodeID != activeID {
-					// Skip bringing IP up on passive nodes; config still records the IP
+				// Only the owner brings the address up. Every other node hosting
+				// the group keeps it in config and nothing else, so the address is
+				// never up in two places. With no owner resolvable, nobody brings
+				// it up and the IP monitor's ENFORCE pass places it once a node is
+				// eligible.
+				if ownerID == "" || nodeID != ownerID {
 					continue
 				}
 				if nodeID != s.config.Pulse.LocalNode {
@@ -4296,12 +4372,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 	// Optionally read member states and convergence metadata if present (EnhancedConfig)
 	var (
-		incomingMemberStates  map[string]membership.MemberStatus
-		incomingEpoch         int64
-		incomingLeaderID      string
-		senderID              string
-		senderActiveIPs       []string
-		incomingConfigVersion int64
+		incomingMemberStates map[string]membership.MemberStatus
+		incomingEpoch        int64
+		incomingLeaderID     string
+		senderID             string
+		senderActiveIPs      []string
+		incomingStamp        configStamp
 	)
 	// Defer cleanup of any allocated maps
 	defer func() {
@@ -4318,6 +4394,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			SenderID        string            `json:"sender_id"`
 			SenderActiveIPs []string          `json:"sender_active_ips"`
 			ConfigVersion   int64             `json:"config_version"`
+			ConfigOrigin    string            `json:"config_origin"`
 		}
 		var e enhanced
 		if err := json.Unmarshal(req.Config, &e); err == nil {
@@ -4333,7 +4410,14 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			incomingLeaderID = e.LeaderID
 			senderID = e.SenderID
 			senderActiveIPs = e.SenderActiveIPs
-			incomingConfigVersion = e.ConfigVersion
+			// A binary that versions configs but does not name the origin gets the
+			// sender treated as the origin — right for a direct mutation broadcast,
+			// and the pre-origin behaviour otherwise.
+			origin := e.ConfigOrigin
+			if origin == "" {
+				origin = e.SenderID
+			}
+			incomingStamp = configStamp{version: e.ConfigVersion, origin: origin}
 		}
 	}
 
@@ -4352,10 +4436,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// empty — so an older snapshot delivered late used to overwrite a newer
 		// one with no way back (docs/TEST-PLAN.md defect #5). Not an error: the
 		// sender has nothing to fix, the message is simply obsolete.
-		if !s.shouldApplyIncomingConfig(senderID, incomingConfigVersion) {
+		if !s.shouldApplyIncomingConfig(incomingStamp) {
+			held := s.loadConfigStamp()
 			s.logger.Debug("CONFIG_SYNC: ignoring superseded config",
-				"sender", senderID, "version", incomingConfigVersion,
-				"held", s.configVersion.Load())
+				"sender", senderID, "version", incomingStamp.version,
+				"origin", incomingStamp.origin,
+				"held", held.version, "heldOrigin", held.origin)
 			return &rpc.ConfigSyncResponse{
 				Success: true,
 				Message: supersededConfigMessage,
@@ -4419,11 +4505,13 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// the back-to-back add-ip calls that produce defect #38 to land inside it.
 		// Applying anyway would erase an add that had already reported success and
 		// leave the version claiming otherwise, which is the very shape being fixed.
-		if !configIsNewer(senderID, incomingConfigVersion, s.configVersion.Load(), localIDPreserve) {
+		if !configIsNewer(incomingStamp, s.loadConfigStamp()) {
+			held := s.loadConfigStamp()
 			s.Unlock()
 			s.logger.Debug("CONFIG_SYNC: a local mutation superseded this config mid-apply",
-				"sender", senderID, "version", incomingConfigVersion,
-				"held", s.configVersion.Load())
+				"sender", senderID, "version", incomingStamp.version,
+				"origin", incomingStamp.origin,
+				"held", held.version, "heldOrigin", held.origin)
 			return &rpc.ConfigSyncResponse{
 				Success: true,
 				Message: supersededConfigMessage,
@@ -4539,13 +4627,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		s.config = newConfig
-		s.Unlock()
 
-		// Adopted only once the config is actually in place, so a save failure
-		// above cannot make this node claim a version it never applied.
-		s.adoptConfigVersion(senderID, incomingConfigVersion)
+		// Adopted in the same critical section as the pointer swap, and only once
+		// the config is actually in place: a save failure above cannot make this
+		// node claim a version it never applied, and a local mutation cannot land
+		// between the two. Adopting after the unlock left exactly that gap — the
+		// mutation minted its version against the stamp this sync was about to
+		// overwrite, so the next reconcile silently reverted it.
+		s.adoptConfigStamp(incomingStamp)
 
-		// Update convergence metadata if newer
+		// Update convergence metadata if newer. Also under the lock: the config
+		// broadcaster reads s.clusterEpoch under RLock, so writing it after the
+		// unlock is a data race the detector flags.
 		if incomingEpoch > s.clusterEpoch {
 			s.logger.Debug("CONFIG_SYNC: Updating cluster epoch",
 				"oldEpoch", s.clusterEpoch,
@@ -4554,6 +4647,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			s.clusterEpoch = incomingEpoch
 			s.leaderID = incomingLeaderID
 		}
+
+		s.Unlock()
 
 		// Immediately refresh member list from new configuration so peers become visible
 		s.logger.Debug("CONFIG_SYNC: Updating member list with new config")
@@ -5396,7 +5491,22 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// Announcing inside this loop cost about four seconds per address, which for a
 	// large group held this RPC — and the caller waiting on it — open for minutes
 	// (docs/TEST-PLAN.md defects #4/#8).
+	//
+	// Batching moved the announcement after the loop, but the loop still abandons
+	// the request on the first address it cannot bring up — so every exit has to
+	// announce what is already up first. Skipping it leaves those addresses live on
+	// the interface and unannounced: peers keep the old MAC in ARP and the traffic
+	// goes nowhere, a silent partial outage mid-failover, where the per-IP version
+	// had at least announced each success as it happened.
 	upIPs := make([]string, 0, len(req.Ips))
+	announceUpIPs := func() {
+		if len(upIPs) == 0 {
+			return
+		}
+		if err := network.SendGARPBatch(req.Iface, upIPs); err != nil {
+			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
+		}
+	}
 
 	for _, raw := range req.Ips {
 		ip := raw
@@ -5407,6 +5517,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 			} else if utils.IsIPv6(ip) {
 				ip = ip + "/128"
 			} else {
+				announceUpIPs()
 				return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
 			}
 		}
@@ -5452,6 +5563,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				}
 			}
 			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", ip, "error", err)
+			announceUpIPs()
 			return &rpc.UpIpResponse{Success: false, Message: err.Error()}, nil
 		}
 
@@ -5459,9 +5571,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	}
 
 	// Best-effort announcement of the whole set; the addresses are already up.
-	if err := network.SendGARPBatch(req.Iface, upIPs); err != nil {
-		s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
-	}
+	announceUpIPs()
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
 	// call means the coordinator has assigned these IPs to us. Transition to
@@ -6109,22 +6219,30 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 func buildConfigAndStatePayload(cfg *config.Config, states map[string]membership.MemberStatus,
 	epoch int64, leaderID string) ([]byte, error) {
 
-	return buildFullConfigPayload(cfg, states, epoch, leaderID, "", 0)
+	return buildFullConfigPayload(cfg, states, epoch, leaderID, "", configStamp{})
 }
 
 // buildFullConfigPayload is buildConfigAndStatePayload plus the sender identity
 // and config version that let the receiver decide whether this payload is newer
 // than what it already holds (docs/TEST-PLAN.md defects #5 and #38).
 //
-// senderID "" / version 0 means unversioned: the receiver cannot order it and
+// An empty origin / version 0 means unversioned: the receiver cannot order it and
 // applies it. That is the required behaviour for a peer still running an older
 // binary during a rolling upgrade, so the guard degrades to today's
 // last-writer-wins rather than dropping the message. The key is deliberately
 // `config_version` and not the `config_generation` it replaced: an older binary
 // reads that key as a per-sender generation with different semantics, and a mixed
 // cluster is better off treating the field as absent than comparing two clocks.
+//
+// `config_origin` is sent alongside `sender_id` and is not the same field.
+// sender_id is whoever put these bytes on the wire; config_origin is whoever's
+// mutation produced the content, and they differ on every re-broadcast — the
+// coordinator re-sends the cluster's config once a minute without having authored
+// it. The receiver's tiebreak needs the latter (see configStamp). A peer running a
+// binary that omits the key falls back to sender_id, which is correct for a direct
+// mutation broadcast and no worse than the previous behaviour otherwise.
 func buildFullConfigPayload(cfg *config.Config, states map[string]membership.MemberStatus,
-	epoch int64, leaderID, senderID string, configVersion int64) ([]byte, error) {
+	epoch int64, leaderID, senderID string, stamp configStamp) ([]byte, error) {
 
 	configBytes, err := json.Marshal(cfg)
 	if err != nil {
@@ -6142,22 +6260,35 @@ func buildFullConfigPayload(cfg *config.Config, states map[string]membership.Mem
 	payload["member_states"] = ms
 	payload["epoch"] = epoch
 	payload["leader_id"] = leaderID
-	if senderID != "" && configVersion > 0 {
+	if senderID != "" && !stamp.isEmpty() {
 		payload["sender_id"] = senderID
-		payload["config_version"] = configVersion
+		payload["config_version"] = stamp.version
+		payload["config_origin"] = stamp.origin
 	}
 
 	return json.Marshal(payload)
 }
 
-// nextConfigVersion moves the clock one above everything this node has seen, so
-// the mutation about to be broadcast outranks the config every peer holds. Two
-// concurrent mutations can never be handed the same number — the receiver's whole
-// ability to order them depends on that. Starts at 1, since 0 means "unversioned".
+// nextConfigStamp moves the clock one above everything this node has seen and
+// stamps this node as the origin, so the mutation about to be broadcast outranks
+// the config every peer holds. Two concurrent mutations on the same node can
+// never be handed the same number, and two on different nodes are separated by
+// the origin — the receiver's whole ability to order them depends on both.
+// Versions start at 1, since 0 means "unversioned".
 //
-// Takes no lock deliberately: its callers hold s.Lock() (see configVersion).
-func (s *Server) nextConfigVersion() int64 {
-	return s.configVersion.Add(1)
+// Takes no lock deliberately: its callers hold s.Lock() (see configStamp).
+func (s *Server) nextConfigStamp(origin string) configStamp {
+	next := &configStamp{origin: origin}
+	for {
+		heldPtr := s.configStamp.Load()
+		next.version = 1
+		if heldPtr != nil {
+			next.version = heldPtr.version + 1
+		}
+		if s.configStamp.CompareAndSwap(heldPtr, next) {
+			return *next
+		}
+	}
 }
 
 // markConfigDirty records that the local config changed and wakes the
@@ -6171,8 +6302,20 @@ func (s *Server) nextConfigVersion() int64 {
 // single broadcaster instead means concurrent mutations coalesce into one
 // broadcast of the final state, and only one broadcast from this node is ever in
 // flight.
+//
+// The local node ID is read from s.config directly rather than through
+// currentConfig(): every group mutation calls this while holding s.Lock(), where
+// taking the read lock self-deadlocks. That makes the read safe at those call
+// sites and no less safe than the surrounding code at the one that holds no lock
+// (HandleNodeJoin, which mutates s.config bare throughout) — part of the residual
+// noted against defect #32, not new exposure. An empty ID degrades the tiebreak
+// to last-writer-wins rather than corrupting it.
 func (s *Server) markConfigDirty() {
-	s.nextConfigVersion()
+	origin, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		origin = ""
+	}
+	s.nextConfigStamp(origin)
 	s.requestConfigBroadcast()
 }
 
@@ -6249,10 +6392,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 	)
 
 	s.RLock()
-	version := s.configVersion.Load()
+	stamp := s.loadConfigStamp()
 	localID, _ := s.config.GetLocalNodeUUID()
 	states := s.memberStatesForBroadcast()
-	payloadBytes, err := buildFullConfigPayload(s.config, states, s.clusterEpoch, s.leaderID, localID, version)
+	payloadBytes, err := buildFullConfigPayload(s.config, states, s.clusterEpoch, s.leaderID, localID, stamp)
 	pending := make(map[string]*config.Node, len(s.config.Nodes))
 	for id, node := range s.config.Nodes {
 		if id != localID {
@@ -6271,7 +6414,7 @@ func (s *Server) broadcastConfigToPeersOnce() {
 		// would have delivered, so stop rather than compete with it.
 		if attempt > 1 && len(s.broadcastTrigger) > 0 {
 			s.logger.Debug("CONFIG_BROADCAST: superseded by a newer broadcast, abandoning retries",
-				"version", version, "peersOutstanding", len(pending))
+				"version", stamp.version, "peersOutstanding", len(pending))
 			return
 		}
 
@@ -6294,7 +6437,7 @@ func (s *Server) broadcastConfigToPeersOnce() {
 			switch {
 			case err != nil:
 				s.logger.Debug("CONFIG_BROADCAST: ConfigSync failed, will retry",
-					"peer", id, "attempt", attempt, "version", version, "error", err)
+					"peer", id, "attempt", attempt, "version", stamp.version, "error", err)
 			case resp != nil && resp.Message == supersededConfigMessage:
 				// This node's config is older than the cluster's, so the change it
 				// just made will not propagate — the next sync will overwrite it.
@@ -6304,14 +6447,14 @@ func (s *Server) broadcastConfigToPeersOnce() {
 				// and its first full ConfigSync, while configVersion still reads 0.
 				s.logger.Warn("CONFIG_BROADCAST: peer holds a newer config; this node's "+
 					"change will not propagate and will be reverted by the next sync",
-					"peer", id, "version", version)
+					"peer", id, "version", stamp.version)
 				delete(pending, id)
 			case resp != nil && !resp.Success:
 				// The peer rejected the payload on its own terms (a save failure,
 				// or a config it could not unmarshal). Retrying the same bytes
 				// cannot change that answer.
 				s.logger.Debug("CONFIG_BROADCAST: peer declined ConfigSync",
-					"peer", id, "version", version, "message", resp.Message)
+					"peer", id, "version", stamp.version, "message", resp.Message)
 				delete(pending, id)
 			default:
 				delete(pending, id)
@@ -6328,7 +6471,7 @@ func (s *Server) broadcastConfigToPeersOnce() {
 		// periodic reconcile is what will eventually repair it.
 		s.logger.Warn("CONFIG_BROADCAST: peers did not accept the config after all retries; "+
 			"waiting for the periodic reconcile",
-			"version", version, "peers", outstanding)
+			"version", stamp.version, "peers", outstanding)
 	}
 }
 
@@ -6375,6 +6518,39 @@ func (s *Server) currentConfig() *config.Config {
 // behind, so the string is part of the wire contract, not just a log line.
 const supersededConfigMessage = "superseded config version ignored"
 
+// configStamp identifies a config's content: the Lamport clock value, and the ID
+// of the node whose mutation produced it.
+//
+// The origin has to travel with the version because breaking a tie between two
+// equal versions is only convergent if every node compares the same two things.
+// The tiebreak used to be sender-versus-receiver, which is not that: if nodes A
+// and B concurrently mint version N+1, a third node C whose UUID sorts above both
+// rejects each late arrival and keeps whichever it applied first, while A and B
+// each accept the other's and settle on max(A,B). The periodic reconcile re-runs
+// the same receiver-relative comparison, so it cannot separate them either and
+// the split is *stable* — the permanent divergence this clock exists to prevent.
+// Comparing origin against origin gives every node the same answer,
+// max(originA, originB), so all three converge.
+type configStamp struct {
+	version int64
+	origin  string
+}
+
+// isEmpty reports a stamp that carries no ordering information, either because
+// nothing has been applied yet or because the payload came from a binary that
+// does not version its configs.
+func (c configStamp) isEmpty() bool { return c.origin == "" || c.version <= 0 }
+
+// loadConfigStamp reads the stamp for the config this node currently holds. The
+// zero stamp — a node that has applied nothing since it started — orders below
+// everything.
+func (s *Server) loadConfigStamp() configStamp {
+	if held := s.configStamp.Load(); held != nil {
+		return *held
+	}
+	return configStamp{}
+}
+
 // shouldApplyIncomingConfig decides whether a full config payload carries newer
 // content than what this node already holds.
 //
@@ -6382,48 +6558,57 @@ const supersededConfigMessage = "superseded config version ignored"
 // has nothing to add — the periodic reconcile repairs a node that is *behind*,
 // and that node's version is lower, so it still heals.
 //
-// Equal versions from two different senders are the concurrent-mutation case, and
+// Equal versions from two different origins are the concurrent-mutation case, and
 // they have to be broken deterministically or each side rejects the other and the
-// reconcile, also equal, cannot separate them. The node ID is the tiebreak because
-// it is the one input both sides agree on. The losing mutation is lost; that is
-// the standing limitation of applying a config wholesale, and convergence is worth
-// more than a permanent split.
-func (s *Server) shouldApplyIncomingConfig(senderID string, version int64) bool {
-	localID, err := s.currentConfig().GetLocalNodeUUID()
-	if err != nil {
-		localID = ""
-	}
-	return configIsNewer(senderID, version, s.configVersion.Load(), localID)
+// reconcile, also equal, cannot separate them. The origin node ID is the tiebreak
+// because it is the one input every node agrees on. The losing mutation is lost;
+// that is the standing limitation of applying a config wholesale, and convergence
+// is worth more than a permanent split.
+func (s *Server) shouldApplyIncomingConfig(incoming configStamp) bool {
+	return configIsNewer(incoming, s.loadConfigStamp())
 }
 
-// configIsNewer is the comparison itself, taking every input as an argument so
+// configIsNewer is the comparison itself, taking both stamps as arguments so
 // ConfigSync can re-run it under s.Lock() without re-entering the read lock.
 //
-// An empty localID loses every tie, which is the same "cannot order this, apply
-// it" default as an unversioned payload.
-func configIsNewer(senderID string, version, held int64, localID string) bool {
-	if senderID == "" || version <= 0 {
+// An empty held stamp loses every tie, which is the same "cannot order this,
+// apply it" default as an unversioned payload.
+func configIsNewer(incoming, held configStamp) bool {
+	if incoming.isEmpty() {
 		return true // unversioned: cannot be ordered, so apply it
 	}
-	if version != held {
-		return version > held
+	if held.isEmpty() {
+		return true
 	}
-	return senderID > localID
+	if incoming.version != held.version {
+		return incoming.version > held.version
+	}
+	return incoming.origin > held.origin
 }
 
-// adoptConfigVersion raises this node's config version to the one it just
-// applied, which is what keeps the clock shared: a node that only ever receives
-// configs still speaks the cluster's current version rather than its own zero.
+// adoptConfigStamp raises this node's stamp to the one it just applied, which is
+// what keeps the clock shared: a node that only ever receives configs still
+// speaks the cluster's current version rather than its own zero.
 //
 // Never lowers it. The tiebreak above can apply a config at the version already
-// held, and a concurrent local mutation may have moved past it.
-func (s *Server) adoptConfigVersion(senderID string, version int64) {
-	if senderID == "" || version <= 0 {
+// held, and a concurrent local mutation may have moved past it. At equal versions
+// the origin still moves, so the stamp continues to describe the content actually
+// held rather than the tie it won.
+func (s *Server) adoptConfigStamp(incoming configStamp) {
+	if incoming.isEmpty() {
 		return
 	}
+	next := &configStamp{version: incoming.version, origin: incoming.origin}
 	for {
-		held := s.configVersion.Load()
-		if version <= held || s.configVersion.CompareAndSwap(held, version) {
+		heldPtr := s.configStamp.Load()
+		var held configStamp
+		if heldPtr != nil {
+			held = *heldPtr
+		}
+		if !configIsNewer(incoming, held) {
+			return
+		}
+		if s.configStamp.CompareAndSwap(heldPtr, next) {
 			return
 		}
 	}
