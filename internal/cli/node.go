@@ -178,7 +178,7 @@ Omit --node-id to target the local node.`,
 				NodeId: nodeID,
 			})
 			if err != nil {
-				return fmt.Errorf("RPC error: %v", err)
+				return fmt.Errorf("RPC error: %w", err)
 			}
 			if !resp.Success {
 				return errors.New(resp.Message)
@@ -216,12 +216,18 @@ Omit --node-id to target the local node.`,
 			}
 			defer c.Close()
 
-			resp, err := c.CLI().SetCapacity(context.Background(), &rpc.SetCapacityRequest{
+			// Bounded like its siblings above: SetCapacity takes s.Lock() and can
+			// queue behind a long-running mutation, and context.Background() would
+			// leave the CLI hanging with no way out but ^C.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			resp, err := c.CLI().SetCapacity(ctx, &rpc.SetCapacityRequest{
 				NodeId:   nodeID,
 				Capacity: int32(capacity),
 			})
 			if err != nil {
-				return fmt.Errorf("RPC error: %v", err)
+				return fmt.Errorf("RPC error: %w", err)
 			}
 			if !resp.Success {
 				return errors.New(resp.Message)

@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/utils"
@@ -189,7 +190,7 @@ func SendGARP(iface, ip string) error {
 		garpIP = parsedIP
 	}
 	log.Debug("Sending gratuitous arp for " + garpIP.String() + " on interface " + iface)
-	_, err := utils.Execute("arping", "-U", "-c", "5", "-I", iface, garpIP.String())
+	_, err := utils.ExecuteWithTimeout(garpTimeout, "arping", "-U", "-c", "5", "-I", iface, garpIP.String())
 	if err != nil {
 		log.Error("failed to GARP. " + err.Error())
 		return err
@@ -204,6 +205,15 @@ func SendGARP(iface, ip string) error {
 // takes minutes. The processes spend that time asleep rather than on CPU, so the
 // bound exists only to cap process and socket count, not to ration work.
 const garpFanout = 32
+
+// garpTimeout caps a single arping.
+//
+// The batch below ends in an unconditional wg.Wait(), so without a deadline one
+// arping that never exits holds the bring-up RPC — and the failover waiting on
+// it — open forever. Five packets a second apart is ~4s of expected work, so 10s
+// only fires on a process that is genuinely stuck. The address is up either way:
+// a killed announcement is a logged warning, not a failed bring-up.
+const garpTimeout = 10 * time.Second
 
 // SendGARPBatch announces every ip on iface, up to garpFanout at a time.
 //

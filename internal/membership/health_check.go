@@ -112,22 +112,22 @@ type HealthCheck struct {
 // HealthChecker handles health checking for nodes and IPs
 type HealthChecker struct {
 	sync.RWMutex
-	members             *MemberList
-	checkTicker         *time.Ticker
-	stopChan            chan struct{}
-	stopOnce            sync.Once // Ensure we only close stopChan once
-	logger              *log.Logger
-	ready               bool
-	stopped             bool // Track if we're stopped
-	server              ServerReference
-	lastClusterState    string    // Track last cluster state to only log changes
-	checksWithoutChange int       // Counter for periodic status logs
-	lastLeaderBroadcast time.Time // suppress elections briefly after leader broadcast
-	lastTick            time.Time // last time a check cycle executed
-	loggedNoMembers        bool            // Tracks if a no-member condition has already been logged in the current state
-	deepCheckCounter       int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
-	membershipCheckFailed  map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
-	reconcileCycles        int             // cycles since startup; reconciliation waits for a grace period
+	members               *MemberList
+	checkTicker           *time.Ticker
+	stopChan              chan struct{}
+	stopOnce              sync.Once // Ensure we only close stopChan once
+	logger                *log.Logger
+	ready                 bool
+	stopped               bool // Track if we're stopped
+	server                ServerReference
+	lastClusterState      string          // Track last cluster state to only log changes
+	checksWithoutChange   int             // Counter for periodic status logs
+	lastLeaderBroadcast   time.Time       // suppress elections briefly after leader broadcast
+	lastTick              time.Time       // last time a check cycle executed
+	loggedNoMembers       bool            // Tracks if a no-member condition has already been logged in the current state
+	deepCheckCounter      int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
+	membershipCheckFailed map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
+	reconcileCycles       int             // cycles since startup; reconciliation waits for a grace period
 }
 
 // NewHealthChecker creates a new health checker
@@ -1738,7 +1738,15 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 			// No status transition needed; update LoadFactor to reflect reduced load.
 			h.logger.Infof("Partial IP failure for member %s, updating load factor", member.Hostname)
 			if member.Capacity > 0 {
-				member.LoadFactor = float64(len(member.ActiveIPs)-len(failedIPs)) / float64(member.Capacity)
+				// Clamped at zero: failedIPs is built from a separate observation of
+				// the interface, so it can name an address ActiveIPs no longer lists
+				// and make this subtraction negative. A negative load factor reads as
+				// "emptier than empty" everywhere it is compared.
+				remaining := len(member.ActiveIPs) - len(failedIPs)
+				if remaining < 0 {
+					remaining = 0
+				}
+				member.LoadFactor = float64(remaining) / float64(member.Capacity)
 			}
 		}
 

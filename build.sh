@@ -6,7 +6,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VERSION="$(git -C "${REPO_ROOT}" describe --tags 2>/dev/null || echo 'dev')"
 BUILD="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || echo 'unknown')"
-LDFLAGS="-ldflags \"-X main.Version=${VERSION} -X main.Build=${BUILD}\""
+# An array, not a string: passing this through `eval` re-tokenised every argument,
+# so a repo path containing a space split into two arguments and the build failed
+# with a nonsense target.
+LDFLAGS=(-ldflags "-X main.Version=${VERSION} -X main.Build=${BUILD}")
 
 PHP_OUT="${REPO_ROOT}/rpc/php"
 
@@ -29,7 +32,7 @@ go mod download
 
 info "Building pulseha daemon → cmd/pulseha/bin/pulseha (linux/amd64)..."
 mkdir -p "${REPO_ROOT}/cmd/pulseha/bin"
-eval env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v \
+env GOOS=linux GOARCH=amd64 go build "${LDFLAGS[@]}" -v \
     -o "${REPO_ROOT}/cmd/pulseha/bin/pulseha" \
     "${REPO_ROOT}/cmd/pulseha"
 
@@ -37,7 +40,7 @@ eval env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v \
 
 info "Building pulsectl CLI → cmd/pulsectl/bin/pulsectl (linux/amd64)..."
 mkdir -p "${REPO_ROOT}/cmd/pulsectl/bin"
-eval env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v \
+env GOOS=linux GOARCH=amd64 go build "${LDFLAGS[@]}" -v \
     -o "${REPO_ROOT}/cmd/pulsectl/bin/pulsectl" \
     "${REPO_ROOT}/cmd/pulsectl"
 

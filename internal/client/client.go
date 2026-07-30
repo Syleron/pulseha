@@ -258,15 +258,15 @@ type ClusterStatus struct {
 }
 
 type Member struct {
-	Hostname      string   `json:"hostname"`
-	NodeID        string   `json:"node_id"`
-	IP            string   `json:"ip"`
-	Port          string   `json:"port"`
-	Status        string   `json:"status"`
-	IPs           []string `json:"ips"`
-	ActiveIPs     []string `json:"active_ips"`
-	LastResponse  string   `json:"last_response"`
-	Latency       string   `json:"latency"`
+	Hostname     string   `json:"hostname"`
+	NodeID       string   `json:"node_id"`
+	IP           string   `json:"ip"`
+	Port         string   `json:"port"`
+	Status       string   `json:"status"`
+	IPs          []string `json:"ips"`
+	ActiveIPs    []string `json:"active_ips"`
+	LastResponse string   `json:"last_response"`
+	Latency      string   `json:"latency"`
 }
 
 // GroupInfo represents a floating IP group
@@ -452,14 +452,14 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Unknown"
 		}
 		status.Members[i] = Member{
-			Hostname:      m.Hostname,
-			Status:        statusStr,
-			IPs:           m.ActiveIps,
+			Hostname:     m.Hostname,
+			Status:       statusStr,
+			IPs:          m.ActiveIps,
 			ActiveIPs:    m.ActiveIps,
 			LastResponse: m.LastResponse,
 			Latency:      m.Latency,
 			IP:           m.Ip,
-			Port:          m.Port,
+			Port:         m.Port,
 		}
 
 		// Log the latency for debugging

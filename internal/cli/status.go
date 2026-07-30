@@ -86,11 +86,11 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 		nodeID := m.NodeId
 
 		status.Members[i] = client.Member{
-			Hostname:      m.Hostname,
-			NodeID:        nodeID,
-			IP:            m.Ip,
-			Port:          m.Port,
-			Status:        s,
+			Hostname:     m.Hostname,
+			NodeID:       nodeID,
+			IP:           m.Ip,
+			Port:         m.Port,
+			Status:       s,
 			IPs:          m.ActiveIps,
 			ActiveIPs:    m.ActiveIps,
 			LastResponse: m.LastResponse,
