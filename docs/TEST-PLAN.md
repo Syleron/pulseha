@@ -485,7 +485,7 @@ not just `pulsectl`).
 
 ## 5. Coverage
 
-Row statuses are maintained as of **2026-07-28**. Where a row and a dated narrative
+Row statuses are maintained as of **2026-07-30**. Where a row and a dated narrative
 section below disagree, the narrative is the record of what was actually observed;
 the row is the summary. "Unconfirmed" means the code the defect described has since
 been rewritten by another fix, but the defect itself was never re-tested — treat it
@@ -534,6 +534,15 @@ as neither fixed nor reproduced.
 | TC-3 | #43 a burst of config mutations commits locally and never propagates; the reconcile does not repair it | **New, open, found run 23. Mirror of #39 and made reachable by its fix.** 20 `add-ip` calls in 4s from node-1 (all rc=0): node-1 reached 286 while node-2/3/4 stayed at 267/268/268, **stable for 135s+** with all four healthy and no node down. Reproduced twice (the first burst, with node-4 stopped, left node-1 at 265 against 246/251, stable 3min+). Mechanism, all on the wire: the per-add broadcasts coalesce correctly (`CONFIG_BROADCAST: superseded by a newer broadcast, abandoning retries`), but every retry of the *final* broadcast is refused (#31), ending in `CONFIG_BROADCAST: peers did not accept the config after all retries; waiting for the periodic reconcile version=N peers=[all three]` — and **that reconcile only runs on the coordinator**: node-1 logged **0** `CONFIG_RECONCILE` lines in 4–5 minutes while node-2 logged 4. So a failed broadcast from a *non-coordinator* is never repaired; node-2's own reconcile pushes its older config, node-1 correctly rejects it as stale (#38's guard working), and nothing pulls node-1's newer config out. Repaired only by the next *successful* mutation, which carries the whole backlog: a single quiet `add-ip` took node-2 from 246 → 266 and node-3 from 251 → 266 in one push. **Consequence: `add-ip` returns success for a change that exists on one node only, for an unbounded time.** Pre-existing in mechanism (coordinator-only reconcile + #31), but before `bef7286` each add took 13–28s and the broadcasts were naturally spaced far enough apart to succeed — runs 19 and 20 landed 244 adds this way. Fix shape: let any node reconcile its own unpropagated version, or block the `add-ip` reply on propagation rather than on the local commit |
 | TC-6 | #44 `unassign` alone does not trigger the reclaim; only a restart of the unassigned node does | **New, open, found run 23.** `group unassign RealTest` from node-3 (rc=0, propagated to **all four** nodes' `group_assignments` within seconds) made node-3 correctly release all 71 of its addresses within 6s — and then the cluster sat at `n1=72 n2=72 n3=0 n4=72, placements=216, missing=71` for **8 minutes**. 71 configured addresses on no node at all, with every node agreeing on the config. node-1's `ENFORCE: Current expectations` never widened to include them and there were **zero** `ACTIVE_CHECK: rebalancing`, reclaim, vote or capacity lines on node-1 or node-2 in the window — the reclaim never even tried. Restarting node-3 with the group still unassigned then reclaimed all 71 immediately (`95/96/0/96`, `unique=287 missing=0`), which is why **run 22 did not see this**: it unassigned and restarted in the same breath, so the restart-driven reclaim masked the missing unassign-driven one. Distinct from #40 (the release half, which works) and from #13 (dropped RPCs — here no RPC is attempted) |
 | TC-6 | #45 the bring-up path logs an already-present address as an error — #41's mirror | **New, open, found run 23.** During the same release storm that produced zero #41 errors, the *bring-up* side logged `IP monitor restore: failed to add addr cidr=… iface=enX0 error="file exists"` (18 node-2, 4 node-3) and `NETWORK: netlink.AddrAdd failed error="file exists"` (7 node-2, 2 node-3) at **error** level, followed by `ENFORCE: Failed to bring up IP on Active node … error="unable to bring IP up as netlink failed to do so"` (8 node-2, 7 node-3) and `IP_FAILOVER: Some interfaces failed to bring up IPs`. Adding an address the node already holds is a no-op reported as a failure — exactly #41's shape with the sign flipped, and the same fix applies: check existence immediately before `AddrAdd` and classify `EEXIST` as already-satisfied rather than failed. Note this one propagates upward into a failed-failover report, so unlike #41 it is not purely cosmetic |
+| TC-6 | #46 `RemoveMember` self-deadlocks redistributing the leaving node's addresses | **Fixed (PR #227 follow-up), not verified live.** Found while auditing the locking the review flagged in `member_list.go`, and not itself a review finding. `MemberList` embeds a `sync.RWMutex`, which is not reentrant; `RemoveMember` takes the write lock and then calls the exported `RedistributeIPs`, which takes it again. Every removal of a node that still held floating IPs therefore hung forever **with the write lock held**, so nothing else touching the member list could make progress either — the daemon, not just the removal. Both branches of `RemoveMember` had their own copy of the call (by node ID and by hostname). Same shape as the old `RebalanceCluster` self-deadlock and the `hasQuorumLocked` one this PR already fixed, and as #32's `Load()`/`Save()`. Fix: the body is split into `redistributeIPsLocked`, which documents that it requires the lock; the exported method is the locking wrapper. The two call sites also passed `member.ActiveIPs` bare and now read it through `GetActiveIPs()`. Tests: `internal/membership/member_list_locking_test.go` — `TestRemoveMemberRedistributingDoesNotSelfDeadlock` covers both branches and times out against the old code (10s = 2 × its 5s deadline) |
+| TC-6 | #47 the redistribution path reads member state without the member lock | **Fixed (PR #227 follow-up), not verified live.** Review finding. `getAvailableNodes` read `member.Status`, and `calculateIPDistribution` read `len(node.ActiveIPs)` and `node.Capacity`, holding only the member *list* lock — which does not cover those fields. `AddActiveIPs` appends to `ActiveIPs` and `UpdateConfig` refreshes `Capacity` under the member's own lock, and the health check loop writes `Status` there, so these were real races rather than staleness. `getActiveNode`, the callee of both, had the same defect. Fixed by snapshotting each member's fields under its own lock, the pattern `ConsolidationTarget` in the same file already used. Detector: `TestRedistributeIPsSnapshotsMemberStateUnderLock`, which reports a data race on every run against the old code, at exactly the three flagged lines |
+| TC-6 | #48 `performPromotionAsync` writes member status bare on its rollback paths | **Fixed (PR #227 follow-up), not verified live.** Review finding. The four identical restore-from-`originalStates` loops, the two mark-unreachable blocks and the remote-promotion success all assigned `Status` (and `ActiveIPs`) directly, violating the member-locking rule this PR's own comments establish, while the health check loop and IP monitor read those fields under the member lock. Fixed with `Member.GetStatus`/`SetStatus`/`MarkUnreachable` and a `restoreMemberStates` helper; the two bare *reads* in the same function were converted too, since `-race` pairs them against the now-locked writes. **Residual, deliberately open:** the equivalent bare writes elsewhere in `internal/server` (around lines 687, 1348, 4777, 4790) are untouched — a wider pre-existing pattern the review did not scope, and `internal/membership/health_check.go`'s writes were already correctly locked |
+| TC-6 | #49 `seedActiveActiveAssignments` violates `groupIPsForNode`'s lock contract | **Fixed (PR #227 follow-up), not verified live.** Review finding. The function documented itself as safe to call with or without `s.Lock()`, but calls `groupIPsForNode`, whose contract requires it because it reads `s.config.Nodes` and `s.config.Groups`. `SetMode`'s call site satisfied it (it holds the write lock); `ConfigSync`'s runs after the pointer swap has released it, so that path read the config maps unsynchronised. Fixed by stating the real contract — the caller must hold `s.Lock()` or `s.RLock()` — and taking the read lock around the `ConfigSync` call site, which is enough because the function only writes member state |
+| TC-6, TC-8 | #50 `ConfigSync` writes the cluster epoch and leader outside the lock on three of its four paths | **Fixed (PR #227 follow-up), not verified live.** Review finding, extended. `157a2f9` moved the full-config branch's `clusterEpoch` write inside the critical section; the same compare-and-write remained unsynchronised in the envelope-only branch (which takes no server lock at all), in the pre-sync epoch read before the lock is acquired, and in the apply-member-states block after it is released — while the config broadcaster reads both fields under `RLock`. Fixed with `convergenceMetadata()` and `adoptConvergenceMetadata()`, which read and write the pair as one critical section. Two behaviour improvements fall out: the epoch can no longer regress (the old code compared against a snapshot taken earlier in the function, so a sync that lost the race still wrote its lower epoch), and the leader can no longer be observed against the wrong epoch. Tests: `internal/server/convergence_metadata_test.go` — `TestConvergenceMetadataIsNeverObservedMismatched` both fails the invariant and trips `-race` when the helper's lock is removed |
+| TC-6 | #51 the reconciliation pass runs blocking RPCs on the 1s health-check tick | **Fixed (PR #227 follow-up), not verified live.** Review finding, and the one with real behavioural weight: `checkForActiveNodeFailure` ran inline on the tick, and below it sit a serial `MakePassive` per extra Active, a quorum vote that polls for up to 30s, a remote `BringDownIPs` per duplicate address (each carrying `Client.Send`'s own 30s deadline), and the bring-ups redistribution performs — plus `electNewActiveNode`'s retry sleeps. A 1s tick could therefore take a minute, so the node stopped answering its own health checks and peers marked it Unknown and elected around it: the same "busy node looks dead" failure that #2/#26, the batched GARP (#4) and the coordinator grace period exist to prevent, left in place on the loop that drives them. Fix: the pass runs on its own goroutine behind a single-flight `atomic.Bool`, so a tick arriving during a pass skips rather than queues, with a 3-minute backstop that releases the guard if a pass never returns. The two counters the pass reads (`reconcileCycles`, `checksWithoutChange`) moved under the health checker lock, since the tick still owns the writes. The duplicate bring-downs are also batched per node now, one RPC instead of one per address, and the consolidation loop carries a shared deadline so it cannot run away. Tests: `internal/membership/reconcile_pass_test.go` — against the inline version the dispatch test measures a 2s block on the tick and the stacking test runs 4 passes where it must run 1 |
+| TC-6 | #52 the demotion deadline is fixed at 10s regardless of how many addresses must be released | **Fixed (PR #227 follow-up), not verified live.** Review finding. `MakePassive` now drops **and verifies** every configured group address rather than only a node's recorded assignments (#21), so its cost scales with the group; the flat 10s on `confirmPeerReleasedIPs` was sized for the old behaviour. On this plan's own 201-address topology a healthy but loaded incumbent can exceed it, and `DeadlineExceeded` is deliberately read as "the peer is alive and may still own its IPs" — the conservative reading that keeps a wedged Active from being promoted over — so a deadline that is merely too short aborts a promotion that was safe. Fixed with `DemotionTimeoutFor(ipCount)`: a 10s base plus 100ms per address, capped at 120s so a misconfigured group cannot make the wait effectively unbounded. Applied to the consolidation invariant's demotions too, which issue the same RPC and were mis-sized the same way — affordable now that #51 moved them off the tick. Tests: `internal/membership/demotion_timeout_test.go` |
+| TC-7 | #53 `PlanMoves` batch aggregation transiently exceeds a destination's capacity | **Fixed (PR #227 follow-up), not verified live.** Review finding. Capacity is enforced per simulated move, but aggregating the plan by `(src, dst, group)` collapses moves that were interleaved with others, so a destination that has to shed before it can accept beyond its capacity gets its whole incoming batch applied first. Callers apply a batch at a time, so this is observable: on a three-node topology where node2 has capacity 4, the first emitted batch put 7 addresses on it. The final state was correct either way, which is why the existing batched-equals-incremental invariant did not catch it. Fixed with `scheduleWithinCapacity`, which emits the aggregated batches greedily in plan order, trims each to the room actually available at that point and retries the remainder once the batches that free the space have been emitted. Plans with no capacities set — the common bulk-drain case, where batching turns ~150 sequential IP failovers into one call per destination — are returned untouched. Tests: `internal/ipam/plan_capacity_test.go`, whose no-transient-overflow invariant fails against the old code on the first emitted batch |
+| TC-6 | #54 duplicate-IP resolution picks the survivor by record order rather than kernel state | **Partly fixed (PR #227 follow-up), not verified live.** Review finding (listed among the smaller ones). `resolveDuplicateAssignments` kept the address on whichever contender sorted first by node ID. When that is not the node actually holding it, the coordinator brings down a live address and leaves the record on a node that may not have it up, so the address is served by nobody until the next orphan sweep re-places it — one avoidable flap per duplicate, and it compounds with #16, which makes a genuine duplicate indistinguishable from a split-brain in the logs. **Only partly fixable as things stand:** no RPC exposes a peer's interface state, so the coordinator can read the kernel for the local node and nothing else. The local node's state therefore decides whenever it is one of the two contenders — which is the common case, since the coordinator running the pass is usually also a holder — and record order remains the deterministic fallback when neither is local or the interfaces cannot be read. Closing it properly needs an interface-state RPC, i.e. a proto change, which does not belong in this branch. Tests: `internal/membership/duplicate_survivor_test.go`; the two behavioural cases fail against record order and the two fallback cases are unchanged by design |
 
 ---
 
@@ -1870,3 +1879,72 @@ duplicated=0`, `RealTest` assigned to all four on `enX0`. All four running
 `/run/lbBootFlag` **absent on all four, untouched by this run** — as run 22 left it. It still gates
 the appliance's config wipe, so restoring it will delete the 287 test addresses on the next daemon
 start; that is a deliberate decision to defer, not an oversight.
+
+---
+
+## Fix 2026-07-30 — PR #227 review follow-up, defects #46-#54 (unverified live)
+
+The second tranche from the PR #227 review. `157a2f9` and `9d2948b` took the three
+merge blockers, `make testrace` and the trivial minors; this covers everything the
+reply to the review deferred, plus the two things found while doing it.
+
+**Nothing here has been verified live.** Every claim below is from code and unit
+tests, so each row is marked "not verified live" — deliberately, because run 23's
+lesson was that a fix consistent with a fix is weak evidence. The next whitecrane
+run should treat #51 as the one to watch: it changes when reconciliation runs, not
+merely what it does.
+
+### What the review asked for
+
+| Finding | Defect | Shape of the fix |
+|---|---|---|
+| `member_list.go` unlocked member reads | #47 | Snapshot each member's fields under its own lock, as `ConsolidationTarget` already did |
+| `performPromotionAsync` bare `Status` writes | #48 | `SetStatus`/`MarkUnreachable`/`restoreMemberStates`; the bare reads in the same function too |
+| `seedActiveActiveAssignments` lock contract | #49 | State the real contract; take `RLock` at the `ConfigSync` call site |
+| Blocking RPCs in the 1s health-check loop | #51 | Single-flight goroutine off the tick, batched duplicate releases, bounded consolidation |
+| `confirmPeerReleasedIPs` 10s deadline | #52 | `DemotionTimeoutFor` — 10s + 100ms/address, capped at 120s |
+| `PlanMoves` transient over-capacity | #53 | `scheduleWithinCapacity` — trim and retry batches instead of reordering them |
+| Duplicate survivor by record order | #54 | Local kernel state decides when the local node is a contender; record order otherwise |
+| Envelope-only `ConfigSync` epoch write | #50 | Read and write the epoch/leader pair in one critical section |
+
+### Found while doing it
+
+- **#46, a hard self-deadlock.** `RemoveMember` holds the member list write lock and
+  calls the exported `RedistributeIPs`, which takes it again. `sync.RWMutex` is not
+  reentrant, so removing any node that still held addresses hung the daemon with the
+  lock held. Not a review finding, and the fourth instance of this exact shape in the
+  codebase (`RebalanceCluster`, `hasQuorumLocked`, #32's `Load()`/`Save()`).
+- **#50 was wider than reported.** The review named the envelope-only branch; the same
+  unsynchronised compare-and-write was also in the pre-lock epoch read and the
+  apply-member-states block, so three of `ConfigSync`'s four paths, not one.
+
+### Method
+
+Every fix has a test that was **run against the unfixed code and observed to fail** —
+in a throwaway git worktree at `HEAD`, so the working tree was never left in a
+half-reverted state. What each one reported:
+
+| Test | Against the old code |
+|---|---|
+| `TestRemoveMemberRedistributingDoesNotSelfDeadlock` | Times out, both branches |
+| `TestRedistributeIPsSnapshotsMemberStateUnderLock` | `-race` at the three flagged lines |
+| `TestConvergenceMetadataIsNeverObservedMismatched` | Mismatched pair **and** `-race` |
+| `TestReconcilePassDoesNotBlockTheHealthCheckTick` | 2.0s block on a 1s tick |
+| `TestReconcilePassesDoNotStackAndTheGuardIsReleased` | 4 passes where 1 is correct |
+| `TestPlanMovesNeverTransientlyExceedsCapacity` | node2 holds 7 against capacity 4 |
+| `TestDuplicateSurvivor{PrefersTheNodeHoldingTheAddress,DropsAStaleLocalRecord}` | Wrong survivor in both |
+
+`#49` and `#52` are the two without a failing-first test: #49 is a contract and a lock
+acquisition with no observable behaviour change, and #52's test pins the sizing rule
+rather than a bug — the old constant is asserted to be insufficient.
+
+### Left open, deliberately
+
+- **#48's residual:** bare member-status writes elsewhere in `internal/server`
+  (~lines 687, 1348, 4777, 4790). A wider pre-existing pattern the review did not
+  scope; `health_check.go`'s writes were already correctly locked.
+- **#54 cannot be closed** without an RPC that reports a peer's interface state — a
+  proto change, which does not belong in a follow-up to an already-reviewed PR.
+- The `partial_active` removal still needs calling out in the release notes as
+  breaking, and the unauthenticated mutating RPCs still want their own issue. Both
+  were acknowledged in the review reply as out of scope for this branch.
