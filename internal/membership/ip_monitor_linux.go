@@ -179,6 +179,19 @@ func (m *IPMonitor) restoreIP(iface string, ip string) {
 	}
 	m.logger.Debug("IP monitor restore: parsed address", "cidr", cidr)
 
+	// Deliberately does not announce, unlike every other path that places an
+	// address (docs/TEST-PLAN.md defect #33). This runs on the watcher goroutine,
+	// whose netlink channel is 32 deep with no overflow handling, and an arping
+	// costs about four seconds — so announcing here would drop address events
+	// during exactly the churn that produces them, and a dropped removal is an
+	// expected address never restored. That is #4/#8's failure, which is why every
+	// announcement in this codebase is batched off a loop like this one.
+	//
+	// The cost of the silence is small here and only here: the address was taken
+	// off this node and is going straight back onto it, so neighbours' ARP entries
+	// still point at this node's MAC. A placement that genuinely moves an address
+	// between nodes goes through the enforce pass or a bring-up RPC, both of which
+	// announce.
 	if err := netlink.AddrAdd(link, addr); err != nil {
 		// The watcher restores on the removal event, so by the time it gets here
 		// another writer may already have put the address back — an add that
@@ -369,13 +382,35 @@ func (m *IPMonitor) enforceExpectations() {
 		}
 		if len(missing) > 0 {
 			m.logger.Info("ENFORCE: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", StatusToString(member.Status))
-			for _, ip := range missing {
-				m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(member.Status))
-				if err := network.BringIPup(iface, ip); err != nil {
-					m.logger.Error("ENFORCE: Failed to bring up IP on Active node", "ip", ip, "iface", iface, "error", err)
+
+			// This pass placed addresses and announced none of them, which run 30
+			// caught doing it for the ones that mattered most: node-1's final 72 of
+			// a 288-address group came up here, live under a holder that had never
+			// announced them (docs/TEST-PLAN.md defect #33, residual half).
+			attempts, skipped, announceErr := placeMissingFloatingIPs(iface, missing,
+				func(iface, ip string) error {
+					m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(member.Status))
+					return network.BringIPup(iface, ip)
+				}, network.SendGARPBatch)
+
+			for _, attempt := range attempts {
+				if attempt.Err != nil {
+					m.logger.Error("ENFORCE: Failed to bring up IP on Active node", "ip", attempt.IP, "iface", iface, "error", attempt.Err)
 				} else {
-					m.logger.Info("ENFORCE: Successfully brought up IP on Active node", "ip", ip, "iface", iface)
+					m.logger.Info("ENFORCE: Successfully brought up IP on Active node", "ip", attempt.IP, "iface", iface)
 				}
+			}
+			// The addresses are up and serving whether or not the announcement
+			// landed, so this is a warning and never changes what the pass did.
+			if announceErr != nil {
+				m.logger.Warn("ENFORCE: failed to announce some placed IPs", "iface", iface, "error", announceErr)
+			}
+			if len(skipped) > 0 {
+				// On this logger rather than packages/network's, which nothing calls
+				// SetLevel on — a line reported there cannot reach the journal at any
+				// logging_level (#61's lesson, #33's positive control).
+				m.logger.Debug("ENFORCE: skipped announcing addresses this node no longer holds",
+					"iface", iface, "count", len(skipped), "of", len(missing))
 			}
 		} else {
 			m.logger.Debug("ENFORCE: No missing IPs for interface", "iface", iface)

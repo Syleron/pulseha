@@ -537,6 +537,60 @@ func releaseSurplusFloatingIPs(surplus map[string][]string,
 	return attempts
 }
 
+// placeAttempt is the outcome of trying to place one expected address.
+type placeAttempt struct {
+	Iface string
+	IP    string
+	// Err is set when the bring-up failed. It says nothing about whether the
+	// address is on the interface: #45 is the race where it reports failure for
+	// an address that is in fact up, which is why the announcement below decides
+	// from kernel state rather than from this.
+	Err error
+}
+
+// placeMissingFloatingIPs brings up each missing address and announces the whole
+// set it attempted, in one batch, letting the announcement decide which of them
+// the interface actually holds.
+//
+// docs/TEST-PLAN.md defect #33, residual half. The over-announcing half was
+// announcing an address the node had lost; this is the reverse and the more
+// expensive one. The enforce pass placed addresses and announced none of them,
+// and run 30 caught it doing so for the addresses that mattered most: node-1's
+// final 72 of a 288-address group were placed there, live under a holder that had
+// never announced them. Nothing re-announces on its own, so neighbours keep the
+// previous owner's MAC until their ARP entries age out: #11/#15's risk, a silent
+// partial outage that survives convergence.
+//
+// The set handed to announce is what this pass attempted, not what it believed
+// it achieved. Deciding from the success list is the same staleness the
+// over-announcing half had, pointed the other way — a list built during the
+// placement loop cannot know about an address that came up after it was written.
+// It is safe to offer the whole attempted set because the batch re-reads each
+// address against the kernel immediately before its own arping (541111c),
+// announcing the ones the interface holds and returning the rest as skipped. The
+// kernel decides, at announce time.
+//
+// Announcement failures come back separately from placement failures: the
+// addresses are up and serving either way, and a switch relearns them on the
+// next ARP exchange regardless.
+func placeMissingFloatingIPs(iface string, missing []string,
+	bringUp func(iface, ip string) error,
+	announce func(iface string, ips []string) ([]string, error),
+) (attempts []placeAttempt, skipped []string, announceErr error) {
+
+	if len(missing) == 0 {
+		return nil, nil, nil
+	}
+
+	attempts = make([]placeAttempt, 0, len(missing))
+	for _, ip := range missing {
+		attempts = append(attempts, placeAttempt{Iface: iface, IP: ip, Err: bringUp(iface, ip)})
+	}
+
+	skipped, announceErr = announce(iface, missing)
+	return attempts, skipped, announceErr
+}
+
 // initializeExpectedIPs initializes the expected IPs from the current member
 func (m *IPMonitor) initializeExpectedIPs() error {
 	m.logger.Debug("IP monitor: starting initializeExpectedIPs")

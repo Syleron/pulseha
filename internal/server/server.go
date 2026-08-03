@@ -6070,12 +6070,21 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// the interface and unannounced: peers keep the old MAC in ARP and the traffic
 	// goes nowhere, a silent partial outage mid-failover, where the per-IP version
 	// had at least announced each success as it happened.
-	upIPs := make([]string, 0, len(req.Ips))
-	announceUpIPs := func() {
-		if len(upIPs) == 0 {
+	//
+	// The set announced is every address this request got as far as attempting,
+	// not the ones the loop concluded were up. The two rechecks below exist
+	// because a bring-up can report failure for an address the kernel holds
+	// (#45), and an address that appears after the last of them was still lost
+	// from the announcement — #33's residual half. Offering the attempted set is
+	// safe because the batch re-reads each address against the kernel immediately
+	// before its own arping, announcing what the interface holds and returning the
+	// rest as skipped: the kernel decides, at announce time.
+	attempted := make([]string, 0, len(req.Ips))
+	announceAttempted := func() {
+		if len(attempted) == 0 {
 			return
 		}
-		skipped, err := network.SendGARPBatch(req.Iface, upIPs)
+		skipped, err := network.SendGARPBatch(req.Iface, attempted)
 		if err != nil {
 			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
 		}
@@ -6085,7 +6094,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 			// reach the journal at any logging_level, so the skip would be
 			// unverifiable live (#61's lesson, #33's positive control).
 			s.logger.Debug("BringUpIP: skipped announcing addresses this node no longer holds",
-				"iface", req.Iface, "count", len(skipped), "of", len(upIPs))
+				"iface", req.Iface, "count", len(skipped), "of", len(attempted))
 		}
 	}
 
@@ -6098,13 +6107,18 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 			} else if utils.IsIPv6(ip) {
 				ip = ip + "/128"
 			} else {
-				announceUpIPs()
+				announceAttempted()
 				return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
 			}
 		}
 
 		// Inform monitor of expectation before manipulations
 		s.ipMonitor.AddExpectedIPs(req.Iface, []string{ip})
+
+		// A candidate for announcement from here on, whatever the loop below
+		// concludes about it: only the kernel, read at announce time, can say
+		// whether this node ended up holding it.
+		attempted = append(attempted, ip)
 
 		// Pre-check if already present
 		ipOnly, ipNet := utils.GetCIDR(ip)
@@ -6116,7 +6130,6 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				if eIface == req.Iface {
 					// Already present on desired interface: announce it and continue
 					s.logger.Info("IP already exists on target interface, skipping", "ip", ip, "iface", req.Iface)
-					upIPs = append(upIPs, ip)
 					continue
 				}
 				// Present on a different interface: try to remove there first (best-effort)
@@ -6129,7 +6142,6 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
 				if ex && eIface == req.Iface {
 					s.logger.Info("BringUpIP: IP assignment failed but IP is now present on target interface", "ip", ip, "iface", req.Iface)
-					upIPs = append(upIPs, ip)
 					continue
 				}
 			}
@@ -6139,20 +6151,17 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
 				if ex && eIface == req.Iface {
 					s.logger.Info("BringUpIP: Final check confirms IP is present on target interface, treating as success")
-					upIPs = append(upIPs, ip)
 					continue
 				}
 			}
 			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", ip, "error", err)
-			announceUpIPs()
+			announceAttempted()
 			return &rpc.UpIpResponse{Success: false, Message: err.Error()}, nil
 		}
-
-		upIPs = append(upIPs, ip)
 	}
 
 	// Best-effort announcement of the whole set; the addresses are already up.
-	announceUpIPs()
+	announceAttempted()
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
 	// call means the coordinator has assigned these IPs to us. Transition to

@@ -305,12 +305,21 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 	// without announcing leaves them live and unreachable — peers still have the old
 	// MAC — so the announcement runs on every exit. A failure to announce is logged
 	// rather than returned, since the addresses are up either way.
-	upIPs := make([]string, 0, len(ips))
-	announceUpIPs := func() {
-		if len(upIPs) == 0 {
+	//
+	// The set announced is every address this call got as far as attempting, not
+	// the ones the loop believed it placed. A bring-up that reports failure for an
+	// address the kernel does in fact hold is #45's race, and deciding from the
+	// success list leaves such an address live and unannounced — #33's residual
+	// half. Offering the attempted set is safe because the batch re-reads each
+	// address against the kernel immediately before its own arping, announcing what
+	// the interface holds and returning the rest as skipped: the kernel decides, at
+	// announce time, which is later than any list this loop could keep.
+	attempted := make([]string, 0, len(ips))
+	announceAttempted := func() {
+		if len(attempted) == 0 {
 			return
 		}
-		skipped, err := network.SendGARPBatch(iface, upIPs)
+		skipped, err := network.SendGARPBatch(iface, attempted)
 		if err != nil {
 			m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
 		}
@@ -318,7 +327,7 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 			// On the daemon's logger, not the network package's: see the same
 			// report in Server.BringUpIP (#33/#61).
 			m.logger.Debug("Skipped announcing addresses this node no longer holds",
-				"iface", iface, "count", len(skipped), "of", len(upIPs))
+				"iface", iface, "count", len(skipped), "of", len(attempted))
 		}
 	}
 
@@ -328,7 +337,7 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 		// Check if IP is already up somewhere else
 		exists, existingIface, err := network.CheckIfIPExists(ip)
 		if err != nil {
-			announceUpIPs()
+			announceAttempted()
 			return fmt.Errorf("failed to check IP existence: %w", err)
 		}
 
@@ -341,19 +350,22 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 			}
 		}
 
+		// Recorded before the attempt, not after: the address is a candidate for
+		// announcement from the moment this node tries to place it here.
+		attempted = append(attempted, ip)
+
 		// Bring up the IP on the specified interface
 		if err := network.BringIPup(iface, ip); err != nil {
-			announceUpIPs()
+			announceAttempted()
 			return fmt.Errorf("failed to bring up IP %s on interface %s: %w", ip, iface, err)
 		}
 
-		upIPs = append(upIPs, ip)
 		m.logger.Info("Successfully brought up IP on interface", "ip", ip, "iface", iface)
 	}
 
 	// Announce the whole set. A failure here leaves the addresses up and serving,
 	// so it is logged rather than returned.
-	announceUpIPs()
+	announceAttempted()
 
 	return nil
 }
