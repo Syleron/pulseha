@@ -273,6 +273,24 @@ func sendGARPBatch(iface string, ips []string, announce announceFunc) error {
 	return nil
 }
 
+// AnnounceBatchTimeout is the longest SendGARPBatch can take for ipCount
+// addresses: ceil(ipCount/garpFanout) waves, each bounded by garpTimeout.
+//
+// Exported because a bring-up ends in one of these batches, and its arping waves
+// — not the netlink adds, which are sub-millisecond — are what a caller's
+// deadline on that bring-up actually has to cover. Sizing such a deadline from
+// the address count alone is defect #57: a flat 5s could not cover even a single
+// wave, so a 24-address batch that was up almost immediately was still reported
+// failed. This is an upper bound, not an estimate; a wave usually costs the ~4s
+// arping spends pacing its five packets, not the 10s cap.
+func AnnounceBatchTimeout(ipCount int) time.Duration {
+	if ipCount <= 0 {
+		return 0
+	}
+	waves := (ipCount + garpFanout - 1) / garpFanout
+	return time.Duration(waves) * garpTimeout
+}
+
 /*
 *
 Checks to see what status a network interface is currently.

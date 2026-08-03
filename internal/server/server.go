@@ -6589,6 +6589,35 @@ func (s *Server) groupIPsByInterfaceForNode(nodeID string, ips []string) (map[st
 	return ifaceToIPs, nil
 }
 
+// Remote IP-batch deadline sizing.
+//
+// A flat 5s on both helpers below was defect #57. `BringUpIP` and `BringDownIP`
+// each carry a whole batch, so their cost scales with the batch; run 25 moved
+// 23–24 addresses at a time onto a node already bringing up ~71, the bring-up
+// RPC overran, and the coordinator logged `IP_FAILOVER: Failed to bring IPs up
+// remotely … DeadlineExceeded` → `ACTIVE_CHECK: rebalance move failed` for seven
+// moves whose addresses had all in fact arrived. Same family as #39/#13/#21/#31:
+// the returned status was not evidence of what happened — and here it is read,
+// not just logged, since the rebalance loop breaks on it.
+//
+// Bring-down is #52's demotion shape exactly — release and verify, per address —
+// so it reuses that sizing, as `releaseDeletedGroupIPs` already does.
+//
+// Bring-up needs more than the address work, which is why 5s was too short for a
+// batch that was up in well under a second: the RPC ends in one gratuitous-ARP
+// batch, and those arping waves dominate the call. Capped for the same reason
+// DemotionTimeoutFor is — this deadline is a bound on how long a coordinator
+// blocks in a single move.
+const bringUpMaxTimeout = 120 * time.Second
+
+func bringUpTimeoutFor(ipCount int) time.Duration {
+	timeout := membership.DemotionTimeoutFor(ipCount) + network.AnnounceBatchTimeout(ipCount)
+	if timeout > bringUpMaxTimeout {
+		return bringUpMaxTimeout
+	}
+	return timeout
+}
+
 // bringIPsOnNodeUp contacts a specific node and asks it to bring IPs up on the given interface
 func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
 	node := s.config.Nodes[nodeID]
@@ -6603,7 +6632,7 @@ func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
 	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
 	defer cancel()
 	_, err = remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{Iface: iface, Ips: ips})
 	return err
@@ -6623,7 +6652,7 @@ func (s *Server) bringIPsOnNodeDown(nodeID, iface string, ips []string) error {
 	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), membership.DemotionTimeoutFor(len(ips)))
 	defer cancel()
 	_, err = remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{Iface: iface, Ips: ips})
 	return err

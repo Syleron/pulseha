@@ -145,3 +145,33 @@ func TestSendGARPBatch(t *testing.T) {
 		t.Errorf("empty group: unexpected error %v", err)
 	}
 }
+
+// A caller putting a deadline on a bring-up has to budget for the announcement
+// that ends it, and cannot see garpFanout or garpTimeout to do so. Defect #57 is
+// what happens when it guesses: a flat 5s did not cover even one wave.
+func TestAnnounceBatchTimeoutCoversTheWavesItWouldRun(t *testing.T) {
+	// Nothing to announce costs nothing — the bring-up paths call this for
+	// batches that brought nothing up.
+	if got := AnnounceBatchTimeout(0); got != 0 {
+		t.Errorf("empty batch got %s, want 0", got)
+	}
+	if got := AnnounceBatchTimeout(-5); got != 0 {
+		t.Errorf("negative count got %s, want 0", got)
+	}
+
+	// Anything that fits in one wave costs one wave.
+	if got, want := AnnounceBatchTimeout(1), garpTimeout; got != want {
+		t.Errorf("1 address got %s, want %s", got, want)
+	}
+	if got, want := AnnounceBatchTimeout(garpFanout), garpTimeout; got != want {
+		t.Errorf("%d addresses got %s, want %s", garpFanout, got, want)
+	}
+	// One past the bound is a second wave — the tail must not be free, which is
+	// the rounding a caller would most plausibly get wrong.
+	if got, want := AnnounceBatchTimeout(garpFanout+1), 2*garpTimeout; got != want {
+		t.Errorf("%d addresses got %s, want %s", garpFanout+1, got, want)
+	}
+	if got, want := AnnounceBatchTimeout(garpFanout*3), 3*garpTimeout; got != want {
+		t.Errorf("%d addresses got %s, want %s", garpFanout*3, got, want)
+	}
+}
