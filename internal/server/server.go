@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3966,20 +3967,95 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 	}, nil
 }
 
-// DeleteGroup implements the CLI.DeleteGroup RPC method
+// DeleteGroup implements the CLI.DeleteGroup RPC method.
+//
+// A group that is assigned somewhere is deleted in two config writes rather than
+// one: its assignments are dropped and committed, the addresses are then released
+// on the nodes holding them, and only a release confirmed everywhere is followed
+// by the delete itself. See beginGroupDeletion for why the ordering is the fix
+// for docs/TEST-PLAN.md defect #59.
 func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, error) {
 	s.logger.Infof("Received DeleteGroup request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	done, targets, warnings := s.beginGroupDeletion(req)
+	if done != nil {
+		return done, nil
+	}
+
+	// The release runs outside s.Lock(): a fan-out to every node holding the
+	// group is exactly the work that stops a node answering its own health
+	// checks while it holds the lock, which is how a busy node gets elected
+	// around (defects #4/#7/#8).
+	if len(targets) > 0 {
+		releaseWarnings, unconfirmed := s.releaseDeletedGroupIPs(ctx, targets)
+		warnings = append(warnings, releaseWarnings...)
+
+		if len(unconfirmed) > 0 {
+			// Deleting over this is defect #59: the addresses stay up and the
+			// group that referenced them is gone, so no enforce pass can ever
+			// compute them as surplus again. Left configured-but-unassigned they
+			// are still recoverable — every node's release pass takes its share
+			// down when it can, and a retried delete finishes the job.
+			s.logger.Error("Not deleting group: its addresses could not be confirmed released",
+				"group", req.GroupName, "nodes", unconfirmed)
+			return &rpc.DeleteGroupResponse{
+				Success: false,
+				Message: fmt.Sprintf("group %s was unassigned but NOT deleted: could not confirm "+
+					"its floating IPs were released on %s. The addresses stay accounted for while "+
+					"the group is still configured; retry the delete once those nodes are reachable",
+					req.GroupName, strings.Join(unconfirmed, ", ")),
+				Warnings: warnings,
+			}, nil
+		}
+	}
+
+	if err := s.commitGroupDeletion(req.GroupName); err != nil {
+		s.logger.Error("Failed to save config", "error", err)
+		return &rpc.DeleteGroupResponse{
+			Success:  false,
+			Message:  fmt.Sprintf("failed to save config: %v", err),
+			Warnings: warnings,
+		}, nil
+	}
+
+	s.logger.Infof("Successfully deleted group %s", req.GroupName)
+	return &rpc.DeleteGroupResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("successfully deleted group %s", req.GroupName),
+		Warnings: warnings,
+	}, nil
+}
+
+// beginGroupDeletion runs the locked first half of a group deletion: it
+// validates the request and, for an assigned group deleted with --force, drops
+// every assignment and commits that as a write of its own, returning the release
+// each node still owes.
+//
+// Dropping the assignments separately is what makes the release that follows
+// possible at all. Removing them and the group in one write — the original
+// behaviour — left the addresses referenced by nothing the moment it landed:
+// surplusFloatingIPs scans only *configured* groups, deliberately, so a node
+// still holding its share had it fall outside every set any enforce pass could
+// compute, and it stayed up indefinitely (docs/TEST-PLAN.md defect #59).
+// Configured-but-unassigned is the one state whose release pass is verified live
+// (#58), so this ordering also means a node that misses the explicit release
+// still converges on its own instead of stranding.
+//
+// The release cannot run from here — it is a fan-out to every node holding the
+// group and this holds s.Lock() — so the plan is snapshotted for the caller.
+// A non-nil response is the final answer and the caller must return it.
+func (s *Server) beginGroupDeletion(req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, []groupReleaseTarget, []string) {
 	s.Lock()
 	defer s.Unlock()
 
 	if !s.config.ClusterCheck() {
-		return &rpc.DeleteGroupResponse{Success: false, Message: "no cluster configured"}, nil
+		return &rpc.DeleteGroupResponse{Success: false, Message: "no cluster configured"}, nil, nil
 	}
 
 	// Validate group exists (idempotent success if missing)
 	if _, exists := s.config.Groups[req.GroupName]; !exists {
 		s.logger.Infof("Group %s does not exist; treating delete as success", req.GroupName)
-		return &rpc.DeleteGroupResponse{Success: true, Message: fmt.Sprintf("group %s does not exist", req.GroupName)}, nil
+		return &rpc.DeleteGroupResponse{Success: true, Message: fmt.Sprintf("group %s does not exist", req.GroupName)}, nil, nil
 	}
 
 	// Check if group is assigned to any nodes (unless force is true)
@@ -3998,50 +4074,292 @@ func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (
 		return &rpc.DeleteGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("group %s is assigned to nodes: %s. Use --force to delete anyway", req.GroupName, assignedNodes),
-		}, nil
+		}, nil, nil
 	}
 
-	// If force is true and group is assigned, remove assignments and add warnings
+	// An unassigned group holds nothing anywhere, so there is nothing to release
+	// and no reason to spend a second config write on it.
+	if len(assignedNodes) == 0 {
+		return nil, nil, nil
+	}
+
+	// Plan the release before the assignments go, since it is the assignments
+	// that say which node holds what.
+	targets := s.planGroupRelease(req.GroupName)
+
 	var warnings []string
-	if len(assignedNodes) > 0 && req.Force {
-		for _, node := range s.config.Nodes {
-			for iface := range node.IPGroups {
-				groups := node.IPGroups[iface]
-				for i := len(groups) - 1; i >= 0; i-- {
-					if groups[i] == req.GroupName {
-						// Remove group from slice
-						node.IPGroups[iface] = append(groups[:i], groups[i+1:]...)
-						warnings = append(warnings, fmt.Sprintf("removed assignment from %s:%s", node.Hostname, iface))
-					}
+	for _, node := range s.config.Nodes {
+		for iface := range node.IPGroups {
+			groups := node.IPGroups[iface]
+			for i := len(groups) - 1; i >= 0; i-- {
+				if groups[i] == req.GroupName {
+					// Remove group from slice
+					node.IPGroups[iface] = append(groups[:i], groups[i+1:]...)
+					warnings = append(warnings, fmt.Sprintf("removed assignment from %s:%s", node.Hostname, iface))
 				}
-				// If interface has no more groups, remove the entry
-				if len(node.IPGroups[iface]) == 0 {
-					delete(node.IPGroups, iface)
-				}
+			}
+			// If interface has no more groups, remove the entry
+			if len(node.IPGroups[iface]) == 0 {
+				delete(node.IPGroups, iface)
 			}
 		}
 	}
 
-	// Delete the group
-	delete(s.config.Groups, req.GroupName)
-
-	// Save config
 	if err := s.config.Save(); err != nil {
 		s.logger.Error("Failed to save config", "error", err)
 		return &rpc.DeleteGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("failed to save config: %v", err),
-		}, nil
+		}, nil, nil
 	}
 	// Broadcast updated config to peers
 	s.markConfigDirty()
 
-	s.logger.Infof("Successfully deleted group %s", req.GroupName)
-	return &rpc.DeleteGroupResponse{
-		Success:  true,
-		Message:  fmt.Sprintf("successfully deleted group %s", req.GroupName),
-		Warnings: warnings,
-	}, nil
+	return nil, targets, warnings
+}
+
+// commitGroupDeletion removes the group from the config once its addresses are
+// accounted for, and is the second of the two writes an assigned deletion makes.
+func (s *Server) commitGroupDeletion(groupName string) error {
+	s.Lock()
+	defer s.Unlock()
+
+	delete(s.config.Groups, groupName)
+	if err := s.config.Save(); err != nil {
+		return err
+	}
+	// Broadcast updated config to peers
+	s.markConfigDirty()
+	return nil
+}
+
+// groupReleaseTarget is one node's share of a group being deleted, snapshotted
+// under s.Lock() because the release that consumes it runs without the lock and
+// must not walk s.config.Nodes.
+type groupReleaseTarget struct {
+	nodeID   string
+	hostname string
+	ip       string
+	port     string
+	iface    string
+	ips      []string
+	local    bool
+}
+
+// planGroupRelease returns, per node and interface holding the group, the
+// addresses that have to come down before the group can leave the config.
+//
+// expectedIfaceIPs answers "which of these addresses are mine" for a node, so in
+// active-active each node is sent only its assigned share: asking a node to bring
+// down a group it holds none of is defect #34's noise, 201 error lines for a
+// no-op. In active-passive it yields the whole group, which is correct there —
+// the Active holds all of it and a node that just changed role may still hold any
+// of it.
+//
+// An address another still-configured group provides on the same interface is
+// excluded. Nothing in the CLI can create that overlap (AddIPToGroup rejects an
+// address already held by another group), but config.json is written by the
+// appliance too (defect #3), and tearing down an address a live group still
+// serves would be an outage.
+//
+// The caller must hold s.Lock() or s.RLock().
+func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
+	groupIPs := s.config.Groups[groupName]
+	if len(groupIPs) == 0 {
+		return nil
+	}
+
+	var targets []groupReleaseTarget
+	for nodeID, node := range s.config.Nodes {
+		if node == nil {
+			continue
+		}
+		for iface, groups := range node.IPGroups {
+			if !slices.Contains(groups, groupName) {
+				continue
+			}
+
+			mine := make(map[string]bool)
+			for _, ip := range s.expectedIfaceIPs(nodeID, iface) {
+				mine[ip] = true
+			}
+			retained := make(map[string]bool)
+			for _, g := range groups {
+				if g == groupName {
+					continue
+				}
+				for _, ip := range s.config.Groups[g] {
+					retained[ip] = true
+				}
+			}
+
+			var ips []string
+			for _, ip := range groupIPs {
+				if mine[ip] && !retained[ip] {
+					ips = append(ips, ip)
+				}
+			}
+			if len(ips) == 0 {
+				continue
+			}
+
+			targets = append(targets, groupReleaseTarget{
+				nodeID:   nodeID,
+				hostname: node.Hostname,
+				ip:       node.IP,
+				port:     node.Port,
+				iface:    iface,
+				ips:      ips,
+				local:    nodeID == s.config.Pulse.LocalNode,
+			})
+		}
+	}
+
+	// Map iteration order is random; a deterministic plan keeps the logs and the
+	// tests readable.
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].nodeID != targets[j].nodeID {
+			return targets[i].nodeID < targets[j].nodeID
+		}
+		return targets[i].iface < targets[j].iface
+	})
+	return targets
+}
+
+// releaseDeletedGroupIPs brings a deleted group's addresses down on every node
+// holding them, concurrently and outside s.Lock(). It returns a warning per node
+// that reported trouble, and the hostnames whose release could not be confirmed
+// at all — the delete must not proceed over one of those.
+func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupReleaseTarget) (warnings []string, unconfirmed []string) {
+	// Sized to the work, not fixed. A flat deadline on a batched bring-down is
+	// defect #57 on the release side: it reports as failed a release that in fact
+	// succeeded, and a false failure here costs the operator the delete. The
+	// nodes run concurrently, so the largest single batch is what has to fit, and
+	// the caller's deadline still caps the whole thing.
+	largest := 0
+	for _, target := range targets {
+		if len(target.ips) > largest {
+			largest = len(target.ips)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, membership.DemotionTimeoutFor(largest))
+	defer cancel()
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	for _, target := range targets {
+		wg.Add(1)
+		go func(target groupReleaseTarget) {
+			defer wg.Done()
+
+			warning, confirmed := s.releaseGroupIPsOnTarget(ctx, target)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+			if !confirmed {
+				unconfirmed = append(unconfirmed, target.hostname)
+			}
+		}(target)
+	}
+	wg.Wait()
+
+	sort.Strings(warnings)
+	sort.Strings(unconfirmed)
+	return warnings, unconfirmed
+}
+
+// releaseGroupIPsOnTarget brings one node's share of a deleted group down and
+// reports whether the release can be treated as done.
+func (s *Server) releaseGroupIPsOnTarget(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
+	s.logger.Info("Releasing floating IPs of a group being deleted",
+		"node", target.hostname, "iface", target.iface, "count", len(target.ips))
+
+	if target.local {
+		return s.releaseGroupIPsLocally(ctx, target)
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		return fmt.Sprintf("failed to create client for node %s: %v", target.hostname, err), false
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+		return fmt.Sprintf("failed to connect to node %s to release its floating IPs: %v", target.hostname, err), false
+	}
+
+	resp, err := remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{
+		Iface: target.iface,
+		Ips:   target.ips,
+	})
+	switch {
+	case err != nil:
+		return fmt.Sprintf("failed to release %d floating IP(s) on node %s: %v", len(target.ips), target.hostname, err), false
+	case !resp.Success:
+		return fmt.Sprintf("node %s refused to release %d floating IP(s): %s", target.hostname, len(target.ips), resp.Message), false
+	}
+
+	// A peer's per-address netlink failures are not visible here, and cannot be:
+	// no RPC exposes a peer's interface state (the same wall defect #54 hit). They
+	// are also the benign case — a failed bring-down is overwhelmingly "cannot
+	// assign requested address", i.e. the address was already gone (#34). What
+	// must not be waved through is the transport failing, which is what the two
+	// cases above cover.
+	return "", true
+}
+
+// releaseGroupIPsLocally brings the local node's share down through the same
+// handler a peer would run, so the IP monitor's expectations and the member's
+// assignment list stay honest (defect #58), and then checks the kernel rather
+// than trusting the return — the lesson of #21.
+func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
+	// An address cannot be up on an interface the node does not have, so there is
+	// nothing to release and nothing to strand.
+	if exists, _ := network.InterfaceExist(target.iface); !exists {
+		return fmt.Sprintf("interface %s does not exist on local node; nothing to release there", target.iface), true
+	}
+
+	if _, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips}); err != nil {
+		return fmt.Sprintf("failed to release %d floating IP(s) locally: %v", len(target.ips), err), false
+	}
+
+	// Keep the local assignment list honest whatever the mode: BringDownIP only
+	// maintains it in active-active, and a deleted group's addresses left on the
+	// list are reported as held forever, since nothing can recompute them
+	// downward once the group is gone (defect #58).
+	if member := s.memberList.GetMemberByID(target.nodeID); member != nil {
+		member.RemoveActiveIPs(target.ips)
+	}
+
+	inventory, err := network.BuildIPInventory()
+	if err != nil {
+		// A host whose addresses cannot be read is a problem of its own, but
+		// refusing the delete over it would leave no way to finish one. Say so
+		// and take the release at its word.
+		return fmt.Sprintf("released %d floating IP(s) locally but could not read interface state to confirm: %v",
+			len(target.ips), err), true
+	}
+
+	var stillHeld []string
+	for _, ip := range target.ips {
+		addr, cerr := utils.GetCIDR(ip)
+		if cerr != nil || addr == nil {
+			continue
+		}
+		if held, _, eerr := inventory.Exists(addr.String()); eerr == nil && held {
+			stillHeld = append(stillHeld, ip)
+		}
+	}
+	if len(stillHeld) > 0 {
+		return fmt.Sprintf("%d floating IP(s) are still up locally after the release: %s",
+			len(stillHeld), strings.Join(stillHeld, ", ")), false
+	}
+	return "", true
 }
 
 // ListGroups implements the CLI.ListGroups RPC method
