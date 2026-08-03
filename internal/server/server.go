@@ -135,6 +135,11 @@ type Server struct {
 	memberList    *membership.MemberList
 	healthCheck   *membership.HealthChecker
 	ipMonitor     *membership.IPMonitor
+
+	// peerBringUp coalesces per-address peer bring-ups (defect #37); see
+	// peerBringUpQueue for why it is built lazily.
+	peerBringUpMu sync.Mutex
+	peerBringUp   *peerBringUpBatcher
 	quorumManager *quorum.QuorumManager
 	quorumHandler *quorum.RPCHandler
 	grpcServer    *grpc.Server
@@ -3550,8 +3555,14 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	// of defect #39 (see the commit-first comment above) and the whole of #37's
 	// ~13s per add: the calls are independent, so they run concurrently and on a
 	// context of their own — the caller's is cancelled the moment we return.
+	// Queued rather than sent: a burst of adds becomes one request per peer per
+	// window instead of one per address, which is #37's remainder. See
+	// peerBringUpBatcher.
 	if len(peerTargets) > 0 {
-		go s.bringUpGroupIPOnPeers(peerTargets, ipToUse)
+		batcher := s.peerBringUpQueue()
+		for _, target := range peerTargets {
+			batcher.Add(target, ipToUse)
+		}
 	}
 
 	s.logger.Infof("Successfully added IP %s to group %s", ipToUse, req.GroupName)
@@ -3560,6 +3571,27 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		Message:  fmt.Sprintf("successfully added IP %s to group %s", ipToUse, req.GroupName),
 		Warnings: warnings,
 	}, nil
+}
+
+// peerBringUpQueue returns the batcher, creating it on first use.
+//
+// Lazily, and on its own mutex rather than s.Lock(): the only caller holds
+// s.Lock() already, and every Server in the tests is built as a literal rather
+// than through NewServer, so a field that has to be initialised at construction
+// would be nil in exactly the paths that exercise this.
+func (s *Server) peerBringUpQueue() *peerBringUpBatcher {
+	s.peerBringUpMu.Lock()
+	defer s.peerBringUpMu.Unlock()
+	if s.peerBringUp == nil {
+		s.peerBringUp = newPeerBringUpBatcher(peerBringUpWindow, s.sendPeerBringUpBatch)
+	}
+	return s.peerBringUp
+}
+
+// sendPeerBringUpBatch is the batcher's send hook, kept separate so the batching
+// and the RPC fan-out can be tested apart from each other.
+func (s *Server) sendPeerBringUpBatch(target peerBringUpTarget, ips []string) {
+	s.bringUpGroupIPOnPeers([]peerBringUpTarget{target}, ips)
 }
 
 // peerBringUpTarget is one peer bring-up for a newly configured group address,
@@ -3580,10 +3612,15 @@ type peerBringUpTarget struct {
 // only shortens the wait for the ENFORCE pass. Failures are therefore logged
 // rather than returned, and a single unreachable peer no longer decides the
 // latency of an add (docs/TEST-PLAN.md defects #37 and #39).
-func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ip string) {
-	// Generous enough for the callee's inline per-IP GARP on a slow peer, but
-	// bounded so a wedged node cannot leak this goroutine indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string) {
+	if len(ips) == 0 {
+		return
+	}
+
+	// Sized to the batch, not flat: the callee announces the whole set and a
+	// deadline that fits one address reports a batch that succeeded as a failure
+	// (defect #57, the same mistake on the bring-up side).
+	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
 	defer cancel()
 
 	var wg sync.WaitGroup
@@ -3592,34 +3629,34 @@ func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ip string) {
 		go func(target peerBringUpTarget) {
 			defer wg.Done()
 
-			s.logger.Infof("Sending request to bring up IP %s on node %s", ip, target.hostname)
+			s.logger.Infof("Sending request to bring up %d IP(s) on node %s", len(ips), target.hostname)
 			remoteClient, err := client.New()
 			if err != nil {
-				s.logger.Warn("Failed to create client to bring up a new group IP",
-					"ip", ip, "node", target.hostname, "error", err)
+				s.logger.Warn("Failed to create client to bring up new group IPs",
+					"count", len(ips), "node", target.hostname, "error", err)
 				return
 			}
 			defer remoteClient.Close()
 
 			if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
-				s.logger.Warn("Failed to connect to peer to bring up a new group IP",
-					"ip", ip, "node", target.hostname, "error", err)
+				s.logger.Warn("Failed to connect to peer to bring up new group IPs",
+					"count", len(ips), "node", target.hostname, "error", err)
 				return
 			}
 
 			resp, err := remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{
 				Iface: target.iface,
-				Ips:   []string{ip},
+				Ips:   ips,
 			})
 			switch {
 			case err != nil:
-				s.logger.Warn("Failed to bring up a new group IP on peer; its IP monitor will converge",
-					"ip", ip, "node", target.hostname, "error", err)
+				s.logger.Warn("Failed to bring up new group IPs on peer; its IP monitor will converge",
+					"count", len(ips), "ips", ips, "node", target.hostname, "error", err)
 			case !resp.Success:
-				s.logger.Warn("Peer refused to bring up a new group IP; its IP monitor will converge",
-					"ip", ip, "node", target.hostname, "message", resp.Message)
+				s.logger.Warn("Peer refused to bring up new group IPs; its IP monitor will converge",
+					"count", len(ips), "ips", ips, "node", target.hostname, "message", resp.Message)
 			default:
-				s.logger.Infof("Successfully brought up IP %s on node %s", ip, target.hostname)
+				s.logger.Infof("Successfully brought up %d IP(s) on node %s", len(ips), target.hostname)
 			}
 		}(target)
 	}
