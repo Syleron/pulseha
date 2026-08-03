@@ -6075,8 +6075,17 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		if len(upIPs) == 0 {
 			return
 		}
-		if err := network.SendGARPBatch(req.Iface, upIPs); err != nil {
+		skipped, err := network.SendGARPBatch(req.Iface, upIPs)
+		if err != nil {
 			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
+		}
+		if len(skipped) > 0 {
+			// Reported here rather than in packages/network, whose package-level
+			// logger nothing ever calls SetLevel on — a Debug line there cannot
+			// reach the journal at any logging_level, so the skip would be
+			// unverifiable live (#61's lesson, #33's positive control).
+			s.logger.Debug("BringUpIP: skipped announcing addresses this node no longer holds",
+				"iface", req.Iface, "count", len(skipped), "of", len(upIPs))
 		}
 	}
 

@@ -310,8 +310,15 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 		if len(upIPs) == 0 {
 			return
 		}
-		if err := network.SendGARPBatch(iface, upIPs); err != nil {
+		skipped, err := network.SendGARPBatch(iface, upIPs)
+		if err != nil {
 			m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
+		}
+		if len(skipped) > 0 {
+			// On the daemon's logger, not the network package's: see the same
+			// report in Server.BringUpIP (#33/#61).
+			m.logger.Debug("Skipped announcing addresses this node no longer holds",
+				"iface", iface, "count", len(skipped), "of", len(upIPs))
 		}
 	}
 

@@ -227,24 +227,60 @@ const garpTimeout = 10 * time.Second
 // Announcement is advisory: the addresses are already up and serving before this
 // runs, and a switch relearns them on the next ARP exchange regardless. So a
 // failure is reported for logging but never means the address is not up.
-func SendGARPBatch(iface string, ips []string) error {
+//
+// The set is announced as it stood when the caller built it, and it takes waves
+// of seconds to work through, so an address can be released before its turn comes
+// — the caller's list is intent, not inventory. Addresses that have gone are
+// skipped and returned, not announced and not reported failed: see
+// addressAbsentFrom (docs/TEST-PLAN.md defect #33).
+func SendGARPBatch(iface string, ips []string) (skipped []string, err error) {
 	if len(ips) == 0 {
-		return nil
+		return nil, nil
 	}
 	if exists, _ := InterfaceExist(iface); !exists {
 		log.Error("Unable to GARP as the network interface does not exist", "iface", iface)
-		return errors.New("network interface does not exist")
+		return nil, errors.New("network interface does not exist")
 	}
-	return sendGARPBatch(iface, ips, SendGARP)
+	return sendGARPBatch(iface, ips, SendGARP, addressAbsentFrom)
 }
 
 // announceFunc announces a single address on an interface.
 type announceFunc func(iface, ip string) error
 
-// sendGARPBatch is the fan-out half of SendGARPBatch, with the announcement
-// injected. The real one execs arping, so this is where the concurrency bound and
-// the failure reporting can be tested without a network or a Linux host.
-func sendGARPBatch(iface string, ips []string, announce announceFunc) error {
+// absentFunc reports that iface definitely no longer holds ip.
+type absentFunc func(iface, ip string) bool
+
+// addressAbsentFrom answers whether iface has stopped holding ip — a definite
+// negative only. Callers pass CIDR form, which CheckIfIPExists accepts as it
+// stands.
+//
+// An address whose state cannot be read answers false, so a netlink hiccup makes
+// it be announced rather than silently dropped. Suppressing an announcement for
+// an address that is in fact up is the one way this fix could do harm: nothing
+// re-announces on its own, so neighbours would keep pointing at the previous
+// owner until their ARP entries age out. Announcing one address too many costs a
+// log line; announcing one too few costs traffic.
+func addressAbsentFrom(iface, ip string) bool {
+	exists, on, err := CheckIfIPExists(ip)
+	if err != nil {
+		return false
+	}
+	return !exists || on != iface
+}
+
+// sendGARPBatch is the fan-out half of SendGARPBatch, with the announcement and
+// the liveness check injected. The real ones exec arping and read netlink, so
+// this is where the concurrency bound, the skipping and the failure reporting can
+// be tested without a network or a Linux host.
+//
+// The check runs inside the goroutine, immediately before the announcement it
+// guards, rather than filtering the set up front. A pre-filter would be read once
+// and then acted on for as long as the batch takes — at 32 at a time and ~4s an
+// arping, the last wave of a 200-address group announces roughly half a minute
+// after such a filter ran, which is most of the window the defect lives in. The
+// window cannot be closed, only narrowed to the syscall, the same reasoning
+// AddrAddSatisfied records for #45.
+func sendGARPBatch(iface string, ips []string, announce announceFunc, absent absentFunc) (skipped []string, err error) {
 	sem := make(chan struct{}, garpFanout)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -257,6 +293,16 @@ func sendGARPBatch(iface string, ips []string, announce announceFunc) error {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			if absent != nil && absent(iface, ip) {
+				// Released between the caller listing it and its turn here. Not a
+				// failure: arping -U exits 2 on an address the interface does not
+				// have, which is 173 error lines for correct behaviour (#33).
+				mu.Lock()
+				skipped = append(skipped, ip)
+				mu.Unlock()
+				return
+			}
+
 			if err := announce(iface, ip); err != nil {
 				mu.Lock()
 				failed = append(failed, ip)
@@ -267,10 +313,10 @@ func sendGARPBatch(iface string, ips []string, announce announceFunc) error {
 	wg.Wait()
 
 	if len(failed) > 0 {
-		return fmt.Errorf("failed to announce %d of %d address(es) on %s (e.g. %s)",
+		return skipped, fmt.Errorf("failed to announce %d of %d address(es) on %s (e.g. %s)",
 			len(failed), len(ips), iface, strings.Join(failed[:min(3, len(failed))], ", "))
 	}
-	return nil
+	return skipped, nil
 }
 
 // AnnounceBatchTimeout is the longest SendGARPBatch can take for ipCount
