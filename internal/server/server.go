@@ -4142,8 +4142,16 @@ type groupReleaseTarget struct {
 	ip       string
 	port     string
 	iface    string
-	ips      []string
-	local    bool
+	// ips is the share this node is recorded as holding, which is what gets
+	// released.
+	ips []string
+	// candidates is every address of the group that could be up on this
+	// interface. It is wider than ips on purpose: the record of who holds what
+	// was append-only until defect #58, so the local node — the one node whose
+	// interfaces can actually be read — verifies against this rather than trusting
+	// the record it is about to delete.
+	candidates []string
+	local      bool
 }
 
 // planGroupRelease returns, per node and interface holding the group, the
@@ -4193,24 +4201,32 @@ func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
 				}
 			}
 
-			var ips []string
+			var ips, candidates []string
 			for _, ip := range groupIPs {
-				if mine[ip] && !retained[ip] {
+				if retained[ip] {
+					continue
+				}
+				candidates = append(candidates, ip)
+				if mine[ip] {
 					ips = append(ips, ip)
 				}
 			}
-			if len(ips) == 0 {
+			// A node recorded as holding nothing is still visited when it is the
+			// local one, because there the record can be checked against the
+			// kernel instead of believed.
+			if len(ips) == 0 && !(nodeID == s.config.Pulse.LocalNode && len(candidates) > 0) {
 				continue
 			}
 
 			targets = append(targets, groupReleaseTarget{
-				nodeID:   nodeID,
-				hostname: node.Hostname,
-				ip:       node.IP,
-				port:     node.Port,
-				iface:    iface,
-				ips:      ips,
-				local:    nodeID == s.config.Pulse.LocalNode,
+				nodeID:     nodeID,
+				hostname:   node.Hostname,
+				ip:         node.IP,
+				port:       node.Port,
+				iface:      iface,
+				ips:        ips,
+				candidates: candidates,
+				local:      nodeID == s.config.Pulse.LocalNode,
 			})
 		}
 	}
@@ -4324,8 +4340,10 @@ func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupRelease
 		return fmt.Sprintf("interface %s does not exist on local node; nothing to release there", target.iface), true
 	}
 
-	if _, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips}); err != nil {
-		return fmt.Sprintf("failed to release %d floating IP(s) locally: %v", len(target.ips), err), false
+	if len(target.ips) > 0 {
+		if _, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips}); err != nil {
+			return fmt.Sprintf("failed to release %d floating IP(s) locally: %v", len(target.ips), err), false
+		}
 	}
 
 	// Keep the local assignment list honest whatever the mode: BringDownIP only
@@ -4345,8 +4363,13 @@ func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupRelease
 			len(target.ips), err), true
 	}
 
+	// Checked over every address the group could have here, not only the ones the
+	// record said to release. That record was append-only until defect #58 and is
+	// about to be deleted along with the group, so the kernel is the authority for
+	// the one node where it can be read — and an address it reports up is exactly
+	// the strand this whole ordering exists to prevent.
 	var stillHeld []string
-	for _, ip := range target.ips {
+	for _, ip := range target.candidates {
 		addr, cerr := utils.GetCIDR(ip)
 		if cerr != nil || addr == nil {
 			continue
@@ -4356,8 +4379,8 @@ func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupRelease
 		}
 	}
 	if len(stillHeld) > 0 {
-		return fmt.Sprintf("%d floating IP(s) are still up locally after the release: %s",
-			len(stillHeld), strings.Join(stillHeld, ", ")), false
+		return fmt.Sprintf("%d floating IP(s) of this group are still up locally on %s: %s",
+			len(stillHeld), target.iface, strings.Join(stillHeld, ", ")), false
 	}
 	return "", true
 }

@@ -368,6 +368,43 @@ func TestForceDeleteSpareAnAddressAnotherGroupStillProvides(t *testing.T) {
 	}
 }
 
+// The release plan is built from the record of who holds what, and that record
+// was append-only until defect #58 — so on the one node whose interfaces can
+// actually be read, the plan must not be the last word. The local node is
+// therefore planned even when it is recorded as holding none of the group, so
+// releaseGroupIPsLocally gets to check the kernel; a peer, whose state cannot be
+// read at all, is not visited for nothing.
+func TestPlanGroupReleaseAlwaysVisitsTheLocalNode(t *testing.T) {
+	s := newGroupDeleteTestServer(t, "127.0.0.1:49152")
+
+	// Nobody is recorded as holding anything.
+	for _, id := range []string{"local-node", "peer-0"} {
+		m := s.memberList.GetMemberByID(id)
+		m.Lock()
+		m.ActiveIPs = nil
+		m.Unlock()
+	}
+
+	s.RLock()
+	targets := s.planGroupRelease("group1")
+	s.RUnlock()
+
+	if len(targets) != 1 {
+		t.Fatalf("planned %d targets, want only the local node: %+v", len(targets), targets)
+	}
+	local := targets[0]
+	if !local.local || local.nodeID != "local-node" {
+		t.Fatalf("planned %+v, want the local node", local)
+	}
+	if len(local.ips) != 0 {
+		t.Errorf("ips = %v, want none: nothing is recorded as held", local.ips)
+	}
+	if len(local.candidates) != len(s.config.Groups["group1"]) {
+		t.Errorf("candidates = %v, want every address of the group so the kernel "+
+			"check can catch one the record missed", local.candidates)
+	}
+}
+
 // The refusal without --force is unchanged: nothing is released and nothing is
 // deleted, so the flag stays the only way to delete an assigned group.
 func TestDeleteWithoutForceStillRefusesAnAssignedGroup(t *testing.T) {
