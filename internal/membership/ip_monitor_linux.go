@@ -133,6 +133,14 @@ func (m *IPMonitor) monitorLoop() {
 					ipOnly = strings.Split(exp, "/")[0]
 				}
 				if ipOnly == changedIP {
+					// A release this node was told to perform is not an address
+					// that has gone missing, even while the expectation set still
+					// derives it from a config that has not caught up
+					// (docs/TEST-PLAN.md defect #60).
+					if m.restoreSuppressed(iface, exp) {
+						m.logger.Info("IP monitor: expected IP was released on request; not restoring", "ip", exp, "iface", iface)
+						break
+					}
 					m.logger.Warn("IP monitor: expected IP removed from Active node; restoring", "ip", exp, "iface", iface, "status", currentMember.Status)
 					m.restoreIP(iface, exp)
 					break
@@ -348,6 +356,16 @@ func (m *IPMonitor) enforceExpectations() {
 				missing = append(missing, ip)
 				m.logger.Debug("ENFORCE: IP is missing and needs to be brought up", "ip", ip, "exists", exists, "foundIface", eIface)
 			}
+		}
+		// An address this node was told to release is missing on purpose. The
+		// expectation it is missing against is derived from the config, which on
+		// the node that has just released is the thing still lagging, so without
+		// this the pass hands the address straight back (docs/TEST-PLAN.md
+		// defect #60).
+		missing, released := m.restorableIPs(iface, missing)
+		if len(released) > 0 {
+			m.logger.Info("ENFORCE: not restoring floating IPs this node was told to release",
+				"iface", iface, "count", len(released), "ips", released)
 		}
 		if len(missing) > 0 {
 			m.logger.Info("ENFORCE: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", StatusToString(member.Status))

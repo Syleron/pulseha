@@ -5,7 +5,9 @@ import (
 	"net"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/config"
@@ -13,15 +15,35 @@ import (
 	"github.com/syleron/pulseha/packages/utils"
 )
 
+// releaseGraceWindow is how long an address this node was told to release stays
+// protected from the node's own restore paths.
+//
+// It has to outlast the config write that says the address stopped being this
+// node's share arriving here. On whitecrane a peer restored its share anywhere
+// between sub-second and 22 seconds after the release (docs/TEST-PLAN.md defect
+// #60), and the enforce loop's own period is 30s, so a minute clears both. It is
+// only a backstop: an expectation set recomputed from a config that no longer
+// gives this node the address restores nothing, and an explicit re-assignment
+// clears the protection immediately.
+const releaseGraceWindow = 60 * time.Second
+
 // IPMonitor monitors IP addresses on interfaces and ensures they match the expected configuration
 type IPMonitor struct {
 	sync.RWMutex
 	members     *MemberList
 	logger      *log.Logger
 	expectedIPs map[string][]string // map[interface][]ips
-	stopChan    chan struct{}
-	stopOnce    sync.Once
-	done        chan struct{}
+	// releasedIPs records, per interface, the addresses this node has been told
+	// to give up and the moment each record stops applying. Keyed on the address
+	// without its mask, since a release and an expectation are not guaranteed to
+	// spell the same address the same way.
+	releasedIPs map[string]map[string]time.Time
+	// now is time.Now, indirected so the grace window can be tested without
+	// waiting a minute.
+	now      func() time.Time
+	stopChan chan struct{}
+	stopOnce sync.Once
+	done     chan struct{}
 }
 
 // NewIPMonitor creates a new IP monitor
@@ -30,6 +52,8 @@ func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 		members:     members,
 		logger:      logger,
 		expectedIPs: make(map[string][]string),
+		releasedIPs: make(map[string]map[string]time.Time),
+		now:         time.Now,
 		stopChan:    make(chan struct{}),
 		done:        make(chan struct{}),
 	}
@@ -98,6 +122,11 @@ func (m *IPMonitor) UpdateExpectedIPs(iface string, ips []string) {
 	slices.Sort(ipsCopy)
 
 	m.expectedIPs[iface] = ipsCopy
+	// Deliberately does not clear the release protection: one of this setter's
+	// callers derives the set from the config, which is what lags on a node that
+	// has just released, so clearing here would re-arm the defect (see
+	// markReleasedLocked). Its other caller brings the addresses up itself, and an
+	// address that is up is one no restore path is looking at.
 	m.logger.Info("Updated expected IPs", "iface", iface, "ips", ips)
 	m.TriggerEnforce()
 }
@@ -106,6 +135,12 @@ func (m *IPMonitor) UpdateExpectedIPs(iface string, ips []string) {
 //
 // Deliberately does not TriggerEnforce: the caller is the enforce loop itself,
 // which is about to act on this set, and re-arming from inside it would spin.
+//
+// Deliberately does not clear the release protection either, unlike the two
+// setters above. Its caller derives this set from the config, and on a node that
+// has just been told to release an address the config is precisely what has not
+// caught up yet — clearing here would re-arm the race the protection exists to
+// stop (docs/TEST-PLAN.md defect #60).
 func (m *IPMonitor) UpdateExpectedIPsAll(expected map[string][]string) {
 	if m == nil {
 		return
@@ -135,11 +170,26 @@ func (m *IPMonitor) AddExpectedIPs(iface string, ips []string) {
 	slices.Sort(m.expectedIPs[iface])
 	m.expectedIPs[iface] = slices.Compact(m.expectedIPs[iface])
 
+	// An address given back to this node is no longer an address it was told to
+	// release, and must be served now rather than when the grace window runs out.
+	// This is the one setter whose callers are unambiguously that statement:
+	// BringUpIP calls it per address immediately before putting the address on the
+	// interface. The config-derived setters must not clear (see
+	// UpdateExpectedIPs/UpdateExpectedIPsAll).
+	m.clearReleasedLocked(iface, ips)
+
 	m.logger.Info("Added IPs to interface", "iface", iface, "ips", ips)
 	m.TriggerEnforce()
 }
 
-// RemoveExpectedIPs removes IPs from the expected list for an interface
+// RemoveExpectedIPs removes IPs from the expected list for an interface.
+//
+// Every caller is a deliberate release — a bring-down RPC, a group edit, a
+// rebalance move — so the addresses are also marked as released, which stops
+// this node putting them straight back. Dropping the expectation is not enough
+// on its own: both restore paths re-derive their expectations from the config,
+// and the node being told to release is by construction a node whose config has
+// not yet been told the address stopped being its share (see markReleasedLocked).
 func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
 	if m == nil {
 		return
@@ -163,8 +213,126 @@ func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
 	}
 
 	m.expectedIPs[iface] = updated
+	m.markReleasedLocked(iface, ips)
 	m.logger.Info("Removed IPs from interface", "iface", iface, "remaining", updated)
 	m.TriggerEnforce()
+}
+
+// markReleasedLocked records that this node has been told to give up these
+// addresses on iface, so its own restore paths leave them alone until either the
+// config agrees or the grace window runs out.
+//
+// Removing the expectation cannot carry this by itself. Both paths that put an
+// address back — the netlink watcher's restore and the enforce pass's bring-up —
+// work from an expectation set that is recomputed from the config: in
+// active-active from the node's own assignment list, in active-passive from the
+// whole group configured on the interface. The node commanded to release is the
+// node whose config has not yet been told the address is no longer its share, so
+// it removes the expectation, re-derives the same expectation moments later, sees
+// the address missing and restores it — undoing the release it was just asked to
+// perform, and reporting success for it (docs/TEST-PLAN.md defect #60).
+//
+// The caller must hold m.Lock().
+func (m *IPMonitor) markReleasedLocked(iface string, ips []string) {
+	if len(ips) == 0 {
+		return
+	}
+	if m.releasedIPs == nil {
+		m.releasedIPs = make(map[string]map[string]time.Time)
+	}
+
+	now := m.timeNow()
+	released, ok := m.releasedIPs[iface]
+	if !ok {
+		released = make(map[string]time.Time, len(ips))
+		m.releasedIPs[iface] = released
+	}
+	// Expired records are dropped here rather than on a timer of their own: this
+	// is the only path that grows the map.
+	for ip, expiry := range released {
+		if !expiry.After(now) {
+			delete(released, ip)
+		}
+	}
+
+	expiry := now.Add(releaseGraceWindow)
+	for _, ip := range ips {
+		released[ipWithoutMask(ip)] = expiry
+	}
+}
+
+// clearReleasedLocked drops the release protection for the given addresses on
+// iface. The caller must hold m.Lock().
+func (m *IPMonitor) clearReleasedLocked(iface string, ips []string) {
+	released, ok := m.releasedIPs[iface]
+	if !ok {
+		return
+	}
+	for _, ip := range ips {
+		delete(released, ipWithoutMask(ip))
+	}
+	if len(released) == 0 {
+		delete(m.releasedIPs, iface)
+	}
+}
+
+// restoreSuppressed reports whether ip must be left down on iface because this
+// node was recently told to release it.
+func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
+	if m == nil {
+		return false
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	released, ok := m.releasedIPs[iface]
+	if !ok {
+		return false
+	}
+	key := ipWithoutMask(ip)
+	expiry, ok := released[key]
+	if !ok {
+		return false
+	}
+	if !expiry.After(m.timeNow()) {
+		delete(released, key)
+		if len(released) == 0 {
+			delete(m.releasedIPs, iface)
+		}
+		return false
+	}
+	return true
+}
+
+// restorableIPs splits addresses missing from iface into the ones this node
+// should put back and the ones it was told to release. Both restore paths go
+// through here, so the policy is one decision rather than two.
+func (m *IPMonitor) restorableIPs(iface string, missing []string) (restore, released []string) {
+	for _, ip := range missing {
+		if m.restoreSuppressed(iface, ip) {
+			released = append(released, ip)
+			continue
+		}
+		restore = append(restore, ip)
+	}
+	return restore, released
+}
+
+// timeNow is m.now, defaulting to time.Now for an IPMonitor built without one.
+func (m *IPMonitor) timeNow() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
+}
+
+// ipWithoutMask returns an address with any prefix length stripped, so
+// "10.0.0.1/24" and "10.0.0.1" are the same key.
+func ipWithoutMask(ip string) string {
+	if i := strings.Index(ip, "/"); i >= 0 {
+		return ip[:i]
+	}
+	return ip
 }
 
 // ClearExpectedIPs removes all expected IPs for an interface
