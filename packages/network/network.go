@@ -396,24 +396,87 @@ func BringIPup(iface, ip string) error {
 	return nil
 }
 
+// AddrDelSatisfied reports whether a failed address delete left the interface in
+// the state the caller wanted, so the failure is a no-op rather than a fault.
+//
+// docs/TEST-PLAN.md defect #61, the same shape as #45 on the release path.
+// Deleting an address that is not there fails with EADDRNOTAVAIL — `cannot
+// assign requested address` — and every caller of BringIPdown reported that as a
+// failure. Two release paths run concurrently on a node whose group is being
+// deleted: the enforce loop's surplus pass, which #41 taught to classify this,
+// and the BringDownIP RPC, which had no classification at all. The RPC loses the
+// race routinely and logged one error per address for work the other path had
+// just completed.
+//
+// The inversion against AddrAddSatisfied is the point: for a delete the wanted
+// state is the address being *absent*, so heldByTarget answering false is
+// success. Like #41's post-failure re-check it must be a live check, because its
+// purpose is to be newer than whatever decided to make the call; the window
+// between a pre-check and the syscall cannot be closed, only classified.
+//
+// An address still up after a failed delete is still a failure. That is the line
+// worth reading, and the noise was what would have hidden it.
+func AddrDelSatisfied(delErr error, heldByTarget func() bool) bool {
+	if delErr == nil {
+		return true
+	}
+	// errors.Is rather than a bare comparison, for the reason given on
+	// AddrAddSatisfied: netlink may wrap the errno with the kernel's extended-ack
+	// message. unix.EADDRNOTAVAIL is itself a syscall.Errno, so this matches an
+	// errno raised as either type.
+	if errors.Is(delErr, unix.EADDRNOTAVAIL) {
+		return true
+	}
+	return heldByTarget != nil && !heldByTarget()
+}
+
 /*
 *
 This function is to bring down a network interface
 */
 func BringIPdown(iface, ip string) error {
+	_, err := BringIPdownClassified(iface, ip)
+	return err
+}
+
+// BringIPdownClassified brings an address down and reports whether it was
+// already gone, so a caller with a logger the operator can actually turn up can
+// say which of the two happened.
+//
+// The distinction exists only for observability, and it has to be surfaced here
+// because this package logs through charmbracelet's package-level logger, whose
+// level nothing sets — it stays at Info for the life of the process, so a Debug
+// line from this file never reaches the journal at any `logging_level`. Run 29
+// hit that directly: the #61 fix silenced the false error, and there was no way
+// to show from the logs that the classification had fired rather than the race
+// simply not happening. An all-zeros pass with no positive control is not a pass.
+func BringIPdownClassified(iface, ip string) (alreadyGone bool, err error) {
 	exists, link := InterfaceExist(iface)
 	if !exists {
-		return errors.New("unable to bring IP down as the network interface does not exist")
+		return false, errors.New("unable to bring IP down as the network interface does not exist")
 	}
-	addr, err := netlink.ParseAddr(ip)
-	if err != nil {
-		return errors.New("unable to bring IP down because ip address couldn't be parsed")
+	addr, parseErr := netlink.ParseAddr(ip)
+	if parseErr != nil {
+		return false, errors.New("unable to bring IP down because ip address couldn't be parsed")
 	}
-	if err := netlink.AddrDel(link, addr); err != nil {
-		log.Warn("NETWORK: Unable to bring down IP", "ip", ip, "iface", iface, "error", err)
-		return errors.New("unable to bring down ip " + ip + " on interface " + iface + ": " + err.Error())
+	if delErr := netlink.AddrDel(link, addr); delErr != nil {
+		if AddrDelSatisfied(delErr, func() bool {
+			ipOb, _ := utils.GetCIDR(ip)
+			if ipOb == nil {
+				// Nothing to ask with; leave the failure as a failure.
+				return true
+			}
+			ex, eIface, cerr := CheckIfIPExists(ipOb.String())
+			return cerr == nil && ex && eIface == iface
+		}) {
+			// Nothing to do and nothing wrong: the address had already gone,
+			// which is the state this call was asking for (defect #61).
+			return true, nil
+		}
+		log.Warn("NETWORK: Unable to bring down IP", "ip", ip, "iface", iface, "error", delErr)
+		return false, errors.New("unable to bring down ip " + ip + " on interface " + iface + ": " + delErr.Error())
 	}
-	return nil
+	return false, nil
 }
 
 /*

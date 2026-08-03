@@ -6198,10 +6198,19 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 
 		s.ipMonitor.RemoveExpectedIPs(req.Iface, []string{ip})
 
-		if err := network.BringIPdown(req.Iface, ip); err != nil {
+		alreadyGone, err := network.BringIPdownClassified(req.Iface, ip)
+		if err != nil {
 			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", ip, "error", err)
 			failed = append(failed, ip)
 			continue
+		}
+		if alreadyGone {
+			// Not a failure: the address had already been released, almost always
+			// by this node's own enforce pass, which #41 taught to classify the
+			// same race in the other direction. Before defect #61 this arm logged
+			// one Error per address — 23 of them across three run-29 deletes —
+			// which is exactly the noise that would hide a release that mattered.
+			s.logger.Debug("BringDownIP: IP was already down", "iface", req.Iface, "ip", ip)
 		}
 	}
 	// In active-active mode keep the local member's ActiveIPs bookkeeping in
