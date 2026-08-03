@@ -6201,36 +6201,67 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
 	s.logger.Infof("RPC BringDownIP on iface %s for %d IP(s)", req.Iface, len(req.Ips))
 
-	var failed []string
-	for _, ip := range req.Ips {
-		if !utils.IsCIDR(ip) {
-			if utils.IsIPv4(ip) {
-				ip = ip + "/32"
-			} else if utils.IsIPv6(ip) {
-				ip = ip + "/128"
-			} else {
-				s.logger.Warn("BringDownIP skipping invalid IP", "ip", ip)
-				continue
+	normalized, invalid := normalizeDownRequest(req.Ips)
+	for _, ip := range invalid {
+		s.logger.Warn("BringDownIP skipping invalid IP", "ip", ip)
+	}
+
+	// One call for the whole request, not one per address. RemoveExpectedIPs
+	// takes the monitor lock, logs the remaining expectation set, and calls
+	// TriggerEnforce — which starts an enforceExpectations *goroutine*. Per
+	// address that was one enforce pass per requested address: 201 of them for a
+	// group-delete, each with its own netlink dump and its own release loop,
+	// running concurrently with this loop as it deleted the rest. Every one of
+	// those passes saw a different half-released set, which is a large part of
+	// how defect #34 got to ~18 duplicate release attempts per address. Batched,
+	// the request removes the expectations once and wakes the enforce pass once.
+	//
+	// Still before the bring-downs, as it was: the expectation has to be gone
+	// first, or the restore paths put the address straight back (#60).
+	s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+
+	// One snapshot for the whole request. See releaseRequestedIPs for why the
+	// filter belongs here rather than in the caller; the nil on failure is
+	// deliberate — unable to see what this node holds, attempt everything.
+	var heldHere func(ip string) bool
+	// No addresses to look up means no reason to dump the interface table.
+	if len(normalized) > 0 {
+		if inventory, invErr := network.BuildIPInventory(); invErr != nil {
+			s.logger.Warn("BringDownIP: could not read interface addresses; attempting every requested release",
+				"iface", req.Iface, "error", invErr)
+		} else {
+			heldHere = func(ip string) bool {
+				ipOnly, _ := utils.GetCIDR(ip)
+				if ipOnly == nil {
+					return true
+				}
+				exists, foundIface, err := inventory.Exists(ipOnly.String())
+				if err != nil {
+					return true
+				}
+				return exists && foundIface == req.Iface
 			}
 		}
+	}
 
-		s.ipMonitor.RemoveExpectedIPs(req.Iface, []string{ip})
+	attempts := releaseRequestedIPs(req.Iface, normalized, heldHere, network.BringIPdownClassified)
+	summary := summarizeDownAttempts(attempts)
 
-		alreadyGone, err := network.BringIPdownClassified(req.Iface, ip)
-		if err != nil {
-			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", ip, "error", err)
-			failed = append(failed, ip)
-			continue
-		}
-		if alreadyGone {
-			// Not a failure: the address had already been released, almost always
-			// by this node's own enforce pass, which #41 taught to classify the
-			// same race in the other direction. Before defect #61 this arm logged
-			// one Error per address — 23 of them across three run-29 deletes —
-			// which is exactly the noise that would hide a release that mattered.
-			s.logger.Debug("BringDownIP: IP was already down", "iface", req.Iface, "ip", ip)
+	// Per address only for the outcome worth reading. The other three are
+	// counted, and reported through this logger rather than packages/network's,
+	// whose level nothing sets — a classification that cannot reach the journal
+	// cannot be verified live (#61's lesson).
+	for _, attempt := range attempts {
+		if attempt.Outcome == downFailed {
+			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", attempt.IP, "error", attempt.Err)
 		}
 	}
+	if summary.Skipped > 0 || summary.Vanished > 0 {
+		s.logger.Debug("BringDownIP: addresses this node was not holding",
+			"iface", req.Iface, "notHeld", summary.Skipped, "vanishedBeforeRelease", summary.Vanished,
+			"released", summary.Released, "of", len(normalized))
+	}
+
 	// In active-active mode keep the local member's ActiveIPs bookkeeping in
 	// sync (mirror of BringUpIP) so a later monitor refresh doesn't resurrect
 	// IPs that were deliberately moved to another node.
@@ -6254,7 +6285,7 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 		}
 	}
 
-	if len(failed) > 0 {
+	if summary.Failed > 0 {
 		return &rpc.DownIpResponse{Success: true, Message: "Best-effort: some IPs may not have been present"}, nil
 	}
 	return &rpc.DownIpResponse{Success: true, Message: "IPs brought down"}, nil
