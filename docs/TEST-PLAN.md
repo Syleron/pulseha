@@ -532,7 +532,7 @@ as neither fixed nor reproduced.
 | TC-8 | #31 a ConfigSync cycles the gRPC listener; the refused `BringDownIPs` is never retried | **Open, found run 16, reconfirmed live run 23 on a healthy four-node cluster** — 56 of 60 peer `BringUpIP` RPCs and every retry of the config broadcast itself were refused during a 20-add burst, with only 1–2 `Reconfiguring PulseHA server` events per peer in the window, so one teardown refuses many seconds of traffic. It is the amplifier under both #37's dead fan-out and #43's lost propagation. **Original finding:** node-1's release RPCs to node-3 and node-4 both got `connection refused` mid-switch although neither daemon restarted — `Reconfiguring PulseHA server` tears the listener down. Only a `Warn`; nothing retries. Benign only because the demoted peer self-releases via its own ConfigSync, which is the path `2ae8189` restored — so this is very likely #28's proximate trigger. **Fixed at the cause, NOT verified live: `Reconfigure` now rebinds the cluster listener only when the bind address actually moved.** Every full `ConfigSync` spawns `Reconfigure`, which unconditionally `GracefulStop`ped the listener and bound a fresh one — for a config change that never touched the bind address, which is what a group edit or a peer status change is. The gRPC server here is built with no credentials and no options, so the address is the whole of the listener's configuration and an unchanged address means there is nothing to re-apply. The serving goroutine clears the record when `Serve` returns, so a listener that dies on its own is still rebound by the next `Reconfigure` rather than skipped as still-serving. Does not by itself fix #43 — a genuinely down peer still misses a broadcast — which is why the retry above is the other half. Tests: `TestReconfigureKeepsTheListenerWhenTheBindAddressIsUnchanged` (fails against HEAD) and `TestReconfigureRebindsWhenTheBindAddressChanges` (passes at HEAD; it guards the skip from getting too wide) |
 | TC-3 | #42 `pulsectl config set` reports success but does not apply cluster-wide | **Fixed, NOT verified live (2026-07-30).** `UpdateConfig` now knows the scope of every key it accepts. **Cluster-wide keys** (`hcs_interval`, `fos_interval`, `fo_limit`, `auto_failback`) are stamped and broadcast through `markConfigDirty()` exactly like a group mutation, so they inherit #43's retry as well as the broadcast. **`mode` is delegated to `SetMode`** rather than written into the config: changing the mode consolidates or spreads the floating IPs and re-broadcasts the member statuses that belong with it, and writing the value past all of that is precisely what produced the 529 `4 nodes are Active in active-passive mode` lines. The delegation happens *before* `s.Lock()` is taken, because `SetMode` takes it and the lock is not reentrant — the recurring shape behind #32/#46/#55. `SetMode` additionally marks the config dirty now, so the mode has the retrying broadcaster behind it instead of one unretried pass per peer whose result was discarded. **Logging and syslog keys are node-local by design** — `ConfigSync` preserves them so a peer left at debug for an investigation survives the next broadcast — so they are applied locally and *reported* as node-local; the CLI prints the reach of every change and the help text lists which keys are which. Keys not in the table (notably `local_node` and `cluster_token`) are now refused rather than written. Two prerequisites fixed underneath: `Config.UpdateValue` rolls back a value the validator rejects (it used to leave it in the live struct, failing every subsequent `Save()` and standing ready to be broadcast by the next successful mutation) and its error now names the constraint; and #55 below, found while testing this. Tests: `internal/server/config_scope_test.go` and `packages/config/update_value_test.go`, all seven observed to fail against `d4408e9` in a throwaway worktree — the mode test reporting `2 members Active … want exactly 1`, which is run 23's wedged state in miniature. **Original finding, run 23:** `config set mode active-passive` on node-1 printed `Successfully updated mode to active-passive` and rc=0, but **only node-1's config changed** — nodes 2, 3 and 4 still read `active-active`. node-1 then logged `ACTIVE_CHECK: 4 nodes are Active in active-passive mode; waiting for the coordinator to consolidate` **529 times** while the coordinator, still in active-active, never consolidated: a wedged cluster with zero placement change and a success message. The same command's help says "Set a configuration value and apply it to the cluster". Also seen with `logging_level`: one invocation reached node-1 and node-2 only, so `logging_level` had to be set on each node individually (both to enable Debug for this run and to restore `info` afterwards). Distinct from #43 — this is a *single* quiet mutation, not a burst, and the `pulseha` section rather than `floating_ip_groups`. Severity is high for `mode`: a two-mode cluster is exactly the split-brain configuration quorum is meant to prevent, and the operator is told it worked |
 | TC-3 | #43 a burst of config mutations commits locally and never propagates; the reconcile does not repair it | **Second fix 2026-08-03, NOT verified live — the retry (2026-07-30, below) was necessary but not sufficient, and the missing half was on the *receiver*. `ConfigSync` could not represent a removal at all.** Its merge read "the incoming list is missing or empty" as "this sender has no opinion, keep mine" — but absence and emptiness are exactly what a removal looks like on the wire, so all three removing mutations were undone by every peer that received them: `commitGroupDeletion` deletes the key, `UnassignGroupFromNode` deletes an interface entry once it has no groups left, and `RemoveIPFromGroup` leaves the group present with an empty list. The receiver then replied `Success: true`, so the sender's broadcaster recorded full propagation and cleared the retry state — **the 2026-07-30 retry could never fire for this arm, because nothing ever reported a failure.** That is why run 27 and run 28 kept reconfirming #43 on binaries that already contained the retry: write 1 of a delete (the assignment drop) changes lists and propagates, write 2 (the delete) is a removal and is refused silently by every peer. **Fix: within the full-config branch a payload that *carries* the field is authoritative about it, including about what is no longer in it.** Keyed on the map being **nil** — the field absent from the JSON or explicitly null — rather than on it being empty, which is what preserves the case the merge was actually written for: `floating_ip_groups`/`group_assignments` carry no `omitempty` and `config.New`/`Load` always initialise the maps, so any live daemon sending a full config emits at least `{}` and "I have no groups" stays distinguishable from "I do not speak groups". Safe to honour absence because this point is past two stamp checks, the second under `s.Lock()`: the payload is strictly newer than what the receiver holds, so a removal is ordered on #38's Lamport clock exactly like a content change, and the wholesale semantics are what a newer config already had for a group's address list. **Node-level absence is deliberately left alone** — a node missing from an incoming config is still kept, so this does not make a stale payload able to delete peers, and `leave`/`RemoveMember` propagation is not part of this fix. Tests: `internal/server/config_deletion_test.go` — `TestConfigSyncAppliesAGroupDeletion`, `TestConfigSyncAppliesAGroupUnassignment` and `TestConfigSyncAppliesEmptyingAGroup` all observed to fail against the unfixed merge (the group came back, the unassignment was undone, and all addresses were restored), with `TestConfigSyncWithNoGroupsFieldPreservesLocalGroups` passing both before and after as the guard on the nil case. Adding those tests exposed a **latent flake in this package's harness**, now fixed: `ConfigSync` replies before the `go s.Reconfigure()` it spawns has re-read the config file, and every harness here points the package-level `config.CONFIG_LOCATION` at its own `t.TempDir()`, so a test that ended while that goroutine was still inside `config.Load()` let the next test's setup write the global it was reading — a real data race, in the harness rather than the daemon, hit by roughly 1 run in 6 of `make testrace` and 0 of 12 after (`onAsyncReconfigure`, a nil-in-production test seam; waiting on the config pointer instead cannot work, because the pointer Reconfigure swaps to is indistinguishable from the one `ConfigSync` installed when the goroutine wins). **First fix 2026-07-30 (the retry), also not verified live; reconfirmed live on runs 27 and 28, whose binaries `0c2ad56`/`671ec04` already contained it. Found run 23. Mirror of #39 and made reachable by its fix.** Before chasing this further, read #60: a propagating delete is what turns #60's restored share into a permanent strand, which is why #60 was fixed first (2026-08-03, itself awaiting live verification). **Fix: the node that owns the change is the node that retries it.** A broadcast that exhausts its four in-pass attempts now records the version and the outstanding peers, and the broadcaster re-pushes on its own timer — 5s, doubling to a 60s ceiling — until every peer accepts or a newer mutation supersedes it. No coordinator involvement, which is the whole point: the repair is owned by the node holding the unpropagated config. Safe for a non-coordinator to push because #38's Lamport stamp already guards the receiver: a peer holding something newer answers `superseded config version ignored`, which drops it from the retry set rather than overwriting it — that guard is what made the original coordinator-only gate unnecessary. The retry re-snapshots and pushes to *every* peer rather than only the outstanding ones, since by then this node's config may have moved on again; a peer already holding the version ignores the message. Deliberately **not** fixed by blocking the `add-ip` reply on propagation — that would undo `bef7286` and put #39 and #37's latency straight back. Paired with the #31 fix below, which removes the condition that made the in-pass attempts fail in the first place. Tests: `internal/server/config_propagation_test.go` — `TestUnpropagatedConfigIsRetriedUntilEveryPeerAccepts` (against HEAD: 4 refused pushes, 0 accepted, forever) and `TestPropagationRetryBacksOffAndStops` (the schedule has a ceiling and stops) 20 `add-ip` calls in 4s from node-1 (all rc=0): node-1 reached 286 while node-2/3/4 stayed at 267/268/268, **stable for 135s+** with all four healthy and no node down. Reproduced twice (the first burst, with node-4 stopped, left node-1 at 265 against 246/251, stable 3min+). Mechanism, all on the wire: the per-add broadcasts coalesce correctly (`CONFIG_BROADCAST: superseded by a newer broadcast, abandoning retries`), but every retry of the *final* broadcast is refused (#31), ending in `CONFIG_BROADCAST: peers did not accept the config after all retries; waiting for the periodic reconcile version=N peers=[all three]` — and **that reconcile only runs on the coordinator**: node-1 logged **0** `CONFIG_RECONCILE` lines in 4–5 minutes while node-2 logged 4. So a failed broadcast from a *non-coordinator* is never repaired; node-2's own reconcile pushes its older config, node-1 correctly rejects it as stale (#38's guard working), and nothing pulls node-1's newer config out. Repaired only by the next *successful* mutation, which carries the whole backlog: a single quiet `add-ip` took node-2 from 246 → 266 and node-3 from 251 → 266 in one push. **Consequence: `add-ip` returns success for a change that exists on one node only, for an unbounded time.** Pre-existing in mechanism (coordinator-only reconcile + #31), but before `bef7286` each add took 13–28s and the broadcasts were naturally spaced far enough apart to succeed — runs 19 and 20 landed 244 adds this way. Fix shape: let any node reconcile its own unpropagated version, or block the `add-ip` reply on propagation rather than on the local commit |
-| TC-6 | #44 `unassign` alone does not trigger the reclaim; only a restart of the unassigned node does | **New, open, found run 23.** `group unassign RealTest` from node-3 (rc=0, propagated to **all four** nodes' `group_assignments` within seconds) made node-3 correctly release all 71 of its addresses within 6s — and then the cluster sat at `n1=72 n2=72 n3=0 n4=72, placements=216, missing=71` for **8 minutes**. 71 configured addresses on no node at all, with every node agreeing on the config. node-1's `ENFORCE: Current expectations` never widened to include them and there were **zero** `ACTIVE_CHECK: rebalancing`, reclaim, vote or capacity lines on node-1 or node-2 in the window — the reclaim never even tried. Restarting node-3 with the group still unassigned then reclaimed all 71 immediately (`95/96/0/96`, `unique=287 missing=0`), which is why **run 22 did not see this**: it unassigned and restarted in the same breath, so the restart-driven reclaim masked the missing unassign-driven one. Distinct from #40 (the release half, which works) and from #13 (dropped RPCs — here no RPC is attempted) |
+| TC-6 | #44 `unassign` alone does not trigger the reclaim; only a restart of the unassigned node does | **NO LONGER REPRODUCES, run 29 (2026-08-03) — fixed as a side effect of #58 (`6d55cd8`), not by anything aimed at #44.** `unassign` from node-4 on the coordinator: released, and nodes 1/2/3 reclaimed all 9 within 15s, settled `12/12/12/0` with the cluster total still 36 of 36, held 3 min, no restart. The reclaim was never broken — the orphan detector builds `hosted` from each member's `ActiveIPs`, and before #58 a released address was never dropped from its own node's list, so `orphanedGroupIPs` saw nothing orphaned and correctly declined to act on a set it could not see. Original finding, run 23: `group unassign RealTest` from node-3 (rc=0, propagated to **all four** nodes' `group_assignments` within seconds) made node-3 correctly release all 71 of its addresses within 6s — and then the cluster sat at `n1=72 n2=72 n3=0 n4=72, placements=216, missing=71` for **8 minutes**. 71 configured addresses on no node at all, with every node agreeing on the config. node-1's `ENFORCE: Current expectations` never widened to include them and there were **zero** `ACTIVE_CHECK: rebalancing`, reclaim, vote or capacity lines on node-1 or node-2 in the window — the reclaim never even tried. Restarting node-3 with the group still unassigned then reclaimed all 71 immediately (`95/96/0/96`, `unique=287 missing=0`), which is why **run 22 did not see this**: it unassigned and restarted in the same breath, so the restart-driven reclaim masked the missing unassign-driven one. Distinct from #40 (the release half, which works) and from #13 (dropped RPCs — here no RPC is attempted) |
 | TC-6 | #45 the bring-up path logs an already-present address as an error — #41's mirror | **Fixed 2026-07-30, VERIFIED FIXED LIVE run 25 (2026-07-31) — one of the two arms exercised live.** Across a full run covering five daemon restarts and two make-before-break storms (transient `duplicated=5` then `duplicated=27`), on all four nodes: **0** `IP monitor restore: failed to add addr`, **0** `NETWORK: netlink.AddrAdd failed`, **0** `ENFORCE: Failed to bring up IP on Active node`, and **0** occurrences of the escalation's cause string `unable to bring IP up as netlink failed to do so` — where run 23 had 22, 9 and 15 respectively. The positive control fired: the Debug classification `IP monitor restore: expected IP was already back` appeared **48 times** (n1=7, n2=9, n3=22, n4=10), so the EEXIST races genuinely happened and were classified rather than merely absent. The decisive count is that **every** `file exists` string in the whole run was one of those 48 Debug lines — the `file exists` total per node equals the Debug total per node exactly (7/9/22/10), so no EEXIST escaped to an error line. Coverage settled exact after both storms (`287 unique, duplicated=0, missing=0`), which is the outcome-level control: classifying EEXIST as satisfied did not hide a genuinely absent address. A 60s quiet window afterwards logged zero of all of it, so the noise is churn-driven, not steady-state. **Honest limitation:** only the `IPMonitor.restoreIP` arm was exercised live. The `network.BringIPup` arm never hit EEXIST in this run (`NETWORK: IP was already up when adding it` = 0 on all four) and rests on unit tests alone — though the arm that *was* proven is the one that produced 22 of run 23's 31 error lines. **`IP_FAILOVER: Some interfaces failed to bring up IPs` did still fire 7 times on node-2, but not for this cause** — all 7 trace to `IP_FAILOVER: Failed to bring IPs up remotely … DeadlineExceeded`, which is the new #57, not a netlink failure. Original finding, run 23. During the same release storm that produced zero #41 errors, the *bring-up* side logged `IP monitor restore: failed to add addr cidr=… iface=enX0 error="file exists"` (18 node-2, 4 node-3) and `NETWORK: netlink.AddrAdd failed error="file exists"` (7 node-2, 2 node-3) at **error** level, followed by `ENFORCE: Failed to bring up IP on Active node … error="unable to bring IP up as netlink failed to do so"` (8 node-2, 7 node-3) and `IP_FAILOVER: Some interfaces failed to bring up IPs`. Adding an address the node already holds is a no-op reported as a failure — exactly #41's shape with the sign flipped. Note this one propagates upward into a failed-failover report, so unlike #41 it is not purely cosmetic: a failover was reported broken because an address it wanted up was up already. **Fix:** `network.AddrAddSatisfied` classifies a failed add, and the two sites that logged these lines consult it. `EEXIST` is satisfied outright — the kernel only refuses with it when this exact address and prefix are already on this exact link, which is the goal state — and it is answered without a further netlink walk. Any *other* failure is put to a live existence check, #41's post-failure re-check in mirror image: several writers add addresses here (the enforce loop, the netlink watcher's restore, `BringUpIP`'s per-interface goroutines), so the window between a pre-check and the syscall cannot be closed, only classified. A failure on an address that is genuinely not up is still an error. Fixing `network.BringIPup` clears the `ENFORCE: Failed to bring up IP on Active node` and `IP_FAILOVER` escalation above it for this cause, since both only report what it returned. Tests: `packages/network/addr_add_test.go`, both arms mutation-tested — neutering the `EEXIST` arm fails three of the six, neutering the live check fails one |
 | TC-6 | #46 `RemoveMember` self-deadlocks redistributing the leaving node's addresses | **Fixed (PR #227 follow-up), not verified live.** Found while auditing the locking the review flagged in `member_list.go`, and not itself a review finding. `MemberList` embeds a `sync.RWMutex`, which is not reentrant; `RemoveMember` takes the write lock and then calls the exported `RedistributeIPs`, which takes it again. Every removal of a node that still held floating IPs therefore hung forever **with the write lock held**, so nothing else touching the member list could make progress either — the daemon, not just the removal. Both branches of `RemoveMember` had their own copy of the call (by node ID and by hostname). Same shape as the old `RebalanceCluster` self-deadlock and the `hasQuorumLocked` one this PR already fixed, and as #32's `Load()`/`Save()`. Fix: the body is split into `redistributeIPsLocked`, which documents that it requires the lock; the exported method is the locking wrapper. The two call sites also passed `member.ActiveIPs` bare and now read it through `GetActiveIPs()`. Tests: `internal/membership/member_list_locking_test.go` — `TestRemoveMemberRedistributingDoesNotSelfDeadlock` covers both branches and times out against the old code (10s = 2 × its 5s deadline) |
 | TC-6 | #47 the redistribution path reads member state without the member lock | **Fixed (PR #227 follow-up), not verified live.** Review finding. `getAvailableNodes` read `member.Status`, and `calculateIPDistribution` read `len(node.ActiveIPs)` and `node.Capacity`, holding only the member *list* lock — which does not cover those fields. `AddActiveIPs` appends to `ActiveIPs` and `UpdateConfig` refreshes `Capacity` under the member's own lock, and the health check loop writes `Status` there, so these were real races rather than staleness. `getActiveNode`, the callee of both, had the same defect. Fixed by snapshotting each member's fields under its own lock, the pattern `ConsolidationTarget` in the same file already used. Detector: `TestRedistributeIPsSnapshotsMemberStateUnderLock`, which reports a data race on every run against the old code, at exactly the three flagged lines |
@@ -2458,3 +2458,155 @@ those two rows describe is no longer hypothetical.
   for undoing `bef7286`. **Operationally: after restarting a node, do not issue mutations on it
   until it has taken a full `ConfigSync`.** Run 25's `group assign` on node-3 is this arm, not the
   merge arm.
+
+---
+
+## Result 2026-08-03 (run 29) — #43 VERIFIED FIXED LIVE at last; #59/#60 hold beside it; #44 no longer reproduces; #61 opened, fixed and verified
+
+Two binaries, both md5-verified on all four via `/proc/MainPID/exe`:
+`9ad384909eba9c1a1ac00665d758c819` (HEAD `8aa67db`, cycles 1–4) and
+`50eab7ff3c596f04e1a1420f17390477` (the #61 fix, cycle 5). Mode active-active. Test group
+`VerifyTest` = `10.200.0.155-190` on `enX0` — **36 addresses**, all DAD-verified free by exit code
+with a live positive control (gateway + two cluster IPs all `IN-USE`), assigned to all four,
+settled `9/9/9/9` before every delete. Six `group delete --force` in total, all issued on the
+**coordinator only** (node-2, `049-b22-093-2d3` — the lowest healthy node UUID, which is
+`clusterCoordinator`'s rule and cheaper to compute than waiting for a re-broadcast line to appear).
+
+### #43 PASSES — the first time a `group delete` has ever propagated on this cluster
+
+**Six deletes, six times the group left all four configs.** Every cycle: `has_group=true` on all
+four before, `has_group=false` with `assignment_entries=0` on all four after, `rc=0` in 1–2s. The
+positive control is the pre-delete reading — the group is proven present everywhere first, so its
+absence afterwards is propagation and not an artefact of it never having arrived.
+
+Runs 25, 27 and 28 all reconfirmed #43 on binaries that already carried the 2026-07-30 broadcaster
+retry. The receiving-half fix (`53d6506`) is the one that mattered, exactly as its commit message
+predicted: the merge could not *represent* a removal, so every peer resurrected the deleted group
+and answered `Success: true`.
+
+### #59 and #60 both hold with deletes propagating — the risk the #43 fix created
+
+This was the stated reason run 29 existed: once deletes propagate, a peer that restores its share
+inside #60's window and *then* loses the group from config has those addresses outside every
+computable set, which would be #59 permanently.
+
+- **#59: zero strands in all six.** Post-delete kernel state `0 | 0 0 0 0` every time.
+- **#60: zero `expected IP removed from Active node; restoring` in all six**, on all four nodes.
+- **#60's protection was observed doing the work, not merely idle.** Both consumer arms fired:
+  cycle 1 node-1 (enforce ×2), cycle 2 node-1 (watcher ×2, enforce ×8), cycle 4 node-1
+  (watcher ×6, enforce ×6) and node-4 (watcher ×2, enforce ×3). The window opened repeatedly and
+  the 60s record is what kept it harmless.
+
+### #44 no longer reproduces — and the cause was **#58**, not #43
+
+Re-diagnosed from scratch, 36 addresses, `unassign` from node-4 issued on the coordinator:
+
+| | run 23 / run 25 | run 29 |
+|---|---|---|
+| unassign propagates | yes (run 23 recorded it explicitly) | yes, all four in <20s |
+| unassigned node releases | yes, 6s | yes |
+| **remaining nodes reclaim** | **never, until that node was restarted** (`missing=71` for 8 min) | **all 9, within 15s** |
+
+Settled `12/12/12/0` at t+15s and held it for the full 3-minute watch, cluster total still **36 of
+36** — no strand, no loss, no restart needed.
+
+**The run-29 brief's premise for this was wrong, and the correction is the useful part.** #44 was
+*not* an artefact of the unassign failing to propagate — run 23's own entry records it reaching all
+four `group_assignments` within seconds. The orphan detector
+(`health_check.go:1203`, `orphanedGroupIPs` over configured groups vs `hosted`) already existed in
+run 23 and logged *nothing*, because **`hosted` is built from each member's `ActiveIPs`, and before
+#58 a node's released addresses were never dropped from its own assignment list**. The released
+addresses therefore still counted as hosted, `orphanedGroupIPs` returned empty, and the reclaim
+correctly declined to fire on a set it could not see. That is precisely run 23's symptom —
+"71 configured addresses on no node at all… zero reclaim, vote or capacity lines."
+
+So #58 (`6d55cd8`, verified live run 27) fixed #44 as a side effect, and today's evidence is the
+mechanism running end to end on the coordinator: `Initiating vote for redistribution of 8 IPs` →
+voting session → `ACTIVE_CHECK: redistributing 8 orphaned floating IP(s)`. Zero such lines existed
+in run 23. **This is inferred from the mechanism, not from an A/B against run-23 code** — but it
+fits both records and #43's propagation was never the missing ingredient.
+
+Worth keeping as a pattern: **a defect whose diagnosis blames a mechanism can be a symptom of a
+bookkeeping bug one layer down.** #44 looked like "the reclaim is broken"; the reclaim was working
+correctly on a false inventory.
+
+### NEW #61 — an already-released address reported as a failed bring-down (found, fixed, verified live in the same run)
+
+**23 `ERRO … BringDownIP failed … cannot assign requested address` lines across the three cycles on
+HEAD** (1, 14 and 8), on node-2, node-3 and node-4.
+
+Mechanism, from node-2's cycle-2 journal, all inside one second: the delete's release fan-out calls
+`RPC BringDownIP … for 9 IP(s)`, and the node's own enforce pass concurrently logs
+`ENFORCE: releasing floating IPs this node is no longer assigned count=8`. Two independent release
+paths, same node, same addresses. The enforce pass is #41-hardened — it pre-checks `stillHeld`,
+re-checks after a failure, and classifies a vanished address as a Debug no-op — so it completes
+silently. `Server.BringDownIP` had **no classification at all**, so its per-IP loop then hit
+EADDRNOTAVAIL on the 8 the enforce pass had already released and logged one Error each. Exactly
+#41's shape and #45's mirror, on the one release path neither fix covered.
+
+Bounded to noise: the RPC returns `Success: true` with `"Best-effort: some IPs may not have been
+present"` either way, so nothing acted on the false failures. But it is the noise class that hid
+the #59/#60-era failures, and now that deletes propagate it fires on **every** delete.
+
+**Fix:** `network.AddrDelSatisfied` mirroring `AddrAddSatisfied`, keyed on EADDRNOTAVAIL through
+`errors.Is` (the errno may arrive wrapped in the kernel's extended-ack message; `unix.EADDRNOTAVAIL`
+is itself a `syscall.Errno`, so one comparison covers both types), with a live not-held check for
+any other failure. **The inversion is the point:** for a delete the wanted state is the address
+being *absent*, so `heldByTarget` answering false is success. An address still up after a failed
+delete is still a failure. Unit tests in `packages/network/addr_del_test.go`; a classifier with the
+old behaviour was confirmed to misclassify both no-op cases while already getting the
+genuine-failure case right, so the fix loosens nothing that mattered.
+
+**A trap that cost a cycle and is worth inheriting: `packages/network` cannot emit a Debug line at
+all.** The first fix logged the no-op via that package's `log.Debug`, and cycle 4 came back with
+**zero** `BringDownIP failed` *and* **zero** classifications — an all-zeros pass with a dead
+control, indistinguishable from the race simply not happening. The cause is structural, not
+configuration: `packages/network` logs through charmbracelet's *package-level* logger, which
+`NewWithOptions` leaves at Info and which **nothing in the tree ever calls `SetLevel` on**. The
+daemon's own logger is a separate instance that `main.go` levels from config. So a Debug line in
+`packages/network` is unreachable at any `logging_level`, while its `Warn`/`Error` render fine —
+which is why the *symptom* was always visible and the *fix* never could be. Hence
+`BringIPdownClassified`, which returns `alreadyGone` so `Server.BringDownIP` can log it on the
+daemon logger where an operator can turn it up. (This does not undermine #45's run-25 verification:
+that entry records the `network.BringIPup` arm as never having raced and unit-tests-only, and its 48
+Debug classifications as the `IPMonitor.restoreIP` arm — the daemon logger.)
+
+**Verified live, cycle 5, with the control firing:** node-2 `ENFORCE: releasing floating IPs … `
+released 3, the RPC then classified those same 3 (`BringDownIP: IP was already down` ×3), and
+`BringDownIP failed` = 0 and `NETWORK: Unable to bring down IP` = 0 on all four. Pre-fix that same
+overlap produced one Error per address.
+
+### Other observations
+
+- **#33 re-observed** during the #44 reclaim: `ERRO failed to GARP. exit status 2`, twice each on
+  node-1 and node-3. `SendGARP` execs `arping -U`, which exits 2 for an address the node does not
+  hold — a GARP announced against a stale set. Not new, not diagnosed further here.
+- **#42's honesty half confirmed live** (it was fixed 2026-07-30 and never verified): `config set
+  logging_level debug` now reports *"applied to this node only — this key is node-local and has to
+  be set on each node"* on every node, instead of claiming a cluster-wide apply.
+- **The coordinator is computable, so don't wait for a log line to find it.**
+  `clusterCoordinator` picks the lowest ID among healthy members, so
+  `jq -r '.nodes|keys' | sort | head -1` answers it instantly. The
+  `re-broadcasting config from the coordinator` line only appears when there is an unpropagated
+  config to re-push, and grepping a quiet 30-minute window for it returns 0 on all four — which
+  reads exactly like "no coordinator".
+
+### Leave-behind
+
+Groups `Management` (empty) and `test` (empty, `enX1`) on all four, consistent; **zero floating IPs
+held anywhere**; mode active-active; `logging_level` back to `info` on all four; `/run/lbBootFlag`
+**restored on all four**; all four running `50eab7ff3c596f04e1a1420f17390477`. `10.200.0.155-190`
+were DAD-verified free at the start of this run and are free again at the end.
+
+### What run 30 should watch
+
+- **#57** is now the oldest open defect with a known diagnosis (flat 5s deadline in
+  `bringIPsOnNodeUp`, `server.go:~6232`) and it is what still produces
+  `IP_FAILOVER: Some interfaces failed to bring up IPs` — read the cause line above that escalation.
+- **#51** remains the PR-#227 fix flagged as the one to watch; none of #46–#54 has been verified
+  live, and #44's disappearance is a reminder that unverified fixes can be silently load-bearing.
+- **#35/#36 (capacity unenforced)** are untouched since run 18 and are the natural next target now
+  that placement, release, delete and reclaim all behave.
+- The 36-address group at `10.200.0.155-190` settling `9/9/9/9` is a good harness: a full
+  create/assign/settle/delete cycle takes ~4 min and the release races reproduce readily at that
+  size.
