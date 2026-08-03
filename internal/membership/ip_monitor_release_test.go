@@ -96,3 +96,61 @@ func TestReleaseReportsAFailureForAnAddressStillHeld(t *testing.T) {
 		t.Errorf("Err = %v, want %v", attempts[0].Err, wantErr)
 	}
 }
+
+// Regression for docs/TEST-PLAN.md defect #58. The release pass brought surplus
+// addresses down with network.BringIPdown directly, bypassing the ActiveIPs
+// bookkeeping that the BringDownIP RPC handler maintains, so an address released
+// locally stayed on the member's assignment list forever. Live evidence: after
+// RealTest was unassigned and deleted on 2026-07-31, all four nodes released
+// their 72 addresses correctly and reported all 288 of them for the next three
+// days — every node Active, holding nothing.
+//
+// An address that is no longer held must leave the list. An address whose
+// release genuinely failed must stay on it: the node is still serving it, and
+// dropping it would hide the address from the next pass.
+func TestReleasedAddressesLeaveTheAssignmentList(t *testing.T) {
+	attempts := []releaseAttempt{
+		{Iface: "eth0", IP: "10.0.0.1/24"},                            // released
+		{Iface: "eth0", IP: "10.0.0.2/24", Vanished: true},            // already gone
+		{Iface: "eth0", IP: "10.0.0.3/24", Err: errors.New("failed")}, // still held
+	}
+
+	got := releasedForBookkeeping(attempts)
+
+	want := map[string]bool{"10.0.0.1/24": true, "10.0.0.2/24": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want the released and vanished addresses only", got)
+	}
+	for _, ip := range got {
+		if !want[ip] {
+			t.Errorf("%s must not be dropped from the assignment list", ip)
+		}
+	}
+}
+
+// The member's own list is what pulsectl status prints and what placement reads
+// as this node's load, so the drop has to reach it.
+func TestRemoveActiveIPsDropsOnlyTheGivenAddresses(t *testing.T) {
+	m := &Member{ActiveIPs: []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"}}
+
+	m.RemoveActiveIPs([]string{"10.0.0.1/24", "10.0.0.3/24"})
+
+	got := m.GetActiveIPs()
+	if len(got) != 1 || got[0] != "10.0.0.2/24" {
+		t.Errorf("ActiveIPs = %v, want only the address still held", got)
+	}
+}
+
+// A node that released everything must report an empty list, not a nil-vs-empty
+// distinction that reads as "no information" — deriveMemberStatus reports
+// Standby off an empty list, and that is the honest answer for a node serving
+// nothing.
+func TestRemoveActiveIPsCanEmptyTheList(t *testing.T) {
+	m := &Member{ActiveIPs: []string{"10.0.0.1/24", "10.0.0.2/24"}}
+
+	m.RemoveActiveIPs([]string{"10.0.0.1/24", "10.0.0.2/24"})
+
+	if got := m.GetActiveIPs(); len(got) != 0 {
+		t.Errorf("ActiveIPs = %v, want empty after releasing everything", got)
+	}
+}

@@ -437,7 +437,8 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 			"iface", iface, "count", len(ips))
 	}
 
-	for _, attempt := range releaseSurplusFloatingIPs(surplus, stillHeld, network.BringIPdown) {
+	attempts := releaseSurplusFloatingIPs(surplus, stillHeld, network.BringIPdown)
+	for _, attempt := range attempts {
 		switch {
 		case attempt.Vanished:
 			// Nothing to do and nothing wrong: the address left before this pass
@@ -447,6 +448,18 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 		case attempt.Err != nil:
 			m.logger.Error("ENFORCE: failed to release unassigned floating IP",
 				"ip", attempt.IP, "iface", attempt.Iface, "error", attempt.Err)
+		}
+	}
+
+	// The bring-downs above went straight to the kernel, so nothing has told this
+	// node's own assignment list that the addresses are gone. Without this the
+	// list only ever grows: a released address is still reported as held and
+	// still counted as this node's load (docs/TEST-PLAN.md defect #58).
+	if released := releasedForBookkeeping(attempts); len(released) > 0 {
+		if localMember := m.members.GetMemberByID(localID); localMember != nil {
+			localMember.RemoveActiveIPs(released)
+			m.logger.Info("ENFORCE: dropped released floating IPs from this node's assignments",
+				"count", len(released))
 		}
 	}
 }

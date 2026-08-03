@@ -546,6 +546,76 @@ as neither fixed nor reproduced.
 | TC-6 | #54 duplicate-IP resolution picks the survivor by record order rather than kernel state | **Partly fixed (PR #227 follow-up), not verified live.** Review finding (listed among the smaller ones). `resolveDuplicateAssignments` kept the address on whichever contender sorted first by node ID. When that is not the node actually holding it, the coordinator brings down a live address and leaves the record on a node that may not have it up, so the address is served by nobody until the next orphan sweep re-places it — one avoidable flap per duplicate, and it compounds with #16, which makes a genuine duplicate indistinguishable from a split-brain in the logs. **Only partly fixable as things stand:** no RPC exposes a peer's interface state, so the coordinator can read the kernel for the local node and nothing else. The local node's state therefore decides whenever it is one of the two contenders — which is the common case, since the coordinator running the pass is usually also a holder — and record order remains the deterministic fallback when neither is local or the interfaces cannot be read. Closing it properly needs an interface-state RPC, i.e. a proto change, which does not belong in this branch. Tests: `internal/membership/duplicate_survivor_test.go`; the two behavioural cases fail against record order and the two fallback cases are unchanged by design |
 | TC-3 | #55 loading a config that needs the syslog migration deadlocks the daemon | **Fixed, NOT verified live (2026-07-30).** Found while writing the #42 tests, not on the cluster. `Config.Load()` holds the config mutex for its whole body and calls `migrateConfig`, which persisted through the **exported** `Save()` — the same non-reentrant `sync.Mutex`. Any config on disk whose four syslog fields are all empty is exactly the config the migration fires for, so loading it blocked forever: daemon startup, and every `Reload()` behind a `ConfigSync` or a `Reconfigure`. Not reached on whitecrane because its configs carry syslog settings, and invisible to the existing tests because `PULSEHA_TEST=true` short-circuits both `Load` and `Validate`. **Sixth instance of the exported-method-called-from-a-locked-region shape** in this tree (`RebalanceCluster`, `hasQuorumLocked`, #32's `Load()`/`Save()`, #46's `RemoveMember`, #42's `SetMode` delegation), so the fix is a named `saveLocked()` that documents the contract rather than another ad-hoc unlock/relock. Test: `TestLoadMigratesAnOldConfigWithoutDeadlocking`, which times out at 10s against `d4408e9` |
 | TC-6 | #57 the rebalance's remote bring-up RPC has a flat 5s deadline regardless of batch size, so a large move is reported failed after it succeeded | **New, open, found run 25 (2026-07-31).** `bringIPsOnNodeUp` (`internal/server/server.go:6232`) wraps the remote `BringUpIP` call in `context.WithTimeout(…, 5*time.Second)` with no reference to `len(ips)`. Both storms in run 25 moved 23–24 addresses per batch onto a node that was concurrently bringing up ~71, the RPC exceeded 5s, and node-2 logged `IP_FAILOVER: Failed to bring IPs up remotely … DeadlineExceeded` → `IP_FAILOVER: Some interfaces failed to bring up IPs` → `ACTIVE_CHECK: rebalance move failed count=23/24` — **7 times across the run, every one on a move whose addresses did in fact arrive** (coverage settled `287 unique, duplicated=0, missing=0` both times). Exactly #52's defect on the bring-up side: a flat deadline sized for a smaller unit of work, where #52 fixed the demotion RPC with `DemotionTimeoutFor(ipCount)`. The sibling `bringIPsOnNodeDown` (line 6252) carries the same flat 5s and was not separately measured. Same family as #39/#13/#21/#31 — the returned status is not evidence of what happened — and it matters more than log noise, because `rebalance move failed` is what the coordinator's rebalance loop reads to decide whether the move needs redoing. **This is the residual reason `IP_FAILOVER: Some interfaces failed to bring up IPs` still appears now that #45 is fixed**, so the two must not be confused: check the cause line immediately above it (`DeadlineExceeded` = #57, `unable to bring IP up as netlink failed to do so` = #45) |
+| TC-6 | #59 deleting an assigned group can leave its addresses up permanently, referenced by nothing | **New, open, found 2026-08-03.** `pulsectl group delete VerifyTest --force` on a 12-address group assigned to all four: nodes 2, 3 and 4 released their 3 each, node-1 kept `10.200.0.155/23`, `.159`, `.163` up indefinitely — still there after 2 minutes with no release pass ever running for them, and no group left in config to reference them. Cause: `--force` removes every assignment and deletes the group in **one** config write, so the group is never "configured but unassigned" for long enough for a node's enforce tick to compute surplus; and once it is gone from `config.Groups`, `surplusFloatingIPs` cannot see the addresses at all, because it scans only configured groups (deliberately — anything else would be the node's own addresses). Whichever nodes' tick happens to fall inside the propagation window release; the rest strand. Distinct from #58, and #58's fix is what makes it *visible*: the node now honestly reports `Active` with 3 held, where before every node reported a stale full list and the strand was indistinguishable from the lie. Recovery used here, which doubles as the reproduction in reverse: create a group over exactly the stranded addresses, assign it to the holding node, then `unassign` — that makes them surplus against a *configured* group and the release pass takes them down. Suspected fix: release before the group leaves the config, or refuse `--force` until assignments have been dropped and propagated | 
+| TC-6 | #58 the enforce loop's release pass never updates the node's own assignment list, so a released address is reported as held forever | **Fixed 2026-08-03, VERIFIED FIXED LIVE 2026-08-03.** Live proof: every `ENFORCE: releasing floating IPs this node is no longer assigned … count=N` is paired with `ENFORCE: dropped released floating IPs from this node's assignments count=N` at the same count, on all four nodes (4/1/4/4 pairs), and the node's reported list empties to `Standby` with `ip -4 -o addr show` agreeing. Note the release pass is **not** what `group delete --force` exercises (see #59) — reproducing it needs `unassign` while the group stays configured. Found on whitecrane three days after run 25 ended: `pulsectl status` reported all four nodes `Active` holding 288 addresses of the deleted `RealTest` group while `ip a` showed only each node's own address on all four. The release had worked correctly — one `ENFORCE: releasing floating IPs this node is no longer assigned … count=72` per node at 08:12:11–08:12:24 on 2026-07-31, kernel clean ever since — but `Active IPs` is `member.ActiveIPs` (`internal/cli/status.go:159` ← `internal/server/server.go:1253`), pure in-memory bookkeeping maintained incrementally by `BringUpIP` (append) and the `BringDownIP` RPC handler (subtract). The enforce loop's release pass calls `network.BringIPdown` directly (`internal/membership/ip_monitor_linux.go:440`), bypassing that handler, so in practice the list was append-only. Neither `DeleteGroup` nor `UnassignGroupFromNode` clears it either. It cannot self-heal: `surplusFloatingIPs` only scans *configured* groups, so a deleted group's addresses are outside every set it computes (deliberate, and correct — those would otherwise be the node's own addresses); `deriveExpectedIPs` correctly yields nothing to re-add but never recomputes the list downward; and a peer's copy is only overwritten by a **non-nil** self-report (`internal/server/server.go:4964`), so an empty list reads as "no information" and the stale copy survives every sync. **Not merely cosmetic:** `deriveMemberStatus` reports `Standby` only on an empty list, so all four reported `Active` while serving nothing — #40's operator-visible lie in a new path — and `calculateIPDistribution` (`internal/membership/member_list.go:241`) plus `leastLoadedNodeForGroup` (`internal/server/server.go:3200`) both read `len(ActiveIPs)` as the node's load. Here all four were equally wrong (72 each) with `capacity` unset, so relative balance would have survived, but every absolute-count decision was reading fiction. **Fix:** the release pass now drops what it released from the local member via a new `Member.RemoveActiveIPs` (bookkeeping only — the caller has already brought the addresses down). A release that *failed* on an address the node still holds deliberately stays on the list, so it is retried rather than stranded as #40 did. Tests: `internal/membership/ip_monitor_release_test.go` — `TestReleasedAddressesLeaveTheAssignmentList` (classification: released and vanished drop, failed stays), `TestRemoveActiveIPsDropsOnlyTheGivenAddresses`, `TestRemoveActiveIPsCanEmptyTheList`. **Residual:** the one-line wiring in `ip_monitor_linux.go` is Linux-only and so is covered by the live path, not by these unit tests |
+
+---
+
+## Result 2026-08-03 (run 26) — #58 found, fixed and VERIFIED FIXED LIVE; #59 opened
+
+The cluster was inspected three days after run 25 and the state disagreed with
+run 25's own leave-behind note: `pulsectl status` on all four nodes reported every node `Active`
+with 72 addresses each (288 total) from `RealTest`, while `ip -4 -o addr show enX0` returned only
+`10.200.0.12N/23` on all four, and `RealTest` was absent from `floating_ip_groups` in
+`/etc/pulseha/config.json` on all four. `ip a` was right.
+
+**Run 25's leave-behind is superseded.** It records `RealTest` = 287 assigned to all four and
+settled `72/72/72/71`. The group was in fact unassigned from all four and deleted at 08:12:11 on
+2026-07-31, minutes after that note's window — `Received DeleteGroup request for group: RealTest`
+→ `Successfully deleted group RealTest`, config written 08:13:33. The current groups are
+`Management` (empty) and `test` (empty, on `enX1`). Anything planning to reuse `RealTest` must
+recreate it, DAD-verifying the range first as always.
+
+Diagnosis is in the #58 row. Two things worth keeping separate from it:
+
+- **The release itself was correct, and that is what made the defect hard to see.** Exactly one
+  `ENFORCE: releasing floating IPs this node is no longer assigned … count=72` per node, no
+  `failed to release` lines, and the addresses have stayed down for three days across no restarts
+  (daemons up since 07:44–07:57 on 2026-07-31, all still on
+  `c3b56a2a907cda6f9aa11a13f717356c`). Every mechanism except the bookkeeping did its job, so the
+  only visible symptom was a status output that contradicted the kernel.
+- **The stale state is purely in-memory.** Nothing persists `ActiveIPs`; a rolling restart clears
+  it. `mode: active-active` *is* persisted on all four (under `pulseha.mode`), so the mode
+  survives one. `/run/lbBootFlag` is present, so `lbClearRestart` runs on start — harmless here,
+  there is nothing left for it to wipe.
+
+Unit suite green with `-race` across `internal/`, `packages/` and `cmd/` (12 packages), and the
+tree cross-compiles for `linux/amd64`.
+
+### Live verification (run 26)
+
+Deployed `42085f65900bc0f671058e399ce0cfce` to all four and rolled the restarts one at a time,
+verified via `/proc/MainPID/exe`. Baseline after the restarts was honest and is itself half the
+evidence: all four `Standby`, reported 0, actual 0 — where before the restart the same command
+said `Active` with 72 each.
+
+Group `VerifyTest`, 12 addresses (`10.200.0.152-163`), DAD-verified free first with a **positive
+control that fired** (`10.200.0.1`, `.122`, `.123` all `rc=1` in use; all 12 candidates `rc=0`).
+Assigned to all four on `enX0`, settled to `3/3/3/3` with reported matching actual on every node.
+
+**The fix fires, paired, on all four:** every `ENFORCE: releasing floating IPs this node is no
+longer assigned … count=N` has a matching `ENFORCE: dropped released floating IPs from this
+node's assignments count=N` at the same count — 4 pairs on node-1, 1 on node-2, 4 on node-3, 4 on
+node-4 — and the released node's reported list empties to `Standby` with `ip a` agreeing.
+
+Two traps this run walked into, both worth inheriting:
+
+- **`group delete --force` does not exercise the release pass.** It was the obvious test and it
+  proves nothing about #58: nodes 2/3/4 came clean via the coordinator's redistribution, which
+  goes through the `BringDownIP` RPC and always maintained the list correctly. The pass only fires
+  where a group stays **configured** while ceasing to be assigned — i.e. `unassign`, which is what
+  the original incident used four times over. This is also how #59 was found.
+- **The node clock is behind the workstation's**, so `journalctl --since "12:10"` was a window in
+  the *future* and returned zero of everything — reading exactly like "the code never ran", and it
+  briefly did. `date +"%F %T"` on the node first, every time; the existing warning in this
+  document about the displayed clock is not the only skew on these hosts.
+
+**Leave-behind.** Groups `Management` (empty) and `test` (empty, `enX1`) on all four, consistent —
+verified after cleanup, because the group *deletes* did not propagate (**#43 again**: creates and
+`add-ip` propagated to all four, deletes committed locally only, and a re-broadcast from a node
+that still held the group resurrected it on nodes that had just deleted it). Clearing it needed
+the delete issued on all four **simultaneously**. All four `Standby`, zero floating IPs, running
+`42085f65900bc0f671058e399ce0cfce`, `/run/lbBootFlag` **restored on all four**.
 
 ---
 

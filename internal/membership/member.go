@@ -168,6 +168,46 @@ func (m *Member) AddActiveIPs(ips []string) error {
 	return m.BringUpIPs(added)
 }
 
+// RemoveActiveIPs drops the given IPs from this member's assignment list,
+// leaving the rest untouched. Bookkeeping only: it brings nothing down, because
+// its caller is the release pass, which has already done that.
+//
+// The counterpart to AddActiveIPs, and the reason it exists separately from the
+// BringDownIP RPC handler's inline equivalent: the enforce loop releases
+// addresses locally without going through that handler, so the list it maintains
+// was never updated. Every address the pass released stayed on the list
+// permanently — reported as held by a node serving nothing, and counted as that
+// node's load by placement (docs/TEST-PLAN.md defect #58).
+func (m *Member) RemoveActiveIPs(ips []string) {
+	if len(ips) == 0 {
+		return
+	}
+
+	removed := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		removed[ip] = true
+	}
+
+	m.Lock()
+	defer m.Unlock()
+
+	remaining := make([]string, 0, len(m.ActiveIPs))
+	for _, ip := range m.ActiveIPs {
+		if !removed[ip] {
+			remaining = append(remaining, ip)
+		}
+	}
+	m.ActiveIPs = remaining
+
+	// The same formula AddActiveIPs uses, so the two stay consistent: with no
+	// capacity configured the load factor is not meaningful.
+	if m.Capacity > 0 {
+		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
+	} else {
+		m.LoadFactor = 1.0
+	}
+}
+
 // GetActiveIPs returns a copy of the IPs this member currently hosts.
 //
 // Callers deciding what a node should hold need this under the member lock —

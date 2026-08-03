@@ -307,6 +307,24 @@ type releaseAttempt struct {
 	Err error
 }
 
+// releasedForBookkeeping returns the addresses the release pass has established
+// this node no longer holds, so they can leave its assignment list.
+//
+// A release that succeeded and an address that had already vanished are both
+// "not held": the pass got the state it wanted either way. A release that failed
+// on an address the node still holds is not — dropping it would take the address
+// out of every set the next pass computes, stranding it exactly as defect #40
+// did, so it stays on the list and gets retried.
+func releasedForBookkeeping(attempts []releaseAttempt) []string {
+	var released []string
+	for _, attempt := range attempts {
+		if attempt.Err == nil {
+			released = append(released, attempt.IP)
+		}
+	}
+	return released
+}
+
 // releaseSurplusFloatingIPs brings down each surplus address, checking that the
 // node still holds it immediately before the attempt and, if the attempt fails,
 // immediately after.
