@@ -226,6 +226,23 @@ type Server struct {
 	clusterListenMu   sync.Mutex
 	clusterListenSrv  *grpc.Server
 	clusterListenAddr string
+
+	// onAsyncReconfigure, when non-nil, is called once the Reconfigure that a
+	// full ConfigSync spawns has returned. A test seam, nil in production.
+	//
+	// ConfigSync replies before that goroutine has re-read the config file, and
+	// every harness in this package points the package-level
+	// config.CONFIG_LOCATION at its own t.TempDir(). A test that finishes while
+	// the goroutine is still inside config.Load() therefore lets the *next*
+	// test's setup write the global the goroutine is reading — a real data race
+	// the detector flags intermittently, in the harness rather than in the
+	// daemon. Waiting on the reconfigure instead of on the config pointer is what
+	// makes it deterministic: the pointer it swaps to cannot be distinguished
+	// from the one ConfigSync itself installed when the goroutine wins the race.
+	//
+	// Set it before the first ConfigSync and never afterwards; the goroutine
+	// reads it without synchronisation.
+	onAsyncReconfigure func()
 }
 
 // NewServer creates a new PulseHA server instance
@@ -4878,10 +4895,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 	if isFullConfig {
 		// Drop a snapshot the sender has already superseded. ConfigSync applies a
-		// group wholesale — local is preferred only when the incoming list is
-		// empty — so an older snapshot delivered late used to overwrite a newer
-		// one with no way back (docs/TEST-PLAN.md defect #5). Not an error: the
-		// sender has nothing to fix, the message is simply obsolete.
+		// carried group wholesale, and since defect #43 applies its absence too, so
+		// an older snapshot delivered late used to overwrite a newer one with no way
+		// back (docs/TEST-PLAN.md defect #5) — and now could delete from it. This
+		// guard is what makes absence safe to honour: it is only ever read as a
+		// removal on a payload strictly newer than what this node holds. Not an
+		// error: the sender has nothing to fix, the message is simply obsolete.
 		if !s.shouldApplyIncomingConfig(incomingStamp) {
 			held := s.loadConfigStamp()
 			s.logger.Debug("CONFIG_SYNC: ignoring superseded config",
@@ -4975,8 +4994,37 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		newConfig.Pulse.SyslogFacility = syslogFacilityPreserve
 		newConfig.Pulse.SyslogTag = syslogTagPreserve
 
-		// Merge: preserve/merge groups and interface assignments when missing or empty in incoming
-		if len(newConfig.Groups) == 0 && len(s.config.Groups) > 0 {
+		// Groups: a payload that carries the field is authoritative about it,
+		// including about what is no longer in it (docs/TEST-PLAN.md defect #43).
+		//
+		// This used to merge — "if the incoming list is missing or empty, prefer
+		// mine" — which is unanswerable for a removal, because absence and
+		// emptiness are exactly what a removal looks like on the wire. All three
+		// removing mutations were therefore undone by every receiver:
+		// commitGroupDeletion deletes the key, UnassignGroupFromNode deletes an
+		// interface entry that has no groups left, and RemoveIPFromGroup leaves the
+		// group present with an empty list. Worse, the receiver still answered
+		// Success, so the sender's broadcaster recorded full propagation and
+		// cleared #43's retry state — the repair could never fire, because nothing
+		// reported a failure. On whitecrane a `group delete --force` on the
+		// coordinator propagated write 1 (the release) to all four and write 2 (the
+		// delete) to none, leaving three nodes listing a group the coordinator had
+		// dropped, which is the state that puts a group's addresses outside every
+		// computable set (defect #59).
+		//
+		// Keyed on nil, not on emptiness. nil means the field was absent from the
+		// JSON or explicitly null, which is a sender that has no opinion about
+		// groups — the case the merge was written for, and the only one that still
+		// preserves local. `floating_ip_groups`/`group_assignments` carry no
+		// omitempty and config.New/Load always initialise the maps, so any live
+		// daemon sending a full config emits at least `{}`: "I have no groups" is
+		// distinguishable from "I do not speak groups".
+		//
+		// Safe because this point is past two stamp checks, the second under
+		// s.Lock(): the payload is strictly newer than what this node holds, and
+		// the wholesale semantics are what a newer config already had for a group's
+		// address list. Absence is now ordered on the same clock as content.
+		if newConfig.Groups == nil && len(s.config.Groups) > 0 {
 			// Deep copy local groups
 			newConfig.Groups = make(map[string][]string, len(s.config.Groups))
 			for g, ips := range s.config.Groups {
@@ -4985,24 +5033,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Groups[g] = copySlice
 			}
 		}
-		// For any group present with empty list, prefer local non-empty list
-		if len(s.config.Groups) > 0 {
-			if newConfig.Groups == nil {
-				newConfig.Groups = make(map[string][]string)
-			}
-			for g, localIPs := range s.config.Groups {
-				if len(localIPs) == 0 {
-					continue
-				}
-				incomingIPs, ok := newConfig.Groups[g]
-				if !ok || len(incomingIPs) == 0 {
-					copySlice := make([]string, len(localIPs))
-					copy(copySlice, localIPs)
-					newConfig.Groups[g] = copySlice
-				}
-			}
-		}
-		// Preserve per-node interface group assignments when missing in incoming
+		// Preserve per-node interface group assignments when the incoming node
+		// entry carries none at all — same nil-versus-empty rule as the groups
+		// above, for the same reason.
 		localNodeID, _ := s.config.GetLocalNodeUUID()
 		for nodeID, existing := range s.config.Nodes {
 			if existing == nil {
@@ -5024,23 +5057,11 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Nodes[nodeID] = &copied
 				continue
 			}
-			if len(nIncoming.IPGroups) == 0 && len(existing.IPGroups) > 0 {
+			if nIncoming.IPGroups == nil && len(existing.IPGroups) > 0 {
 				nIncoming.IPGroups = make(map[string][]string, len(existing.IPGroups))
 				for iface, groups := range existing.IPGroups {
 					gg := make([]string, len(groups))
 					copy(gg, groups)
-					nIncoming.IPGroups[iface] = gg
-				}
-			}
-			// For any interface present with empty group list, prefer local list
-			for iface, localGroups := range existing.IPGroups {
-				if len(localGroups) == 0 {
-					continue
-				}
-				incomingGroups, ok := nIncoming.IPGroups[iface]
-				if !ok || len(incomingGroups) == 0 {
-					gg := make([]string, len(localGroups))
-					copy(gg, localGroups)
 					nIncoming.IPGroups[iface] = gg
 				}
 			}
@@ -5319,6 +5340,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				s.logger.Error("Async reconfigure failed after ConfigSync", "error", err)
 			} else {
 				s.logger.Debug("Async reconfigure completed after ConfigSync")
+			}
+			if s.onAsyncReconfigure != nil {
+				s.onAsyncReconfigure()
 			}
 		}()
 	}

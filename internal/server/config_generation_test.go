@@ -63,9 +63,10 @@ func peerConfigWithGroup(s *Server, group string, n int) *config.Config {
 // Every group mutation used to end in a fire-and-forget
 // `go s.broadcastFullConfigToPeers()`, and that goroutine marshalled s.config
 // whenever it happened to be scheduled. N concurrent mutations therefore put N
-// snapshots on the wire with no ordering, and ConfigSync applies a group
-// wholesale — local is preferred only when the incoming list is empty or the
-// group is absent. So an older snapshot arriving last simply overwrote a newer
+// snapshots on the wire with no ordering, and ConfigSync applies a carried group
+// wholesale (and, since defect #43, its absence too — local is preferred only
+// when the payload carries no groups field at all). So an older snapshot arriving
+// last simply overwrote a newer
 // one, and nothing ever corrected it: on whitecrane 200 rapid add-ip calls from
 // a single node left the four configs at 200/189/192/193, still diverged after
 // two minutes, and one further serialised add-ip snapped all four into line.
