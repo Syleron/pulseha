@@ -2744,6 +2744,21 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 	}
 
 	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(member.Status))
+
+	// One interface snapshot for the whole refresh, not one netlink dump per
+	// expected address. network.CheckIfIPExists builds a complete inventory —
+	// every link, both families — on each call, so scanning a 72-address share
+	// cost 72 of them, and this scan's output is a whole-share bring-up
+	// (docs/TEST-PLAN.md defect #64). A dump that fails leaves the lookup nil and
+	// every expected address is treated as missing, which is what the discarded
+	// error here used to achieve by accident.
+	var heldOn func(ip string) (bool, string)
+	if inventory, invErr := network.BuildIPInventory(); invErr != nil {
+		s.logger.Warn("REFRESH: could not read interface addresses; treating every expected address as missing", "error", invErr)
+	} else {
+		heldOn = ipInventoryLookup(inventory)
+	}
+
 	for iface := range node.IPGroups {
 		s.logger.Debug("REFRESH: Processing interface", "iface", iface, "groups", node.IPGroups[iface])
 		ifaceIPs := s.expectedIfaceIPs(localID, iface)
@@ -2752,20 +2767,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 			s.logger.Info("REFRESH: Updating expected IPs for Active node", "iface", iface, "ips", ifaceIPs)
 			s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
 			// Proactively bring up any missing expected IPs on this interface
-			var missing []string
-			for _, ip := range ifaceIPs {
-				ipOnly, _ := utils.GetCIDR(ip)
-				if ipOnly == nil {
-					s.logger.Debug("REFRESH: Skipping invalid IP", "ip", ip)
-					continue
-				}
-				exists, existingIface, _ := network.CheckIfIPExists(ipOnly.String())
-				s.logger.Debug("REFRESH: IP existence check for Active node", "ip", ipOnly.String(), "exists", exists, "existingIface", existingIface, "targetIface", iface)
-				if !exists || existingIface != iface {
-					missing = append(missing, ip)
-					s.logger.Debug("REFRESH: IP is missing and will be brought up", "ip", ip)
-				}
-			}
+			missing := missingOnIface(iface, ifaceIPs, heldOn)
 			if len(missing) > 0 {
 				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(member.Status))
 				_, err := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: missing})
@@ -6096,10 +6098,78 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		return &rpc.UpIpResponse{Success: false, Message: "interface does not exist"}, nil
 	}
 
+	// Normalized once, up front, so the expectation set below can be registered
+	// for the whole request. An address that cannot be parsed rejects the request
+	// without touching the interface — see normalizeUpRequest.
+	normalized, invalid := normalizeUpRequest(req.Ips)
+	if len(invalid) > 0 {
+		s.logger.Error("BringUpIP: rejecting request carrying unparseable addresses",
+			"iface", req.Iface, "invalid", invalid, "of", len(req.Ips))
+		return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
+	}
+
+	// One call for the whole request, not one per address. AddExpectedIPs takes the
+	// monitor lock and calls TriggerEnforce — which starts an enforceExpectations
+	// *goroutine*. Per address, a 62-address request started 62 concurrent enforce
+	// passes, each with its own netlink dump and its own placement loop, racing
+	// this handler's own loop as it brought the rest up. That is the herd #34
+	// removed from the release path by batching RemoveExpectedIPs, left in place on
+	// this one, and it is a large part of how run 32's node-4 came to run 34 enforce
+	// placement batches inside one second (docs/TEST-PLAN.md defects #64, #63).
+	//
+	// Still before the placement below, where the per-address call was: the
+	// expectation has to exist before the address does, or the netlink watcher's
+	// restore path and the enforce pass disagree about whether it belongs here.
+	s.ipMonitor.AddExpectedIPs(req.Iface, normalized)
+
+	// One snapshot for the whole request, so an address this node already holds on
+	// the requested interface costs no syscall to recognise. See placeRequestedIPs
+	// for why that matters and why a failed dump means attempt everything.
+	var heldOn func(ip string) (bool, string)
+	if len(normalized) > 0 {
+		inventory, invErr := network.BuildIPInventory()
+		if invErr != nil {
+			s.logger.Warn("BringUpIP: could not read interface addresses; attempting every requested address",
+				"iface", req.Iface, "error", invErr)
+		} else {
+			heldOn = ipInventoryLookup(inventory)
+		}
+	}
+
+	// Live, per failing address, and only for a failing address: its whole job is
+	// to be newer than the syscall that just failed (#45).
+	liveHeldOnIface := func(ip string) bool {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			return false
+		}
+		ex, eIface, err := network.CheckIfIPExists(ipOnly.String())
+		return err == nil && ex && eIface == req.Iface
+	}
+
+	attempts := placeRequestedIPs(req.Iface, normalized, heldOn, liveHeldOnIface,
+		network.BringIPdown, network.BringIPup)
+	summary := summarizeUpAttempts(attempts)
+
+	// Per address only for the outcome worth reading, as on the release path (#61).
+	for _, attempt := range attempts {
+		if attempt.Outcome == upFailed {
+			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", attempt.IP, "error", attempt.Err)
+		}
+	}
+	if summary.AlreadyHeld > 0 || summary.Moved > 0 || summary.Satisfied > 0 {
+		// The positive control for #64: on a redundant re-place this is the line
+		// that says the request cost nothing. Debug rather than Info because a
+		// converged cluster emits it on every re-place.
+		s.logger.Debug("BringUpIP: addresses that needed no placement",
+			"iface", req.Iface, "alreadyHeld", summary.AlreadyHeld, "movedFromOtherIface", summary.Moved,
+			"heldDespiteFailedAdd", summary.Satisfied, "placed", summary.Placed, "of", len(normalized))
+	}
+
 	// Announcements are collected and sent as one batch once every address is up.
-	// Announcing inside this loop cost about four seconds per address, which for a
-	// large group held this RPC — and the caller waiting on it — open for minutes
-	// (docs/TEST-PLAN.md defects #4/#8).
+	// Announcing inside the placement loop cost about four seconds per address,
+	// which for a large group held this RPC — and the caller waiting on it — open
+	// for minutes (docs/TEST-PLAN.md defects #4/#8).
 	//
 	// Batching moved the announcement after the loop, but the loop still abandons
 	// the request on the first address it cannot bring up — so every exit has to
@@ -6109,18 +6179,12 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// had at least announced each success as it happened.
 	//
 	// The set announced is every address this request got as far as attempting,
-	// not the ones the loop concluded were up. The two rechecks below exist
-	// because a bring-up can report failure for an address the kernel holds
-	// (#45), and an address that appears after the last of them was still lost
-	// from the announcement — #33's residual half. Offering the attempted set is
-	// safe because the batch re-reads each address against the kernel immediately
-	// before its own arping, announcing what the interface holds and returning the
-	// rest as skipped: the kernel decides, at announce time.
-	attempted := make([]string, 0, len(req.Ips))
-	announceAttempted := func() {
-		if len(attempted) == 0 {
-			return
-		}
+	// not the ones the loop concluded were up, and it includes the ones no syscall
+	// was made for — see attemptedIPs. Offering that set is safe because the batch
+	// re-reads each address against the kernel immediately before its own arping,
+	// announcing what the interface holds and returning the rest as skipped: the
+	// kernel decides, at announce time.
+	if attempted := attemptedIPs(attempts); len(attempted) > 0 {
 		skipped, err := network.SendGARPBatch(req.Iface, attempted)
 		if err != nil {
 			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
@@ -6135,70 +6199,16 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		}
 	}
 
-	for _, raw := range req.Ips {
-		ip := raw
-		// Normalize to CIDR
-		if !utils.IsCIDR(ip) {
-			if utils.IsIPv4(ip) {
-				ip = ip + "/32"
-			} else if utils.IsIPv6(ip) {
-				ip = ip + "/128"
-			} else {
-				announceAttempted()
-				return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
-			}
+	// Abandoned on a genuine failure, as before, and after the announcement above:
+	// the addresses placed before it are on the interface either way. The failure
+	// is always the last attempt, since the loop stops at it.
+	if summary.Failed > 0 {
+		message := "failed to bring up IP"
+		if last := attempts[len(attempts)-1]; last.Err != nil {
+			message = last.Err.Error()
 		}
-
-		// Inform monitor of expectation before manipulations
-		s.ipMonitor.AddExpectedIPs(req.Iface, []string{ip})
-
-		// A candidate for announcement from here on, whatever the loop below
-		// concludes about it: only the kernel, read at announce time, can say
-		// whether this node ended up holding it.
-		attempted = append(attempted, ip)
-
-		// Pre-check if already present
-		ipOnly, ipNet := utils.GetCIDR(ip)
-		s.logger.Warn("DEBUG: GetCIDR result", "inputIP", ip, "ipOnly", ipOnly, "ipNet", ipNet)
-		if ipOnly != nil {
-			ex, eIface, checkErr := network.CheckIfIPExists(ipOnly.String())
-			s.logger.Warn("DEBUG: CheckIfIPExists for IP", "ip", ipOnly.String(), "exists", ex, "iface", eIface, "targetIface", req.Iface, "error", checkErr)
-			if ex {
-				if eIface == req.Iface {
-					// Already present on desired interface: announce it and continue
-					s.logger.Info("IP already exists on target interface, skipping", "ip", ip, "iface", req.Iface)
-					continue
-				}
-				// Present on a different interface: try to remove there first (best-effort)
-				_ = network.BringIPdown(eIface, ip)
-			}
-		}
-		if err := network.BringIPup(req.Iface, ip); err != nil {
-			// If add failed, recheck if it is now present on target iface (treat as success)
-			if ipOnly != nil {
-				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
-				if ex && eIface == req.Iface {
-					s.logger.Info("BringUpIP: IP assignment failed but IP is now present on target interface", "ip", ip, "iface", req.Iface)
-					continue
-				}
-			}
-			// Additional fallback check - this prevents the emergency loop
-			s.logger.Warn("BringUpIP failed, doing final verification", "iface", req.Iface, "ip", ip, "error", err)
-			if ipOnly != nil {
-				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
-				if ex && eIface == req.Iface {
-					s.logger.Info("BringUpIP: Final check confirms IP is present on target interface, treating as success")
-					continue
-				}
-			}
-			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", ip, "error", err)
-			announceAttempted()
-			return &rpc.UpIpResponse{Success: false, Message: err.Error()}, nil
-		}
+		return &rpc.UpIpResponse{Success: false, Message: message}, nil
 	}
-
-	// Best-effort announcement of the whole set; the addresses are already up.
-	announceAttempted()
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
 	// call means the coordinator has assigned these IPs to us. Transition to
@@ -6213,7 +6223,11 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 					localMember.Status = membership.StatusActive
 					s.logger.Info("BringUpIP: Transitioned local node to Active for active-active mode")
 				}
-				for _, ip := range req.Ips {
+				// The normalized forms, not the raw request: this list is what
+				// IPMonitor.deriveExpectedIPs matches against the configured group
+				// to decide what this node is still expected to hold, so an entry
+				// spelled differently there is an entry that expectation misses.
+				for _, ip := range normalized {
 					found := false
 					for _, existing := range localMember.ActiveIPs {
 						if existing == ip {
@@ -6226,7 +6240,29 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 					}
 				}
 				localMember.Unlock()
-				s.refreshLocalMonitorExpectedIPs()
+
+				// Deliberately no refreshLocalMonitorExpectedIPs() here. That call
+				// was defect #64's whole-share re-place, and it was this handler
+				// calling it on *every* request that made the flood: the function
+				// rescans the node's entire expected share against the kernel and
+				// issues a fresh s.BringUpIP for everything it finds missing, which
+				// re-enters this handler. So a one-address bring-up arriving mid-
+				// convergence turned into a 62-address bring-up — run 32's node-4
+				// took 17 requests for the 62 addresses that were already its share
+				// plus 14 single-address ones, and the load rejected five correctly
+				// batched requests from #37's new batcher with DeadlineExceeded.
+				// Both the 62s and the 1s were this site, at different points in
+				// convergence; there is no per-address caller of BringUpIP to find.
+				//
+				// Nothing is lost by dropping it. AddExpectedIPs above already woke
+				// the enforce pass exactly once, and that pass does the same job
+				// strictly better: in active-active it re-derives the expectation
+				// set from this node's own assignments rather than trusting whoever
+				// wrote the cache last, takes one interface snapshot for the whole
+				// pass, and places what is missing with placeMissingFloatingIPs.
+				// Role transitions still refresh — SetMode, Promote, MakePassive,
+				// ConfigSync and the election paths all call it — and the 30s
+				// periodic reconcile backs all of them up.
 			}
 		}
 	}
