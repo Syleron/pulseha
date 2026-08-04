@@ -224,7 +224,13 @@ func (m *IPMonitor) periodicReconcile() {
 		case <-m.stopChan:
 			return
 		case <-t.C:
-			m.enforceExpectations()
+			// Through the same gate as every other caller rather than calling the
+			// pass directly, which is how a tick came to run beside a triggered
+			// pass on a converging cluster — two dumps, two placement loops over
+			// the same missing set, two GARP batches (docs/TEST-PLAN.md defect
+			// #63). A tick landing on a pass in flight now queues the follow-up
+			// this loop exists to provide, and the pass it queues is the same pass.
+			m.TriggerEnforce()
 		}
 	}
 }

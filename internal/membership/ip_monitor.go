@@ -44,11 +44,22 @@ type IPMonitor struct {
 	stopChan chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
+
+	// enforceMu guards the two flags below, and is deliberately not the monitor's
+	// own RWMutex: every setter that triggers a pass — UpdateExpectedIPs,
+	// AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce with m.Lock() still
+	// held by a defer, so taking that lock here would wedge the writer.
+	enforceMu      sync.Mutex
+	enforceRunning bool
+	enforcePending bool
+	// enforce is the pass itself, indirected so the coalescing above can be tested
+	// on any platform — enforceExpectations needs netlink, and is a no-op off Linux.
+	enforce func()
 }
 
 // NewIPMonitor creates a new IP monitor
 func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
-	return &IPMonitor{
+	m := &IPMonitor{
 		members:     members,
 		logger:      logger,
 		expectedIPs: make(map[string][]string),
@@ -57,6 +68,8 @@ func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 		stopChan:    make(chan struct{}),
 		done:        make(chan struct{}),
 	}
+	m.enforce = m.enforceExpectations
+	return m
 }
 
 // Start begins monitoring IP addresses
@@ -81,19 +94,86 @@ func (m *IPMonitor) Start() error {
 	return nil
 }
 
-// TriggerEnforce performs an immediate expectations check asynchronously.
+// TriggerEnforce performs an immediate expectations check asynchronously, with at
+// most one pass running and at most one queued behind it.
+//
+// The coalescing is the fix for docs/TEST-PLAN.md defect #63. This used to start a
+// goroutine per call unconditionally, and its callers are expectation writes — so
+// a burst of writes started a burst of passes, each of which took its own netlink
+// dump, recomputed the same missing set, placed the same addresses and announced
+// them through its own SendGARPBatch. That batch's fan-out cap of 32 is per call,
+// so the ceiling was 32 × passes: run 32 settled 62 addresses with 618 per-address
+// placements and put 549 concurrent arping processes on one node, which is #7's
+// saturation shape on the placement path.
+//
+// Deliberately not the reconciliation guard's drop-if-running
+// (startReconcilePassLocked): a pass already in flight may have snapshotted the
+// expectations before this write, so dropping the trigger could lose it entirely.
+// Queueing exactly one follow-up keeps the guarantee every caller relies on — a
+// full pass runs after your write — while collapsing the herd, because the
+// follow-up re-reads the expectation set and the interface from scratch and so
+// covers however many writes arrived while the first pass was busy.
 func (m *IPMonitor) TriggerEnforce() {
 	if m == nil {
 		return
 	}
 	m.logger.Debug("TRIGGER: TriggerEnforce called")
-	select {
-	case <-m.stopChan:
+	if m.stopRequested() {
 		m.logger.Debug("TRIGGER: Skipping enforce - monitor stopped")
 		return
+	}
+
+	m.enforceMu.Lock()
+	if m.enforceRunning {
+		m.enforcePending = true
+		m.enforceMu.Unlock()
+		m.logger.Debug("TRIGGER: enforce pass already running, queued a follow-up")
+		return
+	}
+	m.enforceRunning = true
+	m.enforceMu.Unlock()
+
+	m.logger.Debug("TRIGGER: Launching enforceExpectations goroutine")
+	go m.runEnforcePasses()
+}
+
+// runEnforcePasses runs the pass, then runs it once more for however many
+// triggers arrived while it was running, until none has.
+//
+// The re-check happens after the pass returns rather than before it starts, which
+// is what makes a trigger arriving mid-pass safe to collapse: the next pass begins
+// its work strictly after the last write it is answering.
+//
+// enforceMu is never held across m.enforce(), and that is the invariant that keeps
+// the two locks acyclic: the writers acquire m's write lock and then enforceMu
+// inside TriggerEnforce, and the pass itself acquires m's locks with enforceMu
+// released. Holding it over the pass would order them both ways round.
+func (m *IPMonitor) runEnforcePasses() {
+	for {
+		m.enforce()
+
+		m.enforceMu.Lock()
+		queued := m.enforcePending
+		m.enforcePending = false
+		// A monitor that has stopped abandons the queued pass. Stop is a teardown,
+		// and TriggerEnforce already refuses to start a pass past it.
+		if !queued || m.stopRequested() {
+			m.enforceRunning = false
+			m.enforceMu.Unlock()
+			return
+		}
+		m.enforceMu.Unlock()
+		m.logger.Debug("TRIGGER: running the enforce pass queued during the last one")
+	}
+}
+
+// stopRequested reports whether Stop has been called.
+func (m *IPMonitor) stopRequested() bool {
+	select {
+	case <-m.stopChan:
+		return true
 	default:
-		m.logger.Debug("TRIGGER: Launching enforceExpectations goroutine")
-		go m.enforceExpectations()
+		return false
 	}
 }
 

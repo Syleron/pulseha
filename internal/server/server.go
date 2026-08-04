@@ -6110,7 +6110,10 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 
 	// One call for the whole request, not one per address. AddExpectedIPs takes the
 	// monitor lock and calls TriggerEnforce — which starts an enforceExpectations
-	// *goroutine*. Per address, a 62-address request started 62 concurrent enforce
+	// *goroutine*, coalesced since #63 to one pass in flight and one queued. That
+	// bound is a backstop for this batching, not a replacement: it caps the passes,
+	// while batching is what stops the lock and log churn of a trigger per address.
+	// Per address, a 62-address request started 62 concurrent enforce
 	// passes, each with its own netlink dump and its own placement loop, racing
 	// this handler's own loop as it brought the rest up. That is the herd #34
 	// removed from the release path by batching RemoveExpectedIPs, left in place on
@@ -6281,7 +6284,10 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 
 	// One call for the whole request, not one per address. RemoveExpectedIPs
 	// takes the monitor lock, logs the remaining expectation set, and calls
-	// TriggerEnforce — which starts an enforceExpectations *goroutine*. Per
+	// TriggerEnforce — which starts an enforceExpectations *goroutine*, coalesced
+	// since #63 to one pass in flight and one queued. That bound is a backstop for
+	// this batching, not a replacement: it caps the passes, while batching is what
+	// stops the lock and log churn of a trigger per address. Per
 	// address that was one enforce pass per requested address: 201 of them for a
 	// group-delete, each with its own netlink dump and its own release loop,
 	// running concurrently with this loop as it deleted the rest. Every one of
