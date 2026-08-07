@@ -2553,13 +2553,36 @@ func (s *Server) Reconfigure() error {
 	// (defect #32); a pointer swap leaves those readers on a consistent
 	// snapshot. Same shape as ConfigSync's `s.config = newConfig`.
 	s.logger.Debug("Reloading configuration...")
-	newConfig, err := s.config.Reload()
+	s.RLock()
+	reloadedFrom := s.config
+	s.RUnlock()
+	newConfig, err := reloadedFrom.Reload()
 	if err != nil {
 		return fmt.Errorf("failed to reload config: %v", err)
 	}
 	s.Lock()
-	s.config = newConfig
+	// Only install the reload if nothing replaced the config while we were
+	// reading the file. ConfigSync saves and swaps under this same lock, but the
+	// read above is outside it, so a sync landing in between used to be undone in
+	// memory by a snapshot taken before it existed — the node then served a
+	// config older than the one on its own disk, and broadcast it as its own,
+	// until the next reconfigure happened to correct it. Measured 2026-08-07 on
+	// two back-to-back syncs: disk 120 addresses, memory 100.
+	//
+	// Pointer identity rather than a counter, so this catches every writer that
+	// swaps s.config, not just the ones remembering to bump something. Superseded
+	// means the installed config is already at least as new as what we read, so
+	// there is nothing to do but let the rest of the function work on it.
+	superseded := s.config != reloadedFrom
+	if superseded {
+		newConfig = s.config
+	} else {
+		s.config = newConfig
+	}
 	s.Unlock()
+	if superseded {
+		s.logger.Debug("Reconfigure: a newer config was applied while reloading; keeping it")
+	}
 	// The member list holds its own pointer, and the health checker reads
 	// the config through it, so both go stale without this.
 	s.memberList.UpdateConfig(newConfig)

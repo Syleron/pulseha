@@ -89,3 +89,60 @@ func TestAwaitAsyncReconfiguresBlocksUntilTheSpawnedReconfigureReturns(t *testin
 		t.Fatal("awaitAsyncReconfigures did not return after the reconfigure finished")
 	}
 }
+
+// A reconfigure must not install a config the world has moved past.
+//
+// Reconfigure reads the file and *then* swaps s.config, and the read is not
+// inside the lock the swap takes. ConfigSync saves and swaps under that same
+// lock, so a sync landing between a reconfigure's read and its swap is undone
+// in memory by a snapshot taken before it existed:
+//
+//	sync #1 saves 100, spawns the reconfigure
+//	the reconfigure reads the file          -> 100
+//	sync #2 saves 120 and installs it       -> memory 120, disk 120
+//	the reconfigure takes the lock, swaps   -> memory 100, disk 120
+//
+// The node then serves a config older than the one on its own disk and keeps
+// doing so until something triggers another reconfigure, and it will broadcast
+// that stale config as its own. Instrumented on 2026-08-07: disk=120, mem=100.
+//
+// This is what failed CI on 03ca13d as TestUnversionedConfigSyncStillApplies
+// reading 100 where it wanted 120. That test had been passing by luck — its
+// assertion usually beat the swap — so the defect is much older than the run
+// that caught it.
+func TestAsyncReconfigureDoesNotRevertANewerConfigSync(t *testing.T) {
+	const localID, peerID = "node-local", "node-peer"
+	s, _ := newConfigSyncTestServer(t, localID, peerID)
+
+	states := map[string]membership.MemberStatus{
+		localID: membership.StatusActive,
+		peerID:  membership.StatusActive,
+	}
+	sync := func(addresses int, version int64) {
+		t.Helper()
+		payload, err := buildFullConfigPayload(peerConfigWithGroup(s, "group1", addresses), states, 1,
+			peerID, peerID, configStamp{version: version, origin: peerID})
+		if err != nil {
+			t.Fatalf("buildFullConfigPayload(%d): %v", addresses, err)
+		}
+		resp, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload})
+		if err != nil {
+			t.Fatalf("ConfigSync(%d addresses): %v", addresses, err)
+		}
+		if !resp.GetSuccess() {
+			t.Fatalf("ConfigSync(%d addresses) refused: %s", addresses, resp.GetMessage())
+		}
+	}
+
+	// No wait between them: the second must land inside the first's reconfigure,
+	// which is the whole window under test.
+	sync(100, 42)
+	sync(120, 43)
+
+	s.awaitAsyncReconfigures()
+
+	if got := groupIPCount(s, "group1"); got != 120 {
+		t.Errorf("group size after the reconfigure = %d, want 120 — a stale reload reverted "+
+			"a newer ConfigSync; the node now serves an older config than its own disk", got)
+	}
+}
