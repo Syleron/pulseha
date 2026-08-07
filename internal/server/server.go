@@ -4716,7 +4716,15 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 			finalPort = localNode.Port
 		}
 	}
-	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(req.BindIp), finalPort)
+	// JoinHostPort rather than the FormatIPv6 + "%s:%s" idiom used for the
+	// listener addresses elsewhere in this file: the two are equivalent for every
+	// input (FormatIPv6 brackets a v6 literal and JoinHostPort brackets any host
+	// containing a colon), but `go vet` cannot see through the helper and reports
+	// every "%s:%s" reaching net.Dial as broken for IPv6. Silencing it here keeps
+	// a real finding from being buried in known noise. Only the dial sites are
+	// converted — the listener addresses are string-compared against each other
+	// by clusterListenerServing, so they change together or not at all.
+	address := net.JoinHostPort(utils.SanitizeIPv6(req.BindIp), finalPort)
 	readyDeadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(readyDeadline) {
 		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
@@ -5997,7 +6005,9 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 
 		// Wait briefly for the cluster listener to become ready after resync
 		if localNode, err := s.config.GetLocalNode(); err == nil {
-			address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
+			// JoinHostPort for the same reason as the dial probe above: equivalent
+			// to FormatIPv6 + "%s:%s", but visible to `go vet`.
+			address := net.JoinHostPort(utils.SanitizeIPv6(localNode.IP), localNode.Port)
 			readyDeadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(readyDeadline) {
 				conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
