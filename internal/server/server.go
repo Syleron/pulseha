@@ -130,11 +130,11 @@ func callerAddr(ctx context.Context) string {
 // Server represents the PulseHA server
 type Server struct {
 	sync.RWMutex
-	config        *config.Config
-	logger        *log.Logger
-	memberList    *membership.MemberList
-	healthCheck   *membership.HealthChecker
-	ipMonitor     *membership.IPMonitor
+	config      *config.Config
+	logger      *log.Logger
+	memberList  *membership.MemberList
+	healthCheck *membership.HealthChecker
+	ipMonitor   *membership.IPMonitor
 
 	// peerBringUp coalesces per-address peer bring-ups (defect #37); see
 	// peerBringUpQueue for why it is built lazily.
@@ -7255,6 +7255,61 @@ func (s *Server) stopConfigBroadcaster() {
 	}
 }
 
+// Config-push deadline sizing.
+//
+// A flat 2s on every ConfigSync push was defect #62. Building a 248-address
+// group with back-to-back add-ip calls left one peer without the group key at
+// all for ~3 minutes: the sender logged `CONFIG_BROADCAST: ConfigSync failed,
+// will retry … error=DeadlineExceeded` through all four attempts, and only
+// #43's 40s re-push eventually carried it — while every one of those mutations
+// had already returned success to the operator.
+//
+// The defect was written up as #57's mistake on the config path, and the fix
+// shape it suggested was to scale with the payload. Measuring the receiver says
+// the shape is right but the reason is not, and the difference decides the
+// numbers. The payload-proportional half of the handler — three full parses of
+// the message, the group deep-copies, the MarshalIndent and the file write —
+// costs well under a millisecond per KiB (~1ms for the 9KiB payload run 32
+// timed out on, ~4ms at 5000 addresses). The payload is not what overran 2s.
+//
+// What overran it is everything the handler has to get past before it can start:
+// s.Lock(), which every group mutation and the sync's own predecessors hold,
+// and the member-list write lock inside UpdateConfig, which the health-check
+// cycle holds while it does IP work. On top of that the RPC pays for the
+// transport itself — grpc.NewClient dials lazily, so a cached but idle peer
+// client establishes TCP, TLS and the HTTP/2 handshake inside this deadline. A
+// receiver in the middle of the burst that produced the config is the normal
+// case for this RPC, not the pathological one.
+//
+// So the base carries the fix and is sized for a busy receiver, while the
+// per-KiB term keeps the deadline from being blind to the payload the way the
+// flat 2s was. That coefficient is headroom, not the measurement above: a bigger
+// config also means more enforce work, more netlink and more member state in
+// flight on the node receiving it.
+//
+// The cap is where this deadline hands over to #43's retry, and the two cover
+// different faults on purpose. A *busy* peer is what a deadline should wait out;
+// an *unavailable* one — run 32's coordinator was unresponsive for ~40s — is
+// what the retry exists for, and blocking the broadcaster on it only delays the
+// next config behind a peer that is not going to answer either way.
+const (
+	configSyncBaseTimeout   = 10 * time.Second
+	configSyncPerKiBTimeout = 250 * time.Millisecond
+	configSyncMaxTimeout    = 20 * time.Second
+)
+
+func configSyncTimeoutFor(payloadBytes int) time.Duration {
+	if payloadBytes < 0 {
+		payloadBytes = 0
+	}
+	kib := (payloadBytes + 1023) / 1024
+	timeout := configSyncBaseTimeout + time.Duration(kib)*configSyncPerKiBTimeout
+	if timeout > configSyncMaxTimeout {
+		return configSyncMaxTimeout
+	}
+	return timeout
+}
+
 // broadcastConfigToPeersOnce snapshots the config under the read lock, then
 // pushes it to every peer, retrying the ones that fail.
 //
@@ -7311,7 +7366,7 @@ func (s *Server) broadcastConfigToPeersOnce() {
 			if err != nil {
 				continue
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payloadBytes)))
 			resp, err := remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
 			cancel()
 			switch {
@@ -7544,7 +7599,7 @@ func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberSta
 		if err != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payloadBytes)))
 		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
 		cancel()
 	}
@@ -7564,7 +7619,7 @@ func (s *Server) broadcastFullConfigToPeers() {
 		if err != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(configBytes)))
 		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: configBytes})
 		cancel()
 	}
