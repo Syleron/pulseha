@@ -89,7 +89,16 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 		ml.GetMemberByID(id).Status = membership.StatusActive
 	}
 
-	return &Server{config: cfg, logger: logger, memberList: ml}, ml
+	s := &Server{config: cfg, logger: logger, memberList: ml}
+
+	// Registered last, so it runs first: cleanups are LIFO, and both the
+	// CONFIG_LOCATION restore above and t.TempDir's own removal are writes that
+	// race a reconfigure goroutine still reading the file. Waiting here bounds
+	// that goroutine to the test that spawned it, which is what every ConfigSync
+	// call site would otherwise have to remember to do individually.
+	t.Cleanup(s.awaitAsyncReconfigures)
+
+	return s, ml
 }
 
 // Regression for docs/TEST-PLAN.md defect #28. SetMode propagates the new mode

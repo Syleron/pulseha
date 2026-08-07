@@ -248,6 +248,25 @@ type Server struct {
 	// Set it before the first ConfigSync and never afterwards; the goroutine
 	// reads it without synchronisation.
 	onAsyncReconfigure func()
+
+	// asyncReconfigures counts the Reconfigure goroutines full ConfigSyncs have
+	// spawned and not yet finished, so awaitAsyncReconfigures can wait them out.
+	//
+	// This is the bound onAsyncReconfigure above does not provide. That hook
+	// makes one reconfigure observable to a caller that chooses to wait; this
+	// makes every in-flight one waitable from a single place, which is what a
+	// test harness needs — thirteen of the fourteen ConfigSync call sites in this
+	// package's tests never waited, and each left a goroutine reading
+	// config.CONFIG_LOCATION past the end of the test that started it.
+	asyncReconfigures sync.WaitGroup
+}
+
+// awaitAsyncReconfigures blocks until every Reconfigure goroutine spawned by a
+// full ConfigSync has returned. Used by the test harnesses in this package to
+// keep a goroutine from outliving the test that started it; harmless in
+// production, where nothing calls it.
+func (s *Server) awaitAsyncReconfigures() {
+	s.asyncReconfigures.Wait()
 }
 
 // NewServer creates a new PulseHA server instance
@@ -5374,7 +5393,11 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 	// Only reconfigure when full config changed; skip for envelope-only state updates
 	if isFullConfig {
+		// Counted before the spawn, not inside it: a Wait racing the goroutine's
+		// own Add would return before the reconfigure had started.
+		s.asyncReconfigures.Add(1)
 		go func() {
+			defer s.asyncReconfigures.Done()
 			if err := s.Reconfigure(); err != nil {
 				s.logger.Error("Async reconfigure failed after ConfigSync", "error", err)
 			} else {
