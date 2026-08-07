@@ -2918,6 +2918,55 @@ Group deleted, all four back to zero.
   landed ~110s in) and `71/72/71/72` 50s after the burst, both settling correctly afterwards. Reading
   either as a result would have produced a false finding in both directions.
 
+## 2026-08-07 (run 34) — #66 VERIFIED FIXED LIVE; the first run on an IPv6-only whitecrane
+
+Binary `ecd40850aa1fdc16bc22cc68a1230501` (`5268ce8`) on all four, md5-checked against
+`/proc/MainPID/exe`, rolling restart passives-first. **The first run since the cluster was reset onto
+`2a02:1648:3008:1:202::121-124` with no IPv4 address on any interface** (2026-08-05), which is what
+exposed #66 in the first place: `SendGARP` execed `arping -U` for every family, so on this cluster
+nothing was ever announced and every placement logged `failed to GARP. exit status 2`.
+
+Shape: group `Run34` = 8 addresses `2a02:1648:3008:1:202::a001-a008/64` on `enX0`, assigned to all
+four in **active-passive**, so all 8 landed on the Active (node-4) within 5s, no `dadfailed` — that
+range is free. `ndptool monitor` running on a **different** node for the whole window.
+
+- **#66 fixed.** **4 unsolicited NAs from node-4's link-local, one per placement**, for the 4
+  addresses added while the group was already assigned; plus **1 solicited NA from `::a008` itself**,
+  i.e. the address is answering NDP rather than merely being configured. **0** `failed to announce` /
+  `failed to GARP` lines on node-4 across the window. The counterfactual was measured directly rather
+  than assumed: `arping -U -c 1` against a v6 address the node **does** hold exits 2, so the old
+  binary would have logged one failure per address. Placement and release were unaffected — 8/8 up,
+  0 strays after the group went.
+- **The instrument nearly produced a false pass, and this is the run's most transferable lesson.**
+  The first monitor log had **0 lines — zero of everything, not zero NAs** — while the unit sat
+  `active`: `ndptool monitor > file` block-buffers. What exposed it was a **hand-sent control NA that
+  also failed to appear**; `stdbuf -oL` fixed it. Without that control the empty log reads exactly
+  like "the fix does not announce". Two further traps: the log contains NUL bytes, so plain `grep`
+  says `binary file matches` and counts nothing (use `grep -a`), and **`ndptool monitor` prints only
+  the source and the type, never the NA's target** — attribution is by the sender's link-local, not
+  by the floating IP.
+- **`packages/network`'s Debug lines never reach the journal at any `logging_level`** (its
+  package-level logger stays at Info), so `Announcing floating IP … via ndptool` will never appear and
+  its absence proves nothing. On this path the decisive evidence is on the wire, not in the log; the
+  `failed to announce` count is the journal-side control.
+- **Not a regression, but recorded:** the first `group delete Run34 --force` was refused —
+  `failed to release 8 floating IP(s)` with `DeadlineExceeded … while waiting for connections to
+  become ready` from nodes 1/2/3, **which held none of the 8**. #60's confirm-gate behaved correctly
+  (group left configured, zero strays), all three were healthy at sub-ms latency seconds later, and an
+  immediate retry succeeded. That is the #62/#57 flat-deadline shape on the release path — a lazy dial
+  needing a moment to become ready, reported as a failed release. Note run 35 later pinned the same
+  lazy-dial mechanism as part of #62's real cause.
+- **The cluster disappeared off the network for ~20 minutes mid-session** — all four, both stacks,
+  with the segment gateway still answering ping6 — and came back by itself with no daemon restart. It
+  blocked the first deploy attempt of this fix (`No route to host` to all four). Retry before
+  diagnosing.
+
+### Leave-behind
+
+All four on `ecd40850aa1fdc16bc22cc68a1230501` (`5268ce8`), `Management` only and empty, zero floating
+addresses, **active-passive** with node-4 Active, `/run/lbBootFlag` restored, monitor unit stopped and
+its root-owned log removed.
+
 ## 2026-08-07 (run 35) — #62's coalescing half VERIFIED FIXED LIVE; the deadline half could not be made to fire
 
 Two A/B pairs on the same cluster within one hour, which is the only reason the numbers mean
