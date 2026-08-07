@@ -7144,14 +7144,20 @@ func (s *Server) startConfigBroadcaster() {
 				retry = nil
 			}
 			for {
+				mutated := false
 				select {
 				case <-s.broadcastStop:
 					stopRetry()
 					return
 				case <-s.broadcastTrigger:
+					mutated = true
 				case <-retry:
 				}
 				stopRetry()
+
+				if mutated && !s.lingerForMoreMutations() {
+					return
+				}
 
 				s.broadcastConfigToPeersOnce()
 
@@ -7165,6 +7171,59 @@ func (s *Server) startConfigBroadcaster() {
 			}
 		}()
 	})
+}
+
+// configBroadcastLinger is how long the broadcaster waits after a mutation
+// before pushing, so a burst of them costs one push rather than one each.
+//
+// The trigger channel already coalesces *concurrent* mutations: it holds one
+// slot and the send is non-blocking, so anything that lands while a broadcast is
+// in flight folds into the next one. Serial mutations get no such benefit. Since
+// #37 an `add-ip` completes in ~38ms and a healthy broadcast finishes well
+// inside that, so the 248 back-to-back adds that produced defect #62 produced
+// ~248 broadcasts — 744 ConfigSync RPCs at the receivers, each one a parse, a
+// file write, a member-list reload and a `go Reconfigure()`. That is the "every
+// version is pushed separately" half of #62: the deadline fix stops the pushes
+// being abandoned, this stops most of them being made. The receiver those
+// pushes saturate is the same receiver whose slowness the deadline had to
+// absorb, so the two fixes work the same problem from both ends.
+//
+// The window is FIXED, not sliding, for the reason #37 settled on the same
+// shape for the bring-up fan-out: a sliding window resets on every mutation, so
+// a long enough burst starves the push entirely and the config propagates only
+// once the operator stops typing. A fixed window bounds the delay for any single
+// mutation at one window and caps the push rate at one per window however long
+// the burst runs.
+//
+// Only a mutation lingers. A retry firing is already late by construction and
+// re-pushes immediately.
+const configBroadcastLinger = 250 * time.Millisecond
+
+// lingerForMoreMutations waits out the window and then consumes any trigger that
+// arrived inside it, reporting false if the broadcaster was stopped instead.
+//
+// Draining before the caller broadcasts is what makes the coalescing real: the
+// snapshot taken next carries every mutation that landed during the window, so
+// leaving their triggers behind would push the same config again. It also
+// restores the "superseded by a newer broadcast" check in
+// broadcastConfigToPeersOnce, which reads the same channel — under a burst that
+// check used to see a non-empty trigger on every retry and abandon the pass.
+//
+// A mutation landing between the drain and the snapshot is not lost either way:
+// it is either included in the snapshot, or it re-arms the trigger and gets the
+// next window.
+func (s *Server) lingerForMoreMutations() bool {
+	select {
+	case <-s.broadcastStop:
+		return false
+	case <-time.After(configBroadcastLinger):
+	}
+
+	select {
+	case <-s.broadcastTrigger:
+	default:
+	}
+	return true
 }
 
 // unpropagatedConfig is a config version this node committed but could not push
