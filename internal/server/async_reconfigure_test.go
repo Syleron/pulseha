@@ -146,3 +146,47 @@ func TestAsyncReconfigureDoesNotRevertANewerConfigSync(t *testing.T) {
 			"a newer ConfigSync; the node now serves an older config than its own disk", got)
 	}
 }
+
+// The other half of that guard: a reload nothing superseded must be installed.
+//
+// Without this, "never install" is indistinguishable from the fix. Inverting the
+// condition kills no other test in the package, because every one of them either
+// drives Reconfigure through a ConfigSync that already installed the payload
+// itself, or runs under the harness's PULSEHA_TEST, where config.Load returns
+// before touching the disk and a reload is a content no-op. Both make the swap
+// unobservable, so both would pass a Reconfigure that threw its reload away and
+// left the node serving a config older than its own disk — the same end state as
+// defect #67, reached from the opposite direction.
+func TestReconfigureInstallsAReloadNothingSuperseded(t *testing.T) {
+	const localID, peerID = "node-local", "node-peer"
+	s, _ := newConfigSyncTestServer(t, localID, peerID)
+
+	// Turning PULSEHA_TEST off is what gives this test its teeth: it is the flag
+	// that makes config.Load skip the disk read. Validate's full path runs as a
+	// result, which the harness config satisfies — the local node is present in
+	// Nodes and every interval is above its minimum.
+	t.Setenv("PULSEHA_TEST", "")
+
+	// Written straight to the file rather than through a ConfigSync. A sync
+	// installs its own payload in memory, which leaves the reload with nothing to
+	// carry and proves nothing about whether the result was installed.
+	onDisk := peerConfigWithGroup(s, "group1", 150)
+	if err := onDisk.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if got := groupIPCount(s, "group1"); got == 150 {
+		t.Fatalf("memory already holds the config written to disk; the reload has nothing to install")
+	}
+
+	// The rebind that follows the swap fails, by design: the harness addresses the
+	// node in TEST-NET-1 so no socket outlives the test. The swap happens well
+	// before it, so the error is expected rather than the subject — it is reported
+	// only if the assertion below fails, where it would be the likelier cause.
+	reconfigureErr := s.Reconfigure()
+
+	if got := groupIPCount(s, "group1"); got != 150 {
+		t.Errorf("group size after a reconfigure nothing superseded = %d, want 150 — the "+
+			"reload was discarded and the node keeps serving a config older than its own "+
+			"disk (Reconfigure returned %v)", got, reconfigureErr)
+	}
+}
