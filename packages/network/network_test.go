@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -284,6 +285,87 @@ func TestAddressAbsentFromReadsTheInterfaceItIsGiven(t *testing.T) {
 	// interface is the same exit-2 failure.
 	if !addressAbsentFrom("lo", ip.String()) {
 		t.Errorf("%s reported as held by lo, but it is on %s", ip, iface)
+	}
+}
+
+// Defect #66. The announcement was ARP-only: SendGARP execed `arping -U` for every
+// address regardless of family, so on an IPv6-only cluster every floating IP failed
+// to announce and neighbours kept the old owner's MAC until their NDP cache aged
+// out. Confirmed live on whitecrane — `arping -U -c 1 -I enX0 <v6 addr>` on a node
+// that HELD the address exits 2 with "Address family for hostname not supported",
+// which is also the exit code #33 reads as "the interface does not hold this".
+//
+// The family choice is a pure function so it can be tested without a network, a
+// Linux host, or either binary installed: what went wrong was the argv, not the
+// fan-out around it.
+func TestTheAnnouncementMatchesTheAddressFamily(t *testing.T) {
+	cases := []struct {
+		name     string
+		ip       string
+		wantName string
+		wantArgs []string
+	}{
+		{
+			name:     "IPv4 announces with gratuitous ARP",
+			ip:       "10.200.0.155",
+			wantName: "arping",
+			wantArgs: []string{"-U", "-c", "5", "-I", "enX0", "10.200.0.155"},
+		},
+		{
+			name:     "IPv4 in CIDR form drops the mask",
+			ip:       "10.200.0.155/23",
+			wantName: "arping",
+			wantArgs: []string{"-U", "-c", "5", "-I", "enX0", "10.200.0.155"},
+		},
+		{
+			// The whitecrane cluster's own form. `send` is a subcommand, not a flag,
+			// and -T is the target: ndptool with neither sends nothing.
+			name:     "IPv6 announces with an unsolicited neighbour advertisement",
+			ip:       "2a02:1648:3008:1:202::155",
+			wantName: "ndptool",
+			wantArgs: []string{"-t", "na", "-U", "-i", "enX0", "-T", "2a02:1648:3008:1:202::155", "send"},
+		},
+		{
+			name:     "IPv6 in CIDR form drops the prefix length",
+			ip:       "2a02:1648:3008:1:202::155/64",
+			wantName: "ndptool",
+			wantArgs: []string{"-t", "na", "-U", "-i", "enX0", "-T", "2a02:1648:3008:1:202::155", "send"},
+		},
+		{
+			// A v4-mapped address is an IPv4 address wearing v6 clothes; ARP is
+			// still what answers for it. normalizeIP already draws this line for
+			// the inventory, so the announcement must draw it the same way.
+			name:     "a v4-mapped address is still ARP",
+			ip:       "::ffff:10.200.0.155",
+			wantName: "arping",
+			wantArgs: []string{"-U", "-c", "5", "-I", "enX0", "10.200.0.155"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name, args, err := announceCommand("enX0", tc.ip)
+			if err != nil {
+				t.Fatalf("announceCommand(%q) returned error: %v", tc.ip, err)
+			}
+			if name != tc.wantName {
+				t.Errorf("announced with %q, want %q", name, tc.wantName)
+			}
+			if !slices.Equal(args, tc.wantArgs) {
+				t.Errorf("argv %q, want %q", args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+// An unannounceable address must be reported, not handed to a command that would
+// fail obscurely — this is the branch that used to let a v6 address through to
+// arping.
+func TestAnUnparseableAddressIsNotAnnounced(t *testing.T) {
+	for _, ip := range []string{"", "not-an-address", "10.200.0.999", "10.200.0.0/99"} {
+		if name, args, err := announceCommand("enX0", ip); err == nil {
+			t.Errorf("announceCommand(%q) returned %q %q, want an error", ip, name, args)
+		}
 	}
 }
 

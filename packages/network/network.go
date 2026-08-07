@@ -168,32 +168,63 @@ func parseTargetIP(ipAddr string) (net.IP, error) {
 	return nil, errors.New("unsupported IP address family for: " + ipAddr)
 }
 
+// announceCommand returns the command that tells the segment this interface now
+// answers for ip: gratuitous ARP for IPv4, an unsolicited neighbour advertisement
+// for IPv6.
+//
+// Defect #66. Announcing was ARP-only — `arping -U` for every address whatever its
+// family — which on an IPv6-only cluster means no floating IP is ever announced and
+// neighbours keep the previous owner's MAC until their NDP cache ages out. Worse
+// than silent: `arping -U` against a v6 address exits **2**, the same code #33
+// reads as "the interface does not hold this address", so the one channel that
+// defect is scored on reports a constant instead of a signal.
+//
+// A v4-mapped address is an IPv4 address in v6 clothing and ARP still answers for
+// it, so the family line is drawn with normalizeIP — the same line BuildIPInventory
+// draws, because an announcement that disagreed with the inventory would announce
+// on one family and be liveness-checked on the other.
+//
+// Split out from SendGARP and kept pure so the argv is testable without a network,
+// a Linux host, or either binary installed: what #66 got wrong was the argv, not
+// the fan-out around it. NOTE: assumes Linux with "arping" and "ndptool" installed.
+func announceCommand(iface, ip string) (string, []string, error) {
+	target, err := parseTargetIP(ip)
+	if err != nil {
+		return "", nil, err
+	}
+	if target == nil {
+		return "", nil, errors.New("invalid IP address: " + ip)
+	}
+
+	if target.To4() != nil {
+		return "arping", []string{"-U", "-c", "5", "-I", iface, target.String()}, nil
+	}
+	// `send` is a subcommand and -T is the ICMPv6 target: ndptool with either
+	// missing sends nothing. The tree carried a dead IPv6NDP(iface) helper with
+	// neither, which is why this looked handled and was not.
+	return "ndptool", []string{"-t", "na", "-U", "-i", iface, "-T", target.String(), "send"}, nil
+}
+
 /*
 *
-Send Gratuitous ARP to automagically tell the router who has the new floating IP
-NOTE: This function assumes the OS is LINUX and has "arping" installed.
+Announce a floating IP so the segment learns which node now answers for it —
+gratuitous ARP for IPv4, an unsolicited neighbour advertisement for IPv6.
+NOTE: This function assumes the OS is LINUX with "arping"/"ndptool" installed.
 */
 func SendGARP(iface, ip string) error {
 	exists, _ := InterfaceExist(iface)
 	if !exists {
-		log.Error("Unable to GARP as the network interface does not exist")
+		log.Error("Unable to announce as the network interface does not exist")
 		return errors.New("network interface does not exist")
 	}
-	var garpIP net.IP
-	if parsedIP := net.ParseIP(ip); parsedIP != nil {
-		garpIP = parsedIP
-	} else {
-		parsedIP, _, err := net.ParseCIDR(ip)
-		if err != nil {
-			log.Error("failed to GARP. Cannot parse IP address", "value", ip, "error", err)
-			return err
-		}
-		garpIP = parsedIP
-	}
-	log.Debug("Sending gratuitous arp for " + garpIP.String() + " on interface " + iface)
-	_, err := utils.ExecuteWithTimeout(garpTimeout, "arping", "-U", "-c", "5", "-I", iface, garpIP.String())
+	name, args, err := announceCommand(iface, ip)
 	if err != nil {
-		log.Error("failed to GARP. " + err.Error())
+		log.Error("failed to announce. Cannot parse IP address", "value", ip, "error", err)
+		return err
+	}
+	log.Debug("Announcing floating IP", "ip", ip, "iface", iface, "via", name)
+	if _, err := utils.ExecuteWithTimeout(garpTimeout, name, args...); err != nil {
+		log.Error("failed to announce. "+err.Error(), "ip", ip, "via", name)
 		return err
 	}
 	return nil
@@ -604,17 +635,10 @@ func ArpScan(addrWSubnet string) string {
 	return output
 }
 
-/*
-*
-Send the eq. of IPv4 arping with IPv6
-*/
-func IPv6NDP(ipv6Iface string) string {
-	output, err := utils.Execute("ndptool", "-t", "na", "-U", "-i", ipv6Iface)
-	if err != nil {
-		return err.Error()
-	}
-	return output
-}
+// IPv6NDP is gone (defect #66). It was the intended IPv6 announcer and had never
+// been called by anything: it took no target address and omitted ndptool's `send`
+// subcommand, so it could not have announced anything if it had been. The working
+// form lives in announceCommand, on the path every caller already uses.
 
 /*
 *
