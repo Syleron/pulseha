@@ -140,6 +140,13 @@ type Server struct {
 	// peerBringUpQueue for why it is built lazily.
 	peerBringUpMu sync.Mutex
 	peerBringUp   *peerBringUpBatcher
+
+	// vipReconcile coalesces the post-load VIP reconcile, which loadInitialMembers
+	// schedules on every full ConfigSync (defect #65). Lazily built for the same
+	// reason as peerBringUp.
+	vipReconcileMu sync.Mutex
+	vipReconcile   *vipReconciler
+
 	quorumManager *quorum.QuorumManager
 	quorumHandler *quorum.RPCHandler
 	grpcServer    *grpc.Server
@@ -832,21 +839,19 @@ func (s *Server) loadInitialMembers() error {
 
 	// After members are loaded, perform one-shot VIP reconcile on local node.
 	// The config half of the decision is taken here, synchronously; see
-	// snapshotVIPGroups for why it cannot wait for the goroutine.
+	// snapshotVIPGroups for why it cannot wait for the pass.
+	//
+	// Scheduled rather than spawned: this function runs on every full ConfigSync,
+	// so a burst of mutations used to put one whole-share bring-up — and one
+	// whole-share announcement — on every peer per mutation (docs/TEST-PLAN.md
+	// defect #65). See vipReconciler.
 	if localID, err := s.config.GetLocalNodeUUID(); err == nil {
 		groupIPs, activeActive := s.snapshotVIPGroups(localID)
-		go func() {
-			// small delay to ensure listeners up
-			time.Sleep(500 * time.Millisecond)
-			plan, claim := s.reconcileVIPPlan(localID, groupIPs, activeActive)
-			for iface, ips := range plan {
-				if claim {
-					_, _ = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ips})
-				} else {
-					_, _ = s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips})
-				}
-			}
-		}()
+		s.vipReconcileQueue().Schedule(vipReconcileSnapshot{
+			localID:      localID,
+			groupIPs:     groupIPs,
+			activeActive: activeActive,
+		})
 	}
 
 	return nil
