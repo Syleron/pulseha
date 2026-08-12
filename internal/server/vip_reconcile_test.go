@@ -317,7 +317,7 @@ func TestVIPReconcileTargetsNarrowsAClaimToMissingAddresses(t *testing.T) {
 		"eth1": {"10.0.1.1/24", "10.0.1.2/24", "10.0.0.9/24"},
 	}
 
-	targets := vipReconcileTargets(plan, true, heldOn)
+	targets, _ := vipReconcileTargets(plan, true, heldOn)
 
 	if _, ok := targets["eth0"]; ok {
 		t.Errorf("eth0 stayed in the plan with nothing missing: %v", targets["eth0"])
@@ -340,7 +340,7 @@ func TestVIPReconcileTargetsLeavesAReleaseWhole(t *testing.T) {
 	heldOn := func(ip string) (bool, string) { return true, "eth0" }
 	plan := map[string][]string{"eth0": {"10.0.0.1/24", "10.0.0.2/24"}}
 
-	targets := vipReconcileTargets(plan, false, heldOn)
+	targets, _ := vipReconcileTargets(plan, false, heldOn)
 
 	if !slices.Equal(targets["eth0"], plan["eth0"]) {
 		t.Errorf("targets[eth0] = %v, want the whole plan %v", targets["eth0"], plan["eth0"])
@@ -354,7 +354,7 @@ func TestVIPReconcileTargetsLeavesAReleaseWhole(t *testing.T) {
 func TestVIPReconcileTargetsWithoutKernelStateClaimsEverything(t *testing.T) {
 	plan := map[string][]string{"eth0": {"10.0.0.1/24", "10.0.0.2/24"}}
 
-	targets := vipReconcileTargets(plan, true, nil)
+	targets, _ := vipReconcileTargets(plan, true, nil)
 
 	if !slices.Equal(targets["eth0"], plan["eth0"]) {
 		t.Errorf("targets[eth0] = %v, want the whole plan %v", targets["eth0"], plan["eth0"])

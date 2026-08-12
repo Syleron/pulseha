@@ -392,3 +392,54 @@ func aLocalIPv4ForTest() (string, net.IP, bool) {
 	}
 	return "", nil, false
 }
+
+// requireAnnouncer has to name what is missing and cache the answer, since a
+// whole-group announce calls it once an address.
+//
+// Nothing probed for the announcer binaries before this, so on a host without
+// ndptool every IPv6 announce failed as a bare exec error — one line per floating
+// IP, none of them saying which binary was absent. Worth noting the argv itself is
+// verified on real hardware: run 34 captured four unsolicited NAs on the wire from
+// it on an IPv6-only whitecrane, so this guard is about the hosts that are not
+// that one.
+func TestRequireAnnouncerReportsWhatIsMissing(t *testing.T) {
+	announcerPaths.Delete("pulseha-no-such-announcer")
+
+	_, err := requireAnnouncer("pulseha-no-such-announcer")
+	if err == nil {
+		t.Fatal("requireAnnouncer succeeded for a binary that cannot exist")
+	}
+	for _, want := range []string{"pulseha-no-such-announcer", "not found on PATH", "arping", "ndptool"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q; an operator reading one line per "+
+				"address needs to know which package to install", err, want)
+		}
+	}
+
+	// Cached, and the cached value is the same failure rather than a retry.
+	if _, ok := announcerPaths.Load("pulseha-no-such-announcer"); !ok {
+		t.Error("the lookup was not cached, so a 288-address announce would re-probe PATH 288 times")
+	}
+	if _, again := requireAnnouncer("pulseha-no-such-announcer"); again == nil ||
+		again.Error() != err.Error() {
+		t.Errorf("second call returned %v, want the cached %v", again, err)
+	}
+}
+
+// A binary that does exist resolves to a path and caches as a success, so the guard
+// cannot turn into a per-address failure on a correctly provisioned host.
+func TestRequireAnnouncerResolvesAnExistingBinary(t *testing.T) {
+	const name = "sh"
+	announcerPaths.Delete(name)
+
+	path, err := requireAnnouncer(name)
+	if err != nil {
+		t.Fatalf("requireAnnouncer(%q) = %v, want it found", name, err)
+	}
+	if path == "" {
+		t.Error("resolved to an empty path")
+	}
+	if cachedPath, again := requireAnnouncer(name); again != nil || cachedPath != path {
+		t.Errorf("second call returned (%q, %v), want the cached (%q, nil)", cachedPath, again, path)
+	}
+}

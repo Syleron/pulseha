@@ -49,3 +49,10 @@ jobs:
     # about them.
     - name: Test (race detector)
       run: make testrace
+
+    # tests/ is a separate tree from internal/, cmd/ and packages/, so neither
+    # target above touches it and the TestCluster/TestNode harness was going
+    # unbuilt in CI. Integration tests skip themselves off Linux; the runner is
+    # Linux, so these actually execute here.
+    - name: Integration tests
+      run: make quiet-integration-test

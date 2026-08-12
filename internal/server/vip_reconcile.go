@@ -162,18 +162,27 @@ func (s *Server) vipReconcileQueue() *vipReconciler {
 // reported missing, which is missingOnIface's contract and the same direction
 // every other filter on this path takes: a check that cannot see must not turn a
 // placement into a silent no-op.
-func vipReconcileTargets(plan map[string][]string, claim bool, heldOn func(ip string) (bool, string)) map[string][]string {
+//
+// Unparseable addresses come back separately so the caller can say so. They are
+// skipped either way — an address that cannot be parsed cannot be placed — but
+// silently is the wrong way to skip a configured group entry (see missingOnIface).
+func vipReconcileTargets(plan map[string][]string, claim bool,
+	heldOn func(ip string) (bool, string)) (map[string][]string, []string) {
+
 	if !claim {
-		return plan
+		return plan, nil
 	}
 
+	var invalid []string
 	narrowed := make(map[string][]string, len(plan))
 	for iface, ips := range plan {
-		if missing := missingOnIface(iface, ips, heldOn); len(missing) > 0 {
+		missing, bad := missingOnIface(iface, ips, heldOn)
+		invalid = append(invalid, bad...)
+		if len(missing) > 0 {
 			narrowed[iface] = missing
 		}
 	}
-	return narrowed
+	return narrowed, invalid
 }
 
 // runVIPReconcile is the pass: decide what the local node should hold now, and
@@ -198,7 +207,15 @@ func (s *Server) runVIPReconcile(snapshot vipReconcileSnapshot) {
 		}
 	}
 
-	targets := vipReconcileTargets(plan, claim, heldOn)
+	targets, invalid := vipReconcileTargets(plan, claim, heldOn)
+	if len(invalid) > 0 {
+		// A configured group entry that cannot be parsed. Warn rather than skip
+		// quietly: the address simply never gets placed, which looks like a
+		// floating IP that will not come up rather than a config typo.
+		s.logger.Warn("VIP_RECONCILE: skipping unparseable configured addresses; "+
+			"these will never be placed until the config is corrected",
+			"addresses", invalid)
+	}
 	if len(targets) == 0 {
 		s.logger.Debug("VIP_RECONCILE: every claimed address is already held; nothing to place or announce")
 		return

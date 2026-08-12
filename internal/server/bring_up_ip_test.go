@@ -238,21 +238,31 @@ func TestMissingOnIfaceUsesOneSnapshot(t *testing.T) {
 		"10.0.0.4/32": "eth0",
 	}
 
-	got := missingOnIface("eth0", expected, heldOnIface(held))
+	got, invalid := missingOnIface("eth0", expected, heldOnIface(held))
 	if want := []string{"10.0.0.2/32", "10.0.0.3/32"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("got %v want %v", got, want)
 	}
+	if len(invalid) != 0 {
+		t.Errorf("reported %v as unparseable, want none", invalid)
+	}
 
 	// No snapshot: everything is reported missing rather than silently satisfied.
-	got = missingOnIface("eth0", expected, nil)
+	got, _ = missingOnIface("eth0", expected, nil)
 	if !reflect.DeepEqual(got, expected) {
 		t.Fatalf("with no snapshot expected every address missing, got %v", got)
 	}
 
-	// An unparseable entry is skipped rather than attempted, as before.
-	got = missingOnIface("eth0", []string{"not-an-ip"}, nil)
-	if len(got) != 0 {
-		t.Fatalf("expected an unparseable address skipped, got %v", got)
+	// An unparseable entry is still skipped rather than attempted — but it is now
+	// reported rather than dropped on the floor. normalizeUpRequest rejects the whole
+	// request for the same input, and one path being loud while this one was silent
+	// meant a malformed config entry looked like an address that would not come up.
+	got, invalid = missingOnIface("eth0", []string{"not-an-ip", "10.0.0.9/32"}, nil)
+	if want := []string{"10.0.0.9/32"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected the unparseable address skipped and the rest kept, got %v", got)
+	}
+	if want := []string{"not-an-ip"}; !reflect.DeepEqual(invalid, want) {
+		t.Fatalf("invalid = %v, want %v; a skipped address the caller cannot see is a "+
+			"floating IP that silently never gets placed", invalid, want)
 	}
 }
 

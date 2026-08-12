@@ -2814,7 +2814,14 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 			s.logger.Info("REFRESH: Updating expected IPs for Active node", "iface", iface, "ips", ifaceIPs)
 			s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
 			// Proactively bring up any missing expected IPs on this interface
-			missing := missingOnIface(iface, ifaceIPs, heldOn)
+			missing, invalid := missingOnIface(iface, ifaceIPs, heldOn)
+			if len(invalid) > 0 {
+				// Skipped, but not silently: an unparseable configured address is
+				// never placed, and without this it looks like a floating IP that
+				// will not come up rather than a config entry that cannot be read.
+				s.logger.Warn("REFRESH: skipping unparseable configured addresses",
+					"iface", iface, "addresses", invalid)
+			}
 			if len(missing) > 0 {
 				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(member.Status))
 				_, err := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: missing})

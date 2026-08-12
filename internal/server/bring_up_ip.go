@@ -216,10 +216,19 @@ func attemptedIPs(attempts []upAttempt) []string {
 // address is reported missing: the same rule as placeRequestedIPs, and the same
 // one the previous per-address code followed by accident, since it discarded
 // CheckIfIPExists' error and read the false that came with it.
-func missingOnIface(iface string, expected []string, heldOn func(ip string) (bool, string)) []string {
-	var missing []string
+//
+// Unparseable entries come back separately rather than being dropped on the floor.
+// Skipping them is still the right action here — this scan feeds a claim, and an
+// address that cannot be parsed cannot be brought up — but it used to be a bare
+// `continue`, so a malformed config entry meant an address that silently never got
+// placed. normalizeUpRequest rejects the whole request for the same input, and one
+// path being loud while the other was invisible is how a config typo could look like
+// an address that simply would not come up. Reported the same way it is there, and
+// left to the caller to log, so this stays a pure function.
+func missingOnIface(iface string, expected []string, heldOn func(ip string) (bool, string)) (missing, invalid []string) {
 	for _, ip := range expected {
 		if ipOnly, _ := utils.GetCIDR(ip); ipOnly == nil {
+			invalid = append(invalid, ip)
 			continue
 		}
 		if heldOn == nil {
@@ -230,7 +239,7 @@ func missingOnIface(iface string, expected []string, heldOn func(ip string) (boo
 			missing = append(missing, ip)
 		}
 	}
-	return missing
+	return missing, invalid
 }
 
 // ipInventoryLookup adapts an interface-address snapshot to the (exists, iface)

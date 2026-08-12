@@ -140,31 +140,37 @@ func ipKey(ip net.IP) string {
 	return "6|" + net.IP(ip).String()
 }
 
+// parseTargetIP normalises an address or CIDR to a single net.IP.
+//
+// Shared by the inventory lookup and by announceCommand, which is why its log lines
+// no longer name CheckIfIPExists: they were written when this was that function's
+// body, and after #66 gave the announce path its own family decision the same lines
+// were attributing announce failures to a liveness check that had not run.
 func parseTargetIP(ipAddr string) (net.IP, error) {
-	log.Debug("CheckIfIPExists called", "searchIP", ipAddr)
+	log.Debug("parseTargetIP called", "searchIP", ipAddr)
 
 	if strings.Contains(ipAddr, "/") {
 		parsedIP, _, err := net.ParseCIDR(ipAddr)
 		if err != nil {
-			log.Debug("CheckIfIPExists invalid CIDR", "input", ipAddr, "error", err)
+			log.Debug("parseTargetIP invalid CIDR", "input", ipAddr, "error", err)
 			return nil, err
 		}
 		if normalized, ok := normalizeIP(parsedIP); ok {
 			return normalized, nil
 		}
-		log.Debug("CheckIfIPExists unsupported IP family", "input", ipAddr)
+		log.Debug("parseTargetIP unsupported IP family", "input", ipAddr)
 		return nil, errors.New("unsupported IP address family for: " + ipAddr)
 	}
 
 	parsedIP := net.ParseIP(ipAddr)
 	if parsedIP == nil {
-		log.Debug("CheckIfIPExists invalid IP", "input", ipAddr)
+		log.Debug("parseTargetIP invalid IP", "input", ipAddr)
 		return nil, errors.New("invalid IP address: " + ipAddr)
 	}
 	if normalized, ok := normalizeIP(parsedIP); ok {
 		return normalized, nil
 	}
-	log.Debug("CheckIfIPExists unsupported IP family", "input", ipAddr)
+	log.Debug("parseTargetIP unsupported IP family", "input", ipAddr)
 	return nil, errors.New("unsupported IP address family for: " + ipAddr)
 }
 
@@ -205,6 +211,46 @@ func announceCommand(iface, ip string) (string, []string, error) {
 	return "ndptool", []string{"-t", "na", "-U", "-i", iface, "-T", target.String(), "send"}, nil
 }
 
+// announcerPaths caches the PATH lookup per announcer binary.
+//
+// Cached rather than probed per call because a whole-group announce runs this once
+// an address — 288 on the largest whitecrane topology — and the answer cannot change
+// within a daemon's lifetime in any way worth tracking.
+var announcerPaths sync.Map // binary name -> announcerLookup
+
+type announcerLookup struct {
+	path string
+	err  error
+}
+
+// requireAnnouncer resolves an announcer binary on PATH and says plainly what is
+// missing when it is not there.
+//
+// The two announcers are not interchangeable and neither is guaranteed present:
+// arping and ndptool ship in separate packages, and ndptool's `-U` is a libndp
+// addition rather than something every release carries. Without this the failure
+// arrived as a bare exec error once per address, which on an IPv6-only cluster is
+// one line per floating IP saying nothing about the cause.
+//
+// Verified working on the target platform rather than assumed: run 34 (2026-08-07)
+// captured four unsolicited NAs on the wire from this exact argv on an IPv6-only
+// whitecrane, so `-U` and the binary are both present there. This guard is for the
+// hosts that are not that one.
+func requireAnnouncer(name string) (string, error) {
+	if cached, ok := announcerPaths.Load(name); ok {
+		lookup := cached.(announcerLookup)
+		return lookup.path, lookup.err
+	}
+
+	path, err := exec.LookPath(name)
+	if err != nil {
+		err = fmt.Errorf("announcer %q not found on PATH: %w (install it: arping "+
+			"announces IPv4 floating IPs, ndptool announces IPv6 ones)", name, err)
+	}
+	announcerPaths.Store(name, announcerLookup{path: path, err: err})
+	return path, err
+}
+
 /*
 *
 Announce a floating IP so the segment learns which node now answers for it —
@@ -220,6 +266,10 @@ func SendGARP(iface, ip string) error {
 	name, args, err := announceCommand(iface, ip)
 	if err != nil {
 		log.Error("failed to announce. Cannot parse IP address", "value", ip, "error", err)
+		return err
+	}
+	if _, err := requireAnnouncer(name); err != nil {
+		log.Error("failed to announce", "ip", ip, "iface", iface, "error", err)
 		return err
 	}
 	log.Debug("Announcing floating IP", "ip", ip, "iface", iface, "via", name)
