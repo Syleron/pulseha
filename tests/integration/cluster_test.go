@@ -61,11 +61,8 @@ func TestClusterFormation(t *testing.T) {
 	require.Contains(t, node2.Config.Nodes, node1.ID, "Node1 should be in Node2's config")
 
 	// Verify node statuses
-	node1Status := node1.GetMemberStatus(node2.Hostname)
-	require.Equal(t, "passive", node1Status, "Node2 should be passive in Node1's view")
-
-	node2Status := node2.GetMemberStatus(node1.Hostname)
-	require.Equal(t, "active", node2Status, "Node1 should be active in Node2's view")
+	requireMemberStatus(t, node1, node2.Hostname, "passive", "Node2 should be passive in Node1's view")
+	requireMemberStatus(t, node2, node1.Hostname, "active", "Node1 should be active in Node2's view")
 }
 
 func TestClusterHealthCheck(t *testing.T) {
@@ -102,11 +99,8 @@ func TestClusterHealthCheck(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Verify both nodes are healthy
-	node1Status := node1.GetMemberStatus(node2.Hostname)
-	require.Equal(t, "passive", node1Status, "Node2 should be passive in Node1's view")
-
-	node2Status := node2.GetMemberStatus(node1.Hostname)
-	require.Equal(t, "active", node2Status, "Node1 should be active in Node2's view")
+	requireMemberStatus(t, node1, node2.Hostname, "passive", "Node2 should be passive in Node1's view")
+	requireMemberStatus(t, node2, node1.Hostname, "active", "Node1 should be active in Node2's view")
 }
 
 func TestActiveActiveMode(t *testing.T) {
@@ -186,13 +180,9 @@ func TestActiveActiveMode(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// Check the statuses of both nodes
-	node1Status := node1.GetMemberStatus(node1.Hostname)
-	node2Status := node2.GetMemberStatus(node2.Hostname)
-
 	// In active-active mode, all eligible nodes should be active
-	require.Equal(t, "active", node1Status,
-		"Node1 should be active in active-active mode")
-	require.Equal(t, "active", node2Status,
+	requireMemberStatus(t, node1, node1.Hostname, "active", "Node1 should be active in active-active mode")
+	requireMemberStatus(t, node2, node2.Hostname, "active",
 		"Node2 should be active in active-active mode")
 
 	// Log the active IPs from both nodes
