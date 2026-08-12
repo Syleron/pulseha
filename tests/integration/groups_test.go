@@ -81,16 +81,43 @@ func TestGroupManagement(t *testing.T) {
 		}
 	}
 
-	// Now simulate failover by setting node1 to passive and node2 to active
-	t.Log("Simulating failover by setting node1 to passive and node2 to active")
-	node1.SetStatus(testutils.StatusPassive)
-	node2.SetStatus(testutils.StatusActive)
+	// Fail over to node2, through the daemon rather than by flipping a field.
+	//
+	// This used to be two SetStatus calls, which write member.Status on the member
+	// list directly. Nothing moves an address as a result -- the promotion path
+	// does -- so node2 was asserted to hold addresses that nothing had ever given
+	// it, and the assertion had simply never run: ./tests/... was not built by any
+	// CI step until defect #74.
+	//
+	// node2 also has to be able to host the group at all. AssignGroupToInterface
+	// was only ever called on node1, so even a real promotion had nowhere to put
+	// the addresses on node2.
+	err = node2.AssignGroupToInterface(groupName, "eth0")
+	require.NoError(t, err, "Failed to assign group to node2's interface")
 
-	// Wait a moment for any async operations
-	time.Sleep(500 * time.Millisecond)
+	t.Log("Failing over to node2 via the promotion RPC")
+	err = node2.PromoteNode(node2.Hostname, storedIPs)
+	require.NoError(t, err, "Failed to promote node2")
 
-	// Check node2's active IPs
-	node2ActiveIPs := node2.GetActiveIPs()
+	// Poll rather than sleep: promotion is asynchronous on the daemon side, so a
+	// fixed wait asserts at one arbitrary instant and lets a loaded runner decide
+	// the result.
+	var node2ActiveIPs []string
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		node2ActiveIPs = node2.GetActiveIPs()
+		missing := false
+		for _, ip := range storedIPs {
+			if !contains(node2ActiveIPs, ip) {
+				missing = true
+				break
+			}
+		}
+		if !missing {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	t.Logf("Node2 active IPs: %v", node2ActiveIPs)
 
 	// Verify node2 has taken over the IPs
