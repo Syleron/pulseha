@@ -294,6 +294,24 @@ func (h *HealthChecker) performHealthChecks() {
 	doDeepCheck := h.deepCheckCounter%5 == 0
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
+
+	// One config snapshot for the whole pass, taken here because no member lock is
+	// held yet.
+	//
+	// The per-member loop below reads this while holding member.Lock() (taken at
+	// the reachability check), and MemberList.Config() takes the member-list read
+	// lock — so that read inverted against UpdateConfig, which holds the member-list
+	// *write* lock and then reaches for a member lock. Two parties, opposite orders,
+	// and it deadlocked the daemon: CI caught twelve goroutines stacked behind the
+	// member list, including Server.Stop, Promote, ConfigSync and the IP monitor.
+	//
+	// #71 introduced it and named the right remedy in its own write-up —
+	// "snapshotted once per pass" — but left this call site reading per member.
+	// Before #71 it was a bare pointer read: racy, and precisely because it took no
+	// lock, it could not deadlock. Replacing an unsynchronised read with a lock
+	// acquisition inside another lock is the trade that has to be checked, and this
+	// is the site where it was not.
+	passCfg := h.members.Config()
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
 		if !h.loggedNoMembers {
@@ -410,8 +428,12 @@ func (h *HealthChecker) performHealthChecks() {
 		// Node is reachable - update latency once
 		member.Latency = fmt.Sprintf("%.2fms", float64(responseTime.Nanoseconds())/1000000)
 
-		// Handle auto-failback for previously failed nodes
-		hcCfg := h.members.Config()
+		// Handle auto-failback for previously failed nodes.
+		//
+		// The pass snapshot, not a fresh Config(): a member lock is held here, and
+		// taking the member-list lock under it is what deadlocked against
+		// UpdateConfig. See passCfg above.
+		hcCfg := passCfg
 		if hcCfg == nil {
 			continue
 		}
