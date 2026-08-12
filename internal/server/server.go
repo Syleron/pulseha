@@ -4901,7 +4901,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		s.logger.Warn("CONFIG_SYNC: No configuration data provided")
 		return &rpc.ConfigSyncResponse{
 			Success: false,
-			Message: "no configuration data provided",
+			Message: permanentRejectionPrefix + "no configuration data provided",
 		}, nil
 	}
 
@@ -5019,7 +5019,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			s.logger.Error("Failed to unmarshal configuration", "error", err)
 			return &rpc.ConfigSyncResponse{
 				Success: false,
-				Message: fmt.Sprintf("failed to unmarshal configuration: %v", err),
+				Message: permanentRejectionPrefix +
+					fmt.Sprintf("failed to unmarshal configuration: %v", err),
 			}, nil
 		}
 
@@ -5170,6 +5171,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		if err := newConfig.Save(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to save synchronized configuration", "error", err)
 			s.Unlock()
+			// Deliberately *not* marked permanent: the payload was understood and only
+			// storing it failed, which is ENOSPC, EIO or a read-only mount and clears
+			// on its own. The sender has to keep this peer in its retry set, or the
+			// broadcast reports full propagation to a node holding none of the config.
 			return &rpc.ConfigSyncResponse{
 				Success: false,
 				Message: fmt.Sprintf("failed to save synchronized configuration: %v", err),
@@ -7042,22 +7047,21 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	return nil
 }
 
-// buildConfigAndStatePayload renders the cluster config and the member states
-// that belong with it into a single ConfigSync payload.
+// buildFullConfigPayload renders the cluster config and the member states that
+// belong with it into a single ConfigSync payload, plus the sender identity and
+// config version that let the receiver decide whether this payload is newer than
+// what it already holds (docs/TEST-PLAN.md defects #5 and #38).
 //
 // ConfigSync recognises a full config by its "pulseha" root key and reads
-// member_states/epoch/leader_id off the same JSON object, so one message can
-// carry both. Keeping them in one message is the whole point — see
+// member_states/epoch/leader_id off the same JSON object, so one message can carry
+// both. Keeping them in one message is the whole point — see
 // broadcastConfigAndStates.
-func buildConfigAndStatePayload(cfg *config.Config, states map[string]membership.MemberStatus,
-	epoch int64, leaderID string) ([]byte, error) {
-
-	return buildFullConfigPayload(cfg, states, epoch, leaderID, "", configStamp{})
-}
-
-// buildFullConfigPayload is buildConfigAndStatePayload plus the sender identity
-// and config version that let the receiver decide whether this payload is newer
-// than what it already holds (docs/TEST-PLAN.md defects #5 and #38).
+//
+// There is deliberately no unstamped wrapper around this. There was one —
+// buildConfigAndStatePayload, hardcoding an empty senderID and stamp — and
+// SetMode's direct push was its only caller, which is how the cluster's most
+// ordering-sensitive broadcast came to be the one broadcast nobody could order.
+// Callers that genuinely want the unversioned form pass it explicitly.
 //
 // An empty origin / version 0 means unversioned: the receiver cannot order it and
 // applies it. That is the required behaviour for a peer still running an older
@@ -7464,6 +7468,11 @@ func (s *Server) broadcastConfigToPeersOnce() {
 		return
 	}
 
+	// Peers that answered with a rejection no retry can fix. Tracked separately from
+	// `pending` because the two need opposite handling: these must not be re-sent,
+	// but they must also not be mistaken for peers that accepted the config.
+	var permanentlyRejected []string
+
 	for attempt := 1; attempt <= maxAttempts && len(pending) > 0; attempt++ {
 		// A newer broadcast is already queued; it carries everything this one
 		// would have delivered, so stop rather than compete with it.
@@ -7504,32 +7513,54 @@ func (s *Server) broadcastConfigToPeersOnce() {
 					"change will not propagate and will be reverted by the next sync",
 					"peer", id, "version", stamp.version)
 				delete(pending, id)
-			case resp != nil && !resp.Success:
-				// The peer rejected the payload on its own terms (a save failure,
-				// or a config it could not unmarshal). Retrying the same bytes
-				// cannot change that answer.
-				s.logger.Debug("CONFIG_BROADCAST: peer declined ConfigSync",
+			case resp != nil && !resp.Success && isPermanentRejection(resp.Message):
+				// The payload itself is unusable to this peer, so re-sending the same
+				// bytes cannot change the answer. Dropped from the retry set, but
+				// recorded and logged loudly: the peer is diverged and nothing here
+				// will repair it, which is worse than a peer that is merely behind.
+				s.logger.Error("CONFIG_BROADCAST: peer permanently rejected the config; "+
+					"retrying cannot fix this and the peer is now diverged",
 					"peer", id, "version", stamp.version, "message", resp.Message)
+				permanentlyRejected = append(permanentlyRejected, id)
 				delete(pending, id)
+			case resp != nil && !resp.Success:
+				// A rejection on the peer's own terms that is *not* marked permanent:
+				// a save failure, or any rejection from a binary predating the marker.
+				// Both are transient as far as this node can tell, so the peer stays in
+				// `pending` — it gets the in-pass retries and, failing those, reaches
+				// recordUnpropagated. Warn rather than Debug: this used to be the quiet
+				// path that let a diverged peer sit behind a broadcast reporting
+				// success.
+				s.logger.Warn("CONFIG_BROADCAST: peer declined ConfigSync, will retry",
+					"peer", id, "attempt", attempt, "version", stamp.version,
+					"message", resp.Message)
 			default:
 				delete(pending, id)
 			}
 		}
 	}
 
-	if len(pending) > 0 {
-		outstanding := make([]string, 0, len(pending))
-		for id := range pending {
-			outstanding = append(outstanding, id)
-		}
-		sort.Strings(outstanding)
+	// A permanent rejection is not propagation, so it is recorded like any other
+	// peer this config did not reach. Retrying it is futile, and the retry state is
+	// what makes the divergence visible at all — clearing it here would report full
+	// propagation to a peer that rejected the config outright, which is the exact lie
+	// this branch removed everywhere else.
+	unreached := make([]string, 0, len(pending)+len(permanentlyRejected))
+	for id := range pending {
+		unreached = append(unreached, id)
+	}
+	unreached = append(unreached, permanentlyRejected...)
+	sort.Strings(unreached)
+
+	if len(unreached) > 0 {
 		// Warn, not Debug: this is the state that diverges a config. It used to say
 		// "waiting for the periodic reconcile", which was only true on the
 		// coordinator — see startConfigBroadcaster and defect #43.
 		s.logger.Warn("CONFIG_BROADCAST: peers did not accept the config after all retries; "+
 			"this node will keep retrying",
-			"version", stamp.version, "peers", outstanding,
-			"retryIn", s.recordUnpropagated(stamp, outstanding))
+			"version", stamp.version, "peers", unreached,
+			"permanentlyRejected", permanentlyRejected,
+			"retryIn", s.recordUnpropagated(stamp, unreached))
 		return
 	}
 	if attempts, wasOutstanding := s.clearUnpropagated(); wasOutstanding {
@@ -7575,6 +7606,29 @@ func (s *Server) currentConfig() *config.Config {
 	s.RLock()
 	defer s.RUnlock()
 	return s.config
+}
+
+// permanentRejectionPrefix marks a ConfigSync rejection that re-sending the same
+// bytes cannot fix: the payload itself is unusable, as opposed to the receiver
+// having been briefly unable to store a payload it understood perfectly well.
+//
+// Both used to come back as a bare Success:false, and the sender dropped the peer
+// from its retry set for either — which is right for the first and wrong for the
+// second, since a save failure is ENOSPC, EIO or a read-only mount and clears on
+// its own. The peer left the retry set before recordUnpropagated could see it, so
+// the broadcast went on to report full propagation while the peer held none of the
+// config. That is defect #43's signature reached by a different route.
+//
+// A marker on the message rather than a new proto field, deliberately: the wire
+// contract here is two fields wide and shared with binaries that predate this
+// branch, and an older peer simply omits the marker. That reads as transient, which
+// is the safe direction — four retries and a warning, rather than a peer silently
+// dropped. isPermanentRejection is prefix-anchored so the classification cannot be
+// changed by editing an error string.
+const permanentRejectionPrefix = "permanent: "
+
+func isPermanentRejection(message string) bool {
+	return strings.HasPrefix(message, permanentRejectionPrefix)
 }
 
 // supersededConfigMessage is the reply to a config payload older than the one
@@ -7695,12 +7749,21 @@ func (s *Server) adoptConfigStamp(incoming configStamp) {
 //
 // Peers must therefore learn the mode and their new status together, and before
 // any address moves.
+//
+// The payload is stamped, like every other broadcast on this path. It used to go
+// through an unstamped wrapper, so ConfigSync's ordering guard read it as
+// unversioned and every peer applied it unconditionally — including one holding
+// strictly newer content, which reopened the #5/#38 window for the length of a
+// switch. SetMode's caller has already run markConfigDirty(), so the clock the
+// receiver needs is minted before this is reached; reading it here under the same
+// lock as the config keeps the two describing each other.
 func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberStatus,
 	epoch int64, leaderID string) {
 
 	s.Lock()
-	payloadBytes, buildErr := buildConfigAndStatePayload(s.config, states, epoch, leaderID)
 	localID, _ := s.config.GetLocalNodeUUID()
+	payloadBytes, buildErr := buildFullConfigPayload(
+		s.config, states, epoch, leaderID, localID, s.loadConfigStamp())
 	peers := make(map[string]*config.Node, len(s.config.Nodes))
 	for id, node := range s.config.Nodes {
 		if id != localID {

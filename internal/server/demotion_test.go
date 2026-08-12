@@ -120,14 +120,14 @@ func TestDecisiveConfigSyncDemotesTheLocalNode(t *testing.T) {
 	s.clusterEpoch = 4
 
 	// What SetMode's active-passive branch sends: the new mode, the statuses it
-	// implies, and epoch+2.
+	// implies, epoch+2, and the stamp markConfigDirty minted for the switch.
 	s.config.Pulse.Mode = "active-passive"
-	payload, err := buildConfigAndStatePayload(s.config, map[string]membership.MemberStatus{
+	payload, err := buildFullConfigPayload(s.config, map[string]membership.MemberStatus{
 		localID: membership.StatusPassive,
 		peerID:  membership.StatusActive,
-	}, 6, peerID)
+	}, 6, peerID, peerID, configStamp{version: 12, origin: peerID})
 	if err != nil {
-		t.Fatalf("buildConfigAndStatePayload: %v", err)
+		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 
 	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
@@ -151,12 +151,12 @@ func TestEqualEpochConfigSyncDoesNotDemoteTheLocalNode(t *testing.T) {
 	s.clusterEpoch = 6
 	s.leaderID = peerID
 
-	payload, err := buildConfigAndStatePayload(s.config, map[string]membership.MemberStatus{
+	payload, err := buildFullConfigPayload(s.config, map[string]membership.MemberStatus{
 		localID: membership.StatusPassive,
 		peerID:  membership.StatusActive,
-	}, 6, peerID)
+	}, 6, peerID, peerID, configStamp{version: 12, origin: peerID})
 	if err != nil {
-		t.Fatalf("buildConfigAndStatePayload: %v", err)
+		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 
 	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {

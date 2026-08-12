@@ -319,10 +319,14 @@ func seed(t *testing.T, s *Server, states map[string]membership.MemberStatus,
 	}
 }
 
-// An unversioned payload — an older peer mid-rolling-upgrade, or SetMode before
-// it threads a generation through — must still apply. The guard is an ordering
-// check, not an authentication check, so absent metadata means "cannot order
-// this, apply it" rather than "drop it".
+// An unversioned payload — an older peer mid-rolling-upgrade — must still apply.
+// The guard is an ordering check, not an authentication check, so absent metadata
+// means "cannot order this, apply it" rather than "drop it".
+//
+// The empty stamp is passed explicitly here. It used to come from a
+// buildConfigAndStatePayload wrapper that SetMode also used, which meant this
+// test's rolling-upgrade allowance silently covered a live broadcast path as well
+// (see TestSetModeBroadcastCarriesAnOrderableStamp).
 func TestUnversionedConfigSyncStillApplies(t *testing.T) {
 	const localID, peerID = "node-local", "node-peer"
 	s, _ := newConfigSyncTestServer(t, localID, peerID)
@@ -341,9 +345,9 @@ func TestUnversionedConfigSyncStillApplies(t *testing.T) {
 	}
 
 	unversioned := peerConfigWithGroup(s, "group1", 120)
-	legacy, err := buildConfigAndStatePayload(unversioned, states, 1, peerID)
+	legacy, err := buildFullConfigPayload(unversioned, states, 1, peerID, "", configStamp{})
 	if err != nil {
-		t.Fatalf("buildConfigAndStatePayload: %v", err)
+		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 	if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: legacy}); err != nil {
 		t.Fatalf("ConfigSync(unversioned): %v", err)

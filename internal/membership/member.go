@@ -16,11 +16,26 @@ import (
 // MemberStatus represents the current state of a member
 type MemberStatus int
 
+// These ordinals are a wire contract, not an implementation detail: `member_states`
+// is encoded as `int(MemberStatus)` in both broadcast paths and decoded straight
+// back into a MemberStatus with no range validation, so the numbers here must match
+// rpc.MemberStatusEnum exactly (asserted by TestMemberStatusOrdinalsMatchTheProto).
+//
+// 3 is deliberately skipped rather than closed up. It belonged to the removed
+// StatusPartialActive, and the proto retired it properly with `reserved 3` while
+// keeping MAINTENANCE = 4. Letting iota slide Maintenance down into the hole breaks
+// a rolling upgrade both ways — a new peer's Maintenance(3) is read as
+// PartialActive by an old binary, and an old peer's Maintenance(4) becomes an
+// undefined status that matches no arm of redistributeOrphanedIPs' switch, so the
+// node's ActiveIPs are neither counted as hosted nor cleared and the coordinator
+// redistributes addresses it may still be holding. Nothing indexes by MemberStatus,
+// so the gap is free.
 const (
-	StatusUnknown MemberStatus = iota
-	StatusActive
-	StatusPassive
-	StatusMaintenance // Node is up but excluded from failover promotion
+	StatusUnknown MemberStatus = 0
+	StatusActive  MemberStatus = 1
+	StatusPassive MemberStatus = 2
+	// 3 is reserved for the removed StatusPartialActive — see above.
+	StatusMaintenance MemberStatus = 4 // Node is up but excluded from failover promotion
 )
 
 // Member defines our member object

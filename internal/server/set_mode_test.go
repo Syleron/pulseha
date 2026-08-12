@@ -107,9 +107,10 @@ func TestConfigAndStatePayloadCarriesModeAndStatesTogether(t *testing.T) {
 		"node-b": membership.StatusPassive,
 	}
 
-	payload, err := buildConfigAndStatePayload(cfg, states, 42, "node-a")
+	payload, err := buildFullConfigPayload(cfg, states, 42, "node-a", "node-a",
+		configStamp{version: 7, origin: "node-a"})
 	if err != nil {
-		t.Fatalf("buildConfigAndStatePayload: %v", err)
+		t.Fatalf("buildFullConfigPayload: %v", err)
 	}
 
 	var raw map[string]json.RawMessage
