@@ -42,7 +42,7 @@ func TestReconcilePassDoesNotBlockTheHealthCheckTick(t *testing.T) {
 	b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.2/24", "10.0.0.3/24"})
 	c := newAATestMember("node-c", "host-c", StatusPassive, nil)
 	h, stub := newAPTestChecker("node-a", a, b, c)
-	h.ready = true
+	h.ready.Store(true)
 
 	// One slow demotion is enough: the tick's whole budget is 1s.
 	stub.makePassiveDelay = 2 * time.Second
@@ -74,7 +74,7 @@ func TestReconcilePassesDoNotStackAndTheGuardIsReleased(t *testing.T) {
 	b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.2/24"})
 	c := newAATestMember("node-c", "host-c", StatusActive, []string{"10.0.0.3/24"})
 	h, stub := newAPTestChecker("node-a", a, b, c)
-	h.ready = true
+	h.ready.Store(true)
 	stub.makePassiveDelay = 300 * time.Millisecond
 
 	before, _ := h.reconcileCounters()
@@ -108,7 +108,7 @@ func TestReconcilePassDoesNotStartWhenStopped(t *testing.T) {
 	a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
 	b := newAATestMember("node-b", "host-b", StatusActive, []string{"10.0.0.2/24"})
 	h, _ := newAPTestChecker("node-a", a, b)
-	h.ready = false
+	h.ready.Store(false)
 
 	before, _ := h.reconcileCounters()
 	h.startReconcilePassLocked()
@@ -135,7 +135,7 @@ func TestReconcilePassDoesNotStartWhenStopped(t *testing.T) {
 func TestTheTickDoesNotSelfDeadlockOnItsOwnLock(t *testing.T) {
 	a := newAATestMember("node-a", "host-a", StatusActive, []string{"10.0.0.1/24"})
 	h, _ := newAPTestChecker("node-a", a)
-	h.ready = true
+	h.ready.Store(true)
 
 	done := make(chan struct{})
 	go func() {

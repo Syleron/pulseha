@@ -2,6 +2,7 @@ package membership
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -123,8 +124,20 @@ type HealthChecker struct {
 	stopChan              chan struct{}
 	stopOnce              sync.Once // Ensure we only close stopChan once
 	logger                *log.Logger
-	ready                 bool
-	stopped               bool // Track if we're stopped
+	// ready and stopped are atomic rather than plain fields under the health
+	// checker's own RWMutex, because IsRunning is read from a caller that already
+	// holds the *server's* write lock — Server.Start's startHealthChecker probe —
+	// while performHealthChecks holds this lock for its whole body and calls back
+	// into the server for the epoch and the state broadcast. Those two orders are
+	// opposite, so the probe and a health-check pass deadlocked whenever the first
+	// tick landed before Server.Start returned. Reading these without the lock
+	// removes the probe's edge; see #79 for the crossings that remain, and #56 for
+	// the same non-reentrancy trap one lock in.
+	//
+	// Nothing needs the pair to be consistent with each other: IsRunning is
+	// advisory, and every state change still happens under the lock.
+	ready                 atomic.Bool
+	stopped               atomic.Bool // Track if we're stopped
 	server                ServerReference
 	lastClusterState      string          // Track last cluster state to only log changes
 	checksWithoutChange   int             // Counter for periodic status logs
@@ -174,13 +187,13 @@ func (h *HealthChecker) Start(interval time.Duration) {
 	h.Lock()
 	defer h.Unlock()
 
-	if h.stopped {
+	if h.stopped.Load() {
 		h.logger.Debug("Health checker is stopped, reinitializing...")
 		h.stopChan = make(chan struct{})
-		h.stopped = false
+		h.stopped.Store(false)
 	}
 	h.checkTicker = time.NewTicker(interval)
-	h.ready = true
+	h.ready.Store(true)
 
 	// Add initial delay before starting health checks
 	h.logger.Debug("Adding initial delay before starting health checks...")
@@ -190,11 +203,15 @@ func (h *HealthChecker) Start(interval time.Duration) {
 	h.logger.Debug("Health checker is now running")
 }
 
-// IsRunning returns true if the health checker is currently running
+// IsRunning returns true if the health checker is currently running.
+//
+// Deliberately takes no lock. Server.Start probes this from inside the server's
+// write lock, while a health-check pass holds this lock and waits on that same
+// server lock — see the note on the ready/stopped fields. Both reads are atomic,
+// and the answer is advisory in every caller: it decides whether to call Start,
+// which re-checks under the lock.
 func (h *HealthChecker) IsRunning() bool {
-	h.RLock()
-	defer h.RUnlock()
-	return h.ready && !h.stopped
+	return h.ready.Load() && !h.stopped.Load()
 }
 
 // Stop halts the health checking process
@@ -205,8 +222,8 @@ func (h *HealthChecker) Stop() {
 	h.logger.Debug("Stopping health checker...")
 
 	// Set flags first to prevent new checks from starting
-	h.ready = false
-	h.stopped = true
+	h.ready.Store(false)
+	h.stopped.Store(true)
 
 	// Stop the ticker
 	if h.checkTicker != nil {
@@ -231,7 +248,7 @@ func (h *HealthChecker) run() {
 			return
 		default:
 			h.RLock()
-			if !h.ready || h.stopped || h.checkTicker == nil {
+			if !h.ready.Load() || h.stopped.Load() || h.checkTicker == nil {
 				h.RUnlock()
 				return
 			}
@@ -245,7 +262,7 @@ func (h *HealthChecker) run() {
 				h.lastTick = time.Now()
 				h.Unlock()
 				h.RLock()
-				if !h.ready || h.stopped {
+				if !h.ready.Load() || h.stopped.Load() {
 					h.RUnlock()
 					return
 				}
@@ -647,7 +664,7 @@ func (h *HealthChecker) incChecksWithoutChangeLocked() int {
 // promoted, nothing placed the 287-address group, and all four nodes sat
 // Standby/Passive with the whole group down (docs/TEST-PLAN.md defect #56).
 func (h *HealthChecker) startReconcilePassLocked() {
-	if !h.ready || h.stopped {
+	if !h.ready.Load() || h.stopped.Load() {
 		return
 	}
 	if !h.reconcileInFlight.CompareAndSwap(false, true) {
@@ -810,6 +827,22 @@ func DemotionTimeoutFor(ipCount int) time.Duration {
 		return demoteMaxTimeout
 	}
 	return timeout
+}
+
+// localNodeID reads this node's UUID through the config-pointer accessor.
+//
+// Config() is documented as possibly returning nil, and GetLocalNodeUUID calls
+// ClusterCheck, which dereferences c.Nodes — so chaining the two panics on a nil
+// config. Every other reader in this file takes the pointer into a local and
+// guards it; three vote/tie-break sites chained instead, which read as an
+// oversight rather than a considered exception. Folding the guard into one
+// accessor makes it impossible to forget at a fourth site.
+func (h *HealthChecker) localNodeID() (string, error) {
+	cfg := h.members.Config()
+	if cfg == nil {
+		return "", errors.New("member list has no config")
+	}
+	return cfg.GetLocalNodeUUID()
 }
 
 // makePassiveTimeout bounds a demotion issued by the consolidation invariant,
@@ -1860,7 +1893,13 @@ func (h *HealthChecker) checkNodeConnectivity(member *Member) bool {
 	}
 
 	// Try to establish basic connection
-	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(member.IP), member.Port)
+	//
+	// JoinHostPort rather than the FormatIPv6 + "%s:%s" idiom, for the same reason
+	// as the two dial probes in internal/server/server.go: the two are equivalent
+	// for every input, but `go vet` cannot see through the helper and reports every
+	// "%s:%s" reaching net.Dial as broken for IPv6. This was the last such finding
+	// in the tree, and one known-false finding is enough to bury a real one.
+	address := net.JoinHostPort(utils.SanitizeIPv6(member.IP), member.Port)
 	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
 	if err == nil {
 		err = conn.Close()
@@ -2153,7 +2192,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
 				// Find the other available node
-				localNodeID, err := h.members.Config().GetLocalNodeUUID()
+				localNodeID, err := h.localNodeID()
 				if err != nil {
 					h.logger.Error("Failed to get local node ID for tie-breaking", "error", err)
 					return false
@@ -2235,7 +2274,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 		h.logger.Infof("Started voting session %s for node status change", sessionID)
 
 		// Get our own node ID to cast our vote
-		localNodeID, err := h.members.Config().GetLocalNodeUUID()
+		localNodeID, err := h.localNodeID()
 		if err != nil {
 			h.logger.Errorf("Failed to get local node ID: %v", err)
 		} else {
@@ -2371,7 +2410,7 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 	h.logger.Infof("Started voting session %s for IP redistribution", sessionID)
 
 	// Get our own node ID to cast our vote
-	localNodeID, err := h.members.Config().GetLocalNodeUUID()
+	localNodeID, err := h.localNodeID()
 	if err != nil {
 		h.logger.Errorf("Failed to get local node ID: %v", err)
 	} else {
