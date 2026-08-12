@@ -3929,9 +3929,9 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 	// Broadcast updated config to peers
 	s.markConfigDirty()
 
-	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
-	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
-	// go s.refreshLocalMonitorExpectedIPs()
+	// No refresh call here: the config broadcast above lands as a ConfigSync on every
+	// peer including this node's own reconcile path, and the health checker drives VIP
+	// reconciliation off that.
 
 	// If assigning on the local node, refresh expected IPs for this interface
 	if s.ipMonitor != nil {
@@ -4044,9 +4044,9 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 	// Broadcast updated config to peers
 	s.markConfigDirty()
 
-	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
-	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
-	// go s.refreshLocalMonitorExpectedIPs()
+	// No refresh call here: the config broadcast above lands as a ConfigSync on every
+	// peer including this node's own reconcile path, and the health checker drives VIP
+	// reconciliation off that.
 
 	// If unassigning on the local node, refresh expected IPs for this interface
 	if s.ipMonitor != nil {
@@ -7131,9 +7131,9 @@ func (s *Server) nextConfigStamp(origin string) configStamp {
 // markConfigDirty records that the local config changed and wakes the
 // broadcaster.
 //
-// This replaces the `go s.broadcastFullConfigToPeers()` that used to end every
-// group mutation. Each of those goroutines marshalled s.config whenever it was
-// scheduled, so N concurrent mutations put N unordered snapshots on the wire and
+// This replaced a `go broadcastFullConfigToPeers()` (since deleted) that used to
+// end every group mutation. Each of those goroutines marshalled s.config whenever
+// it was scheduled, so N concurrent mutations put N unordered snapshots on the wire and
 // the last to arrive won even when it was the oldest — 200 rapid add-ip calls
 // left whitecrane's four nodes at 200/189/192/193, permanently. Signalling a
 // single broadcaster instead means concurrent mutations coalesce into one
@@ -7784,26 +7784,6 @@ func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberSta
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payloadBytes)))
 		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
-		cancel()
-	}
-}
-
-func (s *Server) broadcastFullConfigToPeers() {
-	configBytes, err := json.Marshal(s.config)
-	if err != nil {
-		return
-	}
-	localID, _ := s.config.GetLocalNodeUUID()
-	for id, node := range s.config.Nodes {
-		if id == localID {
-			continue
-		}
-		remoteClient, err := s.getPeerClient(id, node)
-		if err != nil {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(configBytes)))
-		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: configBytes})
 		cancel()
 	}
 }

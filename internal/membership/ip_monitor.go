@@ -458,7 +458,11 @@ func (m *IPMonitor) GetExpectedIPs(iface string) []string {
 // trust: BroadcastClusterState carries statuses and leases but never assignments,
 // so no peer can overwrite what this node knows it was given.
 func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string][]string {
-	nodeCfg, ok := m.members.config.Nodes[nodeID]
+	cfg := m.members.Config()
+	if cfg == nil {
+		return nil
+	}
+	nodeCfg, ok := cfg.Nodes[nodeID]
 	if !ok || nodeCfg == nil {
 		return nil
 	}
@@ -466,7 +470,7 @@ func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string]
 	// nil means "no restriction"; an empty non-nil map means "assigned nothing".
 	// Collapsing the two is what let an unassigned node claim the whole group.
 	var assigned map[string]bool
-	if m.members.config.Pulse.Mode == "active-active" {
+	if cfg.Pulse.Mode == "active-active" {
 		assigned = make(map[string]bool)
 		for _, ip := range member.GetActiveIPs() {
 			assigned[ip] = true
@@ -477,7 +481,7 @@ func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string]
 	for iface, groups := range nodeCfg.IPGroups {
 		var ifaceIPs []string
 		for _, g := range groups {
-			ips, ok := m.members.config.Groups[g]
+			ips, ok := cfg.Groups[g]
 			if !ok {
 				m.logger.Warn("IP monitor: group not found in config", "group", g, "iface", iface)
 				continue
@@ -676,7 +680,12 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 	m.logger.Debug("IP monitor: starting initializeExpectedIPs")
 
 	// Get the local node ID
-	localNodeID, err := m.members.config.GetLocalNodeUUID()
+	cfg := m.members.Config()
+	if cfg == nil {
+		m.logger.Error("IP monitor init: no config")
+		return fmt.Errorf("no config")
+	}
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		m.logger.Error("IP monitor init: failed to get local node ID", "error", err)
 		return fmt.Errorf("failed to get local node ID: %v", err)
@@ -691,7 +700,7 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 	}
 	m.logger.Debug("IP monitor init: found local member", "status", localMember.Status)
 
-	nodeCfg, ok := m.members.config.Nodes[localNodeID]
+	nodeCfg, ok := cfg.Nodes[localNodeID]
 	if !ok || nodeCfg == nil {
 		m.logger.Error("IP monitor init: local node configuration not found", "nodeID", localNodeID)
 		return fmt.Errorf("local node configuration not found")
@@ -725,12 +734,17 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 func (m *IPMonitor) cleanupFloatingIPsOnRestart(nodeCfg *config.Node) {
 	m.logger.Debug("IP monitor cleanup: starting cleanup for non-Active node")
 
+	cfg := m.members.Config()
+	if cfg == nil {
+		return
+	}
+
 	// Build list of all floating IPs that this node could potentially manage
 	var allFloatingIPs []string
 	for ifaceName, groups := range nodeCfg.IPGroups {
 		m.logger.Debug("IP monitor cleanup: checking interface", "iface", ifaceName, "groups", groups)
 		for _, group := range groups {
-			if ips, ok := m.members.config.Groups[group]; ok {
+			if ips, ok := cfg.Groups[group]; ok {
 				allFloatingIPs = append(allFloatingIPs, ips...)
 				m.logger.Debug("IP monitor cleanup: found IPs in group", "group", group, "ips", ips)
 			} else {

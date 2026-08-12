@@ -61,7 +61,7 @@ func peerConfigWithGroup(s *Server, group string, n int) *config.Config {
 // Regression for docs/TEST-PLAN.md defect #5, the ordering half.
 //
 // Every group mutation used to end in a fire-and-forget
-// `go s.broadcastFullConfigToPeers()`, and that goroutine marshalled s.config
+// `go broadcastFullConfigToPeers()` (since deleted), and that goroutine marshalled s.config
 // whenever it happened to be scheduled. N concurrent mutations therefore put N
 // snapshots on the wire with no ordering, and ConfigSync applies a carried group
 // wholesale (and, since defect #43, its absence too — local is preferred only

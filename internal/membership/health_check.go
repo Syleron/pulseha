@@ -89,10 +89,14 @@ type ServerReference interface {
 // out FailOverLimit before appointing anyone, so a node doing bulk IP work does
 // not get a second coordinator appointed beside it (the runs 8-14 fix).
 func (h *HealthChecker) reconcileConfigAcrossPeers(members map[string]*Member) {
-	if h.server == nil || h.members == nil || h.members.config == nil {
+	if h.server == nil || h.members == nil {
 		return
 	}
-	localID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		return
 	}
@@ -390,8 +394,12 @@ func (h *HealthChecker) performHealthChecks() {
 		member.Latency = fmt.Sprintf("%.2fms", float64(responseTime.Nanoseconds())/1000000)
 
 		// Handle auto-failback for previously failed nodes
-		autoFailback := h.members.config.Pulse.AutoFailback
-		mode := h.members.config.Pulse.Mode
+		hcCfg := h.members.Config()
+		if hcCfg == nil {
+			continue
+		}
+		autoFailback := hcCfg.Pulse.AutoFailback
+		mode := hcCfg.Pulse.Mode
 
 		if wasUnknown && autoFailback {
 			switch mode {
@@ -522,7 +530,12 @@ func (h *HealthChecker) performHealthChecks() {
 		h.startReconcilePassLocked()
 	} else {
 		// Debug why no local member found - this indicates a serious configuration issue
-		localNodeID, err := h.members.config.GetLocalNodeUUID()
+		diagCfg := h.members.Config()
+		var localNodeID string
+		var err error
+		if diagCfg != nil {
+			localNodeID, err = diagCfg.GetLocalNodeUUID()
+		}
 		memberCount := len(membersSnapshot)
 		var memberIDs []string
 		var memberDetails []string
@@ -538,11 +551,11 @@ func (h *HealthChecker) performHealthChecks() {
 			localNodeID, err, memberCount, memberIDs, memberDetails)
 
 		// Additional diagnostic logging
-		if h.members.config != nil {
+		if diagCfg != nil {
 			h.logger.Info("HEALTH_CHECK: MemberList config state",
 				"local_node_id", localNodeID,
-				"cluster_check", h.members.config.ClusterCheck(),
-				"node_count_in_config", len(h.members.config.Nodes))
+				"cluster_check", diagCfg.ClusterCheck(),
+				"node_count_in_config", len(diagCfg.Nodes))
 		} else {
 			h.logger.Error("HEALTH_CHECK: MemberList config is nil!")
 		}
@@ -670,7 +683,7 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	h.nextReconcileCycle()
 
 	members := h.members.MembersSnapshot()
-	config := h.members.config
+	config := h.members.Config()
 
 	// Find the active node
 	var activeMember *Member
@@ -802,8 +815,12 @@ func DemotionTimeoutFor(ipCount int) time.Duration {
 // makePassiveTimeout bounds a demotion issued by the consolidation invariant,
 // sized to the group it makes the target release.
 func (h *HealthChecker) makePassiveTimeout() time.Duration {
+	cfg := h.members.Config()
+	if cfg == nil {
+		return DemotionTimeoutFor(0)
+	}
 	total := 0
-	for _, ips := range h.members.config.Groups {
+	for _, ips := range cfg.Groups {
 		total += len(ips)
 	}
 	return DemotionTimeoutFor(total)
@@ -843,7 +860,11 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 		return false
 	}
 
-	localID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
+	localID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		return false
 	}
@@ -939,7 +960,11 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 		return
 	}
 
-	localID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		return
 	}
@@ -998,7 +1023,11 @@ func clusterCoordinator(members map[string]*Member, grace time.Duration) string 
 // before the cluster acts on its absence — the same limit active-passive
 // failover already waits out before moving addresses.
 func (h *HealthChecker) failoverGrace() time.Duration {
-	return time.Duration(h.members.config.Pulse.FailOverLimit) * time.Millisecond
+	cfg := h.members.Config()
+	if cfg == nil {
+		return 0
+	}
+	return time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
 }
 
 // localIPPresence returns a presence check over this node's interfaces, building
@@ -1179,6 +1208,10 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 	// part-way through a batch of moves, so its peers declared its addresses
 	// orphaned and brought them up alongside the copies it was still serving
 	// (docs/TEST-PLAN.md defects #2/#26).
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
 	grace := h.failoverGrace()
 	hosted := make(map[string]bool)
 	for _, member := range members {
@@ -1200,7 +1233,7 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 		member.Unlock()
 	}
 
-	orphaned := orphanedGroupIPs(h.members.config.Groups, hosted)
+	orphaned := orphanedGroupIPs(cfg.Groups, hosted)
 	if len(orphaned) == 0 {
 		return false
 	}
@@ -1250,8 +1283,12 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 		return false
 	}
 
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
 	nodes := rebalanceCandidates(members)
-	moves := planRebalanceMoves(nodes, h.members.config)
+	moves := planRebalanceMoves(nodes, cfg)
 	if len(moves) == 0 {
 		return false
 	}
@@ -1264,7 +1301,7 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 		// concurrent ConfigSync self-report may have shrunk the source since.
 		// The addresses must come from the batch's own group — an arbitrary tail
 		// of ActiveIPs can belong to a group the destination cannot host.
-		ips := rebalanceMoveIPs(src, h.members.config, move.Group, move.Count)
+		ips := rebalanceMoveIPs(src, cfg, move.Group, move.Count)
 		if len(ips) == 0 {
 			continue
 		}
@@ -1426,7 +1463,12 @@ func removeIPFromList(ips []string, target string) []string {
 func (h *HealthChecker) electNewActiveNode() {
 	h.logger.Info("ELECTION: Starting leader election process")
 
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Error("Failed to get local node ID for election: no config")
+		return
+	}
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Error("Failed to get local node ID for election")
 		return
@@ -1704,7 +1746,12 @@ func (h *HealthChecker) emergencyFallback() {
 	h.logger.Warn("Emergency fallback: checking if this node should coordinate")
 
 	// Use the same deterministic coordination as main election
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Error("Emergency fallback: no config")
+		return
+	}
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Error("Emergency fallback: Failed to get local node ID", "error", err)
 		return
@@ -1753,8 +1800,13 @@ func (h *HealthChecker) checkClusterMembership(member *Member) bool {
 		return false
 	}
 
-	localToken := h.members.config.Pulse.ClusterToken
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Warn("checkClusterMembership: no config")
+		return false
+	}
+	localToken := cfg.Pulse.ClusterToken
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
 		return false
@@ -1901,12 +1953,16 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 	membersSnapshot := h.members.MembersSnapshot()
 
 	// Determine if we should use quorum based on cluster size
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
 	clusterSize := len(membersSnapshot)
 	quorumEnabled := clusterSize >= 3
 
 	// Update member status based on mode
 	member.Lock()
-	switch h.members.config.Pulse.Mode {
+	switch cfg.Pulse.Mode {
 	case "active-passive":
 		if len(failedIPs) == len(member.ActiveIPs) {
 			// All IPs failed in active-passive mode - mark node as down
@@ -2014,7 +2070,7 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 		}
 
 	default:
-		h.logger.Warnf("Unknown cluster mode %s, defaulting to active-passive behavior", h.members.config.Pulse.Mode)
+		h.logger.Warnf("Unknown cluster mode %s, defaulting to active-passive behavior", cfg.Pulse.Mode)
 		if len(failedIPs) == len(member.ActiveIPs) {
 			// If quorum is enabled, we need to initiate a vote before changing status
 			if quorumEnabled {
@@ -2097,7 +2153,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
 				// Find the other available node
-				localNodeID, err := h.members.config.GetLocalNodeUUID()
+				localNodeID, err := h.members.Config().GetLocalNodeUUID()
 				if err != nil {
 					h.logger.Error("Failed to get local node ID for tie-breaking", "error", err)
 					return false
@@ -2179,7 +2235,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 		h.logger.Infof("Started voting session %s for node status change", sessionID)
 
 		// Get our own node ID to cast our vote
-		localNodeID, err := h.members.config.GetLocalNodeUUID()
+		localNodeID, err := h.members.Config().GetLocalNodeUUID()
 		if err != nil {
 			h.logger.Errorf("Failed to get local node ID: %v", err)
 		} else {
@@ -2315,7 +2371,7 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 	h.logger.Infof("Started voting session %s for IP redistribution", sessionID)
 
 	// Get our own node ID to cast our vote
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	localNodeID, err := h.members.Config().GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Errorf("Failed to get local node ID: %v", err)
 	} else {

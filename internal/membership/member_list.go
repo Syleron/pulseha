@@ -36,6 +36,27 @@ func (m *MemberList) SetIPMonitor(monitor *IPMonitor) {
 	m.ipMonitor = monitor
 }
 
+// Config returns the config the member list currently holds.
+//
+// UpdateConfig swaps the pointer under the write lock, and every read of it has to
+// come through here. Defect #32 made each snapshot's *contents* stable, which
+// stopped the observable corruption, but left the pointer read itself racing — the
+// health check and enforce passes dereferenced m.config bare on every tick.
+// TestConfigPointerIsNotReadWhileUpdateConfigSwapsIt is the driver that exposes it;
+// nothing in the suite had previously run UpdateConfig against a read pass, which is
+// why -race stayed quiet.
+//
+// Call this once per pass and work from the returned pointer, rather than calling it
+// per field: the value is a snapshot either way, and taking the lock repeatedly
+// inside a loop is the cost this is meant to avoid. May return nil — several callers
+// already branch on that and must keep seeing it.
+func (m *MemberList) Config() *config.Config {
+	m.RLock()
+	defer m.RUnlock()
+
+	return m.config
+}
+
 // UpdateConfig updates the config reference for the member list and all existing members
 func (m *MemberList) UpdateConfig(cfg *config.Config) {
 	m.Lock()

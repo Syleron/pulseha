@@ -74,7 +74,11 @@ func (m *IPMonitor) monitorLoop() {
 			}
 
 			// Evaluate local role
-			localID, err := m.members.config.GetLocalNodeUUID()
+			watchCfg := m.members.Config()
+			if watchCfg == nil {
+				continue
+			}
+			localID, err := watchCfg.GetLocalNodeUUID()
 			if err != nil {
 				continue
 			}
@@ -110,7 +114,12 @@ func (m *IPMonitor) monitorLoop() {
 			}
 
 			// Re-check current node status before attempting restore
-			localID, err2 := m.members.config.GetLocalNodeUUID()
+			restoreCfg := m.members.Config()
+			if restoreCfg == nil {
+				m.logger.Debug("IP monitor: no config for restore check")
+				continue
+			}
+			localID, err2 := restoreCfg.GetLocalNodeUUID()
 			if err2 != nil {
 				m.logger.Debug("IP monitor: failed to get local node ID for restore check", "error", err2)
 				continue
@@ -239,8 +248,18 @@ func (m *IPMonitor) periodicReconcile() {
 func (m *IPMonitor) enforceExpectations() {
 	m.logger.Debug("ENFORCE: Starting enforceExpectations")
 
+	// One config snapshot for the whole pass. The mode is consulted three times and
+	// the node entry and groups once each, so reading them through separate bare
+	// dereferences let a ConfigSync landing mid-tick send the pass down the
+	// active-active branch while it resolved groups from the config that replaced it.
+	cfg := m.members.Config()
+	if cfg == nil {
+		m.logger.Error("ENFORCE: no config")
+		return
+	}
+
 	// Determine local role
-	localID, err := m.members.config.GetLocalNodeUUID()
+	localID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		m.logger.Error("ENFORCE: Failed to get local node ID", "error", err)
 		return
@@ -269,7 +288,7 @@ func (m *IPMonitor) enforceExpectations() {
 	// every tick and the cluster never converges (docs/TEST-PLAN.md defects #2/#26).
 	// Recomputing from the node's own assignments each tick makes the monitor
 	// self-correcting regardless of which writer last touched the cache.
-	if member.Status == StatusActive && m.members.config.Pulse.Mode == "active-active" {
+	if member.Status == StatusActive && cfg.Pulse.Mode == "active-active" {
 		expectations = m.deriveExpectedIPs(localID, member)
 		m.UpdateExpectedIPsAll(expectations)
 	}
@@ -294,7 +313,7 @@ func (m *IPMonitor) enforceExpectations() {
 		// them (docs/TEST-PLAN.md defects #2/#26, #14). Release only what this
 		// node is not assigned; if it really has failed, the coordinator reclaims
 		// the rest after the failover limit and that path brings them down.
-		if m.members.config.Pulse.Mode == "active-active" {
+		if cfg.Pulse.Mode == "active-active" {
 			m.releaseUnassignedIPs(localID, m.deriveExpectedIPs(localID, member))
 			m.logger.Info("ENFORCE: Completed cleanup for non-Active active-active node")
 			return
@@ -306,11 +325,11 @@ func (m *IPMonitor) enforceExpectations() {
 		allClusterIPs := make(map[string][]string) // iface -> IPs
 
 		// Get local node config to know which interfaces map to which groups
-		localNodeCfg, ok := m.members.config.Nodes[localID]
+		localNodeCfg, ok := cfg.Nodes[localID]
 		if ok && localNodeCfg != nil && localNodeCfg.IPGroups != nil {
 			for iface, groups := range localNodeCfg.IPGroups {
 				for _, groupName := range groups {
-					if groupIPs, exists := m.members.config.Groups[groupName]; exists {
+					if groupIPs, exists := cfg.Groups[groupName]; exists {
 						allClusterIPs[iface] = append(allClusterIPs[iface], groupIPs...)
 					}
 				}
@@ -437,7 +456,7 @@ func (m *IPMonitor) enforceExpectations() {
 	// reliable was fixing its writers: the mode switch now seeds the owner's
 	// assignments on every node, and a busy coordinator is no longer declared
 	// failed and its addresses re-placed behind its back.
-	if m.members.config.Pulse.Mode == "active-active" {
+	if cfg.Pulse.Mode == "active-active" {
 		m.releaseUnassignedIPs(localID, expectations)
 	}
 
@@ -454,7 +473,11 @@ func (m *IPMonitor) enforceExpectations() {
 // should be serving nothing, and acting on that would tear down live traffic on
 // a cluster mid-sync.
 func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string][]string) {
-	if localNodeCfg, ok := m.members.config.Nodes[localID]; !ok || localNodeCfg == nil {
+	cfg := m.members.Config()
+	if cfg == nil {
+		return
+	}
+	if localNodeCfg, ok := cfg.Nodes[localID]; !ok || localNodeCfg == nil {
 		return
 	}
 
@@ -490,7 +513,7 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 		return err == nil && exists && foundIface == iface
 	}
 
-	surplus := surplusFloatingIPs(m.members.config.Groups, expectations, locate)
+	surplus := surplusFloatingIPs(cfg.Groups, expectations, locate)
 	for iface, ips := range surplus {
 		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
 			"iface", iface, "count", len(ips))
