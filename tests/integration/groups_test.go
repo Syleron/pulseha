@@ -92,6 +92,18 @@ func TestGroupManagement(t *testing.T) {
 	// node2 also has to be able to host the group at all. AssignGroupToInterface
 	// was only ever called on node1, so even a real promotion had nowhere to put
 	// the addresses on node2.
+	// Wait for the group to reach node2's daemon first. It was created through
+	// node1's daemon, and propagation is asynchronous -- the broadcaster coalesces
+	// on a 250ms linger and retries beyond that -- so assigning immediately raced
+	// it and node2 answered "group group1 does not exist".
+	groupDeadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(groupDeadline) {
+		if g, gErr := node2.GetGroup(groupName); gErr == nil && len(g) > 0 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
 	err = node2.AssignGroupToInterface(groupName, "eth0")
 	require.NoError(t, err, "Failed to assign group to node2's interface")
 
