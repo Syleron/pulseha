@@ -162,7 +162,12 @@ func TestSetModeBroadcastIsDeclinedByAPeerHoldingNewerConfig(t *testing.T) {
 		t.Errorf("group size = %d, want 100: SetMode's push overwrote content newer "+
 			"than itself, so the switch is unordered against what the peer holds", got)
 	}
-	if got := receiver.config.Pulse.Mode; got != "active-active" {
+	// Through the accessor, not a bare s.config read: ConfigSync spawns
+	// `go s.Reconfigure()`, which swaps the pointer under the write lock, so this
+	// assertion races that goroutine. The two assertions either side of it already
+	// synchronise — groupIPCount takes RLock, loadConfigStamp is atomic — which is
+	// why only this one tripped `-race`, and only on a runner.
+	if got := receiver.currentConfig().Pulse.Mode; got != "active-active" {
 		t.Errorf("mode = %q, want it unchanged at active-active: a mode switch older "+
 			"than the receiver's config was applied anyway", got)
 	}
