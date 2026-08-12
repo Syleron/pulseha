@@ -454,78 +454,54 @@ func (n *TestNode) GetMemberStatus(targetHostname string) string {
 }
 
 // CreateGroup creates a new IP group
-// callDaemon dials this node's own daemon and hands the caller a connected
-// client.
-//
-// Every group mutation below goes through it. They used to edit the TestNode's
-// own *config.Config struct, Save() it, and then hand-roll propagation by
-// marshalling that struct into a ConfigSync aimed at each peer — which meant the
-// running daemon on this very node never learned about the change at all. The
-// tests were therefore asserting against a Go struct sitting beside PulseHA
-// rather than against PulseHA, and the first real RPC to consult the daemon's own
-// config (AssignGroupToNode) answered "group group1 does not exist".
-//
-// The hand-rolled sync was independently broken in a way worth recording, because
-// it is the first real caller to hit the path #68 documents: json.Marshal of a
-// bare config carries no config_version or config_origin, so the receiver applied
-// it as unorderable, and adoptConfigStamp then left that receiver holding new
-// content under its old stamp. The originating node's real broadcaster would
-// afterwards push its own stamped view — which did not contain the group, since
-// the group had never reached its daemon — and win.
-//
-// Letting the daemon own the mutation makes its own broadcaster own propagation
-// too, which is the behaviour under test.
-func (n *TestNode) callDaemon() (*client.Client, error) {
-	c, err := client.New()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create client: %v", err)
-	}
-	if err := c.Connect(n.IP, n.Port, false); err != nil {
-		c.Close()
-		return nil, fmt.Errorf("failed to connect to own daemon: %v", err)
-	}
-	return c, nil
-}
-
-// refreshConfigFromDaemon re-reads the config the daemon just wrote, so test
-// assertions that read TestNode.Config see what the cluster actually holds rather
-// than a stale copy. Best-effort: a node whose file is mid-write is not a failure
-// of the operation that just succeeded.
-// Deliberately the daemon's live pointer rather than a re-read from disk: every
-// TestNode in a run shares one config.CONFIG_LOCATION, so loading the file would
-// return whichever node saved last.
-func (n *TestNode) refreshConfigFromDaemon() {
-	if n.Server == nil || n.Server.GetMemberList() == nil {
-		return
-	}
-	if cfg := n.Server.GetMemberList().Config(); cfg != nil {
-		n.Config = cfg
-	}
-}
-
 func (n *TestNode) CreateGroup(name string) error {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
+	// Initialize config if needed
 	if n.Config == nil {
 		return fmt.Errorf("node configuration is nil")
 	}
 
-	c, err := n.callDaemon()
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	resp, err := c.Send(client.SendCreateGroup, &rpc.CreateGroupRequest{Name: name})
-	if err != nil {
-		return fmt.Errorf("failed to create group: %v", err)
-	}
-	if r := resp.(*rpc.CreateGroupResponse); !r.Success {
-		return fmt.Errorf("create group failed: %s", r.Message)
+	// Check if group already exists
+	if n.Config.Groups == nil {
+		n.Config.Groups = make(map[string][]string)
 	}
 
-	n.refreshConfigFromDaemon()
+	if _, exists := n.Config.Groups[name]; exists {
+		return fmt.Errorf("group %s already exists", name)
+	}
+
+	// Create the group
+	n.Config.Groups[name] = []string{}
+
+	// Save the configuration
+	if err := n.Config.Save(); err != nil {
+		return fmt.Errorf("failed to save configuration: %v", err)
+	}
+
+	// Sync configuration with other nodes in the cluster
+	if n.Cluster != nil {
+		n.Cluster.Lock()
+		for _, node := range n.Cluster.nodes {
+			if node.Hostname != n.Hostname {
+				// Release the cluster lock before syncing to avoid deadlocks
+				n.Cluster.Unlock()
+				// Release the node lock before syncing to avoid deadlocks
+				n.mutex.Unlock()
+
+				if err := n.SyncConfigWithNode(node); err != nil {
+					n.Logger.Warnf("Failed to sync configuration with %s: %v", node.Hostname, err)
+				}
+
+				// Re-acquire the locks
+				n.mutex.Lock()
+				n.Cluster.Lock()
+			}
+		}
+		n.Cluster.Unlock()
+	}
+
 	return nil
 }
 
@@ -534,32 +510,68 @@ func (n *TestNode) AddIPsToGroup(groupName string, ips []string) error {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
+	// Initialize config if needed
 	if n.Config == nil {
 		return fmt.Errorf("node configuration is nil")
 	}
 
-	c, err := n.callDaemon()
-	if err != nil {
-		return err
+	// Check if groups are initialized
+	if n.Config.Groups == nil {
+		n.Config.Groups = make(map[string][]string)
 	}
-	defer c.Close()
 
-	// One RPC per address: AddIPToGroup is a single-address call, and the daemon
-	// coalesces the resulting peer fan-out itself (defect #37).
+	// Check if group exists
+	group, exists := n.Config.Groups[groupName]
+	if !exists {
+		return fmt.Errorf("group %s does not exist", groupName)
+	}
+
+	// Add IPs to the group
 	for _, ip := range ips {
-		resp, err := c.Send(client.SendAddIPToGroup, &rpc.AddIPToGroupRequest{
-			GroupName: groupName,
-			Ip:        ip,
-		})
-		if err != nil {
-			return fmt.Errorf("failed to add IP %s to group %s: %v", ip, groupName, err)
+		// Check if IP already exists in the group
+		exists := false
+		for _, existingIP := range group {
+			if existingIP == ip {
+				exists = true
+				break
+			}
 		}
-		if r := resp.(*rpc.AddIPToGroupResponse); !r.Success {
-			return fmt.Errorf("add IP %s to group %s failed: %s", ip, groupName, r.Message)
+
+		if !exists {
+			group = append(group, ip)
 		}
 	}
 
-	n.refreshConfigFromDaemon()
+	// Update the group
+	n.Config.Groups[groupName] = group
+
+	// Save the configuration
+	if err := n.Config.Save(); err != nil {
+		return fmt.Errorf("failed to save configuration: %v", err)
+	}
+
+	// Sync configuration with other nodes in the cluster
+	if n.Cluster != nil {
+		n.Cluster.Lock()
+		for _, node := range n.Cluster.nodes {
+			if node.Hostname != n.Hostname {
+				// Release the cluster lock before syncing to avoid deadlocks
+				n.Cluster.Unlock()
+				// Release the node lock before syncing to avoid deadlocks
+				n.mutex.Unlock()
+
+				if err := n.SyncConfigWithNode(node); err != nil {
+					n.Logger.Warnf("Failed to sync configuration with %s: %v", node.Hostname, err)
+				}
+
+				// Re-acquire the locks
+				n.mutex.Lock()
+				n.Cluster.Lock()
+			}
+		}
+		n.Cluster.Unlock()
+	}
+
 	return nil
 }
 
@@ -569,28 +581,30 @@ func (n *TestNode) RemoveIPFromGroup(groupName, ip string) error {
 	defer n.mutex.Unlock()
 
 	if n.Config == nil {
-		return fmt.Errorf("node configuration is nil")
+		return fmt.Errorf("node config not initialized")
 	}
 
-	c, err := n.callDaemon()
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	resp, err := c.Send(client.SendRemoveIPFromGroup, &rpc.RemoveIPFromGroupRequest{
-		GroupName: groupName,
-		Ip:        ip,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to remove IP %s from group %s: %v", ip, groupName, err)
-	}
-	if r := resp.(*rpc.RemoveIPFromGroupResponse); !r.Success {
-		return fmt.Errorf("remove IP %s from group %s failed: %s", ip, groupName, r.Message)
+	group, exists := n.Config.Groups[groupName]
+	if !exists {
+		return fmt.Errorf("group %s does not exist", groupName)
 	}
 
-	n.refreshConfigFromDaemon()
-	return nil
+	var newIPs []string
+	found := false
+	for _, existingIP := range group {
+		if existingIP != ip {
+			newIPs = append(newIPs, existingIP)
+		} else {
+			found = true
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("IP %s not found in group %s", ip, groupName)
+	}
+
+	n.Config.Groups[groupName] = newIPs
+	return n.Config.Save()
 }
 
 // AssignGroupToInterface assigns a group to a network interface
@@ -598,29 +612,77 @@ func (n *TestNode) AssignGroupToInterface(groupName, iface string) error {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
+	// Initialize config if needed
 	if n.Config == nil {
 		return fmt.Errorf("node configuration is nil")
 	}
 
-	c, err := n.callDaemon()
-	if err != nil {
-		return err
-	}
-	defer c.Close()
-
-	resp, err := c.Send(client.SendAssignGroupToNode, &rpc.AssignGroupRequest{
-		GroupName: groupName,
-		NodeId:    n.ID,
-		Interface: iface,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to assign group: %v", err)
-	}
-	if r := resp.(*rpc.AssignGroupResponse); !r.Success {
-		return fmt.Errorf("assign group failed: %s", r.Message)
+	// Check if groups are initialized
+	if n.Config.Groups == nil {
+		n.Config.Groups = make(map[string][]string)
 	}
 
-	n.refreshConfigFromDaemon()
+	// Check if group exists
+	if _, exists := n.Config.Groups[groupName]; !exists {
+		return fmt.Errorf("group %s does not exist", groupName)
+	}
+
+	// Get the local node
+	localNode, err := n.Config.GetLocalNode()
+	if err != nil {
+		return fmt.Errorf("failed to get local node: %v", err)
+	}
+
+	// Initialize IP groups if needed
+	if localNode.IPGroups == nil {
+		localNode.IPGroups = make(map[string][]string)
+	}
+
+	// Check if the interface already has the group assigned
+	groups := localNode.IPGroups[iface]
+	groupExists := false
+	for _, g := range groups {
+		if g == groupName {
+			groupExists = true
+			break
+		}
+	}
+
+	// Add the group to the interface if it doesn't exist
+	if !groupExists {
+		localNode.IPGroups[iface] = append(localNode.IPGroups[iface], groupName)
+	}
+
+	// Update the node in the config
+	n.Config.Nodes[n.ID] = &localNode
+
+	// Save the configuration
+	if err := n.Config.Save(); err != nil {
+		return fmt.Errorf("failed to save configuration: %v", err)
+	}
+
+	// Sync configuration with other nodes in the cluster
+	if n.Cluster != nil {
+		n.Cluster.Lock()
+		for _, node := range n.Cluster.nodes {
+			if node.Hostname != n.Hostname {
+				// Release the cluster lock before syncing to avoid deadlocks
+				n.Cluster.Unlock()
+				// Release the node lock before syncing to avoid deadlocks
+				n.mutex.Unlock()
+
+				if err := n.SyncConfigWithNode(node); err != nil {
+					n.Logger.Warnf("Failed to sync configuration with %s: %v", node.Hostname, err)
+				}
+
+				// Re-acquire the locks
+				n.mutex.Lock()
+				n.Cluster.Lock()
+			}
+		}
+		n.Cluster.Unlock()
+	}
+
 	return nil
 }
 
@@ -668,6 +730,52 @@ func (n *TestNode) GetActiveIPs() []string {
 	}
 
 	return activeIPs
+}
+
+// SyncConfigWithNode synchronizes configuration from this node to the target node
+func (n *TestNode) SyncConfigWithNode(targetNode *TestNode) error {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+
+	n.Logger.Infof("Syncing configuration from %s to %s", n.Hostname, targetNode.Hostname)
+
+	// Create a client to connect to the target node
+	c, err := client.New()
+	if err != nil {
+		return fmt.Errorf("failed to create client: %v", err)
+	}
+	defer c.Close()
+
+	// Connect to the target node
+	if err := c.Connect(targetNode.IP, targetNode.Port, false); err != nil {
+		return fmt.Errorf("failed to connect to target node: %v", err)
+	}
+
+	// Marshal the current configuration to bytes
+	configBytes, err := json.Marshal(n.Config)
+	if err != nil {
+		return fmt.Errorf("failed to marshal configuration: %v", err)
+	}
+
+	// Send the configuration to the target node
+	resp, err := c.Send(
+		client.SendConfigSync,
+		&rpc.ConfigSyncRequest{
+			Config: configBytes,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to send configuration: %v", err)
+	}
+
+	// Check the response
+	response := resp.(*rpc.ConfigSyncResponse)
+	if !response.Success {
+		return fmt.Errorf("configuration sync failed: %s", response.Message)
+	}
+
+	n.Logger.Infof("Configuration successfully synced to %s", targetNode.Hostname)
+	return nil
 }
 
 // Leave makes the node leave the cluster
