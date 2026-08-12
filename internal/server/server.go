@@ -1871,6 +1871,16 @@ func (s *Server) demotionTimeout() time.Duration {
 	return membership.DemotionTimeoutFor(total)
 }
 
+// remoteDemotionContext bounds the MakePassive forwarded to the node that
+// actually has to release and verify the addresses.
+//
+// Derived from the caller's context, so whichever deadline is sooner wins: a
+// caller that already sized one keeps it, and a caller with none gets the group-
+// sized bound rather than an unbounded wait on an unresponsive peer.
+func (s *Server) remoteDemotionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.demotionTimeout())
+}
+
 // restoreMemberStates puts every member back to the status it held before a
 // promotion attempt began.
 //
@@ -2257,7 +2267,20 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// Derived from the caller's context so a caller with a deadline — the
 		// health checker's consolidation invariant — isn't left waiting on an
 		// unresponsive peer for the full timeout.
-		ctx2, cancel := context.WithTimeout(ctx, 5*time.Second)
+		//
+		// Sized rather than flat. WithTimeout takes the *sooner* of the parent
+		// deadline and the one given here, so a flat 5s clamped every demotion
+		// that crosses this hop back to 5s — including enforceSingleActive's
+		// makePassiveTimeout() (up to 120s) and performPromotionAsync's step-1
+		// demotion, which is exactly the hop that matters, since the remote node
+		// is the one doing the releasing and verifying. The constants above
+		// DemotionTimeoutFor record that even a flat 10s was overrun by a loaded
+		// incumbent on the 201-address topology, and that an overrun is not
+		// neutral: DeadlineExceeded is deliberately read as "the peer may still
+		// own its IPs", so a too-short deadline aborts promotions and
+		// consolidations that were safe. confirmPeerReleasedIPs got the sized
+		// deadline only because it bypasses this method entirely.
+		ctx2, cancel := s.remoteDemotionContext(ctx)
 		defer cancel()
 		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId})
 		if rerr != nil {
@@ -3149,7 +3172,11 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// modes at once is the split-brain configuration quorum exists to prevent.
 	// Stamping it makes the retrying broadcaster own eventual propagation
 	// (defect #43's machinery), and a peer that already applied the direct send
-	// answers the re-push with `superseded config version ignored`.
+	// answers the re-push with `config version already held` — an accept, since
+	// it holds exactly this stamp. It deliberately does not answer `superseded
+	// config version ignored`: that reply makes the broadcaster warn that this
+	// node's change will be reverted, which would have been false on every mode
+	// switch, once per peer.
 	s.markConfigDirty()
 
 	// Snapshot the decision while still holding the lock, so the goroutine below
@@ -5004,13 +5031,13 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// error: the sender has nothing to fix, the message is simply obsolete.
 		if !s.shouldApplyIncomingConfig(incomingStamp) {
 			held := s.loadConfigStamp()
-			s.logger.Debug("CONFIG_SYNC: ignoring superseded config",
+			s.logger.Debug("CONFIG_SYNC: ignoring config already superseded or held",
 				"sender", senderID, "version", incomingStamp.version,
 				"origin", incomingStamp.origin,
 				"held", held.version, "heldOrigin", held.origin)
 			return &rpc.ConfigSyncResponse{
 				Success: true,
-				Message: supersededConfigMessage,
+				Message: configNotAppliedMessage(incomingStamp, held),
 			}, nil
 		}
 
@@ -5075,13 +5102,13 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		if !configIsNewer(incomingStamp, s.loadConfigStamp()) {
 			held := s.loadConfigStamp()
 			s.Unlock()
-			s.logger.Debug("CONFIG_SYNC: a local mutation superseded this config mid-apply",
+			s.logger.Debug("CONFIG_SYNC: this config was superseded or already held mid-apply",
 				"sender", senderID, "version", incomingStamp.version,
 				"origin", incomingStamp.origin,
 				"held", held.version, "heldOrigin", held.origin)
 			return &rpc.ConfigSyncResponse{
 				Success: true,
-				Message: supersededConfigMessage,
+				Message: configNotAppliedMessage(incomingStamp, held),
 			}, nil
 		}
 
@@ -7516,6 +7543,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 				// is about to be undone: defect #38's signature seen from the
 				// sending end. Reachable when a node is mutated between its restart
 				// and its first full ConfigSync, while configVersion still reads 0.
+				//
+				// Only the peer-is-ahead case reaches here. A peer that holds this
+				// exact version answers configAlreadyHeldMessage instead and falls
+				// into the default arm below as the plain accept it is.
 				s.logger.Warn("CONFIG_BROADCAST: peer holds a newer config; this node's "+
 					"change will not propagate and will be reverted by the next sync",
 					"peer", id, "version", stamp.version)
@@ -7643,6 +7674,38 @@ func isPermanentRejection(message string) bool {
 // to retry — but the sender reads the message to notice that it is the one
 // behind, so the string is part of the wire contract, not just a log line.
 const supersededConfigMessage = "superseded config version ignored"
+
+// configAlreadyHeldMessage is the reply to a payload the receiver holds already —
+// same version, same origin — as opposed to one it has moved past.
+//
+// Both are "not applied", and both used to come back as supersededConfigMessage,
+// but they mean opposite things to the sender. Superseded means the sender is
+// behind and its mutation is about to be undone, which is worth a Warn. This one
+// means the sender's change arrived and is held at exactly the version it claims,
+// which is a plain accept. SetMode makes the difference routine rather than
+// theoretical: since #68 it puts the same stamp on the wire twice — the direct
+// broadcastConfigAndStates push, and the markConfigDirty broadcast 250ms behind
+// it — so every mode switch produced one false "will be reverted" Warn per peer.
+//
+// The sender needs no new case for this: Success is true and the message is not
+// supersededConfigMessage, so it lands in broadcastConfigToPeersOnce's default
+// arm and counts as delivered. That is deliberate, and it is what makes the new
+// message safe against a mixed-version cluster in the sending direction too.
+const configAlreadyHeldMessage = "config version already held"
+
+// configNotAppliedMessage names which of the two "not applied" replies fits: the
+// receiver is the only party that can tell an equal config from a stale one, so
+// the distinction is made here rather than guessed at by the sender.
+//
+// Exact equality is version *and* origin. An equal version from a different
+// origin is the concurrent-mutation case, where one of the two really is lost and
+// the sender does need to hear about it.
+func configNotAppliedMessage(incoming, held configStamp) string {
+	if incoming == held {
+		return configAlreadyHeldMessage
+	}
+	return supersededConfigMessage
+}
 
 // configStamp identifies a config's content: the Lamport clock value, and the ID
 // of the node whose mutation produced it.
