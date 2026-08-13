@@ -2,9 +2,11 @@ package membership
 
 import (
 	"fmt"
+	"sort"
 	"sync"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/packages/config"
 )
 
@@ -32,6 +34,27 @@ func (m *MemberList) SetIPMonitor(monitor *IPMonitor) {
 	m.Lock()
 	defer m.Unlock()
 	m.ipMonitor = monitor
+}
+
+// Config returns the config the member list currently holds.
+//
+// UpdateConfig swaps the pointer under the write lock, and every read of it has to
+// come through here. Defect #32 made each snapshot's *contents* stable, which
+// stopped the observable corruption, but left the pointer read itself racing — the
+// health check and enforce passes dereferenced m.config bare on every tick.
+// TestConfigPointerIsNotReadWhileUpdateConfigSwapsIt is the driver that exposes it;
+// nothing in the suite had previously run UpdateConfig against a read pass, which is
+// why -race stayed quiet.
+//
+// Call this once per pass and work from the returned pointer, rather than calling it
+// per field: the value is a snapshot either way, and taking the lock repeatedly
+// inside a loop is the cost this is meant to avoid. May return nil — several callers
+// already branch on that and must keep seeing it.
+func (m *MemberList) Config() *config.Config {
+	m.RLock()
+	defer m.RUnlock()
+
+	return m.config
 }
 
 // UpdateConfig updates the config reference for the member list and all existing members
@@ -69,6 +92,16 @@ func (m *MemberList) UpdateConfig(cfg *config.Config) {
 
 			member.config = cfg
 
+			// Refresh capacity from config so synced changes take effect
+			// without recreating the member.
+			if cfg != nil {
+				if node, ok := cfg.Nodes[id]; ok {
+					member.Lock()
+					member.Capacity = node.Capacity
+					member.Unlock()
+				}
+			}
+
 			willBeLocal := false
 			if cfg != nil {
 				newID, err := cfg.GetLocalNodeUUID()
@@ -101,6 +134,16 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 	m.Lock()
 	defer m.Unlock()
 
+	return m.redistributeIPsLocked(failedIPs)
+}
+
+// redistributeIPsLocked is RedistributeIPs' body, split out because the member
+// list lock is not reentrant and RemoveMember redistributes while already
+// holding it — calling the exported method there deadlocked the daemon on every
+// removal of a node that still held addresses.
+//
+// Requires m.Lock() held.
+func (m *MemberList) redistributeIPsLocked(failedIPs []string) error {
 	// Get available nodes for redistribution
 	availableNodes := m.getAvailableNodes()
 	if len(availableNodes) == 0 {
@@ -136,7 +179,9 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 				continue
 			}
 
-			if err := node.MakePartialActive(ips); err != nil {
+			// Merge with the node's existing assignments; MakeActive would
+			// replace them and lose track of IPs the node already hosts.
+			if err := node.AddActiveIPs(ips); err != nil {
 				m.logger.Error("Failed to assign IPs to node", "hostname", node.Hostname, "error", err)
 				// Continue with other nodes even if one fails
 				continue
@@ -150,32 +195,30 @@ func (m *MemberList) RedistributeIPs(failedIPs []string) error {
 	return nil
 }
 
-// getAvailableNodes returns a list of nodes that can accept new IPs
+// getAvailableNodes returns a list of nodes that can accept new IPs,
+// sorted by node ID so distribution decisions are deterministic.
+// Capacity and group eligibility are deliberately not checked here:
+// active-passive assigns all IPs to a single node regardless of capacity, and
+// active-active placement enforces both in ipam.Distribute, which knows which
+// group each address belongs to.
+// Status is read under each member's own lock: the member list lock this runs
+// under does not cover it, because promotions and the health check loop write
+// Status while holding only the member lock.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
-		// Skip nodes that are down or at capacity
-		if member.Status == StatusUnknown {
+		member.Lock()
+		status := member.Status
+		member.Unlock()
+
+		// Skip nodes that are down or in maintenance
+		if status == StatusUnknown || status == StatusMaintenance {
 			continue
 		}
-
-		// Check if node has capacity for more IPs
-		if m.hasAvailableCapacity(member) {
-			available = append(available, member)
-		}
+		available = append(available, member)
 	}
+	sort.Slice(available, func(i, j int) bool { return available[i].ID < available[j].ID })
 	return available
-}
-
-// hasAvailableCapacity checks if a node can handle more IPs
-func (m *MemberList) hasAvailableCapacity(member *Member) bool {
-	// If no capacity is set, assume node can handle more IPs
-	if member.Capacity == 0 {
-		return true
-	}
-
-	// Check if node is under its capacity limit
-	return len(member.ActiveIPs) < member.Capacity
 }
 
 // calculateIPDistribution determines how to distribute IPs across available nodes
@@ -194,66 +237,178 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 		}
 
 	case "active-active":
-		// Calculate total available capacity and current load
-		totalCapacity := 0
-		nodeCapacities := make(map[string]int)
-		currentLoads := make(map[string]float64)
-
-		for _, node := range nodes {
-			available := m.getNodeAvailableCapacity(node)
-			nodeCapacities[node.Hostname] = available
-			totalCapacity += available
-			currentLoads[node.Hostname] = node.LoadFactor
-		}
-
-		// Distribute IPs based on capacity and current load
+		// Balance by IP count: each IP goes to the node currently holding the
+		// fewest IPs (existing assignments plus IPs handed out in this pass),
+		// ties broken by node order (sorted by ID for determinism).
+		//
+		// Only nodes the address's group is assigned to are candidates. A node
+		// without the group cannot bring the address up — AddActiveIPs refuses
+		// it — and the refusal used to end the address's journey: unassigning a
+		// group left the coordinator picking the node it had just been removed
+		// from, over and over, with 61 addresses down cluster-wide behind a
+		// passing quorum vote (docs/TEST-PLAN.md defect #40).
+		index := groupIndex(m.config.Groups)
+		placements := make([]ipam.IP, 0, len(ips))
 		for _, ip := range ips {
-			var targetNode *Member
-			minLoad := float64(1000000) // High initial value
-
-			// Find node with lowest load
-			for _, node := range nodes {
-				if nodeCapacities[node.Hostname] <= 0 {
-					continue
-				}
-
-				if currentLoads[node.Hostname] < minLoad {
-					minLoad = currentLoads[node.Hostname]
-					targetNode = node
-				}
-			}
-
-			if targetNode == nil {
-				m.logger.Warn("No nodes with available capacity for IP", "ip", ip)
-				continue
-			}
-
-			// Assign IP and update load
-			distribution[targetNode.Hostname] = append(distribution[targetNode.Hostname], ip)
-			nodeCapacities[targetNode.Hostname]--
-			currentLoads[targetNode.Hostname] = float64(len(distribution[targetNode.Hostname])) / float64(targetNode.Capacity)
+			placements = append(placements, ipam.IP{Addr: ip, Group: index[ip]})
 		}
+
+		// ActiveIPs and Capacity are both written under the member lock —
+		// AddActiveIPs appends, UpdateConfig refreshes capacity — so the counts
+		// feeding placement have to be snapshotted under it, not read raw.
+		snapshots := make([]ipam.Node, 0, len(nodes))
+		for _, node := range nodes {
+			node.Lock()
+			ipCount := len(node.ActiveIPs)
+			capacity := node.Capacity
+			node.Unlock()
+
+			snapshots = append(snapshots, ipam.Node{
+				Hostname: node.Hostname,
+				IPCount:  ipCount,
+				Capacity: capacity,
+				Groups:   nodeHostableGroups(m.config, node.ID),
+			})
+		}
+
+		// Aggregate per group rather than per address. Unassigning a group from
+		// every node leaves its whole set unplaceable, and one line per address
+		// was 245 warnings per reclaim cycle on the test cluster.
+		assignments, unplaced := ipam.Distribute(placements, snapshots)
+		if len(unplaced) > 0 {
+			byGroup := make(map[string]int, len(unplaced))
+			for _, ip := range unplaced {
+				byGroup[index[ip]]++
+			}
+			groups := make([]string, 0, len(byGroup))
+			for group := range byGroup {
+				groups = append(groups, group)
+			}
+			sort.Strings(groups)
+			for _, group := range groups {
+				m.logger.Warn("No eligible node with available capacity for floating IPs",
+					"group", group, "count", byGroup[group], "nodes_considered", len(nodes))
+			}
+		}
+		distribution = assignments
 	}
 
 	return distribution
 }
 
-// getNodeAvailableCapacity calculates remaining capacity for a node
-func (m *MemberList) getNodeAvailableCapacity(member *Member) int {
-	if member.Capacity == 0 {
-		return 0 // Unlimited capacity
+// groupIndex maps every configured floating IP to the group it belongs to.
+// Group names are visited in sorted order, so an address configured into more
+// than one group resolves to the same group on every node.
+func groupIndex(groups map[string][]string) map[string]string {
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
 	}
-	return member.Capacity - len(member.ActiveIPs)
+	sort.Strings(names)
+
+	index := make(map[string]string)
+	for _, name := range names {
+		for _, ip := range groups[name] {
+			if _, seen := index[ip]; !seen {
+				index[ip] = name
+			}
+		}
+	}
+	return index
 }
 
-// getActiveNode returns the current active node in the cluster
+// nodeHostableGroups returns the groups a node may host, as ipam expects them:
+// the union of the groups mapped to its interfaces.
+//
+// A nil result means unrestricted, and is returned only when the config has no
+// entry for the node at all. Absent configuration is not evidence that a node
+// cannot host a group — a cluster whose config has not finished syncing would
+// otherwise have every placement refused — whereas an *empty* mapping is
+// evidence, because unassigning a node's last group deletes the interface entry
+// outright.
+func nodeHostableGroups(cfg *config.Config, nodeID string) map[string]bool {
+	if cfg == nil {
+		return nil
+	}
+	nodeCfg, ok := cfg.Nodes[nodeID]
+	if !ok || nodeCfg == nil {
+		return nil
+	}
+
+	groups := make(map[string]bool)
+	for _, assigned := range nodeCfg.IPGroups {
+		for _, group := range assigned {
+			groups[group] = true
+		}
+	}
+	return groups
+}
+
+// getActiveNode returns the current active node in the cluster.
+//
+// Callers hold the member list lock, which covers the map but not Status — that
+// is written under the member's own lock, so it is snapshotted under it here.
 func (m *MemberList) getActiveNode() *Member {
 	for _, member := range m.Members {
-		if member.Status == StatusActive {
+		member.Lock()
+		status := member.Status
+		member.Unlock()
+
+		if status == StatusActive {
 			return member
 		}
 	}
 	return nil
+}
+
+// ConsolidationTarget picks the single node that should hold every floating IP
+// once the cluster runs in active-passive mode. Preference order:
+//
+//  1. the most-loaded Active node — it already holds the most IPs, so the
+//     fewest have to move;
+//  2. the current leader, if it is healthy;
+//  3. the lowest-ID healthy node.
+//
+// Ties break on the lowest node ID so the choice is deterministic rather than
+// dependent on map iteration order. Failed and maintenance nodes are never
+// selected. Returns nil when no healthy node exists.
+func ConsolidationTarget(members map[string]*Member, leaderID string) *Member {
+	var mostLoadedActive, lowestHealthy, healthyLeader *Member
+	mostLoadedIPs := -1
+
+	for id, member := range members {
+		member.Lock()
+		status := member.Status
+		ipCount := len(member.ActiveIPs)
+		member.Unlock()
+
+		if status == StatusUnknown || status == StatusMaintenance {
+			continue
+		}
+
+		if lowestHealthy == nil || id < lowestHealthy.ID {
+			lowestHealthy = member
+		}
+		if id == leaderID {
+			healthyLeader = member
+		}
+
+		if status != StatusActive {
+			continue
+		}
+		if ipCount > mostLoadedIPs || (ipCount == mostLoadedIPs && id < mostLoadedActive.ID) {
+			mostLoadedActive = member
+			mostLoadedIPs = ipCount
+		}
+	}
+
+	if mostLoadedActive != nil {
+		return mostLoadedActive
+	}
+	if healthyLeader != nil {
+		return healthyLeader
+	}
+	return lowestHealthy
 }
 
 // AddMember adds a new member to the member list
@@ -280,6 +435,13 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 		Status:   StatusMaintenance,
 		config:   m.config,
 		logger:   m.logger,
+	}
+
+	// Seed capacity from config so distribution decisions respect it immediately
+	if m.config != nil {
+		if node, ok := m.config.Nodes[nodeID]; ok {
+			member.Capacity = node.Capacity
+		}
 	}
 
 	// Set back-reference so member methods can access the list (e.g., during MakeActive)
@@ -349,9 +511,11 @@ func (m *MemberList) RemoveMember(id string) error {
 	if member, exists := m.Members[id]; exists {
 		// Found by node ID
 		m.logger.Debug("Removing member", "id", id)
-		// Redistribute IPs if member was active
-		if len(member.ActiveIPs) > 0 {
-			if err := m.RedistributeIPs(member.ActiveIPs); err != nil {
+		// Redistribute IPs if member was active. GetActiveIPs reads under the
+		// member lock, and the locked variant is required here because this
+		// already holds the member list lock.
+		if held := member.GetActiveIPs(); len(held) > 0 {
+			if err := m.redistributeIPsLocked(held); err != nil {
 				m.logger.Error("Failed to redistribute IPs for removed member", "hostname", member.Hostname, "error", err)
 			}
 		}
@@ -369,9 +533,9 @@ func (m *MemberList) RemoveMember(id string) error {
 		if member.Hostname == id {
 			// Found by hostname
 			m.logger.Debug("Removing member by hostname", "hostname", id, "id", member.ID)
-			// Redistribute IPs if member was active
-			if len(member.ActiveIPs) > 0 {
-				if err := m.RedistributeIPs(member.ActiveIPs); err != nil {
+			// Redistribute IPs if member was active (see the by-ID branch above).
+			if held := member.GetActiveIPs(); len(held) > 0 {
+				if err := m.redistributeIPsLocked(held); err != nil {
 					m.logger.Error("Failed to redistribute IPs for removed member", "hostname", member.Hostname, "error", err)
 				}
 			}

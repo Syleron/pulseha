@@ -61,3 +61,5 @@ debug_*
 *.pb.go
 /vendor/
 /graphify-out/
+# Generated PHP stubs only — rpc/ itself holds tracked sources (server.proto).
+/rpc/php/

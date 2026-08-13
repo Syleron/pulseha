@@ -61,10 +61,14 @@ func NewStatusCmd() *cobra.Command {
 }
 
 func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, error) {
+	mode := resp.Mode
+	if mode == "" {
+		mode = "active-passive" // backward compat with older daemons
+	}
 	status := &client.ClusterStatus{
 		Members: make([]client.Member, len(resp.Members)),
 		Groups:  make([]client.GroupInfo, 0),
-		Mode:    "active-passive",
+		Mode:    mode,
 	}
 	for i, m := range resp.Members {
 		s := "Unknown"
@@ -73,25 +77,24 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			s = "Active"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE:
 			s = "Passive"
-		case rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE:
-			s = "PartialActive"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			s = "Maintenance"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY:
+			s = "Standby"
 		}
 
 		nodeID := m.NodeId
 
 		status.Members[i] = client.Member{
-			Hostname:      m.Hostname,
-			NodeID:        nodeID,
-			IP:            m.Ip,
-			Port:          m.Port,
-			Status:        s,
-			IPs:           m.ActiveIps,
-			ActiveIPs:     m.ActiveIps,
-			LastResponse:  m.LastResponse,
-			Latency:       m.Latency,
-			PartialActive: m.PartialActive,
+			Hostname:     m.Hostname,
+			NodeID:       nodeID,
+			IP:           m.Ip,
+			Port:         m.Port,
+			Status:       s,
+			IPs:          m.ActiveIps,
+			ActiveIPs:    m.ActiveIps,
+			LastResponse: m.LastResponse,
+			Latency:      m.Latency,
 		}
 	}
 	for _, g := range resp.Groups {
@@ -112,8 +115,13 @@ func calculateClusterHealth(members []client.Member) string {
 	activeCount := 0
 	totalCount := len(members)
 
+	// Counts reachable nodes, not serving ones. Standby belongs here for the
+	// same reason Passive does: the node is up and answering, it just holds no
+	// floating IPs. Omitting it would report a fully healthy cluster as
+	// "degraded" purely because a node's label changed.
 	for _, member := range members {
-		if member.Status == "Active" || member.Status == "Passive" {
+		switch member.Status {
+		case "Active", "Passive", "Standby":
 			activeCount++
 		}
 	}
@@ -150,9 +158,6 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		if len(member.ActiveIPs) > 0 {
 			fmt.Printf("Active IPs: %v\n", member.ActiveIPs)
 		}
-		if member.PartialActive {
-			fmt.Printf("Partially Active: Yes\n")
-		}
 		if member.Status == "Unknown" || member.LastResponse == "" {
 			fmt.Printf("Last Response: N/A\n")
 			fmt.Printf("Latency: N/A\n")
@@ -177,6 +182,18 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		fmt.Printf("\nFloating IP Groups:\n")
 		fmt.Printf("------------------\n")
 
+		// Groups arrive in map order from the daemon; sort by name so the
+		// listing is stable between runs
+		sort.Slice(status.Groups, func(i, j int) bool {
+			return status.Groups[i].Name < status.Groups[j].Name
+		})
+
+		// Map node IDs to hostnames so assignments can show and sort by node name
+		hostnames := make(map[string]string, len(status.Members))
+		for _, member := range status.Members {
+			hostnames[member.NodeID] = member.Hostname
+		}
+
 		for _, group := range status.Groups {
 			fmt.Printf("\nGroup: %s\n", group.Name)
 
@@ -190,11 +207,22 @@ func printClusterStatus(status *client.ClusterStatus) error {
 				fmt.Printf("  IPs: None\n")
 			}
 
-			// Print assignments
+			// Print assignments sorted by node name
 			if len(group.Assignments) > 0 {
+				sort.Slice(group.Assignments, func(i, j int) bool {
+					ni, nj := hostnames[group.Assignments[i].NodeID], hostnames[group.Assignments[j].NodeID]
+					if ni != nj {
+						return ni < nj
+					}
+					return group.Assignments[i].Interface < group.Assignments[j].Interface
+				})
 				fmt.Printf("  Assigned to:\n")
 				for _, assignment := range group.Assignments {
-					fmt.Printf("    - Node: %s, Interface: %s\n", assignment.NodeID, assignment.Interface)
+					name := hostnames[assignment.NodeID]
+					if name == "" {
+						name = assignment.NodeID
+					}
+					fmt.Printf("    - Node: %s (%s), Interface: %s\n", name, assignment.NodeID, assignment.Interface)
 				}
 			} else {
 				fmt.Printf("  Assigned to: None\n")

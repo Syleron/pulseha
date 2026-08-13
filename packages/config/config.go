@@ -100,6 +100,7 @@ type Node struct {
 	Port        string              `json:"bind_port"`
 	IPGroups    map[string][]string `json:"group_assignments"`
 	Maintenance bool                `json:"maintenance,omitempty"`
+	Capacity    int                 `json:"capacity,omitempty"` // Max floating IPs this node may host; 0 = unlimited
 }
 
 // New instantiates and setups up our config object
@@ -290,7 +291,10 @@ func (c *Config) Load() error {
 	return nil
 }
 
-// migrateConfig ensures backward compatibility by setting default values for new fields
+// migrateConfig ensures backward compatibility by setting default values for new fields.
+//
+// Called from inside Load()'s locked region, so it persists through saveLocked
+// rather than Save.
 func (c *Config) migrateConfig() {
 	migrated := false
 
@@ -309,7 +313,7 @@ func (c *Config) migrateConfig() {
 
 	// Save the migrated config if changes were made
 	if migrated {
-		if err := c.Save(); err != nil {
+		if err := c.saveLocked(); err != nil {
 			log.Warn("Failed to save migrated config", "error", err)
 		} else {
 			log.Info("Config migrated successfully with new syslog settings")
@@ -317,10 +321,79 @@ func (c *Config) migrateConfig() {
 	}
 }
 
-// Reload the config file into memory.
-func (c *Config) Reload() error {
+// Reload reads the config file from disk and returns it as a *new* *Config.
+// The receiver is left untouched.
+//
+// It must not load in place. Load() json.Unmarshals straight over the receiver,
+// and the receiver is the config every other goroutine is reading — none of the
+// readers (ClusterCheck, GetLocalNodeUUID, Nodes[...], Groups[...]) take the
+// Config's mutex, so an in-place reload rewrote the Nodes and Groups maps out
+// from under them. That is a data race under -race and a "concurrent map read
+// and map write" fatal error in production.
+//
+// Callers swap their own pointer to the returned config (see
+// Server.Reconfigure). A goroutine still holding the old pointer keeps reading
+// a consistent snapshot instead of watching one mutate mid-read.
+func (c *Config) Reload() (*Config, error) {
 	log.Info("Reloading PulseHA config", "component", "config")
-	return c.Load()
+
+	// Clone first so the disk state is applied over a copy of the current
+	// in-memory state, preserving Load()'s existing semantics: keys absent
+	// from the file keep their current value, and when the disk read is
+	// skipped (test mode) the reload is a genuine no-op.
+	fresh := c.clone()
+	if err := fresh.Load(); err != nil {
+		return nil, err
+	}
+	return fresh, nil
+}
+
+// clone returns a deep copy of the config that shares no mutable state with the
+// receiver.
+//
+// A shallow copy would not be enough: json.Unmarshal reuses an existing map,
+// unmarshals into the existing *Node behind a map value, and reuses a slice's
+// backing array when the capacity is sufficient. Those are exactly the
+// structures readers walk, so every one of them has to be fresh.
+func (c *Config) clone() *Config {
+	c.Lock()
+	defer c.Unlock()
+
+	clone := &Config{
+		Pulse:   c.Pulse,
+		Groups:  make(map[string][]string, len(c.Groups)),
+		Nodes:   make(map[string]*Node, len(c.Nodes)),
+		Plugins: make(map[string]interface{}, len(c.Plugins)),
+	}
+
+	for name, ips := range c.Groups {
+		clone.Groups[name] = append([]string(nil), ips...)
+	}
+
+	for id, node := range c.Nodes {
+		if node == nil {
+			clone.Nodes[id] = nil
+			continue
+		}
+		nodeCopy := *node
+		if node.IPGroups != nil {
+			nodeCopy.IPGroups = make(map[string][]string, len(node.IPGroups))
+			for iface, groups := range node.IPGroups {
+				nodeCopy.IPGroups[iface] = append([]string(nil), groups...)
+			}
+		}
+		clone.Nodes[id] = &nodeCopy
+	}
+
+	// Plugin values are only ever read, and unmarshalling into an
+	// interface{} map element stores a newly decoded value rather than
+	// merging into the old one, so the map itself is the only thing that
+	// needs to be fresh.
+	for name, value := range c.Plugins {
+		clone.Plugins[name] = value
+	}
+
+	return clone
 }
 
 // SaveDefaultLocalConfig - Generate a default config to write
@@ -509,15 +582,26 @@ func (c *Config) GenerateNodeID() string {
 }
 
 // UpdateValue - Update a key's value
+//
+// A value that fails validation, or that cannot be persisted, is rolled back. The
+// setter writes straight into the live struct, so a rejected value used to stay
+// there: `hcs_interval 500` returned an error to the operator and left 500 behind,
+// from where every later Save() failed the same validation — including saves
+// belonging to unrelated operations — and a config broadcast would have carried
+// the rejected value to the rest of the cluster.
 func (c *Config) UpdateValue(key string, value string) error {
+	previous := c.Pulse
+
 	if err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse); err != nil {
 		return err
 	}
 	if err := c.Validate(); err != nil {
-		return errors.New("invalid configuration value")
+		c.Pulse = previous
+		return fmt.Errorf("invalid configuration value: %v", err)
 	}
 	// Save our config with the updated info
 	if err := c.Save(); err != nil {
+		c.Pulse = previous
 		return err
 	}
 	return nil
@@ -562,6 +646,19 @@ func (c *Config) Save() error {
 	c.Lock()
 	defer c.Unlock()
 
+	return c.saveLocked()
+}
+
+// saveLocked is Save with the config mutex already held by the caller.
+//
+// The split exists for migrateConfig, which runs inside Load()'s locked region and
+// has to persist what it migrated. sync.Mutex is not reentrant, so calling the
+// exported Save() from there deadlocked Load() — and with it daemon startup and
+// every Reload() — for exactly the configs the migration exists to fix: one whose
+// four syslog fields are all empty. Named rather than an ad-hoc unlock/relock
+// because this is the sixth instance of the shape in the tree (see
+// docs/TEST-PLAN.md defect #55).
+func (c *Config) saveLocked() error {
 	// Ensure no null values in groups
 	for groupName, ips := range c.Groups {
 		if ips == nil {

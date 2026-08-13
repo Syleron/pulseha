@@ -2,17 +2,22 @@ package membership
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"net"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/internal/quorum"
+	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
 )
@@ -60,6 +65,47 @@ type ServerReference interface {
 	BroadcastVoteRequest(sessionID string, voteType, subject, description string, timeoutSeconds int64) error
 	// Promotion orchestration
 	Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error)
+	// Demotion orchestration; releases every group IP the node could host
+	MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error)
+	// Re-broadcast of the current config, for the periodic reconcile below
+	RequestConfigReconcile()
+}
+
+// reconcileConfigAcrossPeers re-broadcasts the coordinator's config once a
+// minute on an otherwise stable cluster, so a peer that missed a config
+// broadcast is repaired instead of staying diverged forever.
+//
+// This is the "it never self-heals" half of docs/TEST-PLAN.md defect #5. A
+// mutation's broadcast was fire-and-forget with the RPC error discarded, so a
+// single dropped ConfigSync diverged a node permanently: on whitecrane 200 serial
+// add-ip calls left node-3 holding precisely the last four it had missed, and it
+// stayed that way. The broadcaster now retries, but retries are bounded and a
+// peer can be down for longer than they last.
+//
+// Coordinator-gated, and that gate is the load-bearing part. The receiver applies
+// a config wholesale, so if every node re-broadcast its own view, a node that was
+// *behind* would push its stale config at a generation its peers had not seen
+// from it and they would adopt it — turning the repair into the corruption. One
+// speaker per cluster is what makes a re-broadcast safe. clusterCoordinator waits
+// out FailOverLimit before appointing anyone, so a node doing bulk IP work does
+// not get a second coordinator appointed beside it (the runs 8-14 fix).
+func (h *HealthChecker) reconcileConfigAcrossPeers(members map[string]*Member) {
+	if h.server == nil || h.members == nil {
+		return
+	}
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
+		return
+	}
+	h.logger.Debug("CONFIG_RECONCILE: re-broadcasting config from the coordinator")
+	h.server.RequestConfigReconcile()
 }
 
 // HealthCheck represents the result of a health check
@@ -73,22 +119,47 @@ type HealthCheck struct {
 // HealthChecker handles health checking for nodes and IPs
 type HealthChecker struct {
 	sync.RWMutex
-	members             *MemberList
-	checkTicker         *time.Ticker
-	stopChan            chan struct{}
-	stopOnce            sync.Once // Ensure we only close stopChan once
-	logger              *log.Logger
-	ready               bool
-	stopped             bool // Track if we're stopped
-	server              ServerReference
-	lastClusterState    string    // Track last cluster state to only log changes
-	checksWithoutChange int       // Counter for periodic status logs
-	lastLeaderBroadcast time.Time // suppress elections briefly after leader broadcast
-	lastTick            time.Time // last time a check cycle executed
-	loggedNoMembers        bool            // Tracks if a no-member condition has already been logged in the current state
-	deepCheckCounter       int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
-	membershipCheckFailed  map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
+	members               *MemberList
+	checkTicker           *time.Ticker
+	stopChan              chan struct{}
+	stopOnce              sync.Once // Ensure we only close stopChan once
+	logger                *log.Logger
+	// ready and stopped are atomic rather than plain fields under the health
+	// checker's own RWMutex, because IsRunning is read from a caller that already
+	// holds the *server's* write lock — Server.Start's startHealthChecker probe —
+	// while performHealthChecks holds this lock for its whole body and calls back
+	// into the server for the epoch and the state broadcast. Those two orders are
+	// opposite, so the probe and a health-check pass deadlocked whenever the first
+	// tick landed before Server.Start returned. Reading these without the lock
+	// removes the probe's edge; see #79 for the crossings that remain, and #56 for
+	// the same non-reentrancy trap one lock in.
+	//
+	// Nothing needs the pair to be consistent with each other: IsRunning is
+	// advisory, and every state change still happens under the lock.
+	ready                 atomic.Bool
+	stopped               atomic.Bool // Track if we're stopped
+	server                ServerReference
+	lastClusterState      string          // Track last cluster state to only log changes
+	checksWithoutChange   int             // Counter for periodic status logs
+	lastLeaderBroadcast   time.Time       // suppress elections briefly after leader broadcast
+	lastTick              time.Time       // last time a check cycle executed
+	loggedNoMembers       bool            // Tracks if a no-member condition has already been logged in the current state
+	deepCheckCounter      int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
+	membershipCheckFailed map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
+	reconcileCycles       int             // cycles since startup; reconciliation waits for a grace period
+
+	// reconcileInFlight guards the reconciliation pass, which runs off the tick.
+	// While a pass is running later ticks skip it rather than queue behind it, so
+	// a slow peer cannot accumulate goroutines.
+	reconcileInFlight atomic.Bool
+
+	// ipPresence reports whether an address is up on a local interface. Overridden
+	// in tests; nil means read the real interfaces.
+	ipPresence ipPresenceFunc
 }
+
+// ipPresenceFunc reports whether an address is currently on a local interface.
+type ipPresenceFunc func(string) (bool, string, error)
 
 // NewHealthChecker creates a new health checker
 func NewHealthChecker(members *MemberList, logger *log.Logger) *HealthChecker {
@@ -116,13 +187,13 @@ func (h *HealthChecker) Start(interval time.Duration) {
 	h.Lock()
 	defer h.Unlock()
 
-	if h.stopped {
+	if h.stopped.Load() {
 		h.logger.Debug("Health checker is stopped, reinitializing...")
 		h.stopChan = make(chan struct{})
-		h.stopped = false
+		h.stopped.Store(false)
 	}
 	h.checkTicker = time.NewTicker(interval)
-	h.ready = true
+	h.ready.Store(true)
 
 	// Add initial delay before starting health checks
 	h.logger.Debug("Adding initial delay before starting health checks...")
@@ -132,11 +203,15 @@ func (h *HealthChecker) Start(interval time.Duration) {
 	h.logger.Debug("Health checker is now running")
 }
 
-// IsRunning returns true if the health checker is currently running
+// IsRunning returns true if the health checker is currently running.
+//
+// Deliberately takes no lock. Server.Start probes this from inside the server's
+// write lock, while a health-check pass holds this lock and waits on that same
+// server lock — see the note on the ready/stopped fields. Both reads are atomic,
+// and the answer is advisory in every caller: it decides whether to call Start,
+// which re-checks under the lock.
 func (h *HealthChecker) IsRunning() bool {
-	h.RLock()
-	defer h.RUnlock()
-	return h.ready && !h.stopped
+	return h.ready.Load() && !h.stopped.Load()
 }
 
 // Stop halts the health checking process
@@ -147,8 +222,8 @@ func (h *HealthChecker) Stop() {
 	h.logger.Debug("Stopping health checker...")
 
 	// Set flags first to prevent new checks from starting
-	h.ready = false
-	h.stopped = true
+	h.ready.Store(false)
+	h.stopped.Store(true)
 
 	// Stop the ticker
 	if h.checkTicker != nil {
@@ -173,7 +248,7 @@ func (h *HealthChecker) run() {
 			return
 		default:
 			h.RLock()
-			if !h.ready || h.stopped || h.checkTicker == nil {
+			if !h.ready.Load() || h.stopped.Load() || h.checkTicker == nil {
 				h.RUnlock()
 				return
 			}
@@ -187,7 +262,7 @@ func (h *HealthChecker) run() {
 				h.lastTick = time.Now()
 				h.Unlock()
 				h.RLock()
-				if !h.ready || h.stopped {
+				if !h.ready.Load() || h.stopped.Load() {
 					h.RUnlock()
 					return
 				}
@@ -219,6 +294,24 @@ func (h *HealthChecker) performHealthChecks() {
 	doDeepCheck := h.deepCheckCounter%5 == 0
 	membersSnapshot := h.members.MembersSnapshot()
 	memberCount := len(membersSnapshot)
+
+	// One config snapshot for the whole pass, taken here because no member lock is
+	// held yet.
+	//
+	// The per-member loop below reads this while holding member.Lock() (taken at
+	// the reachability check), and MemberList.Config() takes the member-list read
+	// lock — so that read inverted against UpdateConfig, which holds the member-list
+	// *write* lock and then reaches for a member lock. Two parties, opposite orders,
+	// and it deadlocked the daemon: CI caught twelve goroutines stacked behind the
+	// member list, including Server.Stop, Promote, ConfigSync and the IP monitor.
+	//
+	// #71 introduced it and named the right remedy in its own write-up —
+	// "snapshotted once per pass" — but left this call site reading per member.
+	// Before #71 it was a bare pointer read: racy, and precisely because it took no
+	// lock, it could not deadlock. Replacing an unsynchronised read with a lock
+	// acquisition inside another lock is the trade that has to be checked, and this
+	// is the site where it was not.
+	passCfg := h.members.Config()
 	if memberCount == 0 {
 		// Use a field to print the "no members" message only once to the logs.
 		if !h.loggedNoMembers {
@@ -335,9 +428,17 @@ func (h *HealthChecker) performHealthChecks() {
 		// Node is reachable - update latency once
 		member.Latency = fmt.Sprintf("%.2fms", float64(responseTime.Nanoseconds())/1000000)
 
-		// Handle auto-failback for previously failed nodes
-		autoFailback := h.members.config.Pulse.AutoFailback
-		mode := h.members.config.Pulse.Mode
+		// Handle auto-failback for previously failed nodes.
+		//
+		// The pass snapshot, not a fresh Config(): a member lock is held here, and
+		// taking the member-list lock under it is what deadlocked against
+		// UpdateConfig. See passCfg above.
+		hcCfg := passCfg
+		if hcCfg == nil {
+			continue
+		}
+		autoFailback := hcCfg.Pulse.AutoFailback
+		mode := hcCfg.Pulse.Mode
 
 		if wasUnknown && autoFailback {
 			switch mode {
@@ -357,15 +458,16 @@ func (h *HealthChecker) performHealthChecks() {
 					statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
 				}
 			case "active-active":
-				member.Status = StatusPartialActive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to partial-active", member.Hostname))
+				member.Status = StatusActive
+				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to active", member.Hostname))
 			default:
 				member.Status = StatusPassive
 				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
 			}
 		} else if member.Status == StatusUnknown {
-			member.Status = StatusPassive
-			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to passive", member.Hostname))
+			member.Status = recoveredStatus(mode)
+			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
+				member.Hostname, StatusToString(member.Status)))
 		}
 
 		// Add to display status (with latency for display)
@@ -394,7 +496,7 @@ func (h *HealthChecker) performHealthChecks() {
 		h.logger.Infof("HEALTH_CHECK: Cluster state changed - %s", currentClusterDisplayState)
 		h.logger.Debug("HEALTH_CHECK: Previous state was", "lastState", h.lastClusterState)
 		h.lastClusterState = currentClusterStateForComparison
-		h.checksWithoutChange = 0
+		h.resetChecksWithoutChangeLocked()
 
 		// Proactively broadcast updated member states so all nodes converge quickly
 		if h.server != nil {
@@ -412,12 +514,12 @@ func (h *HealthChecker) performHealthChecks() {
 		}
 	} else {
 		// Increment counter for unchanged state
-		h.checksWithoutChange++
+		checksWithoutChange := h.incChecksWithoutChangeLocked()
 
 		// Heartbeat convergence nudge every 3 checks (~3s) to advance LastResponse and align peers
-		if h.server != nil && h.checksWithoutChange%3 == 0 {
+		if h.server != nil && checksWithoutChange%3 == 0 {
 			h.logger.Debug("HEALTH_CHECK: Performing heartbeat convergence nudge", "checksWithoutChange",
-				h.checksWithoutChange)
+				checksWithoutChange)
 			states := getMemberStatusMap()
 			for id, m := range membersSnapshot {
 				m.Lock()
@@ -426,15 +528,27 @@ func (h *HealthChecker) performHealthChecks() {
 				m.LastHCResponse = time.Now()
 				m.Unlock()
 			}
-			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
+			// Deliberately the current epoch, not epoch+1. This fires on *unchanged*
+			// state, so it carries no decision — it exists to advance LastResponse and
+			// re-assert an already-agreed view. Claiming a new epoch made every node's
+			// three-second keepalive outrank the last real decision, so a peer holding a
+			// stale view could undo a coordinator assignment simply by being the most
+			// recent to speak. In active-active that became an endless loop: the
+			// coordinator assigned IPs to a node, the node went Active, a peer's next
+			// nudge demoted it at a higher epoch, its IPs were stripped, and the
+			// coordinator assigned them again ~3s later (docs/TEST-PLAN.md defect #2).
+			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch(), h.getCurrentLeaderID(), nil)
 			putMemberStatusMap(states)
 			h.logger.Debug("HEALTH_CHECK: Heartbeat convergence broadcast completed")
 		}
 
-		// Log periodic summary every 60 checks (roughly every minute with 1s interval)
-		if h.checksWithoutChange >= 60 {
-			h.logger.Infof("Cluster stable for 60 checks: %s", currentClusterDisplayState)
-			h.checksWithoutChange = 0
+		// Log periodic summary every 60 checks (roughly every minute with 1s interval).
+		// Counts up rather than resetting: reconcileActiveActive reads this as the
+		// number of consecutive unchanged cycles, and zeroing it here would stand
+		// the coordinator down once a minute on a perfectly stable cluster.
+		if checksWithoutChange%60 == 0 {
+			h.logger.Infof("Cluster stable for %d checks: %s", checksWithoutChange, currentClusterDisplayState)
+			h.reconcileConfigAcrossPeers(membersSnapshot)
 		}
 	}
 
@@ -450,11 +564,17 @@ func (h *HealthChecker) performHealthChecks() {
 	if localMember != nil {
 		h.logger.Debug("HEALTH_CHECK: Local member has status, checking for active node failure", "hostname",
 			localMember.Hostname, "status", StatusToString(localMember.Status))
-		// Always check for active node failure, not just when passive
-		h.checkForActiveNodeFailure()
+		// Always check for active node failure, not just when passive. Runs off
+		// the tick — see startReconcilePass for why.
+		h.startReconcilePassLocked()
 	} else {
 		// Debug why no local member found - this indicates a serious configuration issue
-		localNodeID, err := h.members.config.GetLocalNodeUUID()
+		diagCfg := h.members.Config()
+		var localNodeID string
+		var err error
+		if diagCfg != nil {
+			localNodeID, err = diagCfg.GetLocalNodeUUID()
+		}
 		memberCount := len(membersSnapshot)
 		var memberIDs []string
 		var memberDetails []string
@@ -470,11 +590,11 @@ func (h *HealthChecker) performHealthChecks() {
 			localNodeID, err, memberCount, memberIDs, memberDetails)
 
 		// Additional diagnostic logging
-		if h.members.config != nil {
+		if diagCfg != nil {
 			h.logger.Info("HEALTH_CHECK: MemberList config state",
 				"local_node_id", localNodeID,
-				"cluster_check", h.members.config.ClusterCheck(),
-				"node_count_in_config", len(h.members.config.Nodes))
+				"cluster_check", diagCfg.ClusterCheck(),
+				"node_count_in_config", len(diagCfg.Nodes))
 		} else {
 			h.logger.Error("HEALTH_CHECK: MemberList config is nil!")
 		}
@@ -496,12 +616,113 @@ func (h *HealthChecker) getCurrentLeaderID() string {
 	return ""
 }
 
+// reconcileBudget bounds one reconciliation pass. It exists so a pass that is
+// making no progress — a peer that accepts connections and never answers — cannot
+// hold the single-flight guard and stop reconciliation indefinitely.
+//
+// Comfortably above demoteMaxTimeout plus the quorum vote's 30s poll, so the
+// backstop only fires for work that is genuinely stuck rather than for a large
+// group being released legitimately. It bounds reconciliation latency, not
+// health-check responsiveness — the pass no longer runs on the tick.
+const reconcileBudget = 3 * time.Minute
+
+// nextReconcileCycle advances and returns the cycle counter, and reports the
+// consecutive-unchanged-cycles count alongside it.
+//
+// Both counters are written by the tick and read by the reconciliation pass, which
+// now runs on its own goroutine, so they move under the health checker lock.
+func (h *HealthChecker) nextReconcileCycle() (cycles, stable int) {
+	h.Lock()
+	defer h.Unlock()
+	h.reconcileCycles++
+	return h.reconcileCycles, h.checksWithoutChange
+}
+
+// reconcileCounters reads the two counters the reconciliation thresholds consult.
+func (h *HealthChecker) reconcileCounters() (cycles, stable int) {
+	h.RLock()
+	defer h.RUnlock()
+	return h.reconcileCycles, h.checksWithoutChange
+}
+
+// resetChecksWithoutChangeLocked zeroes the consecutive-unchanged-cycles counter.
+//
+// The caller holds h's write lock. performHealthChecks takes it for its whole
+// body, so a helper that took it again wedged the health-check goroutine *with
+// the lock held* — no ticks, no promotion, no placement (docs/TEST-PLAN.md
+// defect #56).
+func (h *HealthChecker) resetChecksWithoutChangeLocked() {
+	h.checksWithoutChange = 0
+}
+
+// incChecksWithoutChangeLocked advances the consecutive-unchanged-cycles counter
+// and returns its new value, so the tick reads one consistent number for the rest
+// of the cycle rather than re-reading a field the reconciliation pass also
+// consults. The caller holds h's write lock — see
+// resetChecksWithoutChangeLocked.
+func (h *HealthChecker) incChecksWithoutChangeLocked() int {
+	h.checksWithoutChange++
+	return h.checksWithoutChange
+}
+
+// startReconcilePass runs cluster reconciliation off the health-check tick.
+//
+// Everything the pass reaches can block for tens of seconds: a serial MakePassive
+// per extra Active, a quorum vote that polls for 30s, a remote BringDownIPs per
+// duplicate address, and the bring-ups redistribution performs. Running that
+// inline meant a 1s tick could take a minute, so this node stopped answering its
+// own health checks, peers marked it Unknown and elected around it — the same
+// "busy node looks dead" failure the batched GARP and the coordinator grace period
+// were added to prevent (docs/TEST-PLAN.md defects #2/#26).
+//
+// At most one pass runs at a time. A tick arriving while one is in flight skips,
+// which is why the pass reads the counters live rather than a snapshot: it should
+// act on the cluster as it is when it gets there, not as it was several ticks ago.
+// The caller holds h's write lock: this is called from performHealthChecks, which
+// takes it for its whole body. Calling the exported IsRunning here took the read
+// lock on top of that write lock, and sync.RWMutex is not reentrant, so the first
+// tick to reach this line wedged the health-check goroutine *with the write lock
+// held*. On whitecrane run 24 that stopped reconciliation dead: no node was ever
+// promoted, nothing placed the 287-address group, and all four nodes sat
+// Standby/Passive with the whole group down (docs/TEST-PLAN.md defect #56).
+func (h *HealthChecker) startReconcilePassLocked() {
+	if !h.ready.Load() || h.stopped.Load() {
+		return
+	}
+	if !h.reconcileInFlight.CompareAndSwap(false, true) {
+		h.logger.Debug("ACTIVE_CHECK: reconciliation still running, skipping this cycle")
+		return
+	}
+
+	go func() {
+		defer h.reconcileInFlight.Store(false)
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			h.checkForActiveNodeFailure()
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(reconcileBudget):
+			// The pass is abandoned, not cancelled — the operations below it are
+			// bounded individually, so it will finish on its own. Releasing the
+			// guard here keeps a wedged peer from stopping reconciliation for good.
+			h.logger.Warn("ACTIVE_CHECK: reconciliation exceeded its budget, releasing it for the next cycle",
+				"budget", reconcileBudget)
+		}
+	}()
+}
+
 // checkForActiveNodeFailure checks if the active node has failed and initiates failover
 func (h *HealthChecker) checkForActiveNodeFailure() {
 	h.logger.Debug("ACTIVE_CHECK: Starting active node failure check")
 
+	h.nextReconcileCycle()
+
 	members := h.members.MembersSnapshot()
-	config := h.members.config
+	config := h.members.Config()
 
 	// Find the active node
 	var activeMember *Member
@@ -517,7 +738,21 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		}
 	}
 
-	// If no active node exists, we need to elect one immediately
+	// In active-active mode, all eligible nodes are StatusActive. The
+	// coordinator reconciles orphaned IPs (dead nodes, restarts) and
+	// rebalances load onto empty nodes (fresh joins, failback) every cycle.
+	if config.Pulse.Mode == "active-active" {
+		h.reconcileActiveActive(members)
+		return
+	}
+
+	// Active-passive tolerates exactly one Active node. If more than one is
+	// Active the scan above picked one of them arbitrarily, so consolidate now
+	// and re-evaluate failover next cycle against a single-Active view.
+	if h.enforceSingleActive(members) {
+		return
+	}
+
 	if activeMember == nil {
 		h.logger.Error("ACTIVE_CHECK: No active node found in cluster, initiating leader election")
 		h.electNewActiveNode()
@@ -576,11 +811,719 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	}
 }
 
+// reconcileGraceCycles is the number of health-check cycles to wait after
+// startup before making redistribution or consolidation decisions. It gives
+// initial health checks and peer self-reports (which carry each node's
+// ActiveIPs) time to converge so we don't redistribute IPs that a peer is
+// actually still hosting, or demote a node whose reported status is still
+// the stale one we started up with.
+const reconcileGraceCycles = 10
+
+// Demotion deadline sizing.
+//
+// MakePassive drops every configured floating address on the target and then
+// verifies each one against its interfaces, so its cost scales with the size of
+// the group, not with the cluster. A flat 10s was right when demotion only
+// released the addresses recorded against a node; now, on the 201-address test
+// topology, a healthy but loaded incumbent can legitimately need longer.
+//
+// Overrunning is not a neutral outcome. A DeadlineExceeded is deliberately read as
+// "the peer is alive and may still own its IPs" — the conservative reading that
+// keeps a wedged Active from being promoted over — so a deadline that is merely
+// too short aborts promotions and consolidations that were safe.
+const (
+	demoteBaseTimeout  = 10 * time.Second
+	demotePerIPTimeout = 100 * time.Millisecond
+	demoteMaxTimeout   = 120 * time.Second
+)
+
+// DemotionTimeoutFor sizes a MakePassive deadline to the number of floating IPs
+// the target has to release and verify. Capped, so a huge or misconfigured group
+// cannot produce an effectively unbounded wait.
+func DemotionTimeoutFor(ipCount int) time.Duration {
+	if ipCount < 0 {
+		ipCount = 0
+	}
+	timeout := demoteBaseTimeout + time.Duration(ipCount)*demotePerIPTimeout
+	if timeout > demoteMaxTimeout {
+		return demoteMaxTimeout
+	}
+	return timeout
+}
+
+// localNodeID reads this node's UUID through the config-pointer accessor.
+//
+// Config() is documented as possibly returning nil, and GetLocalNodeUUID calls
+// ClusterCheck, which dereferences c.Nodes — so chaining the two panics on a nil
+// config. Every other reader in this file takes the pointer into a local and
+// guards it; three vote/tie-break sites chained instead, which read as an
+// oversight rather than a considered exception. Folding the guard into one
+// accessor makes it impossible to forget at a fourth site.
+func (h *HealthChecker) localNodeID() (string, error) {
+	cfg := h.members.Config()
+	if cfg == nil {
+		return "", errors.New("member list has no config")
+	}
+	return cfg.GetLocalNodeUUID()
+}
+
+// makePassiveTimeout bounds a demotion issued by the consolidation invariant,
+// sized to the group it makes the target release.
+func (h *HealthChecker) makePassiveTimeout() time.Duration {
+	cfg := h.members.Config()
+	if cfg == nil {
+		return DemotionTimeoutFor(0)
+	}
+	total := 0
+	for _, ips := range cfg.Groups {
+		total += len(ips)
+	}
+	return DemotionTimeoutFor(total)
+}
+
+// enforceSingleActive keeps the active-passive invariant that at most one node
+// is Active. Consolidating only when the mode changes cannot hold it: anything
+// that promotes a node afterwards — a late BringUpIP reaching a peer that still
+// believes the cluster is active-active, an election racing the switch — leaves
+// two Actives, and in active-passive every Active expects *all* the group IPs
+// on its interfaces, so the two ARP-fight over every floating IP. Checking each
+// cycle means such a promotion is undone on the next one.
+//
+// Only the coordinator acts, so peers can't issue conflicting demotions, and
+// the survivor is ConsolidationTarget — the same choice SetMode makes — so the
+// decision is stable across cycles and nodes. Demotion goes through the
+// MakePassive RPC because that releases every group IP the node could host
+// rather than only the ones recorded against it: a node promoted by election
+// holds them all while its ActiveIPs is still empty.
+//
+// Returns true if any node was demoted.
+func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
+	if cycles, _ := h.reconcileCounters(); cycles < reconcileGraceCycles || h.server == nil {
+		return false
+	}
+
+	var actives []*Member
+	for _, member := range members {
+		member.Lock()
+		isActive := member.Status == StatusActive
+		member.Unlock()
+		if isActive {
+			actives = append(actives, member)
+		}
+	}
+	if len(actives) < 2 {
+		return false
+	}
+
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return false
+	}
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
+		h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode; waiting for the coordinator to consolidate",
+			len(actives))
+		return false
+	}
+
+	target := ConsolidationTarget(members, h.server.GetLeaderID())
+	if target == nil {
+		h.logger.Error("ACTIVE_CHECK: no eligible node to consolidate floating IPs onto")
+		return false
+	}
+
+	h.logger.Warnf("ACTIVE_CHECK: %d nodes are Active in active-passive mode, consolidating onto %s",
+		len(actives), target.Hostname)
+
+	// The demotions are issued serially, so the cost is makePassiveTimeout per
+	// extra Active. A shared deadline caps the pass regardless of how many there
+	// are; whatever is left over is picked up next cycle, since the invariant is
+	// re-checked every time.
+	deadline := time.Now().Add(reconcileBudget / 2)
+
+	demoted := false
+	for _, member := range actives {
+		if member.ID == target.ID {
+			continue
+		}
+		if time.Now().After(deadline) {
+			h.logger.Warn("ACTIVE_CHECK: consolidation budget spent, remaining Actives will be demoted next cycle",
+				"remaining_after", member.Hostname)
+			break
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), h.makePassiveTimeout())
+		resp, err := h.server.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: member.ID})
+		cancel()
+
+		switch {
+		case err != nil:
+			h.logger.Error("ACTIVE_CHECK: failed to demote extra Active node",
+				"hostname", member.Hostname, "error", err)
+		case !resp.Success:
+			h.logger.Error("ACTIVE_CHECK: demotion of extra Active node was rejected",
+				"hostname", member.Hostname, "message", resp.Message)
+		default:
+			h.logger.Warn("ACTIVE_CHECK: demoted extra Active node", "hostname", member.Hostname)
+			demoted = true
+		}
+	}
+
+	if !demoted {
+		return false
+	}
+
+	// Push the corrected state out so demoted nodes stop claiming IPs instead
+	// of waiting to notice the change on their own.
+	states := getMemberStatusMap()
+	for id, member := range members {
+		member.Lock()
+		states[id] = member.Status
+		member.Unlock()
+	}
+	_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, target.ID, nil)
+	putMemberStatusMap(states)
+
+	return true
+}
+
+// viewStableCycles is how many consecutive unchanged health-check cycles a node
+// needs before it will act as active-active coordinator.
+//
+// Coordinator is a local decision — the lowest-ID node this node considers
+// healthy — so it is only single-writer while every node agrees on who is
+// healthy. Bulk IP work breaks that agreement: bringing up a hundred addresses
+// makes a node slow enough to answer that peers mark it Unknown, and each peer
+// that does then makes itself coordinator. On whitecrane all four nodes
+// redistributed at once and left ~170 addresses claimed by more than one owner.
+// Requiring a settled view means a node with a transient one stands down, and
+// the flap resolves before anyone moves an address (docs/TEST-PLAN.md defects
+// #2/#26).
+const viewStableCycles = 3
+
+// reconcileActiveActive keeps floating IPs assigned and balanced in
+// active-active mode. Group IPs no longer hosted by any healthy node are
+// redistributed, and IPs are moved onto underloaded nodes. Only the
+// coordinator — the healthy node with the lowest ID — acts, so concurrent
+// redistribution from multiple nodes can't race.
+func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
+	cycles, stable := h.reconcileCounters()
+	if cycles < reconcileGraceCycles {
+		return
+	}
+
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	if clusterCoordinator(members, h.failoverGrace()) != localID {
+		return
+	}
+	if stable < viewStableCycles {
+		h.logger.Debug("ACTIVE_CHECK: cluster view still settling, deferring reconciliation",
+			"checksWithoutChange", stable)
+		return
+	}
+
+	deduped := h.resolveDuplicateAssignments(members)
+	redistributed := h.redistributeOrphanedIPs(members)
+	moved := h.rebalanceActiveActive(members)
+
+	// Broadcast so peers converge on the new assignments quickly.
+	if (deduped || redistributed || moved) && h.server != nil {
+		states := getMemberStatusMap()
+		for id, m := range members {
+			m.Lock()
+			states[id] = m.Status
+			m.Unlock()
+		}
+		_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
+		putMemberStatusMap(states)
+	}
+}
+
+// clusterCoordinator returns the ID of the node that should orchestrate
+// cluster-wide IP decisions — active-active redistribution and active-passive
+// consolidation: the healthy (Active or Passive) node with the lowest ID.
+// Returns "" when no healthy node exists.
+//
+// grace is how long a node that has gone Unknown still counts. Handing the role
+// over on a single missed check meant the busiest node lost it exactly when it
+// mattered: moving fifty addresses takes long enough that peers marked the
+// coordinator Unknown mid-batch, and the next node in ID order took over and
+// re-placed addresses the first one was still holding (docs/TEST-PLAN.md
+// defects #2/#26).
+func clusterCoordinator(members map[string]*Member, grace time.Duration) string {
+	coordinator := ""
+	for id, member := range members {
+		member.Lock()
+		healthy := member.Status == StatusActive || member.Status == StatusPassive ||
+			(member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace)
+		member.Unlock()
+		if healthy && (coordinator == "" || id < coordinator) {
+			coordinator = id
+		}
+	}
+	return coordinator
+}
+
+// failoverGrace is how long a node may go without answering a health check
+// before the cluster acts on its absence — the same limit active-passive
+// failover already waits out before moving addresses.
+func (h *HealthChecker) failoverGrace() time.Duration {
+	cfg := h.members.Config()
+	if cfg == nil {
+		return 0
+	}
+	return time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
+}
+
+// localIPPresence returns a presence check over this node's interfaces, building
+// the inventory at most once and only if it is actually consulted.
+//
+// BuildIPInventory is a full netlink enumeration, and the common case is a pass
+// with no duplicates at all, so it must not be built up front — nor once per
+// address, which is what made demotion enumerate the interfaces hundreds of times
+// before stillHeldIPs was changed to share one inventory.
+func (h *HealthChecker) localIPPresence() ipPresenceFunc {
+	if h.ipPresence != nil {
+		return h.ipPresence
+	}
+
+	var (
+		inv   *network.IPInventory
+		err   error
+		built bool
+	)
+	return func(ip string) (bool, string, error) {
+		if !built {
+			inv, err = network.BuildIPInventory()
+			built = true
+		}
+		if err != nil {
+			return false, "", err
+		}
+		return inv.Exists(ip)
+	}
+}
+
+// pickDuplicateSurvivor decides which of two members recorded as holding the same
+// address keeps it.
+//
+// Record order — whichever of the two sorts first by node ID — is a coin flip
+// against reality. If the node that actually has the address up is the one that
+// loses, the coordinator brings down a live address and leaves the record on a node
+// that may not have it up at all, so the address is served by nobody until the next
+// orphan sweep re-places it: one avoidable flap per duplicate.
+//
+// Only the local node's interfaces are readable — no RPC exposes a peer's — so the
+// kernel decides whenever the local node is one of the two contenders, and record
+// order remains the fallback when neither is local or the interfaces cannot be
+// read. That covers the case that matters most in practice: the coordinator running
+// this pass is usually itself one of the holders.
+func pickDuplicateSurvivor(first, second *Member, ip string, present ipPresenceFunc) (winner, loser *Member) {
+	for _, candidate := range []*Member{first, second} {
+		if !candidate.IsLocal() {
+			continue
+		}
+		other := first
+		if candidate == first {
+			other = second
+		}
+
+		ipOnly := ip
+		if cidr, _ := utils.GetCIDR(ip); cidr != nil {
+			ipOnly = cidr.String()
+		}
+		holds, _, err := present(ipOnly)
+		if err != nil {
+			// Presence could not be established, so it is no better evidence than
+			// record order. Fall through to that.
+			break
+		}
+		if holds {
+			return candidate, other
+		}
+		// The local record is demonstrably stale: the peer is the better owner, and
+		// dropping the local record costs nothing because nothing is up here.
+		return other, candidate
+	}
+	return first, second
+}
+
+// resolveDuplicateAssignments finds IPs tracked by more than one healthy
+// member and removes them everywhere but the surviving owner. Convergence races
+// can transiently double-assign an IP; left alone that means two nodes
+// ARP-fighting over the same address. Returns true if any duplicate was resolved.
+func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) bool {
+	resolved := false
+	owners := make(map[string]*Member)
+	present := h.localIPPresence()
+
+	// Losing addresses are collected per node and released in one call each, after
+	// every conflict is known: the survivor of a conflict can be a node already
+	// visited, so the loser is not always the one currently being examined.
+	surrender := make(map[string][]string)
+
+	candidates := rebalanceCandidates(members)
+	for _, node := range candidates {
+		node.Lock()
+		ips := append([]string{}, node.ActiveIPs...)
+		node.Unlock()
+
+		// A node listing the same IP twice is a bookkeeping duplicate, not a
+		// conflict: the address is up once and belongs here. Treating it as a
+		// conflict brought the node's own legitimate address down and left it
+		// hosted by nobody until the next orphan sweep re-placed it — the same
+		// address going missing cluster-wide that TC-6 kept measuring
+		// (docs/TEST-PLAN.md defects #2/#26). Collapse the list instead.
+		seenHere := make(map[string]bool, len(ips))
+		deduped := false
+		for _, ip := range ips {
+			if seenHere[ip] {
+				deduped = true
+				continue
+			}
+			seenHere[ip] = true
+		}
+		if deduped {
+			h.logger.Warnf("ACTIVE_CHECK: %s recorded the same IP more than once, collapsing its assignment list",
+				node.Hostname)
+			unique := make([]string, 0, len(seenHere))
+			for _, ip := range ips {
+				if seenHere[ip] {
+					unique = append(unique, ip)
+					delete(seenHere, ip)
+				}
+			}
+			node.Lock()
+			node.ActiveIPs = unique
+			node.Unlock()
+			ips = unique
+			resolved = true
+		}
+
+		for _, ip := range ips {
+			owner, seen := owners[ip]
+			if !seen {
+				owners[ip] = node
+				continue
+			}
+
+			winner, loser := pickDuplicateSurvivor(owner, node, ip, present)
+			owners[ip] = winner
+			surrender[loser.ID] = append(surrender[loser.ID], ip)
+			h.logger.Warnf("ACTIVE_CHECK: IP %s assigned to both %s and %s, keeping it on %s",
+				ip, owner.Hostname, node.Hostname, winner.Hostname)
+		}
+	}
+
+	// Released in one call per node. One BringDownIPs per address meant one RPC per
+	// address to a remote node, each with the client's own 30s deadline, so a node
+	// that had picked up a dozen duplicates could spend minutes here. Iterated in
+	// candidate order rather than map order so the work is deterministic.
+	for _, node := range candidates {
+		ips := surrender[node.ID]
+		if len(ips) == 0 {
+			continue
+		}
+
+		node.Lock()
+		for _, ip := range ips {
+			node.ActiveIPs = removeIPFromList(node.ActiveIPs, ip)
+		}
+		node.Unlock()
+
+		if err := node.BringDownIPs(ips); err != nil {
+			h.logger.Error("ACTIVE_CHECK: failed to bring down duplicate IPs", "ips", ips,
+				"hostname", node.Hostname, "error", err)
+		}
+		resolved = true
+	}
+	return resolved
+}
+
+// redistributeOrphanedIPs reassigns group IPs that no healthy node currently
+// hosts — IPs stranded on failed nodes or lost entirely (e.g. a node
+// rebooted and came back empty). Returns true if anything was redistributed.
+func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool {
+	// Collect IPs hosted by healthy nodes; clear stranded assignments from
+	// failed nodes so their IPs count as orphaned.
+	//
+	// A node only counts as failed once it has been silent for the failover
+	// limit. Acting on the first missed check reclaimed addresses from a node
+	// that was merely busy — and the node that gets busiest is the coordinator
+	// part-way through a batch of moves, so its peers declared its addresses
+	// orphaned and brought them up alongside the copies it was still serving
+	// (docs/TEST-PLAN.md defects #2/#26).
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
+	grace := h.failoverGrace()
+	hosted := make(map[string]bool)
+	for _, member := range members {
+		member.Lock()
+		switch {
+		case member.Status == StatusActive || member.Status == StatusPassive,
+			member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace:
+			for _, ip := range member.ActiveIPs {
+				hosted[ip] = true
+			}
+		case member.Status == StatusUnknown:
+			if len(member.ActiveIPs) > 0 {
+				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s (silent for %s)",
+					len(member.ActiveIPs), member.Hostname, time.Since(member.LastHCResponse).Round(time.Second))
+				member.ActiveIPs = nil
+				member.LoadFactor = 0
+			}
+		}
+		member.Unlock()
+	}
+
+	orphaned := orphanedGroupIPs(cfg.Groups, hosted)
+	if len(orphaned) == 0 {
+		return false
+	}
+
+	// Quorum-gate redistribution the same way partial IP failures are, so a
+	// minority partition can't grab IPs the majority side still serves.
+	if len(members) >= 3 && !h.initiateIPRedistributionVote(orphaned) {
+		h.logger.Warn("ACTIVE_CHECK: quorum vote failed, not redistributing orphaned IPs")
+		return false
+	}
+
+	h.logger.Warnf("ACTIVE_CHECK: redistributing %d orphaned floating IP(s)", len(orphaned))
+	if err := h.members.RedistributeIPs(orphaned); err != nil {
+		h.logger.Error("ACTIVE_CHECK: failed to redistribute orphaned IPs", "error", err)
+		return false
+	}
+	return true
+}
+
+// orphanedGroupIPs returns all configured group IPs not present in hosted,
+// sorted for deterministic redistribution.
+func orphanedGroupIPs(groups map[string][]string, hosted map[string]bool) []string {
+	var orphaned []string
+	for _, ips := range groups {
+		for _, ip := range ips {
+			if !hosted[ip] {
+				orphaned = append(orphaned, ip)
+			}
+		}
+	}
+	sort.Strings(orphaned)
+	return orphaned
+}
+
+// rebalanceActiveActive moves IPs from over-loaded nodes to under-loaded ones
+// until the cluster is balanced (difference <= 1). This is what tops up
+// freshly joined and failed-back nodes, which otherwise sit Active but empty
+// forever. Returns true if any IP was moved.
+//
+// Moves are planned in one pass and applied a batch per node pair. Doing them
+// one address at a time cost a full IP-failover round trip each — roughly one
+// address every eleven seconds on the whitecrane cluster, so the ~150 moves a
+// switch out of active-passive needs took about 27 minutes to converge
+// (docs/TEST-PLAN.md defects #2/#26).
+func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
+	if h.server == nil {
+		return false
+	}
+
+	cfg := h.members.Config()
+	if cfg == nil {
+		return false
+	}
+	nodes := rebalanceCandidates(members)
+	moves := planRebalanceMoves(nodes, cfg)
+	if len(moves) == 0 {
+		return false
+	}
+
+	moved := false
+	for _, move := range moves {
+		src, dst := nodes[move.Src], nodes[move.Dst]
+
+		// Re-read under the lock: the plan came from a snapshot, and a
+		// concurrent ConfigSync self-report may have shrunk the source since.
+		// The addresses must come from the batch's own group — an arbitrary tail
+		// of ActiveIPs can belong to a group the destination cannot host.
+		ips := rebalanceMoveIPs(src, cfg, move.Group, move.Count)
+		if len(ips) == 0 {
+			continue
+		}
+
+		h.logger.Infof("ACTIVE_CHECK: rebalancing %d IP(s) from %s to %s", len(ips), src.Hostname, dst.Hostname)
+		if err := h.server.OrchestrateIPFailover(src.ID, dst.ID, ips); err != nil {
+			h.logger.Error("ACTIVE_CHECK: rebalance move failed", "count", len(ips), "error", err)
+			break
+		}
+
+		src.Lock()
+		for _, ip := range ips {
+			src.ActiveIPs = removeIPFromList(src.ActiveIPs, ip)
+		}
+		src.Unlock()
+
+		// Skip what the destination already records. A concurrent coordinator,
+		// or a self-report that landed mid-move, can have credited it already,
+		// and a doubled entry is worse than a missing one: the dedup pass then
+		// has to decide whether the address is a conflict.
+		dst.Lock()
+		held := make(map[string]bool, len(dst.ActiveIPs))
+		for _, ip := range dst.ActiveIPs {
+			held[ip] = true
+		}
+		for _, ip := range ips {
+			if !held[ip] {
+				dst.ActiveIPs = append(dst.ActiveIPs, ip)
+			}
+		}
+		dst.Status = StatusActive
+		dst.Unlock()
+		moved = true
+	}
+	return moved
+}
+
+// rebalanceCandidates returns the healthy members eligible for rebalancing,
+// sorted by ID so move planning is deterministic.
+func rebalanceCandidates(members map[string]*Member) []*Member {
+	var nodes []*Member
+	for _, member := range members {
+		member.Lock()
+		eligible := member.Status == StatusActive || member.Status == StatusPassive
+		member.Unlock()
+		if eligible {
+			nodes = append(nodes, member)
+		}
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	return nodes
+}
+
+// planRebalanceMoves returns every IP move needed to balance nodes, batched per
+// source/destination/group triple, or nothing when the assignment is already
+// balanced (max-min <= 1). Nodes must be sorted by ID so ties resolve
+// deterministically.
+//
+// Group eligibility constrains the plan in both directions: a destination can
+// only receive groups assigned to it, and a source can only give up groups the
+// destination will accept. Planning blind to that sent addresses to a node that
+// could not bring them up, and rebalanceActiveActive abandons the whole pass on
+// the first failed move — so a single node the group had been unassigned from
+// stalled all rebalancing (docs/TEST-PLAN.md defect #40).
+//
+// A nil cfg plans group-blind, which is what a caller with no config to consult
+// can safely assume.
+func planRebalanceMoves(nodes []*Member, cfg *config.Config) []ipam.Move {
+	var index map[string]string
+	if cfg != nil {
+		index = groupIndex(cfg.Groups)
+	}
+
+	snapshots := make([]ipam.Node, 0, len(nodes))
+	for _, node := range nodes {
+		node.Lock()
+		snapshot := ipam.Node{
+			Hostname: node.Hostname,
+			IPCount:  len(node.ActiveIPs),
+			Capacity: node.Capacity,
+			Groups:   nodeHostableGroups(cfg, node.ID),
+		}
+		if index != nil {
+			held := make(map[string]int)
+			for _, ip := range node.ActiveIPs {
+				if group, ok := index[ip]; ok {
+					held[group]++
+				}
+			}
+			snapshot.Held = held
+		}
+		node.Unlock()
+		snapshots = append(snapshots, snapshot)
+	}
+	return ipam.PlanMoves(snapshots)
+}
+
+// rebalanceMoveIPs picks up to count addresses of the given group off node, for
+// a planned move to hand to the destination. An empty group takes any address,
+// which is what a group-blind plan asks for.
+//
+// Addresses are taken from the end of the list: the tail is the most recently
+// assigned, so a rebalance gives back what it most recently took.
+func rebalanceMoveIPs(node *Member, cfg *config.Config, group string, count int) []string {
+	if count <= 0 {
+		return nil
+	}
+
+	var index map[string]string
+	if group != "" && cfg != nil {
+		index = groupIndex(cfg.Groups)
+	}
+
+	node.Lock()
+	defer node.Unlock()
+
+	picked := make([]string, 0, count)
+	for i := len(node.ActiveIPs) - 1; i >= 0 && len(picked) < count; i-- {
+		ip := node.ActiveIPs[i]
+		if index != nil && index[ip] != group {
+			continue
+		}
+		picked = append(picked, ip)
+	}
+	return picked
+}
+
+// recoveredStatus returns the status a reachable node that was Unknown should
+// return to.
+//
+// Every eligible node is Active in active-active, so recovering to Passive
+// there is a demotion the mode has no concept of — and an expensive one. A
+// non-Active node has its recorded assignments cleared on the next broadcast
+// and every cluster floating IP stripped by the IP monitor, so the coordinator
+// sees those addresses orphaned and re-places them, only for the node to go
+// Active again on the next BringUpIP. That loop kept addresses moving between
+// owners and briefly off the cluster entirely (docs/TEST-PLAN.md defects
+// #2/#26). The auto-failback path already makes this distinction; this is the
+// same decision with auto-failback off.
+func recoveredStatus(mode string) MemberStatus {
+	if mode == "active-active" {
+		return StatusActive
+	}
+	return StatusPassive
+}
+
+// removeIPFromList returns ips with target removed.
+func removeIPFromList(ips []string, target string) []string {
+	out := ips[:0]
+	for _, ip := range ips {
+		if ip != target {
+			out = append(out, ip)
+		}
+	}
+	return out
+}
+
 // electNewActiveNode elects a new active node using deterministic backoff to prevent races
 func (h *HealthChecker) electNewActiveNode() {
 	h.logger.Info("ELECTION: Starting leader election process")
 
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Error("Failed to get local node ID for election: no config")
+		return
+	}
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Error("Failed to get local node ID for election")
 		return
@@ -858,7 +1801,12 @@ func (h *HealthChecker) emergencyFallback() {
 	h.logger.Warn("Emergency fallback: checking if this node should coordinate")
 
 	// Use the same deterministic coordination as main election
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Error("Emergency fallback: no config")
+		return
+	}
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Error("Emergency fallback: Failed to get local node ID", "error", err)
 		return
@@ -907,8 +1855,13 @@ func (h *HealthChecker) checkClusterMembership(member *Member) bool {
 		return false
 	}
 
-	localToken := h.members.config.Pulse.ClusterToken
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	cfg := h.members.Config()
+	if cfg == nil {
+		h.logger.Warn("checkClusterMembership: no config")
+		return false
+	}
+	localToken := cfg.Pulse.ClusterToken
+	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
 		return false
@@ -962,7 +1915,13 @@ func (h *HealthChecker) checkNodeConnectivity(member *Member) bool {
 	}
 
 	// Try to establish basic connection
-	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(member.IP), member.Port)
+	//
+	// JoinHostPort rather than the FormatIPv6 + "%s:%s" idiom, for the same reason
+	// as the two dial probes in internal/server/server.go: the two are equivalent
+	// for every input, but `go vet` cannot see through the helper and reports every
+	// "%s:%s" reaching net.Dial as broken for IPv6. This was the last such finding
+	// in the tree, and one known-false finding is enough to bury a real one.
+	address := net.JoinHostPort(utils.SanitizeIPv6(member.IP), member.Port)
 	conn, err := net.DialTimeout("tcp", address, 500*time.Millisecond)
 	if err == nil {
 		err = conn.Close()
@@ -1055,12 +2014,16 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 	membersSnapshot := h.members.MembersSnapshot()
 
 	// Determine if we should use quorum based on cluster size
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
 	clusterSize := len(membersSnapshot)
 	quorumEnabled := clusterSize >= 3
 
 	// Update member status based on mode
 	member.Lock()
-	switch h.members.config.Pulse.Mode {
+	switch cfg.Pulse.Mode {
 	case "active-passive":
 		if len(failedIPs) == len(member.ActiveIPs) {
 			// All IPs failed in active-passive mode - mark node as down
@@ -1151,34 +2114,24 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 
 			member.Status = StatusUnknown
 		} else {
-			// Partial failure - update status and load factor
-			h.logger.Infof("Partial IP failure for member %s, updating status", member.Hostname)
-
-			// If quorum is enabled, we need to initiate a vote before changing to partial active
-			if quorumEnabled && member.Status != StatusPartialActive {
-				h.logger.Info("Quorum voting is enabled, initiating vote for partial active status")
-				member.Unlock() // Unlock before initiating vote
-
-				// Initiate vote through the server component
-				voteResult := h.initiateNodeStatusVote(member.ID, StatusPartialActive)
-
-				if !voteResult {
-					h.logger.Warn("Quorum vote failed, not changing node status")
-					return
-				}
-
-				h.logger.Info("Quorum vote passed, proceeding with status change")
-				member.Lock() // Lock again to continue with status change
-			}
-
-			member.Status = StatusPartialActive
+			// Partial failure in active-active — node keeps StatusActive with reduced IPs.
+			// No status transition needed; update LoadFactor to reflect reduced load.
+			h.logger.Infof("Partial IP failure for member %s, updating load factor", member.Hostname)
 			if member.Capacity > 0 {
-				member.LoadFactor = float64(len(member.ActiveIPs)-len(failedIPs)) / float64(member.Capacity)
+				// Clamped at zero: failedIPs is built from a separate observation of
+				// the interface, so it can name an address ActiveIPs no longer lists
+				// and make this subtraction negative. A negative load factor reads as
+				// "emptier than empty" everywhere it is compared.
+				remaining := len(member.ActiveIPs) - len(failedIPs)
+				if remaining < 0 {
+					remaining = 0
+				}
+				member.LoadFactor = float64(remaining) / float64(member.Capacity)
 			}
 		}
 
 	default:
-		h.logger.Warnf("Unknown cluster mode %s, defaulting to active-passive behavior", h.members.config.Pulse.Mode)
+		h.logger.Warnf("Unknown cluster mode %s, defaulting to active-passive behavior", cfg.Pulse.Mode)
 		if len(failedIPs) == len(member.ActiveIPs) {
 			// If quorum is enabled, we need to initiate a vote before changing status
 			if quorumEnabled {
@@ -1261,7 +2214,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
 				// Find the other available node
-				localNodeID, err := h.members.config.GetLocalNodeUUID()
+				localNodeID, err := h.localNodeID()
 				if err != nil {
 					h.logger.Error("Failed to get local node ID for tie-breaking", "error", err)
 					return false
@@ -1343,7 +2296,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 		h.logger.Infof("Started voting session %s for node status change", sessionID)
 
 		// Get our own node ID to cast our vote
-		localNodeID, err := h.members.config.GetLocalNodeUUID()
+		localNodeID, err := h.localNodeID()
 		if err != nil {
 			h.logger.Errorf("Failed to get local node ID: %v", err)
 		} else {
@@ -1447,6 +2400,11 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 		return true // Default to allowing the change if quorum manager is not available
 	}
 
+	// Refresh the quorum manager's node count — it is seeded at daemon startup
+	// and goes stale as nodes join, which would make StartVotingSession refuse
+	// with "requires at least 3 nodes" on a healthy 3+ node cluster.
+	quorumManager.UpdateNodeCount(clusterSize)
+
 	// Create a descriptive subject and description for the vote
 	ipList := ""
 	if len(ips) <= 5 {
@@ -1474,7 +2432,7 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 	h.logger.Infof("Started voting session %s for IP redistribution", sessionID)
 
 	// Get our own node ID to cast our vote
-	localNodeID, err := h.members.config.GetLocalNodeUUID()
+	localNodeID, err := h.localNodeID()
 	if err != nil {
 		h.logger.Errorf("Failed to get local node ID: %v", err)
 	} else {
@@ -1483,6 +2441,15 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 		if err != nil {
 			h.logger.Errorf("Failed to cast our own vote: %v", err)
 		}
+	}
+
+	// Broadcast the vote request to other nodes so they can participate —
+	// without this the session only ever holds the initiator's vote and can
+	// never reach quorum, permanently blocking redistribution.
+	h.logger.Info("Broadcasting IP redistribution vote request to cluster nodes...")
+	if err := h.server.BroadcastVoteRequest(sessionID, "ip_redistribution", subject, description, 30); err != nil {
+		h.logger.Warnf("Failed to broadcast vote request: %v", err)
+		// Continue anyway - maybe some nodes are offline but others might still vote
 	}
 
 	// Wait for the vote to complete

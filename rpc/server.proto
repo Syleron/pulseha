@@ -62,6 +62,9 @@ service CLI {
     // Maintenance mode
     rpc SetMaintenance(SetMaintenanceRequest) returns (SetMaintenanceResponse) {}
 
+    // Node capacity (max floating IPs a node may host)
+    rpc SetCapacity(SetCapacityRequest) returns (SetCapacityResponse) {}
+
     // Quorum info (read-only)
     rpc GetVotingSessions(GetVotingSessionsRequest) returns (GetVotingSessionsResponse) {}
     rpc GetVotingSessionDetails(GetVotingSessionDetailsRequest) returns (GetVotingSessionDetailsResponse) {}
@@ -119,7 +122,8 @@ message StatusRequest {}
 
 message StatusResponse {
     repeated Member members = 1;
-    repeated GroupInfo groups = 2;  // Add group information to the response
+    repeated GroupInfo groups = 2;
+    string mode = 3;
 }
 
 // Member status enum provides explicit values on the wire
@@ -127,8 +131,16 @@ enum MemberStatusEnum {
     MEMBER_STATUS_UNKNOWN = 0;
     MEMBER_STATUS_ACTIVE = 1;
     MEMBER_STATUS_PASSIVE = 2;
-    MEMBER_STATUS_PARTIAL_ACTIVE = 3;
+    reserved 3;
+    reserved "MEMBER_STATUS_PARTIAL_ACTIVE";
     MEMBER_STATUS_MAINTENANCE = 4;
+    // Healthy and eligible for promotion, holding no floating IPs. Derived at
+    // the status boundary from the member's health plus its assignment list —
+    // it is never stored, never sent between nodes, and never used to make a
+    // placement decision. Reporting such a node as ACTIVE said nothing about
+    // whether it was serving anything, which is what PARTIAL_ACTIVE (3, now
+    // reserved) failed to fix by adding a stored value to this same enum.
+    MEMBER_STATUS_STANDBY = 5;
 }
 
 message Member {
@@ -137,7 +149,8 @@ message Member {
     repeated string active_ips = 3;
     string last_response = 4;
     string latency = 5;
-    bool partial_active = 6;
+    reserved 6;
+    reserved "partial_active";
     string ip = 7;
     string port = 8;
     string node_id = 9;  // UUID of the node
@@ -273,6 +286,17 @@ message SetMaintenanceRequest {
 }
 
 message SetMaintenanceResponse {
+    bool success = 1;
+    string message = 2;
+}
+
+// Node Capacity Request/Response
+message SetCapacityRequest {
+    string node_id = 1; // optional: target node UUID; defaults to local node if empty
+    int32 capacity = 2; // max floating IPs the node may host; 0 = unlimited
+}
+
+message SetCapacityResponse {
     bool success = 1;
     string message = 2;
 }

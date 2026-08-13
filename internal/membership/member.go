@@ -16,12 +16,26 @@ import (
 // MemberStatus represents the current state of a member
 type MemberStatus int
 
+// These ordinals are a wire contract, not an implementation detail: `member_states`
+// is encoded as `int(MemberStatus)` in both broadcast paths and decoded straight
+// back into a MemberStatus with no range validation, so the numbers here must match
+// rpc.MemberStatusEnum exactly (asserted by TestMemberStatusOrdinalsMatchTheProto).
+//
+// 3 is deliberately skipped rather than closed up. It belonged to the removed
+// StatusPartialActive, and the proto retired it properly with `reserved 3` while
+// keeping MAINTENANCE = 4. Letting iota slide Maintenance down into the hole breaks
+// a rolling upgrade both ways — a new peer's Maintenance(3) is read as
+// PartialActive by an old binary, and an old peer's Maintenance(4) becomes an
+// undefined status that matches no arm of redistributeOrphanedIPs' switch, so the
+// node's ActiveIPs are neither counted as hosted nor cleared and the coordinator
+// redistributes addresses it may still be holding. Nothing indexes by MemberStatus,
+// so the gap is free.
 const (
-	StatusUnknown MemberStatus = iota
-	StatusActive
-	StatusPassive
-	StatusPartialActive // New state for active-active
-	StatusMaintenance   // Node is up but excluded from failover promotion
+	StatusUnknown MemberStatus = 0
+	StatusActive  MemberStatus = 1
+	StatusPassive MemberStatus = 2
+	// 3 is reserved for the removed StatusPartialActive — see above.
+	StatusMaintenance MemberStatus = 4 // Node is up but excluded from failover promotion
 )
 
 // Member defines our member object
@@ -42,10 +56,9 @@ type Member struct {
 	memberList     *MemberList
 
 	// Active-Active support
-	ActiveIPs     []string // IPs currently hosted by this member
-	Capacity      int      // Node capacity for weighted distribution
-	PartialActive bool     // Whether node is partially active
-	LoadFactor    float64  // Current load factor (0.0-1.0)
+	ActiveIPs  []string // IPs currently hosted by this member
+	Capacity   int      // Node capacity for weighted distribution
+	LoadFactor float64  // Current load factor (0.0-1.0)
 }
 
 // NewMember creates a new member instance
@@ -113,51 +126,149 @@ func (m *Member) Close() {
 	}
 }
 
-// MakeActive promotes a member to fully active state (active-passive mode)
+// MakeActive promotes a member to active state.
+// In active-passive mode the node receives all floating IPs.
+// In active-active mode the node receives its assigned subset of IPs.
 func (m *Member) MakeActive(ips []string) error {
 	m.Lock()
-	defer m.Unlock()
-
-	// Check if we're in active-passive mode
-	if m.config.Pulse.Mode != "active-passive" {
-		return fmt.Errorf("cannot make fully active in %s mode", m.config.Pulse.Mode)
-	}
-
-	// Note: We removed the check for another active node here because:
-	// 1. The Promote() handler (server.go) already handles demotion of the previous active
-	// 2. This check was causing a race condition in remote promotions where the demotion
-	//    state hadn't propagated to the target node yet
-	// 3. Single-active enforcement is maintained by the Promote() handler's demotion logic
-
 	m.Status = StatusActive
 	m.ActiveIPs = ips
-	m.PartialActive = false
-	m.LoadFactor = 1.0
-
-	return m.BringUpIPs(ips)
-}
-
-// MakePartialActive promotes a member to partially active state (active-active mode)
-func (m *Member) MakePartialActive(ips []string) error {
-	m.Lock()
-	defer m.Unlock()
-
-	if m.config.Pulse.Mode == "active-passive" {
-		return fmt.Errorf("cannot make partially active in active-passive mode")
-	}
-
-	// Calculate load factor based on capacity
 	if m.Capacity > 0 {
 		m.LoadFactor = float64(len(ips)) / float64(m.Capacity)
 	} else {
-		m.LoadFactor = float64(len(ips)) / float64(len(m.config.Groups))
+		m.LoadFactor = 1.0
+	}
+	m.Unlock()
+
+	// Deliberately outside the lock. Bringing up a large group touches the network
+	// for every address, and every reader of this member's status — health check
+	// responses included — needs the same lock. Holding it across the bring-up made
+	// an Active node with a big group look dead to its peers (docs/TEST-PLAN.md
+	// defects #4/#8). The state above is already committed, so a concurrent reader
+	// sees this node as Active with its IPs assigned while they are coming up, which
+	// is the honest answer: it owns them.
+	return m.BringUpIPs(ips)
+}
+
+// AddActiveIPs assigns additional IPs to this member without dropping the
+// IPs it already holds. The member is promoted to Active and only the newly
+// added IPs are brought up. Used for incremental redistribution in
+// active-active mode, where MakeActive's replace semantics would lose track
+// of a node's existing assignments.
+func (m *Member) AddActiveIPs(ips []string) error {
+	m.Lock()
+	existing := make(map[string]bool, len(m.ActiveIPs))
+	for _, ip := range m.ActiveIPs {
+		existing[ip] = true
+	}
+	var added []string
+	for _, ip := range ips {
+		if !existing[ip] {
+			existing[ip] = true
+			m.ActiveIPs = append(m.ActiveIPs, ip)
+			added = append(added, ip)
+		}
+	}
+	m.Status = StatusActive
+	if m.Capacity > 0 {
+		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
+	} else {
+		m.LoadFactor = 1.0
+	}
+	m.Unlock()
+
+	if len(added) == 0 {
+		return nil
+	}
+	return m.BringUpIPs(added)
+}
+
+// RemoveActiveIPs drops the given IPs from this member's assignment list,
+// leaving the rest untouched. Bookkeeping only: it brings nothing down, because
+// its caller is the release pass, which has already done that.
+//
+// The counterpart to AddActiveIPs, and the reason it exists separately from the
+// BringDownIP RPC handler's inline equivalent: the enforce loop releases
+// addresses locally without going through that handler, so the list it maintains
+// was never updated. Every address the pass released stayed on the list
+// permanently — reported as held by a node serving nothing, and counted as that
+// node's load by placement (docs/TEST-PLAN.md defect #58).
+func (m *Member) RemoveActiveIPs(ips []string) {
+	if len(ips) == 0 {
+		return
 	}
 
-	m.Status = StatusPartialActive
-	m.ActiveIPs = ips
-	m.PartialActive = true
+	removed := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		removed[ip] = true
+	}
 
-	return m.BringUpIPs(ips)
+	m.Lock()
+	defer m.Unlock()
+
+	remaining := make([]string, 0, len(m.ActiveIPs))
+	for _, ip := range m.ActiveIPs {
+		if !removed[ip] {
+			remaining = append(remaining, ip)
+		}
+	}
+	m.ActiveIPs = remaining
+
+	// The same formula AddActiveIPs uses, so the two stay consistent: with no
+	// capacity configured the load factor is not meaningful.
+	if m.Capacity > 0 {
+		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
+	} else {
+		m.LoadFactor = 1.0
+	}
+}
+
+// GetActiveIPs returns a copy of the IPs this member currently hosts.
+//
+// Callers deciding what a node should hold need this under the member lock —
+// the health check loop and the IP monitor both read it while promotions and
+// rebalance moves are writing it.
+func (m *Member) GetActiveIPs() []string {
+	m.Lock()
+	defer m.Unlock()
+	if len(m.ActiveIPs) == 0 {
+		return nil
+	}
+	ips := make([]string, len(m.ActiveIPs))
+	copy(ips, m.ActiveIPs)
+	return ips
+}
+
+// GetStatus returns this member's status, read under the member lock.
+//
+// Status is written under that lock by promotions, the health check loop and the
+// maintenance transitions, so deciding anything from a bare read races with all
+// three.
+func (m *Member) GetStatus() MemberStatus {
+	m.Lock()
+	defer m.Unlock()
+	return m.Status
+}
+
+// SetStatus records this member's status under the member lock.
+func (m *Member) SetStatus(status MemberStatus) {
+	m.Lock()
+	defer m.Unlock()
+	m.Status = status
+}
+
+// MarkUnreachable records that this member is no longer known to hold any
+// floating IPs — status Unknown with an empty assignment set.
+//
+// Promotion uses this when an incumbent could not be reached, so the addresses
+// it may still be holding can be accounted for elsewhere. The two fields have to
+// move together under one lock: a reader seeing Unknown against the old ActiveIPs
+// would conclude a down node still owns the group.
+func (m *Member) MarkUnreachable() {
+	m.Lock()
+	defer m.Unlock()
+	m.Status = StatusUnknown
+	m.ActiveIPs = nil
 }
 
 // BringUpIPs brings up the specified IPs on this member
@@ -178,6 +289,9 @@ func (m *Member) BringUpIPs(ips []string) error {
 	}
 
 	// Remote: send one RPC per interface
+	if err := m.initializeClient(); err != nil {
+		return fmt.Errorf("failed to initialize client for member %s: %w", m.Hostname, err)
+	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring up IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)
 		if _, err := m.Client.Send(client.ProtoFunction(client.SendBringUpIP), &rpc.UpIpRequest{Iface: iface, Ips: ipList}); err != nil {
@@ -196,13 +310,50 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 		m.memberList.ipMonitor.UpdateExpectedIPs(iface, ips)
 	}
 
+	// Announcement is deferred until every address is up, then done in one batch.
+	// Per-IP GARP inside this loop made the loop take four seconds an address, so a
+	// large group kept this node unresponsive long enough for peers to elect a
+	// replacement while it still held every IP (docs/TEST-PLAN.md defects #4/#8).
+	//
+	// Deferred, but not skippable: the loop gives up on the first address it cannot
+	// bring up, and the ones before it are already on the interface. Returning
+	// without announcing leaves them live and unreachable — peers still have the old
+	// MAC — so the announcement runs on every exit. A failure to announce is logged
+	// rather than returned, since the addresses are up either way.
+	//
+	// The set announced is every address this call got as far as attempting, not
+	// the ones the loop believed it placed. A bring-up that reports failure for an
+	// address the kernel does in fact hold is #45's race, and deciding from the
+	// success list leaves such an address live and unannounced — #33's residual
+	// half. Offering the attempted set is safe because the batch re-reads each
+	// address against the kernel immediately before its own arping, announcing what
+	// the interface holds and returning the rest as skipped: the kernel decides, at
+	// announce time, which is later than any list this loop could keep.
+	attempted := make([]string, 0, len(ips))
+	announceAttempted := func() {
+		if len(attempted) == 0 {
+			return
+		}
+		skipped, err := network.SendGARPBatch(iface, attempted)
+		if err != nil {
+			m.logger.Warn("Failed to announce some IPs", "iface", iface, "error", err)
+		}
+		if len(skipped) > 0 {
+			// On the daemon's logger, not the network package's: see the same
+			// report in Server.BringUpIP (#33/#61).
+			m.logger.Debug("Skipped announcing addresses this node no longer holds",
+				"iface", iface, "count", len(skipped), "of", len(attempted))
+		}
+	}
+
 	for _, ip := range ips {
 		m.logger.Debug("Bringing up IP on interface", "ip", ip, "iface", iface)
 
 		// Check if IP is already up somewhere else
 		exists, existingIface, err := network.CheckIfIPExists(ip)
 		if err != nil {
-			return fmt.Errorf("failed to check IP existence: %v", err)
+			announceAttempted()
+			return fmt.Errorf("failed to check IP existence: %w", err)
 		}
 
 		// If IP exists on another interface, bring it down first
@@ -214,19 +365,22 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 			}
 		}
 
+		// Recorded before the attempt, not after: the address is a candidate for
+		// announcement from the moment this node tries to place it here.
+		attempted = append(attempted, ip)
+
 		// Bring up the IP on the specified interface
 		if err := network.BringIPup(iface, ip); err != nil {
-			return fmt.Errorf("failed to bring up IP %s on interface %s: %v", ip, iface, err)
-		}
-
-		// Send gratuitous ARP to update network
-		if err := network.SendGARP(iface, ip); err != nil {
-			m.logger.Warn("Failed to send GARP", "ip", ip, "iface", iface, "error", err)
-			// Don't return error as the IP is still up
+			announceAttempted()
+			return fmt.Errorf("failed to bring up IP %s on interface %s: %w", ip, iface, err)
 		}
 
 		m.logger.Info("Successfully brought up IP on interface", "ip", ip, "iface", iface)
 	}
+
+	// Announce the whole set. A failure here leaves the addresses up and serving,
+	// so it is logged rather than returned.
+	announceAttempted()
 
 	return nil
 }
@@ -267,6 +421,9 @@ func (m *Member) BringDownIPs(ips []string) error {
 	}
 
 	// Remote: send one RPC per interface
+	if err := m.initializeClient(); err != nil {
+		return fmt.Errorf("failed to initialize client for member %s: %w", m.Hostname, err)
+	}
 	for iface, ipList := range ifaceToIPs {
 		m.logger.Debug("Sending request to bring down IPs", "count", len(ipList), "hostname", m.Hostname, "iface", iface)
 		if _, err := m.Client.Send(client.ProtoFunction(client.SendBringDownIP), &rpc.DownIpRequest{Iface: iface, Ips: ipList}); err != nil {
@@ -418,12 +575,11 @@ func (m *Member) GetHealthStatus() MemberHealth {
 	defer m.Unlock()
 
 	return MemberHealth{
-		Hostname:      m.Hostname,
-		Status:        m.Status,
-		ActiveIPs:     append([]string{}, m.ActiveIPs...),
-		LastResponse:  m.LastHCResponse,
-		Latency:       m.Latency,
-		PartialActive: m.PartialActive,
+		Hostname:     m.Hostname,
+		Status:       m.Status,
+		ActiveIPs:    append([]string{}, m.ActiveIPs...),
+		LastResponse: m.LastHCResponse,
+		Latency:      m.Latency,
 	}
 }
 
@@ -436,13 +592,12 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusMaintenance {
 		return nil
 	}
-	if m.Status == StatusActive || m.Status == StatusPartialActive {
+	if m.Status == StatusActive {
 		// Bring down all hosted IPs before leaving active state
 		if len(m.ActiveIPs) > 0 {
 			_ = m.BringDownIPs(m.ActiveIPs)
 		}
 		m.ActiveIPs = nil
-		m.PartialActive = false
 		m.LoadFactor = 0
 	}
 	m.Status = StatusMaintenance
@@ -468,8 +623,6 @@ func StatusToString(status MemberStatus) string {
 		return "Active"
 	case StatusPassive:
 		return "Passive"
-	case StatusPartialActive:
-		return "PartialActive"
 	case StatusMaintenance:
 		return "Maintenance"
 	case StatusUnknown:

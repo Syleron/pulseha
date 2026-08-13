@@ -8,9 +8,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +29,9 @@ import (
 	rpc "github.com/syleron/pulseha/rpc"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 )
 
 // Object pools to reduce memory allocations
@@ -93,14 +99,54 @@ func putStringSliceMap(m map[string][]string) {
 	}
 }
 
+// isDemotion reports whether a status transition means this node has actually
+// been demoted and must release its floating IPs.
+//
+// StatusUnknown deliberately does not count. It means peers have lost sight of
+// the node, not that the node lost its role — and the node that goes Unknown is
+// by definition the one already under load, so treating it as a demotion makes a
+// healthy Active strip every floating IP over a transient health-check blip.
+// Recovery is bounded by the per-IP GARP, so a large group then stays down for
+// minutes. Unknown is left to the health checker to resolve into a real state.
+func isDemotion(old, new membership.MemberStatus) bool {
+	if old != membership.StatusActive {
+		return false
+	}
+	return new == membership.StatusPassive || new == membership.StatusMaintenance
+}
+
+// callerAddr returns the network address of the gRPC caller for audit logging.
+// Group membership is cluster-wide persisted state; any client (pulsectl, the
+// appliance API over the unix socket, or a peer node) can mutate it, so log
+// who asked — without this, externally triggered removals are indistinguishable
+// from daemon-internal ones (see the floating IP group wipe incident).
+func callerAddr(ctx context.Context) string {
+	if p, ok := peer.FromContext(ctx); ok && p.Addr != nil {
+		return p.Addr.String()
+	}
+	return "unknown"
+}
+
 // Server represents the PulseHA server
 type Server struct {
 	sync.RWMutex
-	config        *config.Config
-	logger        *log.Logger
-	memberList    *membership.MemberList
-	healthCheck   *membership.HealthChecker
-	ipMonitor     *membership.IPMonitor
+	config      *config.Config
+	logger      *log.Logger
+	memberList  *membership.MemberList
+	healthCheck *membership.HealthChecker
+	ipMonitor   *membership.IPMonitor
+
+	// peerBringUp coalesces per-address peer bring-ups (defect #37); see
+	// peerBringUpQueue for why it is built lazily.
+	peerBringUpMu sync.Mutex
+	peerBringUp   *peerBringUpBatcher
+
+	// vipReconcile coalesces the post-load VIP reconcile, which loadInitialMembers
+	// schedules on every full ConfigSync (defect #65). Lazily built for the same
+	// reason as peerBringUp.
+	vipReconcileMu sync.Mutex
+	vipReconcile   *vipReconciler
+
 	quorumManager *quorum.QuorumManager
 	quorumHandler *quorum.RPCHandler
 	grpcServer    *grpc.Server
@@ -122,10 +168,112 @@ type Server struct {
 	// ConfigSync-triggered reconfigures) don't race on the cluster listener
 	// bind to IP:port.
 	reconfigureMu sync.Mutex
+
 	// clusterInitMu serializes CreateCluster and InitiateJoin to prevent a
 	// TOCTOU race where both pass the ClusterCheck() guard concurrently and
 	// both activate as the "first node", causing dual-active in active-passive mode.
 	clusterInitMu sync.Mutex
+
+	// Config propagation ordering (docs/TEST-PLAN.md defects #5 and #38).
+	//
+	// configStamp is a Lamport clock over the cluster's config, paired with the ID
+	// of the node whose mutation produced that content: it versions the config's
+	// *content*, not the node holding it. A mutation sets the version to one above
+	// everything this node has seen and stamps itself as the origin, and applying a
+	// peer's config adopts that config's stamp, so every node holding the same
+	// content agrees on both fields. A payload is stale if its version is below the
+	// one already held, no matter which node sent it.
+	//
+	// It replaced a per-sender generation, which ordered each node's snapshots
+	// against that node's own previous ones and nothing else. That caught a
+	// reordered delivery (#5) but was structurally blind to a peer that was simply
+	// behind (#38): the coordinator re-broadcasts once a minute and is usually not
+	// the node taking the mutations, so its stale view arrived on a sequence of its
+	// own, passed the guard, and was applied wholesale — erasing adds that had
+	// already reported success, on every node at once. Worse, the counter only
+	// moved on a node's *own* mutations, so a coordinator that had never mutated
+	// stayed at 0 and broadcast unversioned, which the receiver applies
+	// unconditionally. Adopting the version on apply closes both.
+	//
+	// In-memory only and never persisted: the appliance rewrites config.json out
+	// from under us (defect #3), so a number on disk would be wrong exactly when
+	// that happens. The cost is that a just-restarted node reads 0 until its first
+	// full ConfigSync, so a mutation issued on it in that window is rejected by
+	// peers as stale. That is logged (see broadcastConfigToPeersOnce) rather than
+	// silent, and it is the correct answer: a node that is behind must not push a
+	// config, because ConfigSync applies one wholesale.
+	//
+	// Atomic rather than lock-guarded because every group mutation calls
+	// markConfigDirty while holding s.Lock() through a defer — taking the write
+	// lock to bump this would self-deadlock on a non-reentrant mutex and hang
+	// every add-ip. HandleNodeJoin calls it holding no lock at all, so the
+	// counter has to be safe under either. A single pointer rather than two atomics
+	// because the version and its origin are only meaningful together: a reader
+	// that saw a new version against a previous origin would order the two
+	// concurrent mutations differently from its peers, which is the divergence the
+	// pair exists to prevent.
+	configStamp atomic.Pointer[configStamp]
+
+	// broadcastTrigger coalesces config broadcasts. It has capacity 1 and is
+	// signalled rather than written to: a single broadcaster goroutine drains
+	// it, so concurrent mutations collapse into one broadcast of the final
+	// state instead of racing each other onto the wire.
+	broadcastTrigger chan struct{}
+	broadcastStop    chan struct{}
+	broadcastOnce    sync.Once
+
+	// unpropagated is the config this node committed and could not push to every
+	// peer, plus the retry that will (docs/TEST-PLAN.md defect #43). Guarded by
+	// its own mutex: the broadcaster writes it at the end of a pass and reads it
+	// to schedule the next one, and neither point can take s.RWMutex, which the
+	// mutation that started the broadcast may still hold.
+	propagationMu sync.Mutex
+	unpropagated  *unpropagatedConfig
+
+	// clusterListenSrv/clusterListenAddr record what the cluster gRPC listener is
+	// currently serving, so Reconfigure can tell a config-only change from one
+	// that actually moves the bind address (defect #31). Guarded by their own
+	// mutex because the serving goroutine clears them when Serve returns, off any
+	// path that holds s.RWMutex.
+	clusterListenMu   sync.Mutex
+	clusterListenSrv  *grpc.Server
+	clusterListenAddr string
+
+	// onAsyncReconfigure, when non-nil, is called once the Reconfigure that a
+	// full ConfigSync spawns has returned. A test seam, nil in production.
+	//
+	// ConfigSync replies before that goroutine has re-read the config file, and
+	// every harness in this package points the package-level
+	// config.CONFIG_LOCATION at its own t.TempDir(). A test that finishes while
+	// the goroutine is still inside config.Load() therefore lets the *next*
+	// test's setup write the global the goroutine is reading — a real data race
+	// the detector flags intermittently, in the harness rather than in the
+	// daemon. Waiting on the reconfigure instead of on the config pointer is what
+	// makes it deterministic: the pointer it swaps to cannot be distinguished
+	// from the one ConfigSync itself installed when the goroutine wins the race.
+	//
+	// Set it before the first ConfigSync and never afterwards; the goroutine
+	// reads it without synchronisation.
+	onAsyncReconfigure func()
+
+	// asyncReconfigures counts the Reconfigure goroutines full ConfigSyncs have
+	// spawned and not yet finished, so awaitAsyncReconfigures can wait them out.
+	//
+	// This is the bound onAsyncReconfigure above does not provide. That hook
+	// makes one reconfigure observable to a caller that chooses to wait; this
+	// makes every in-flight one waitable from a single place, which is what a
+	// test harness needs — thirteen of the fourteen ConfigSync call sites in this
+	// package's tests never waited, and each left a goroutine reading
+	// config.CONFIG_LOCATION past the end of the test that started it.
+	asyncReconfigures sync.WaitGroup
+}
+
+// awaitAsyncReconfigures blocks until every Reconfigure goroutine spawned by a
+// full ConfigSync has returned. Used by the test harnesses in this package to
+// keep a goroutine from outliving the test that started it; harmless in
+// production, where nothing calls it.
+func (s *Server) awaitAsyncReconfigures() {
+	s.asyncReconfigures.Wait()
 }
 
 // NewServer creates a new PulseHA server instance
@@ -151,6 +299,9 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 		clusterEpoch:  0,
 		leaderID:      "",
 		peerClients:   make(map[string]*client.Client), // Initialize connection pool
+
+		broadcastTrigger: make(chan struct{}, 1),
+		broadcastStop:    make(chan struct{}),
 	}
 
 	// Set server reference in health checker
@@ -169,6 +320,10 @@ func (s *Server) Start() error {
 	if s.config == nil {
 		return fmt.Errorf("server config is nil")
 	}
+
+	// Owns every outbound config push, so that concurrent mutations coalesce
+	// into one ordered broadcast instead of racing each other (defect #5).
+	s.startConfigBroadcaster()
 
 	// Load initial members from config
 	s.logger.Debug("Loading initial members from configuration...")
@@ -326,20 +481,56 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 					s.logger.Debugf("Updated local node port to actual bound port: %s", actualPort)
 				}
 			}
+			// Record what was actually bound rather than "port 0". Reconfigure
+			// compares its config-derived address against this record, and the
+			// config now holds the real port, so a stale "0" would make every
+			// reconfigure look like a move of the bind address.
+			address = fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), actualPort)
 		}
 	}
 
 	// Capture the gRPC server pointer locally so a concurrent Reconfigure()
 	// swapping s.grpcServer doesn't race with this goroutine's read.
 	grpcSrv := s.grpcServer
+	s.setClusterListener(grpcSrv, address)
 	go func() {
 		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
 		if err := grpcSrv.Serve(listener); err != nil {
 			s.logger.Error("Cluster gRPC server failed", "error", err)
 		}
+		// Forget the record if this is still the serving instance, so a listener
+		// that died on its own is rebound by the next Reconfigure rather than
+		// skipped as still-serving. A GracefulStop from Reconfigure has already
+		// replaced the pointer by the time it gets here, so this leaves the new
+		// listener's record alone.
+		s.clearClusterListener(grpcSrv)
 	}()
 
 	return nil
+}
+
+// setClusterListener records the address a gRPC server instance is serving.
+func (s *Server) setClusterListener(srv *grpc.Server, address string) {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	s.clusterListenSrv, s.clusterListenAddr = srv, address
+}
+
+// clusterListenerServing reports whether a live listener is already serving
+// address, which is Reconfigure's licence to leave it alone.
+func (s *Server) clusterListenerServing(address string) bool {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	return s.clusterListenSrv != nil && s.clusterListenAddr == address
+}
+
+// clearClusterListener forgets the record if srv is still the serving instance.
+func (s *Server) clearClusterListener(srv *grpc.Server) {
+	s.clusterListenMu.Lock()
+	defer s.clusterListenMu.Unlock()
+	if s.clusterListenSrv == srv {
+		s.clusterListenSrv, s.clusterListenAddr = nil, ""
+	}
 }
 
 // listenTCPReuseAddr is net.Listen("tcp", addr) with SO_REUSEADDR (and
@@ -402,6 +593,10 @@ func (s *Server) startHealthChecker() {
 // Stop gracefully shuts down the server
 func (s *Server) Stop() {
 	s.logger.Info("Stopping PulseHA server")
+
+	// Before the teardown below starts mutating state we no longer want to
+	// propagate, and so an in-flight retry loop cannot outlive the server.
+	s.stopConfigBroadcaster()
 
 	// Best-effort convergence hint: broadcast we're going down so peers can elect a new active
 	func() {
@@ -600,7 +795,6 @@ func (s *Server) loadInitialMembers() error {
 				if node.Maintenance {
 					member.Status = membership.StatusMaintenance
 					member.ActiveIPs = nil
-					member.PartialActive = false
 					s.logger.Infof("Restoring local node %s to Maintenance (persisted in config)", id)
 				} else if s.config.Pulse.Mode == "active-passive" {
 					// In active-passive mode, determine who should be active
@@ -643,46 +837,99 @@ func (s *Server) loadInitialMembers() error {
 	s.logger.Info("All members loaded successfully from configuration")
 	s.logger.Debugf("Final member list contains %d members", s.memberList.GetMemberCount())
 
-	// After members are loaded, perform one-shot VIP reconcile on local node
-	go func() {
-		// small delay to ensure listeners up
-		time.Sleep(500 * time.Millisecond)
-		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
-			member := s.memberList.GetMemberByID(localID)
-			node := s.config.Nodes[localID]
-			if member != nil && node != nil {
-				if member.Status == membership.StatusActive {
-					// Bring up any missing expected VIPs
-					for iface, groups := range node.IPGroups {
-						var ips []string
-						for _, g := range groups {
-							if gips, ok := s.config.Groups[g]; ok {
-								ips = append(ips, gips...)
-							}
-						}
-						if len(ips) > 0 {
-							_, _ = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ips})
-						}
-					}
-				} else {
-					// Passive: drop any VIPs found on local interfaces
-					for iface, groups := range node.IPGroups {
-						var ips []string
-						for _, g := range groups {
-							if gips, ok := s.config.Groups[g]; ok {
-								ips = append(ips, gips...)
-							}
-						}
-						if len(ips) > 0 {
-							_, _ = s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips})
-						}
-					}
-				}
-			}
-		}
-	}()
+	// After members are loaded, perform one-shot VIP reconcile on local node.
+	// The config half of the decision is taken here, synchronously; see
+	// snapshotVIPGroups for why it cannot wait for the pass.
+	//
+	// Scheduled rather than spawned: this function runs on every full ConfigSync,
+	// so a burst of mutations used to put one whole-share bring-up — and one
+	// whole-share announcement — on every peer per mutation (docs/TEST-PLAN.md
+	// defect #65). See vipReconciler.
+	if localID, err := s.config.GetLocalNodeUUID(); err == nil {
+		groupIPs, activeActive := s.snapshotVIPGroups(localID)
+		s.vipReconcileQueue().Schedule(vipReconcileSnapshot{
+			localID:      localID,
+			groupIPs:     groupIPs,
+			activeActive: activeActive,
+		})
+	}
 
 	return nil
+}
+
+// snapshotVIPGroups captures the config half of the post-load VIP reconcile:
+// whether the cluster is active-active, and every floating IP configured on
+// each of the local node's interfaces.
+//
+// It is taken synchronously, before the reconcile goroutine sleeps, because
+// ConfigSync also spawns Reconfigure() -> config.Reload(), which unmarshals a
+// freshly read file straight over the live *Config. Touching s.config after the
+// sleep is a data race against that rewrite — the config the reconcile is for
+// is the one loaded here, so read it here.
+func (s *Server) snapshotVIPGroups(localID string) (map[string][]string, bool) {
+	node := s.config.Nodes[localID]
+	if node == nil {
+		return nil, false
+	}
+
+	groupIPs := make(map[string][]string, len(node.IPGroups))
+	for iface, groups := range node.IPGroups {
+		var ips []string
+		for _, g := range groups {
+			if gips, ok := s.config.Groups[g]; ok {
+				ips = append(ips, gips...)
+			}
+		}
+		if len(ips) > 0 {
+			groupIPs[iface] = ips
+		}
+	}
+	return groupIPs, s.config.Pulse.Mode == "active-active"
+}
+
+// reconcileVIPPlan turns that snapshot into what the local node should do now:
+// iface -> addresses, and whether they are to be claimed or released. Member
+// state is read here rather than in the snapshot because ConfigSync applies the
+// incoming statuses and assignments after loadInitialMembers returns — reading
+// them early would act on the pre-sync view.
+//
+// The claim set is mode-aware. In active-passive the Active node owns every IP
+// of every group mapped to the interface; in active-active the group is shared,
+// so it owns only its assigned subset. Claiming the whole group regardless of
+// mode made this a third whole-group claimant alongside the monitor's enforce
+// loop and the consolidation path — and it runs 500ms after every full
+// ConfigSync, so in active-active each Active peer re-claimed all 201 whitecrane
+// addresses and releaseUnassignedIPs had to undo it a tick later
+// (docs/TEST-PLAN.md defect #30 — the mode-blindness of #2/#26 at a site those
+// fixes missed).
+//
+// The release set stays deliberately whole-group: a node that has just been
+// demoted may be holding anything, including addresses it was never assigned,
+// and the point of the pass is to leave it holding none.
+func (s *Server) reconcileVIPPlan(localID string, groupIPs map[string][]string, activeActive bool) (map[string][]string, bool) {
+	member := s.memberList.GetMemberByID(localID)
+	if member == nil {
+		return nil, false
+	}
+
+	// Under the member lock: ConfigSync applies incoming member states
+	// concurrently with this reconcile, and reading the status bare raced with
+	// that write.
+	member.Lock()
+	claim := member.Status == membership.StatusActive
+	member.Unlock()
+
+	if !claim || !activeActive {
+		return groupIPs, claim
+	}
+
+	plan := make(map[string][]string, len(groupIPs))
+	for iface, ips := range groupIPs {
+		if mine := s.filterToAssigned(localID, ips); len(mine) > 0 {
+			plan[iface] = mine
+		}
+	}
+	return plan, true
 }
 
 // HandleNodeJoin processes a new node joining the cluster
@@ -822,7 +1069,7 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	} else {
 		s.logger.Debugf("Config saved successfully after node %s joined", req.Hostname)
 		// Defer/best-effort broadcast in a goroutine to avoid blocking join RPC
-		go s.broadcastFullConfigToPeers()
+		s.markConfigDirty()
 	}
 
 	// Post-join: ensure health checker is running and member list is initialized promptly (async)
@@ -981,28 +1228,65 @@ func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*r
 	return &rpc.LeaveResponse{Success: true, Message: "Successfully left the cluster"}, nil
 }
 
+// deriveMemberStatus maps a member's stored health, plus how many floating IPs
+// it is recorded as holding, to the status reported to an operator.
+//
+// Active carried two independent facts — "this daemon is healthy and eligible"
+// and "this node is serving floating IPs" — which came apart the moment
+// active-active existed. Standby separates them for display: healthy, eligible
+// for promotion, serving nothing.
+//
+// Tenancy is derived here and nowhere else. It is not stored on the member, not
+// put on the wire between nodes, and not consulted by any placement or demotion
+// decision, because a stored copy would be the #1/#21 defect with a new name:
+// MakePassive returned success having released nothing, since ActiveIPs was
+// empty on a node that in fact held every address.
+//
+// hasAssignmentTruth is the reason this takes three arguments rather than two.
+// An empty assignment list only means "holds nothing" where the list is
+// knowledge; elsewhere it means "this node does not know". Peers self-report
+// their hosted IPs over ConfigSync in active-active only (see the sender at the
+// buildFullConfigPayload self-report and its application in ConfigSync), so a
+// remote member's list is current in that mode. In active-passive there is no
+// self-report and a node promoted by election "holds them all while its
+// ActiveIPs is still empty" (internal/membership/health_check.go) — reporting
+// that node as Standby would be the most misleading answer available. A node's
+// record of itself is authoritative in either mode.
+func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, hasAssignmentTruth bool) rpc.MemberStatusEnum {
+	switch status {
+	case membership.StatusActive:
+		if assignedIPs == 0 && hasAssignmentTruth {
+			return rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY
+		}
+		return rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
+	case membership.StatusPassive:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
+	case membership.StatusMaintenance:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
+	default:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
+	}
+}
+
 // GetClusterStatus returns the current status of all nodes
 func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (*rpc.StatusResponse, error) {
 	s.RLock()
 	defer s.RUnlock()
 
+	// Resolved once rather than per member: IsLocal() re-reads the config and
+	// logs on every call, and this loop runs for every node in the cluster.
+	localID, _ := s.config.GetLocalNodeUUID()
+	selfReportsAssignments := s.config.Pulse.Mode == "active-active"
+
 	var members []*rpc.Member
 	membersSnapshot := s.memberList.MembersSnapshot()
 	for _, member := range membersSnapshot {
 		health := member.GetHealthStatus()
-		var st rpc.MemberStatusEnum
-		switch health.Status {
-		case membership.StatusActive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
-		case membership.StatusPassive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
-		case membership.StatusPartialActive:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_PARTIAL_ACTIVE
-		case membership.StatusMaintenance:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
-		default:
-			st = rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
-		}
+		st := deriveMemberStatus(
+			health.Status,
+			len(health.ActiveIPs),
+			selfReportsAssignments || (localID != "" && member.ID == localID),
+		)
 
 		// Stamp a fresh last response for local display if empty/stale
 		lastResp := ""
@@ -1011,15 +1295,14 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 		}
 
 		members = append(members, &rpc.Member{
-			Hostname:      health.Hostname,
-			Status:        st,
-			ActiveIps:     health.ActiveIPs,
-			LastResponse:  lastResp,
-			Latency:       health.Latency,
-			PartialActive: health.PartialActive,
-			Ip:            member.IP,
-			Port:          member.Port,
-			NodeId:        member.ID,
+			Hostname:     health.Hostname,
+			Status:       st,
+			ActiveIps:    health.ActiveIPs,
+			LastResponse: lastResp,
+			Latency:      health.Latency,
+			Ip:           member.IP,
+			Port:         member.Port,
+			NodeId:       member.ID,
 		})
 	}
 
@@ -1054,6 +1337,7 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 	return &rpc.StatusResponse{
 		Members: members,
 		Groups:  groups,
+		Mode:    s.config.Pulse.Mode,
 	}, nil
 }
 
@@ -1467,6 +1751,150 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 	}, nil
 }
 
+// ipPresenceFunc reports whether an address is currently on a local interface.
+type ipPresenceFunc func(string) (bool, string, error)
+
+// filterStillHeld returns those of ips that present reports as still on an interface.
+//
+// An address whose presence cannot be determined is reported as still held. This is the
+// conservative direction: the result gates whether another node may claim these addresses,
+// so a false "it's gone" dual-homes the group, while a false "still there" only declines a
+// promotion the incumbent is already serving.
+func filterStillHeld(ips []string, present ipPresenceFunc) []string {
+	remaining := make([]string, 0)
+	for _, ip := range ips {
+		exists, _, err := present(ip)
+		if err != nil || exists {
+			remaining = append(remaining, ip)
+		}
+	}
+	return remaining
+}
+
+// stillHeldIPs returns those of ips still present on a local interface, or an error if that
+// could not be established at all.
+//
+// The interface inventory is built once for the whole set rather than per address: this runs
+// with the full floating-IP group as input, so a per-address rebuild meant hundreds of full
+// netlink enumerations per demotion. A failure to build it is returned as an error rather than
+// folded into the result, so the caller can distinguish "these are still up" from "I could not
+// look" instead of silently reporting every address as held.
+func stillHeldIPs(ips []string) ([]string, error) {
+	if len(ips) == 0 {
+		return nil, nil
+	}
+	inv, err := network.BuildIPInventory()
+	if err != nil {
+		return nil, err
+	}
+	return filterStillHeld(ips, inv.Exists), nil
+}
+
+// confirmPeerReleasedIPs asks an unreachable peer to release its floating IPs and reports
+// what could actually be established about it.
+//
+// This deliberately does NOT go through s.MakePassive. That method flattens every remote
+// failure into (&Response{Success: false}, nil) — a nil error — so a caller cannot tell a
+// refused connection from a wedged peer from a successful demotion. Promotion safety turns
+// entirely on that distinction, so the RPC is issued directly and the gRPC status preserved.
+//
+// Returns:
+//   - released:     the peer answered and confirmed it is now Passive with its IPs down.
+//   - provablyDown: the transport itself failed in a way that means no daemon is listening.
+//     Anything indeterminate (deadline, local fault, a peer that answers but
+//     declines) is reported as NOT provably down, so the caller stays conservative.
+func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (released bool, provablyDown bool, err error) {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return false, false, fmt.Errorf("no configuration for node %s", nodeID)
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		// A local fault tells us nothing about the peer. Never read it as "the peer is gone".
+		return false, false, fmt.Errorf("failed to create client for %s: %w", nodeID, err)
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		// Nothing accepted the connection, so no daemon is holding those addresses. This is
+		// also what a network partition looks like from here, which is why the caller still
+		// requires quorum before acting on it.
+		return false, true, fmt.Errorf("failed to connect to %s: %w", nodeID, err)
+	}
+
+	resp, err := remoteClient.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
+	if err != nil {
+		// Unavailable means the transport dropped; the daemon is not serving. A deadline means
+		// it accepted the call and never finished — it is alive and still owns its IPs.
+		return false, status.Code(err) == codes.Unavailable, err
+	}
+	if !resp.Success {
+		// The peer is alive enough to answer and told us it did not demote.
+		return false, false, fmt.Errorf("peer %s declined to release: %s", nodeID, resp.Message)
+	}
+	return true, false, nil
+}
+
+// canPromoteWithoutConfirmedRelease decides whether a promotion may claim the floating IPs
+// when the previous Active is unreachable and its release could not be confirmed.
+//
+//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
+//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
+//     still own every floating IP. Nothing overrides this, including forceDemote.
+//   - haveQuorum: this node is on the majority side. A minority must never claim addresses it
+//     cannot prove were released, or both sides of a partition serve the same IPs.
+//
+// forceDemote deliberately does NOT override a live peer. It cannot serve as an operator escape
+// here because HealthChecker.tryForcePromote sets it on every promotion the automatic election
+// drives, so honouring it disabled this check for precisely the case it exists to catch — an
+// election promoting over an Active wedged by SetMode (docs/TEST-PLAN.md TC-6). The operator
+// escape for a permanently wedged Active is to stop its daemon, which makes it provably down.
+func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
+	if peerStillAlive {
+		return false
+	}
+	// The peer is provably down: promote from the majority side, or when explicitly forced.
+	return haveQuorum || forceDemote
+}
+
+// demotionTimeout sizes a MakePassive deadline to the number of floating IPs the
+// target has to release and verify — see membership.DemotionTimeoutFor.
+func (s *Server) demotionTimeout() time.Duration {
+	s.RLock()
+	total := 0
+	for _, ips := range s.config.Groups {
+		total += len(ips)
+	}
+	s.RUnlock()
+
+	return membership.DemotionTimeoutFor(total)
+}
+
+// remoteDemotionContext bounds the MakePassive forwarded to the node that
+// actually has to release and verify the addresses.
+//
+// Derived from the caller's context, so whichever deadline is sooner wins: a
+// caller that already sized one keeps it, and a caller with none gets the group-
+// sized bound rather than an unbounded wait on an unresponsive peer.
+func (s *Server) remoteDemotionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, s.demotionTimeout())
+}
+
+// restoreMemberStates puts every member back to the status it held before a
+// promotion attempt began.
+//
+// Each write goes through SetStatus rather than assigning the field: the health
+// check loop, the IP monitor and the status RPC all read Status under the member
+// lock, and this runs on the promotion goroutine alongside them.
+func (s *Server) restoreMemberStates(originalStates map[string]membership.MemberStatus) {
+	for id, status := range originalStates {
+		if mm := s.memberList.GetMemberByID(id); mm != nil {
+			mm.SetStatus(status)
+		}
+	}
+}
+
 // performPromotionAsync executes the promotion operation asynchronously
 // This prevents frontend timeouts on long-running IP failover operations
 func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceDemote bool) {
@@ -1480,17 +1908,35 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 
 	// Identify current active (if any)
 	prevActiveID := ""
+	// Nodes whose release of the floating IPs we cannot confirm. A member marked Unknown is
+	// unreachable, which is NOT the same as known-idle — it may still hold every group IP.
+	// Promoting over one of these without confirming the release dual-homes the whole group
+	// (see docs/TEST-PLAN.md TC-6). Only populated when no reachable Active is present.
+	unconfirmedIncumbents := make([]string, 0, 1)
+	reachableCount := 0
 	if s.config.Pulse.Mode == "active-passive" {
 		for id, m := range s.memberList.MembersSnapshot() {
-			if m.Status == membership.StatusActive {
+			status := m.GetStatus()
+			if status != membership.StatusUnknown {
+				reachableCount++
+			}
+			if status == membership.StatusActive && prevActiveID == "" {
 				prevActiveID = id
 				s.logger.Info("PROMOTE_ASYNC: Found current active node", "active_node", id, "hostname", m.Hostname)
-				break
+			}
+		}
+		if prevActiveID == "" {
+			for id, m := range s.memberList.MembersSnapshot() {
+				if id != targetNodeID && m.GetStatus() == membership.StatusUnknown {
+					unconfirmedIncumbents = append(unconfirmedIncumbents, id)
+				}
 			}
 		}
 	}
 	if prevActiveID == "" {
-		s.logger.Info("PROMOTE_ASYNC: No active node found in cluster")
+		s.logger.Info("PROMOTE_ASYNC: No active node found in cluster",
+			"unconfirmed_incumbents", len(unconfirmedIncumbents),
+			"reachable_nodes", reachableCount)
 	}
 
 	// Get the member
@@ -1503,7 +1949,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 	// Snapshot current states for rollback
 	originalStates := make(map[string]membership.MemberStatus)
 	for id, m := range s.memberList.MembersSnapshot() {
-		originalStates[id] = m.Status
+		originalStates[id] = m.GetStatus()
 	}
 
 	// Determine demotion strategy
@@ -1532,11 +1978,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			if !forceDemote {
 				// Abort and restore
 				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion due to demotion failure")
-				for id, st := range originalStates {
-					if mm := s.memberList.GetMemberByID(id); mm != nil {
-						mm.Status = st
-					}
-				}
+				s.restoreMemberStates(originalStates)
 				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 				return
 			}
@@ -1546,9 +1988,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				"previous_active", prevActiveID)
 
 			if failingMember := s.memberList.GetMemberByID(prevActiveID); failingMember != nil {
-				failingMember.Status = membership.StatusUnknown
-				failingMember.ActiveIPs = nil
-				failingMember.PartialActive = false
+				failingMember.MarkUnreachable()
 			}
 		} else {
 			s.logger.Info("PROMOTE_ASYNC: Successfully demoted previous active", "previous_active", prevActiveID)
@@ -1557,6 +1997,61 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		s.logger.Info("PROMOTE_ASYNC: Skipping demotion (remote-initiated promotion)",
 			"previous_active", prevActiveID,
 			"new_active", targetNodeID)
+	}
+
+	// Step 1b: There is no reachable Active, but an unreachable peer may still be holding the
+	// entire group. Try to confirm it has released before claiming its addresses. This runs
+	// independently of shouldDemote/isTargetNodePromotion, because an election-driven
+	// self-promotion takes neither of those paths yet is exactly the case that dual-homes the
+	// group (docs/TEST-PLAN.md TC-6).
+	if prevActiveID == "" && len(unconfirmedIncumbents) > 0 {
+		for _, id := range unconfirmedIncumbents {
+			// Must be bounded: without a deadline a wedged peer hangs this goroutine forever
+			// instead of surfacing the DeadlineExceeded the decision below relies on.
+			//
+			// Sized to the group rather than fixed at 10s. The peer's MakePassive drops
+			// and verifies every configured group address, so on the 201-address topology
+			// a healthy but loaded incumbent overran the flat deadline — and an overrun is
+			// read as "still owns its IPs", which aborts a promotion that was safe.
+			mpCtx, mpCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
+			released, provablyDown, err := s.confirmPeerReleasedIPs(mpCtx, id)
+			mpCancel()
+			if released {
+				s.logger.Info("PROMOTE_ASYNC: Confirmed unreachable node released its floating IPs", "node_id", id)
+				continue
+			}
+
+			// Only a transport-level failure proves nothing is holding those addresses. A wedged
+			// peer that accepted the connection but never answered is alive and still owns every
+			// floating IP, so quorum cannot make claiming them safe.
+			stillAlive := !provablyDown
+			// Otherwise the peer is genuinely unreachable. Promote only from the majority side:
+			// a minority must never claim addresses it cannot prove were released.
+			haveQuorum := s.quorumManager != nil && s.quorumManager.HasQuorum(reachableCount)
+
+			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote) {
+				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",
+					"unconfirmed_node", id,
+					"target", targetNodeID,
+					"peer_still_alive", stillAlive,
+					"have_quorum", haveQuorum,
+					"reachable_nodes", reachableCount,
+					"error", err)
+				s.restoreMemberStates(originalStates)
+				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+				return
+			}
+
+			s.logger.Warn("PROMOTE_ASYNC: Proceeding without a confirmed release",
+				"unconfirmed_node", id,
+				"force_demote", forceDemote,
+				"peer_still_alive", stillAlive,
+				"have_quorum", haveQuorum,
+				"error", err)
+			if mm := s.memberList.GetMemberByID(id); mm != nil {
+				mm.MarkUnreachable()
+			}
+		}
 	}
 
 	// Step 2: Promote target node
@@ -1575,11 +2070,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					_ = mm.MakeActive(nil)
 				}
 			}
-			for id, st := range originalStates {
-				if mm := s.memberList.GetMemberByID(id); mm != nil {
-					mm.Status = st
-				}
-			}
+			s.restoreMemberStates(originalStates)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 			return
 		}
@@ -1628,16 +2119,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					_ = mm.MakeActive(nil)
 				}
 			}
-			for id, st := range originalStates {
-				if mm := s.memberList.GetMemberByID(id); mm != nil {
-					mm.Status = st
-				}
-			}
+			s.restoreMemberStates(originalStates)
 			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
 			return
 		}
 
-		member.Status = membership.StatusActive
+		member.SetStatus(membership.StatusActive)
 		s.logger.Info("PROMOTE_ASYNC: Remote promotion succeeded", "node_id", targetNodeID)
 	}
 
@@ -1712,25 +2199,58 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 
 	// If local, make passive locally; otherwise forward to remote node and reflect state
 	if member.IsLocal() {
-		// Proactively bring down all floating IPs assigned to this node per config
+		// Becoming Passive means holding none of the cluster's floating IPs, so the drop set is
+		// every group rather than the ones this node is currently assigned. During a mode change
+		// the assignment is rewritten while the addresses are still up, which left this method
+		// dropping nothing and reporting success anyway — the exact shape of the TC-6 split-brain
+		// (docs/TEST-PLAN.md defect #21). This mirrors what the IP monitor's non-Active branch
+		// already does when it cleans up.
 		var ipsToDrop []string
-		if localNodeCfg := s.config.Nodes[member.ID]; localNodeCfg != nil {
-			for _, groups := range localNodeCfg.IPGroups {
-				for _, g := range groups {
-					if ipList, ok := s.config.Groups[g]; ok {
-						ipsToDrop = append(ipsToDrop, ipList...)
-					}
-				}
-			}
+		for _, ipList := range s.config.Groups {
+			ipsToDrop = append(ipsToDrop, ipList...)
 		}
+		// Release the IPs while the node still counts as Active: BringDownIPs
+		// on an already-Passive local node defers to the monitor instead.
 		if len(ipsToDrop) > 0 {
 			if err := member.BringDownIPs(ipsToDrop); err != nil {
 				s.logger.Warn("Failed to bring down IPs during demotion", "error", err)
 			}
 		}
+
+		// Verify against the interfaces instead of trusting the call above. Callers use this
+		// response to decide whether they may claim these addresses, so reporting success while
+		// any are still up is what dual-homes the group.
+		remaining, verifyErr := stillHeldIPs(ipsToDrop)
+		if verifyErr != nil {
+			// Unable to read the interfaces, so the release cannot be established either way.
+			// Report failure rather than a release we did not observe.
+			s.logger.Error("MakePassive: cannot verify floating IP release",
+				"node_id", req.NodeId, "error", verifyErr)
+			return &rpc.MakePassiveResponse{
+				Success: false,
+				Message: "unable to verify floating IP release: " + verifyErr.Error(),
+			}, nil
+		}
+		if len(remaining) > 0 {
+			// Deliberately leave the status as-is. This node is still serving these addresses;
+			// marking it Passive would have the monitor strip them from under live traffic while
+			// the promotion that requested the demotion has already been refused.
+			s.logger.Error("MakePassive: refusing to report a release that did not happen",
+				"node_id", req.NodeId,
+				"remaining", len(remaining),
+				"sample", remaining[:min(3, len(remaining))])
+			return &rpc.MakePassiveResponse{
+				Success: false,
+				Message: fmt.Sprintf("%d floating IP(s) still up after demotion (e.g. %s)",
+					len(remaining), strings.Join(remaining[:min(3, len(remaining))], ", ")),
+			}, nil
+		}
+
+		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.PartialActive = false
+		member.LoadFactor = 0
+		member.Unlock()
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -1744,7 +2264,23 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 			return &rpc.MakePassiveResponse{Success: false, Message: "Failed to connect to target node: " + err.Error()}, nil
 		}
-		ctx2, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Derived from the caller's context so a caller with a deadline — the
+		// health checker's consolidation invariant — isn't left waiting on an
+		// unresponsive peer for the full timeout.
+		//
+		// Sized rather than flat. WithTimeout takes the *sooner* of the parent
+		// deadline and the one given here, so a flat 5s clamped every demotion
+		// that crosses this hop back to 5s — including enforceSingleActive's
+		// makePassiveTimeout() (up to 120s) and performPromotionAsync's step-1
+		// demotion, which is exactly the hop that matters, since the remote node
+		// is the one doing the releasing and verifying. The constants above
+		// DemotionTimeoutFor record that even a flat 10s was overrun by a loaded
+		// incumbent on the 201-address topology, and that an overrun is not
+		// neutral: DeadlineExceeded is deliberately read as "the peer may still
+		// own its IPs", so a too-short deadline aborts promotions and
+		// consolidations that were safe. confirmPeerReleasedIPs got the sized
+		// deadline only because it bypasses this method entirely.
+		ctx2, cancel := s.remoteDemotionContext(ctx)
 		defer cancel()
 		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId})
 		if rerr != nil {
@@ -1754,9 +2290,11 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 			return &rpc.MakePassiveResponse{Success: false, Message: rresp.Message}, nil
 		}
 		// Reflect locally
+		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.PartialActive = false
+		member.LoadFactor = 0
+		member.Unlock()
 	}
 
 	// Success
@@ -2037,43 +2575,98 @@ func (s *Server) Reconfigure() error {
 
 	s.logger.Info("Reconfiguring PulseHA server...")
 
-	// Reload config (uses config's own lock)
+	// Reload the config from disk into a fresh instance, then swap the
+	// pointer. Reloading in place would rewrite the config while the health
+	// checker, the IP monitor and every in-flight RPC are reading it
+	// (defect #32); a pointer swap leaves those readers on a consistent
+	// snapshot. Same shape as ConfigSync's `s.config = newConfig`.
 	s.logger.Debug("Reloading configuration...")
-	if err := s.config.Reload(); err != nil {
+	s.RLock()
+	reloadedFrom := s.config
+	s.RUnlock()
+	newConfig, err := reloadedFrom.Reload()
+	if err != nil {
 		return fmt.Errorf("failed to reload config: %v", err)
 	}
+	s.Lock()
+	// Only install the reload if nothing replaced the config while we were
+	// reading the file. ConfigSync saves and swaps under this same lock, but the
+	// read above is outside it, so a sync landing in between used to be undone in
+	// memory by a snapshot taken before it existed — the node then served a
+	// config older than the one on its own disk, and broadcast it as its own,
+	// until the next reconfigure happened to correct it. Measured 2026-08-07 on
+	// two back-to-back syncs: disk 120 addresses, memory 100.
+	//
+	// Pointer identity rather than a counter, so this catches every writer that
+	// swaps s.config, not just the ones remembering to bump something. Superseded
+	// means the installed config is already at least as new as what we read, so
+	// there is nothing to do but let the rest of the function work on it.
+	superseded := s.config != reloadedFrom
+	if superseded {
+		newConfig = s.config
+	} else {
+		s.config = newConfig
+	}
+	s.Unlock()
+	if superseded {
+		s.logger.Debug("Reconfigure: a newer config was applied while reloading; keeping it")
+	}
+	// The member list holds its own pointer, and the health checker reads
+	// the config through it, so both go stale without this.
+	s.memberList.UpdateConfig(newConfig)
 
 	// Get local node config (no server lock needed)
 	s.logger.Debug("Getting updated local node configuration...")
-	localNode, err := s.config.GetLocalNode()
+	localNode, err := newConfig.GetLocalNode()
 	if err != nil {
 		return fmt.Errorf("failed to get local node config: %v", err)
 	}
 	s.logger.Infof("Updated local node configuration: IP=%s, Port=%s", localNode.IP, localNode.Port)
 
-	// Swap out old cluster gRPC server pointer quickly under lock, then stop outside lock
-	var oldSrv *grpc.Server
-	s.Lock()
-	oldSrv = s.grpcServer
-	s.grpcServer = nil
-	s.Unlock()
-	if oldSrv != nil {
-		s.logger.Debug("Stopping existing gRPC server...")
-		oldSrv.GracefulStop()
-	}
+	// Rebind the cluster listener only when the bind address actually moved.
+	//
+	// Almost every Reconfigure comes from a ConfigSync that changed the config and
+	// nothing else — a group gained an address, a peer changed status — and for
+	// those the listener is already serving the right endpoint. Rebinding it anyway
+	// is not free in a way that is easy to miss: GracefulStop plus a fresh bind
+	// refuses every inbound RPC for the gap, so peers see `connection refused` for
+	// seconds against a daemon that never restarted (docs/TEST-PLAN.md defect #31).
+	// Under a burst of mutations each broadcast then tore the listener down on every
+	// receiver, which is what refused 56 of 60 peer bring-up RPCs on whitecrane in
+	// run 23 and what starved the config broadcast's own retries into defect #43.
+	//
+	// The address is the whole of the listener's configuration here — the gRPC
+	// server is built with no credentials and no options — so an unchanged address
+	// means there is genuinely nothing to re-apply.
+	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
+	if s.clusterListenerServing(address) {
+		s.logger.Debug("Cluster bind address unchanged; keeping the listener serving",
+			"address", address)
+	} else {
+		// Swap out old cluster gRPC server pointer quickly under lock, then stop outside lock
+		var oldSrv *grpc.Server
+		s.Lock()
+		oldSrv = s.grpcServer
+		s.grpcServer = nil
+		s.Unlock()
+		if oldSrv != nil {
+			s.logger.Debug("Stopping existing gRPC server...")
+			oldSrv.GracefulStop()
+		}
 
-	// Create new gRPC server instance and assign pointer under a short lock
-	newSrv := grpc.NewServer()
-	rpc.RegisterServerServer(newSrv, s)
-	// Also register CLI service on the cluster listener for remote operations (e.g., join)
-	rpc.RegisterCLIServer(newSrv, s)
-	s.Lock()
-	s.grpcServer = newSrv
-	s.Unlock()
+		// Create new gRPC server instance and assign pointer under a short lock
+		newSrv := grpc.NewServer()
+		rpc.RegisterServerServer(newSrv, s)
+		// Also register CLI service on the cluster listener for remote operations (e.g., join)
+		rpc.RegisterCLIServer(newSrv, s)
+		s.Lock()
+		s.grpcServer = newSrv
+		s.Unlock()
 
-	s.logger.Debugf("Starting cluster listener on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
-	if err := s.startClusterListener(localNode); err != nil {
-		return fmt.Errorf("failed to start cluster listener: %v", err)
+		s.logger.Debugf("Starting cluster listener on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
+		if err := s.startClusterListener(localNode); err != nil {
+			return fmt.Errorf("failed to start cluster listener: %v", err)
+		}
 	}
 
 	// Ensure health checker is running after reconfigure
@@ -2121,11 +2714,70 @@ func (s *Server) RefreshLocalMonitorExpectedIPs() {
 	s.logger.Debug("REFRESH: RefreshLocalMonitorExpectedIPs completed")
 }
 
+// expectedIfaceIPs returns the floating IPs the given node should hold on iface.
+//
+// In active-passive the Active node owns every IP of every group mapped to that
+// interface. In active-active the groups are shared, so a node owns only the
+// subset assigned to it. Seeding the monitor with the whole group in that mode
+// makes every Active node's next enforce tick re-add all of them, which undoes
+// each rebalance move about as fast as the coordinator can make one — the
+// cluster then never converges and addresses flap between owners
+// (docs/TEST-PLAN.md defects #2/#26).
+//
+// An active-active node with no assignments expects nothing, which is the point:
+// it should hold no addresses until the coordinator gives it some.
+func (s *Server) expectedIfaceIPs(nodeID, iface string) []string {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return nil
+	}
+
+	var groupIPs []string
+	for _, g := range node.IPGroups[iface] {
+		ips, ok := s.config.Groups[g]
+		if !ok {
+			s.logger.Warn("Group not found in config", "group", g, "iface", iface)
+			continue
+		}
+		groupIPs = append(groupIPs, ips...)
+	}
+
+	if s.config.Pulse.Mode != "active-active" {
+		return groupIPs
+	}
+	return s.filterToAssigned(nodeID, groupIPs)
+}
+
+// filterToAssigned narrows a whole-group address list to the subset currently
+// assigned to nodeID, preserving order.
+//
+// "Assigned nothing" must not collapse into "no restriction" — a node awaiting
+// its first assignment holds nothing, rather than the entire group — so callers
+// decide by mode whether to filter at all, and this returns nil when the node
+// has no assignments. It is shared by every site that has to answer "which of
+// these addresses are mine", because the last time two sites answered it
+// separately one of them missed a fix (defect #30 missing #2/#26).
+func (s *Server) filterToAssigned(nodeID string, ips []string) []string {
+	assigned := make(map[string]bool)
+	if m := s.memberList.GetMemberByID(nodeID); m != nil {
+		for _, ip := range m.GetActiveIPs() {
+			assigned[ip] = true
+		}
+	}
+
+	var mine []string
+	for _, ip := range ips {
+		if assigned[ip] {
+			mine = append(mine, ip)
+		}
+	}
+	return mine
+}
+
 // refreshLocalMonitorExpectedIPs updates the IP monitor's expected IPs for the local node
 // Only enforces when the local member is Active; clears expectations when not active
 func (s *Server) refreshLocalMonitorExpectedIPs() {
 	s.logger.Debug("REFRESH: Starting refreshLocalMonitorExpectedIPs")
-	s.logger.Error("REFRESH_DEBUG_2025_ERROR: This function WAS CALLED with latest code")
 
 	if s.ipMonitor == nil {
 		s.logger.Debug("REFRESH: IP monitor is nil, skipping")
@@ -2149,49 +2801,49 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 	s.logger.Info("REFRESH: Processing node", "nodeID", localID, "status", membership.StatusToString(member.Status))
 
 	if member.Status != membership.StatusActive {
-		// For passive nodes, trigger enforcement to clean up any floating IPs
+		// For passive/unknown/maintenance nodes, trigger enforcement to clean up any floating IPs
 		s.logger.Info("REFRESH: Node is not Active, cleanup needed", "status", membership.StatusToString(member.Status))
 		if s.ipMonitor != nil {
 			s.logger.Debug("REFRESH: Calling TriggerEnforce for passive node cleanup")
 			s.ipMonitor.TriggerEnforce()
 		} else {
 			s.logger.Debug("REFRESH: IP monitor disabled, skipping cleanup TriggerEnforce")
-			// Since IP monitor is disabled, call network functions directly for cleanup
 			s.cleanupFloatingIPsDirectly(node)
 		}
 		return
 	}
 
 	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(member.Status))
+
+	// One interface snapshot for the whole refresh, not one netlink dump per
+	// expected address. network.CheckIfIPExists builds a complete inventory —
+	// every link, both families — on each call, so scanning a 72-address share
+	// cost 72 of them, and this scan's output is a whole-share bring-up
+	// (docs/TEST-PLAN.md defect #64). A dump that fails leaves the lookup nil and
+	// every expected address is treated as missing, which is what the discarded
+	// error here used to achieve by accident.
+	var heldOn func(ip string) (bool, string)
+	if inventory, invErr := network.BuildIPInventory(); invErr != nil {
+		s.logger.Warn("REFRESH: could not read interface addresses; treating every expected address as missing", "error", invErr)
+	} else {
+		heldOn = ipInventoryLookup(inventory)
+	}
+
 	for iface := range node.IPGroups {
-		var ifaceIPs []string
 		s.logger.Debug("REFRESH: Processing interface", "iface", iface, "groups", node.IPGroups[iface])
-		for _, g := range node.IPGroups[iface] {
-			if ips, ok := s.config.Groups[g]; ok {
-				ifaceIPs = append(ifaceIPs, ips...)
-				s.logger.Debug("REFRESH: Added IPs from group", "group", g, "ips", ips)
-			} else {
-				s.logger.Warn("REFRESH: Group not found in config", "group", g)
-			}
-		}
+		ifaceIPs := s.expectedIfaceIPs(localID, iface)
 		s.ipMonitor.ClearExpectedIPs(iface)
 		if len(ifaceIPs) > 0 {
 			s.logger.Info("REFRESH: Updating expected IPs for Active node", "iface", iface, "ips", ifaceIPs)
 			s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
 			// Proactively bring up any missing expected IPs on this interface
-			var missing []string
-			for _, ip := range ifaceIPs {
-				ipOnly, _ := utils.GetCIDR(ip)
-				if ipOnly == nil {
-					s.logger.Debug("REFRESH: Skipping invalid IP", "ip", ip)
-					continue
-				}
-				exists, existingIface, _ := network.CheckIfIPExists(ipOnly.String())
-				s.logger.Debug("REFRESH: IP existence check for Active node", "ip", ipOnly.String(), "exists", exists, "existingIface", existingIface, "targetIface", iface)
-				if !exists || existingIface != iface {
-					missing = append(missing, ip)
-					s.logger.Debug("REFRESH: IP is missing and will be brought up", "ip", ip)
-				}
+			missing, invalid := missingOnIface(iface, ifaceIPs, heldOn)
+			if len(invalid) > 0 {
+				// Skipped, but not silently: an unparseable configured address is
+				// never placed, and without this it looks like a floating IP that
+				// will not come up rather than a config entry that cannot be read.
+				s.logger.Warn("REFRESH: skipping unparseable configured addresses",
+					"iface", iface, "addresses", invalid)
 			}
 			if len(missing) > 0 {
 				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(member.Status))
@@ -2344,6 +2996,15 @@ func (s *Server) BroadcastVoteRequest(sessionID string, voteType, subject, descr
 	return fmt.Errorf("failed to broadcast vote request to any nodes: %v", broadcastErrors)
 }
 
+// pendingIPWork is a node whose floating IPs still have to be released or brought
+// up. Both are synchronous network operations — a gRPC call for a remote node, an
+// address-by-address bring-up locally — so the work is deferred until the server
+// lock has been dropped rather than blocking every other daemon operation.
+type pendingIPWork struct {
+	member *membership.Member
+	ips    []string
+}
+
 // SetMode handles changing the cluster operation mode
 func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.SetModeResponse, error) {
 	s.logger.Infof("Received request to change cluster mode to: %s", req.Mode)
@@ -2372,6 +3033,11 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 		}, nil
 	}
 
+	// IP releases owed by nodes demoted below, run after s.Unlock().
+	var demotions []pendingIPWork
+	// The IPs the consolidated Active must bring up, likewise run after s.Unlock().
+	var activation *pendingIPWork
+
 	// Update mode in config
 	s.config.Pulse.Mode = req.Mode
 
@@ -2383,54 +3049,321 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 		}, nil
 	}
 
-	// If switching to active-active, redistribute IPs
+	// If switching to active-active, record where the floating IPs already are
+	// and let the coordinator spread them from there.
+	//
+	// Clearing every assignment and redistributing the whole group was wrong on
+	// both counts. It left the former sole Active still physically holding all
+	// of the group while three peers were told to bring the same addresses up,
+	// so the switch produced ~150 duplicated addresses immediately; and it ran
+	// those bring-ups under s.Lock(), stalling this daemon long enough for peers
+	// to mark it unreachable — which made each of them appoint itself
+	// coordinator and redistribute too (docs/TEST-PLAN.md defects #2/#26).
+	//
+	// Seeding the current owner instead means the reconciler sees the addresses
+	// as hosted, so it rebalances rather than re-places: every move goes through
+	// OrchestrateIPFailover, which brings the address down on the source before
+	// bringing it up on the destination.
 	if req.Mode == "active-active" {
-		s.logger.Info("Redistributing IPs for active-active mode")
-		var allIPs []string
-		for _, member := range s.memberList.MembersSnapshot() {
-			allIPs = append(allIPs, member.ActiveIPs...)
-			member.ActiveIPs = nil // Clear current assignments
-		}
-
-		if err := s.memberList.RedistributeIPs(allIPs); err != nil {
-			s.logger.Error("Failed to redistribute IPs", "error", err)
-			// Continue anyway as the mode change is already saved
+		if !s.seedActiveActiveAssignments() {
+			s.logger.Warn("No active node found on switch to active-active; redistributing the whole group")
+			var allIPs []string
+			for _, ips := range s.config.Groups {
+				allIPs = append(allIPs, ips...)
+			}
+			if err := s.memberList.RedistributeIPs(allIPs); err != nil {
+				s.logger.Error("Failed to redistribute IPs", "error", err)
+				// Continue anyway as the mode change is already saved
+			}
 		}
 	}
 
-	// If switching to active-passive, move all IPs to the active node
+	// If switching to active-passive, consolidate every floating IP onto a
+	// single active node. In active-passive an Active node's IP monitor expects
+	// *all* of the group IPs on its interfaces, so leaving more than one node
+	// Active — the normal state in active-active — makes every node claim every
+	// floating IP and ARP-fight over them. The whole consolidation is driven
+	// from here, the node handling the request, so it happens exactly once
+	// rather than once per node reacting to the mode change.
 	if req.Mode == "active-passive" {
-		s.logger.Info("Moving all IPs to active node")
-		var activeNode *membership.Member
-		var allIPs []string
+		activeNode := membership.ConsolidationTarget(s.memberList.MembersSnapshot(), s.leaderID)
+		if activeNode == nil {
+			s.logger.Warn("No eligible node found to become active during mode switch")
+		} else {
+			s.logger.Info("Consolidating floating IPs onto a single active node",
+				"hostname", activeNode.Hostname, "node_id", activeNode.ID)
 
-		// Find active node and collect all IPs
-		for _, member := range s.memberList.MembersSnapshot() {
-			if member.Status == membership.StatusActive {
-				activeNode = member
+			// Demote every other node and release the IPs it holds.
+			for _, member := range s.memberList.MembersSnapshot() {
+				if member.ID == activeNode.ID {
+					continue
+				}
+
+				member.Lock()
+				heldIPs := append([]string{}, member.ActiveIPs...)
+				wasActive := member.Status == membership.StatusActive
+				member.ActiveIPs = nil
+				member.LoadFactor = 0
+				// Only Active nodes are demoted; a failed or maintenance node
+				// keeps its status so it isn't falsely reported as healthy.
+				if wasActive {
+					member.Status = membership.StatusPassive
+				}
+				member.Unlock()
+
+				if wasActive {
+					s.logger.Info("Demoted node to passive for active-passive mode", "hostname", member.Hostname)
+				}
+
+				// Releasing a remote node's IPs is a blocking gRPC call, so it
+				// waits until s.Lock() is dropped — an unreachable peer would
+				// otherwise stall every other daemon operation. The local node
+				// needs no call at all: refreshLocalMonitorExpectedIPs below
+				// makes the monitor strip the IPs now that it isn't Active.
+				if len(heldIPs) > 0 && !member.IsLocal() {
+					demotions = append(demotions, pendingIPWork{member: member, ips: heldIPs})
+				}
 			}
-			allIPs = append(allIPs, member.ActiveIPs...)
-			member.ActiveIPs = nil // Clear current assignments
-		}
 
-		// Assign all IPs to active node
-		if activeNode != nil {
-			activeNode.ActiveIPs = allIPs
+			// config.Groups is the authoritative IP source: member.ActiveIPs is
+			// empty on nodes promoted by election, and only groups actually
+			// assigned to this node's interfaces can be brought up on it.
+			activeIPs := s.groupIPsForNode(activeNode.ID)
+
+			// Record the promotion now so the epoch bump, monitor refresh and state
+			// broadcast below all see this node as the Active owner of these IPs, but
+			// leave the bring-up itself until s.Lock() is dropped. Bringing up a large
+			// group under the server lock stalled every other operation on this daemon
+			// — including the health checks peers use to decide it is still alive
+			// (docs/TEST-PLAN.md defects #4/#8) — and it claimed the addresses before
+			// the demoted nodes had released them.
+			activeNode.Lock()
+			activeNode.Status = membership.StatusActive
+			activeNode.ActiveIPs = activeIPs
+			if activeNode.Capacity > 0 {
+				activeNode.LoadFactor = float64(len(activeIPs)) / float64(activeNode.Capacity)
+			} else {
+				activeNode.LoadFactor = 1.0
+			}
+			activeNode.Unlock()
+			if len(activeIPs) > 0 {
+				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
+			}
+
+			// In active-passive the active node is the leader; peers accept
+			// this along with the bumped epoch below.
+			s.leaderID = activeNode.ID
 		}
 	}
 
 	s.logger.Infof("Successfully changed cluster mode to: %s", req.Mode)
+
+	// Bump epoch by 2 so our health-check broadcasts (epoch+1) supersede any stale
+	// broadcasts from peers that still carry the pre-switch epoch.
+	s.clusterEpoch += 2
+
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
+
+	// Hand the new mode to the broadcaster as well as sending it directly below.
+	// The direct send is one unretried pass per peer with its result discarded, so
+	// a peer that is briefly unreachable — a listener mid-rebind under defect #31
+	// is enough — stayed in the old mode indefinitely, and a cluster running two
+	// modes at once is the split-brain configuration quorum exists to prevent.
+	// Stamping it makes the retrying broadcaster own eventual propagation
+	// (defect #43's machinery), and a peer that already applied the direct send
+	// answers the re-push with `config version already held` — an accept, since
+	// it holds exactly this stamp. It deliberately does not answer `superseded
+	// config version ignored`: that reply makes the broadcaster warn that this
+	// node's change will be reverted, which would have been false on every mode
+	// switch, once per peer.
+	s.markConfigDirty()
+
+	// Snapshot the decision while still holding the lock, so the goroutine below
+	// broadcasts exactly what was decided here rather than re-reading state that
+	// a health check may have moved on in the meantime.
+	switchStates := getStatusMap()
+	for id, member := range s.memberList.MembersSnapshot() {
+		member.Lock()
+		switchStates[id] = member.Status
+		member.Unlock()
+	}
+	switchEpoch := s.clusterEpoch
+	switchLeader := s.leaderID
+
+	// The goroutine runs after s.Lock() is released via the deferred s.Unlock():
+	// both the broadcast and the IP work below make blocking gRPC calls, and
+	// holding the server lock across those stalled every other operation on this
+	// daemon — including the health checks peers use to decide it is still alive
+	// (docs/TEST-PLAN.md defects #4/#8).
+	go func() {
+		// Propagate the new mode and the statuses it implies together, and before
+		// any address moves. Peers that know only half of it behave as if the
+		// switch never happened: still in active-active, still Active, still
+		// willing to act as active-active coordinator and consolidate the group
+		// somewhere else (docs/TEST-PLAN.md defect #27). Demoted peers also then
+		// release on their own, from their own IP monitors, rather than waiting on
+		// the serial BringDownIPs calls below.
+		s.broadcastConfigAndStates(switchStates, switchEpoch, switchLeader)
+		putStatusMap(switchStates)
+
+		for _, demotion := range demotions {
+			if err := demotion.member.BringDownIPs(demotion.ips); err != nil {
+				s.logger.Warn("Failed to release IPs from demoted node during mode switch",
+					"hostname", demotion.member.Hostname, "error", err)
+			}
+		}
+
+		// Claim only after the releases above, so the group is not briefly up on both
+		// the old and the new owner.
+		if activation != nil {
+			if err := activation.member.BringUpIPs(activation.ips); err != nil {
+				s.logger.Error("Failed to bring up IPs on active node during mode switch",
+					"hostname", activation.member.Hostname, "error", err)
+			}
+		}
+	}()
+
 	return &rpc.SetModeResponse{
 		Success: true,
 		Message: fmt.Sprintf("cluster mode changed to %s", req.Mode),
 	}, nil
 }
 
+// seedActiveActiveAssignments records the Active node as the owner of every
+// group IP it can host, and clears the rest. It reports whether an Active node
+// was found; if not, nothing holds the group and the caller must place it.
+//
+// Callers must hold s.Lock() or s.RLock(): this reads the config maps through
+// groupIPsForNode, whose contract requires it. It takes no server lock of its own
+// — the lock is not reentrant and SetMode calls this with the write lock held —
+// and the member writes below take only the individual member locks.
+func (s *Server) seedActiveActiveAssignments() bool {
+	members := s.memberList.MembersSnapshot()
+
+	var owner *membership.Member
+	for _, member := range members {
+		member.Lock()
+		isActive := member.Status == membership.StatusActive
+		member.Unlock()
+		if isActive {
+			owner = member
+			break
+		}
+	}
+	if owner == nil {
+		return false
+	}
+
+	// config.Groups is the authoritative IP source. member.ActiveIPs is nil when
+	// the Active node was promoted via election (elections set StatusActive but
+	// never populate ActiveIPs), which is exactly the case that made the whole
+	// group look orphaned to the reconciler.
+	ownedIPs := s.groupIPsForNode(owner.ID)
+	s.logger.Info("Seeding active-active assignments from the current owner",
+		"hostname", owner.Hostname, "ip_count", len(ownedIPs))
+
+	for _, member := range members {
+		member.Lock()
+		if member.ID == owner.ID {
+			member.ActiveIPs = ownedIPs
+		} else {
+			member.ActiveIPs = nil
+			member.LoadFactor = 0
+		}
+		member.Unlock()
+	}
+	return true
+}
+
+// leastLoadedNodeForGroup picks the single node that should host a newly added
+// address in active-active: of the healthy nodes with the group assigned to one
+// of their interfaces, the one holding the fewest floating IPs, ties broken by
+// node ID.
+//
+// This is deliberately the same rule as the coordinator's active-active
+// distribution (see MemberList.calculateIPDistribution), so placing an address at
+// add time does not fight the next rebalance. Nodes in maintenance or of unknown
+// health are excluded — the address would only come straight back off.
+//
+// Returns "" when no node is eligible, which the caller reads as "place it later"
+// rather than "place it everywhere". Callers must hold s.Lock().
+func (s *Server) leastLoadedNodeForGroup(groupName string) string {
+	members := s.memberList.MembersSnapshot()
+
+	best := ""
+	bestCount := -1
+	for nodeID, node := range s.config.Nodes {
+		if node == nil || !nodeHostsGroup(node, groupName) {
+			continue
+		}
+		member := members[nodeID]
+		if member == nil {
+			continue
+		}
+		member.Lock()
+		status := member.Status
+		count := len(member.ActiveIPs)
+		member.Unlock()
+		if status == membership.StatusUnknown || status == membership.StatusMaintenance {
+			continue
+		}
+		if bestCount == -1 || count < bestCount || (count == bestCount && nodeID < best) {
+			best, bestCount = nodeID, count
+		}
+	}
+	return best
+}
+
+// nodeHostsGroup reports whether the group is assigned to any of the node's
+// interfaces, which is what makes the node able to bring its addresses up.
+func nodeHostsGroup(node *config.Node, groupName string) bool {
+	for _, groups := range node.IPGroups {
+		for _, g := range groups {
+			if g == groupName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// groupIPsForNode returns every configured group IP the given node can host —
+// the IPs of the groups assigned to one of its interfaces. Group IPs the node
+// cannot host are logged: in active-passive they have nowhere else to go.
+// Callers must hold s.Lock().
+func (s *Server) groupIPsForNode(nodeID string) []string {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		s.logger.Warn("No node configuration found when collecting group IPs", "node_id", nodeID)
+		return nil
+	}
+
+	assigned := make(map[string]bool)
+	var ips []string
+	for _, groups := range node.IPGroups {
+		for _, group := range groups {
+			if assigned[group] {
+				continue
+			}
+			assigned[group] = true
+			ips = append(ips, s.config.Groups[group]...)
+		}
+	}
+
+	for group, groupIPs := range s.config.Groups {
+		if !assigned[group] && len(groupIPs) > 0 {
+			s.logger.Warn("Group is not assigned to an interface on the active node; its IPs stay down",
+				"group", group, "node_id", nodeID)
+		}
+	}
+
+	return ips
+}
+
 // CreateGroup implements the CLI.CreateGroup RPC method
 func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (*rpc.CreateGroupResponse, error) {
-	s.logger.Infof("Received CreateGroup request for group: %s", req.Name)
+	s.logger.Infof("Received CreateGroup request for group: %s (caller: %s)", req.Name, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -2464,7 +3397,7 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	s.logger.Infof("Successfully created group: %s", req.Name)
 	return &rpc.CreateGroupResponse{
@@ -2475,7 +3408,7 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 
 // AddIPToGroup implements the CLI.AddIPToGroup RPC method
 func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest) (*rpc.AddIPToGroupResponse, error) {
-	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s", req.GroupName, req.Ip)
+	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -2495,18 +3428,34 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	ipToUse := req.Ip
 	var warnings []string
 
-	// Determine active-passive gating context
+	// A floating IP has exactly one owner in either mode, so the bring-up below
+	// goes to exactly one node. In active-passive that is the Active node. In
+	// active-active it is the least-loaded node the group is assigned to.
+	//
+	// Active-active used to have no gate at all: the fan-out visited every node
+	// hosting the group and each one brought the same address up and appended it to
+	// its own ActiveIPs, so a new address started life dual-homed and the
+	// coordinator's next pass had to unwind it. Placing it once here is the same
+	// rule the coordinator applies (fewest current IPs, ties by node ID), so the
+	// two agree and there is nothing to unwind. If they disagree — the snapshot
+	// read here is a moment old — the coordinator still moves it, which is an
+	// ordinary rebalance rather than a duplicate.
 	activePassive := s.config.Pulse.Mode == "active-passive"
-	activeID := ""
+	ownerID := ""
 	if activePassive {
 		for id, m := range s.memberList.MembersSnapshot() {
 			if m.Status == membership.StatusActive {
-				activeID = id
+				ownerID = id
 				break
 			}
 		}
-		if activeID == "" {
+		if ownerID == "" {
 			warnings = append(warnings, "No active node currently; IP will be enforced when a node becomes active")
+		}
+	} else {
+		ownerID = s.leastLoadedNodeForGroup(req.GroupName)
+		if ownerID == "" {
+			warnings = append(warnings, "No node is currently able to host this group; IP will be placed when one is")
 		}
 	}
 
@@ -2555,120 +3504,27 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}, nil
 	}
 
-	// Find nodes that have this group assigned and try to bring up the IP
-	ipBroughtUp := false
-	for nodeID, node := range s.config.Nodes {
-		for iface, groups := range node.IPGroups {
-			for _, g := range groups {
-				if g == req.GroupName {
-					// In active-passive mode, only enforce on the current active node
-					if activePassive && activeID != "" && nodeID != activeID {
-						// Skip bringing IP up on passive nodes; config still records the IP
-						continue
-					}
-					// Check if this is the local node
-					if nodeID == s.config.Pulse.LocalNode {
-						// This is the local node, bring up the IP locally
-						s.logger.Infof("Bringing up IP %s on interface %s", ipToUse, iface)
-
-						// Check if interface exists
-						exists, _ := network.InterfaceExist(iface)
-						if !exists {
-							warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
-							continue
-						}
-
-						// Unconditionally add the IP to the expected IPs for the local monitor
-						s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
-
-						// Check if IP is already present; treat as success if on target iface
-						ipObj, _ := utils.GetCIDR(ipToUse)
-						if ipObj != nil {
-							exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
-							if err != nil {
-								warnings = append(warnings, fmt.Sprintf("Failed to check if IP exists: %v", err))
-								continue
-							}
-							if exists {
-								if existingIface == iface {
-									// Already configured on desired iface; mark success and update expected IPs
-									ipBroughtUp = true
-									s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
-									continue
-								}
-								// Present on a different iface; try to bring it down there first
-								if derr := network.BringIPdown(existingIface, ipToUse); derr != nil {
-									warnings = append(warnings, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ipToUse, existingIface, derr))
-									continue
-								}
-							}
-						}
-
-						if err := network.BringIPup(iface, ipToUse); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ipToUse, iface, err))
-							continue
-						}
-						ipBroughtUp = true
-						s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
-					} else {
-						// This is a remote node, send RPC to bring up the IP
-						s.logger.Infof("Sending request to bring up IP %s on node %s", ipToUse, node.Hostname)
-						remoteClient, err := client.New()
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to create client for node %s: %v", node.Hostname, err))
-							continue
-						}
-						defer remoteClient.Close()
-
-						// Connect to remote node
-						if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to connect to node %s: %v", node.Hostname, err))
-							continue
-						}
-
-						// Send request to bring up IP
-						resp, err := remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{
-							Iface: iface,
-							Ips:   []string{ipToUse},
-						})
-
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on node %s: %v", ipToUse, node.Hostname, err))
-							continue
-						}
-
-						if !resp.Success {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on node %s: %s", ipToUse, node.Hostname, resp.Message))
-							continue
-						}
-
-						ipBroughtUp = true
-						s.logger.Infof("Successfully brought up IP %s on node %s", ipToUse, node.Hostname)
-					}
-				}
-			}
-		}
-	}
-
-	// If we couldn't bring up the IP immediately, decide whether to treat as fatal
-	if !ipBroughtUp && len(warnings) > 0 {
-		if activePassive {
-			// In active-passive mode, lack of immediate bring-up may be expected (no active yet or gated)
-			s.logger.Info("IP not brought up immediately due to active-passive gating or no active present", "ip", ipToUse)
-		} else {
-			return &rpc.AddIPToGroupResponse{
-				Success:  false,
-				Message:  "Failed to bring up IP on any node",
-				Warnings: warnings,
-			}, nil
-		}
-	}
-
-	// Add IP to group in config
+	// Commit the configuration before touching a single interface.
+	//
+	// docs/TEST-PLAN.md defect #39: the bring-up below fans out to every node the
+	// group is assigned to, costing ~4s per peer and ~28s when one is unreachable
+	// (defect #37) — against the 30s deadline Client.Send puts on every CLI call,
+	// which `group add-ip` does not override. When that deadline fired the caller
+	// got rc=1 while this handler carried on to append, Save and broadcast, so a
+	// failure was reported for a mutation that had in fact been applied and a
+	// non-zero add could not be excluded from an expected count.
+	//
+	// Checking ctx instead is not the fix and is arguably worse: aborting
+	// mid-fan-out leaves the address up on some nodes and absent from the config.
+	// The config is the record of intent and the IP monitor's ENFORCE pass is what
+	// puts the address on an interface, so committing first is what makes the
+	// returned status describe the committed state.
 	s.config.Groups[req.GroupName] = append(s.config.Groups[req.GroupName], ipToUse)
-
-	// Save config
 	if err := s.config.Save(); err != nil {
+		// Roll the append back so the in-memory config still matches the disk
+		// we failed to write, and nothing broadcasts a change that did not land.
+		group := s.config.Groups[req.GroupName]
+		s.config.Groups[req.GroupName] = group[:len(group)-1]
 		s.logger.Error("Failed to save config", "error", err)
 		return &rpc.AddIPToGroupResponse{
 			Success:  false,
@@ -2677,7 +3533,120 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
+
+	// Bring the address up locally now — a netlink add with no announcement, so
+	// it is cheap — and collect the peers for the asynchronous fan-out below.
+	localBroughtUp := false
+	var peerTargets []peerBringUpTarget
+	for nodeID, node := range s.config.Nodes {
+		for iface, groups := range node.IPGroups {
+			for _, g := range groups {
+				if g != req.GroupName {
+					continue
+				}
+				// Only the owner brings the address up. Every other node hosting
+				// the group keeps it in config and nothing else, so the address is
+				// never up in two places. With no owner resolvable, nobody brings
+				// it up and the IP monitor's ENFORCE pass places it once a node is
+				// eligible.
+				if ownerID == "" || nodeID != ownerID {
+					continue
+				}
+				if nodeID != s.config.Pulse.LocalNode {
+					// Snapshot the endpoint: the fan-out runs outside s.Lock().
+					peerTargets = append(peerTargets, peerBringUpTarget{
+						hostname: node.Hostname,
+						ip:       node.IP,
+						port:     node.Port,
+						iface:    iface,
+					})
+					continue
+				}
+
+				// This is the local node, bring up the IP locally
+				s.logger.Infof("Bringing up IP %s on interface %s", ipToUse, iface)
+
+				// Check if interface exists
+				exists, _ := network.InterfaceExist(iface)
+				if !exists {
+					warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
+					continue
+				}
+
+				// Unconditionally add the IP to the expected IPs for the local monitor
+				s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
+
+				// Check if IP is already present; treat as success if on target iface
+				ipObj, _ := utils.GetCIDR(ipToUse)
+				if ipObj != nil {
+					exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
+					if err != nil {
+						warnings = append(warnings, fmt.Sprintf("Failed to check if IP exists: %v", err))
+						continue
+					}
+					if exists {
+						if existingIface == iface {
+							// Already configured on desired iface; mark success and update expected IPs
+							localBroughtUp = true
+							s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
+							continue
+						}
+						// Present on a different iface; try to bring it down there first
+						if derr := network.BringIPdown(existingIface, ipToUse); derr != nil {
+							warnings = append(warnings, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ipToUse, existingIface, derr))
+							continue
+						}
+					}
+				}
+
+				if err := network.BringIPup(iface, ipToUse); err != nil {
+					warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ipToUse, iface, err))
+					continue
+				}
+				localBroughtUp = true
+				s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
+			}
+		}
+	}
+
+	// Track the IP on the local member so status and the active-active
+	// reconciler see it as hosted — otherwise it is treated as orphaned and
+	// endlessly re-redistributed. Mirrors what the BringUpIP RPC handler does
+	// for remote nodes, including the transition to Active in active-active.
+	if localBroughtUp {
+		if member := s.memberList.GetMemberByID(s.config.Pulse.LocalNode); member != nil {
+			member.Lock()
+			alreadyTracked := false
+			for _, ip := range member.ActiveIPs {
+				if ip == ipToUse {
+					alreadyTracked = true
+					break
+				}
+			}
+			if !alreadyTracked {
+				member.ActiveIPs = append(member.ActiveIPs, ipToUse)
+			}
+			if s.config.Pulse.Mode == "active-active" && member.Status == membership.StatusPassive {
+				member.Status = membership.StatusActive
+			}
+			member.Unlock()
+		}
+	}
+
+	// Announce to the peers off the request path. Waiting on this was the whole
+	// of defect #39 (see the commit-first comment above) and the whole of #37's
+	// ~13s per add: the calls are independent, so they run concurrently and on a
+	// context of their own — the caller's is cancelled the moment we return.
+	// Queued rather than sent: a burst of adds becomes one request per peer per
+	// window instead of one per address, which is #37's remainder. See
+	// peerBringUpBatcher.
+	if len(peerTargets) > 0 {
+		batcher := s.peerBringUpQueue()
+		for _, target := range peerTargets {
+			batcher.Add(target, ipToUse)
+		}
+	}
 
 	s.logger.Infof("Successfully added IP %s to group %s", ipToUse, req.GroupName)
 	return &rpc.AddIPToGroupResponse{
@@ -2687,9 +3656,99 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	}, nil
 }
 
+// peerBringUpQueue returns the batcher, creating it on first use.
+//
+// Lazily, and on its own mutex rather than s.Lock(): the only caller holds
+// s.Lock() already, and every Server in the tests is built as a literal rather
+// than through NewServer, so a field that has to be initialised at construction
+// would be nil in exactly the paths that exercise this.
+func (s *Server) peerBringUpQueue() *peerBringUpBatcher {
+	s.peerBringUpMu.Lock()
+	defer s.peerBringUpMu.Unlock()
+	if s.peerBringUp == nil {
+		s.peerBringUp = newPeerBringUpBatcher(peerBringUpWindow, s.sendPeerBringUpBatch)
+	}
+	return s.peerBringUp
+}
+
+// sendPeerBringUpBatch is the batcher's send hook, kept separate so the batching
+// and the RPC fan-out can be tested apart from each other.
+func (s *Server) sendPeerBringUpBatch(target peerBringUpTarget, ips []string) {
+	s.bringUpGroupIPOnPeers([]peerBringUpTarget{target}, ips)
+}
+
+// peerBringUpTarget is one peer bring-up for a newly configured group address,
+// snapshotted under s.Lock() because the fan-out that consumes it does not hold
+// the lock and must not walk s.config.Nodes.
+type peerBringUpTarget struct {
+	hostname string
+	ip       string
+	port     string
+	iface    string
+}
+
+// bringUpGroupIPOnPeers asks every peer holding the group to bring a newly
+// configured address up, concurrently and outside the request that added it.
+//
+// It is best-effort by design: the address is already committed to the config
+// and broadcast, so each peer's IP monitor converges on it regardless — this
+// only shortens the wait for the ENFORCE pass. Failures are therefore logged
+// rather than returned, and a single unreachable peer no longer decides the
+// latency of an add (docs/TEST-PLAN.md defects #37 and #39).
+func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string) {
+	if len(ips) == 0 {
+		return
+	}
+
+	// Sized to the batch, not flat: the callee announces the whole set and a
+	// deadline that fits one address reports a batch that succeeded as a failure
+	// (defect #57, the same mistake on the bring-up side).
+	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		wg.Add(1)
+		go func(target peerBringUpTarget) {
+			defer wg.Done()
+
+			s.logger.Infof("Sending request to bring up %d IP(s) on node %s", len(ips), target.hostname)
+			remoteClient, err := client.New()
+			if err != nil {
+				s.logger.Warn("Failed to create client to bring up new group IPs",
+					"count", len(ips), "node", target.hostname, "error", err)
+				return
+			}
+			defer remoteClient.Close()
+
+			if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+				s.logger.Warn("Failed to connect to peer to bring up new group IPs",
+					"count", len(ips), "node", target.hostname, "error", err)
+				return
+			}
+
+			resp, err := remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{
+				Iface: target.iface,
+				Ips:   ips,
+			})
+			switch {
+			case err != nil:
+				s.logger.Warn("Failed to bring up new group IPs on peer; its IP monitor will converge",
+					"count", len(ips), "ips", ips, "node", target.hostname, "error", err)
+			case !resp.Success:
+				s.logger.Warn("Peer refused to bring up new group IPs; its IP monitor will converge",
+					"count", len(ips), "ips", ips, "node", target.hostname, "message", resp.Message)
+			default:
+				s.logger.Infof("Successfully brought up %d IP(s) on node %s", len(ips), target.hostname)
+			}
+		}(target)
+	}
+	wg.Wait()
+}
+
 // RemoveIPFromGroup implements the CLI.RemoveIPFromGroup RPC method
 func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, error) {
-	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s", req.GroupName, req.Ip)
+	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 	s.Lock()
 	defer s.Unlock()
 
@@ -2829,7 +3888,7 @@ func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGro
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
 	// If we couldn't bring down the IP on any node but it was in the config, add a warning
 	if !ipBroughtDown && len(warnings) > 0 {
@@ -2902,11 +3961,11 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
-	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
-	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
-	// go s.refreshLocalMonitorExpectedIPs()
+	// No refresh call here: the config broadcast above lands as a ConfigSync on every
+	// peer including this node's own reconcile path, and the health checker drives VIP
+	// reconciliation off that.
 
 	// If assigning on the local node, refresh expected IPs for this interface
 	if s.ipMonitor != nil {
@@ -2914,12 +3973,7 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 			node := s.config.Nodes[localID]
 			if node != nil {
 				iface := req.Interface
-				var ifaceIPs []string
-				for _, g := range node.IPGroups[iface] {
-					if ips, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, ips...)
-					}
-				}
+				ifaceIPs := s.expectedIfaceIPs(localID, iface)
 				s.ipMonitor.ClearExpectedIPs(iface)
 				if len(ifaceIPs) > 0 {
 					s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -3022,11 +4076,11 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 		}, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
-	// REMOVED: Redundant refresh call - health checker already handles VIP reconciliation after config changes
-	// The broadcastFullConfigToPeers above will trigger config updates that activate health checker logic
-	// go s.refreshLocalMonitorExpectedIPs()
+	// No refresh call here: the config broadcast above lands as a ConfigSync on every
+	// peer including this node's own reconcile path, and the health checker drives VIP
+	// reconciliation off that.
 
 	// If unassigning on the local node, refresh expected IPs for this interface
 	if s.ipMonitor != nil {
@@ -3034,12 +4088,7 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 			node := s.config.Nodes[localID]
 			if node != nil {
 				iface := req.Interface
-				var ifaceIPs []string
-				for _, g := range node.IPGroups[iface] {
-					if ips, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, ips...)
-					}
-				}
+				ifaceIPs := s.expectedIfaceIPs(localID, iface)
 				s.ipMonitor.ClearExpectedIPs(iface)
 				if len(ifaceIPs) > 0 {
 					s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -3055,20 +4104,95 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 	}, nil
 }
 
-// DeleteGroup implements the CLI.DeleteGroup RPC method
+// DeleteGroup implements the CLI.DeleteGroup RPC method.
+//
+// A group that is assigned somewhere is deleted in two config writes rather than
+// one: its assignments are dropped and committed, the addresses are then released
+// on the nodes holding them, and only a release confirmed everywhere is followed
+// by the delete itself. See beginGroupDeletion for why the ordering is the fix
+// for docs/TEST-PLAN.md defect #59.
 func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, error) {
-	s.logger.Infof("Received DeleteGroup request for group: %s", req.GroupName)
+	s.logger.Infof("Received DeleteGroup request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	done, targets, warnings := s.beginGroupDeletion(req)
+	if done != nil {
+		return done, nil
+	}
+
+	// The release runs outside s.Lock(): a fan-out to every node holding the
+	// group is exactly the work that stops a node answering its own health
+	// checks while it holds the lock, which is how a busy node gets elected
+	// around (defects #4/#7/#8).
+	if len(targets) > 0 {
+		releaseWarnings, unconfirmed := s.releaseDeletedGroupIPs(ctx, targets)
+		warnings = append(warnings, releaseWarnings...)
+
+		if len(unconfirmed) > 0 {
+			// Deleting over this is defect #59: the addresses stay up and the
+			// group that referenced them is gone, so no enforce pass can ever
+			// compute them as surplus again. Left configured-but-unassigned they
+			// are still recoverable — every node's release pass takes its share
+			// down when it can, and a retried delete finishes the job.
+			s.logger.Error("Not deleting group: its addresses could not be confirmed released",
+				"group", req.GroupName, "nodes", unconfirmed)
+			return &rpc.DeleteGroupResponse{
+				Success: false,
+				Message: fmt.Sprintf("group %s was unassigned but NOT deleted: could not confirm "+
+					"its floating IPs were released on %s. The addresses stay accounted for while "+
+					"the group is still configured; retry the delete once those nodes are reachable",
+					req.GroupName, strings.Join(unconfirmed, ", ")),
+				Warnings: warnings,
+			}, nil
+		}
+	}
+
+	if err := s.commitGroupDeletion(req.GroupName); err != nil {
+		s.logger.Error("Failed to save config", "error", err)
+		return &rpc.DeleteGroupResponse{
+			Success:  false,
+			Message:  fmt.Sprintf("failed to save config: %v", err),
+			Warnings: warnings,
+		}, nil
+	}
+
+	s.logger.Infof("Successfully deleted group %s", req.GroupName)
+	return &rpc.DeleteGroupResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("successfully deleted group %s", req.GroupName),
+		Warnings: warnings,
+	}, nil
+}
+
+// beginGroupDeletion runs the locked first half of a group deletion: it
+// validates the request and, for an assigned group deleted with --force, drops
+// every assignment and commits that as a write of its own, returning the release
+// each node still owes.
+//
+// Dropping the assignments separately is what makes the release that follows
+// possible at all. Removing them and the group in one write — the original
+// behaviour — left the addresses referenced by nothing the moment it landed:
+// surplusFloatingIPs scans only *configured* groups, deliberately, so a node
+// still holding its share had it fall outside every set any enforce pass could
+// compute, and it stayed up indefinitely (docs/TEST-PLAN.md defect #59).
+// Configured-but-unassigned is the one state whose release pass is verified live
+// (#58), so this ordering also means a node that misses the explicit release
+// still converges on its own instead of stranding.
+//
+// The release cannot run from here — it is a fan-out to every node holding the
+// group and this holds s.Lock() — so the plan is snapshotted for the caller.
+// A non-nil response is the final answer and the caller must return it.
+func (s *Server) beginGroupDeletion(req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, []groupReleaseTarget, []string) {
 	s.Lock()
 	defer s.Unlock()
 
 	if !s.config.ClusterCheck() {
-		return &rpc.DeleteGroupResponse{Success: false, Message: "no cluster configured"}, nil
+		return &rpc.DeleteGroupResponse{Success: false, Message: "no cluster configured"}, nil, nil
 	}
 
 	// Validate group exists (idempotent success if missing)
 	if _, exists := s.config.Groups[req.GroupName]; !exists {
 		s.logger.Infof("Group %s does not exist; treating delete as success", req.GroupName)
-		return &rpc.DeleteGroupResponse{Success: true, Message: fmt.Sprintf("group %s does not exist", req.GroupName)}, nil
+		return &rpc.DeleteGroupResponse{Success: true, Message: fmt.Sprintf("group %s does not exist", req.GroupName)}, nil, nil
 	}
 
 	// Check if group is assigned to any nodes (unless force is true)
@@ -3087,50 +4211,315 @@ func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (
 		return &rpc.DeleteGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("group %s is assigned to nodes: %s. Use --force to delete anyway", req.GroupName, assignedNodes),
-		}, nil
+		}, nil, nil
 	}
 
-	// If force is true and group is assigned, remove assignments and add warnings
+	// An unassigned group holds nothing anywhere, so there is nothing to release
+	// and no reason to spend a second config write on it.
+	if len(assignedNodes) == 0 {
+		return nil, nil, nil
+	}
+
+	// Plan the release before the assignments go, since it is the assignments
+	// that say which node holds what.
+	targets := s.planGroupRelease(req.GroupName)
+
 	var warnings []string
-	if len(assignedNodes) > 0 && req.Force {
-		for _, node := range s.config.Nodes {
-			for iface := range node.IPGroups {
-				groups := node.IPGroups[iface]
-				for i := len(groups) - 1; i >= 0; i-- {
-					if groups[i] == req.GroupName {
-						// Remove group from slice
-						node.IPGroups[iface] = append(groups[:i], groups[i+1:]...)
-						warnings = append(warnings, fmt.Sprintf("removed assignment from %s:%s", node.Hostname, iface))
-					}
+	for _, node := range s.config.Nodes {
+		for iface := range node.IPGroups {
+			groups := node.IPGroups[iface]
+			for i := len(groups) - 1; i >= 0; i-- {
+				if groups[i] == req.GroupName {
+					// Remove group from slice
+					node.IPGroups[iface] = append(groups[:i], groups[i+1:]...)
+					warnings = append(warnings, fmt.Sprintf("removed assignment from %s:%s", node.Hostname, iface))
 				}
-				// If interface has no more groups, remove the entry
-				if len(node.IPGroups[iface]) == 0 {
-					delete(node.IPGroups, iface)
-				}
+			}
+			// If interface has no more groups, remove the entry
+			if len(node.IPGroups[iface]) == 0 {
+				delete(node.IPGroups, iface)
 			}
 		}
 	}
 
-	// Delete the group
-	delete(s.config.Groups, req.GroupName)
-
-	// Save config
 	if err := s.config.Save(); err != nil {
 		s.logger.Error("Failed to save config", "error", err)
 		return &rpc.DeleteGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("failed to save config: %v", err),
-		}, nil
+		}, nil, nil
 	}
 	// Broadcast updated config to peers
-	go s.broadcastFullConfigToPeers()
+	s.markConfigDirty()
 
-	s.logger.Infof("Successfully deleted group %s", req.GroupName)
-	return &rpc.DeleteGroupResponse{
-		Success:  true,
-		Message:  fmt.Sprintf("successfully deleted group %s", req.GroupName),
-		Warnings: warnings,
-	}, nil
+	return nil, targets, warnings
+}
+
+// commitGroupDeletion removes the group from the config once its addresses are
+// accounted for, and is the second of the two writes an assigned deletion makes.
+func (s *Server) commitGroupDeletion(groupName string) error {
+	s.Lock()
+	defer s.Unlock()
+
+	delete(s.config.Groups, groupName)
+	if err := s.config.Save(); err != nil {
+		return err
+	}
+	// Broadcast updated config to peers
+	s.markConfigDirty()
+	return nil
+}
+
+// groupReleaseTarget is one node's share of a group being deleted, snapshotted
+// under s.Lock() because the release that consumes it runs without the lock and
+// must not walk s.config.Nodes.
+type groupReleaseTarget struct {
+	nodeID   string
+	hostname string
+	ip       string
+	port     string
+	iface    string
+	// ips is the share this node is recorded as holding, which is what gets
+	// released.
+	ips []string
+	// candidates is every address of the group that could be up on this
+	// interface. It is wider than ips on purpose: the record of who holds what
+	// was append-only until defect #58, so the local node — the one node whose
+	// interfaces can actually be read — verifies against this rather than trusting
+	// the record it is about to delete.
+	candidates []string
+	local      bool
+}
+
+// planGroupRelease returns, per node and interface holding the group, the
+// addresses that have to come down before the group can leave the config.
+//
+// expectedIfaceIPs answers "which of these addresses are mine" for a node, so in
+// active-active each node is sent only its assigned share: asking a node to bring
+// down a group it holds none of is defect #34's noise, 201 error lines for a
+// no-op. In active-passive it yields the whole group, which is correct there —
+// the Active holds all of it and a node that just changed role may still hold any
+// of it.
+//
+// An address another still-configured group provides on the same interface is
+// excluded. Nothing in the CLI can create that overlap (AddIPToGroup rejects an
+// address already held by another group), but config.json is written by the
+// appliance too (defect #3), and tearing down an address a live group still
+// serves would be an outage.
+//
+// The caller must hold s.Lock() or s.RLock().
+func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
+	groupIPs := s.config.Groups[groupName]
+	if len(groupIPs) == 0 {
+		return nil
+	}
+
+	var targets []groupReleaseTarget
+	for nodeID, node := range s.config.Nodes {
+		if node == nil {
+			continue
+		}
+		for iface, groups := range node.IPGroups {
+			if !slices.Contains(groups, groupName) {
+				continue
+			}
+
+			mine := make(map[string]bool)
+			for _, ip := range s.expectedIfaceIPs(nodeID, iface) {
+				mine[ip] = true
+			}
+			retained := make(map[string]bool)
+			for _, g := range groups {
+				if g == groupName {
+					continue
+				}
+				for _, ip := range s.config.Groups[g] {
+					retained[ip] = true
+				}
+			}
+
+			var ips, candidates []string
+			for _, ip := range groupIPs {
+				if retained[ip] {
+					continue
+				}
+				candidates = append(candidates, ip)
+				if mine[ip] {
+					ips = append(ips, ip)
+				}
+			}
+			// A node recorded as holding nothing is still visited when it is the
+			// local one, because there the record can be checked against the
+			// kernel instead of believed.
+			if len(ips) == 0 && !(nodeID == s.config.Pulse.LocalNode && len(candidates) > 0) {
+				continue
+			}
+
+			targets = append(targets, groupReleaseTarget{
+				nodeID:     nodeID,
+				hostname:   node.Hostname,
+				ip:         node.IP,
+				port:       node.Port,
+				iface:      iface,
+				ips:        ips,
+				candidates: candidates,
+				local:      nodeID == s.config.Pulse.LocalNode,
+			})
+		}
+	}
+
+	// Map iteration order is random; a deterministic plan keeps the logs and the
+	// tests readable.
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].nodeID != targets[j].nodeID {
+			return targets[i].nodeID < targets[j].nodeID
+		}
+		return targets[i].iface < targets[j].iface
+	})
+	return targets
+}
+
+// releaseDeletedGroupIPs brings a deleted group's addresses down on every node
+// holding them, concurrently and outside s.Lock(). It returns a warning per node
+// that reported trouble, and the hostnames whose release could not be confirmed
+// at all — the delete must not proceed over one of those.
+func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupReleaseTarget) (warnings []string, unconfirmed []string) {
+	// Sized to the work, not fixed. A flat deadline on a batched bring-down is
+	// defect #57 on the release side: it reports as failed a release that in fact
+	// succeeded, and a false failure here costs the operator the delete. The
+	// nodes run concurrently, so the largest single batch is what has to fit, and
+	// the caller's deadline still caps the whole thing.
+	largest := 0
+	for _, target := range targets {
+		if len(target.ips) > largest {
+			largest = len(target.ips)
+		}
+	}
+	ctx, cancel := context.WithTimeout(ctx, membership.DemotionTimeoutFor(largest))
+	defer cancel()
+
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+	for _, target := range targets {
+		wg.Add(1)
+		go func(target groupReleaseTarget) {
+			defer wg.Done()
+
+			warning, confirmed := s.releaseGroupIPsOnTarget(ctx, target)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+			if !confirmed {
+				unconfirmed = append(unconfirmed, target.hostname)
+			}
+		}(target)
+	}
+	wg.Wait()
+
+	sort.Strings(warnings)
+	sort.Strings(unconfirmed)
+	return warnings, unconfirmed
+}
+
+// releaseGroupIPsOnTarget brings one node's share of a deleted group down and
+// reports whether the release can be treated as done.
+func (s *Server) releaseGroupIPsOnTarget(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
+	s.logger.Info("Releasing floating IPs of a group being deleted",
+		"node", target.hostname, "iface", target.iface, "count", len(target.ips))
+
+	if target.local {
+		return s.releaseGroupIPsLocally(ctx, target)
+	}
+
+	remoteClient, err := client.New()
+	if err != nil {
+		return fmt.Sprintf("failed to create client for node %s: %v", target.hostname, err), false
+	}
+	defer remoteClient.Close()
+
+	if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+		return fmt.Sprintf("failed to connect to node %s to release its floating IPs: %v", target.hostname, err), false
+	}
+
+	resp, err := remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{
+		Iface: target.iface,
+		Ips:   target.ips,
+	})
+	switch {
+	case err != nil:
+		return fmt.Sprintf("failed to release %d floating IP(s) on node %s: %v", len(target.ips), target.hostname, err), false
+	case !resp.Success:
+		return fmt.Sprintf("node %s refused to release %d floating IP(s): %s", target.hostname, len(target.ips), resp.Message), false
+	}
+
+	// A peer's per-address netlink failures are not visible here, and cannot be:
+	// no RPC exposes a peer's interface state (the same wall defect #54 hit). They
+	// are also the benign case — a failed bring-down is overwhelmingly "cannot
+	// assign requested address", i.e. the address was already gone (#34). What
+	// must not be waved through is the transport failing, which is what the two
+	// cases above cover.
+	return "", true
+}
+
+// releaseGroupIPsLocally brings the local node's share down through the same
+// handler a peer would run, so the IP monitor's expectations and the member's
+// assignment list stay honest (defect #58), and then checks the kernel rather
+// than trusting the return — the lesson of #21.
+func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
+	// An address cannot be up on an interface the node does not have, so there is
+	// nothing to release and nothing to strand.
+	if exists, _ := network.InterfaceExist(target.iface); !exists {
+		return fmt.Sprintf("interface %s does not exist on local node; nothing to release there", target.iface), true
+	}
+
+	if len(target.ips) > 0 {
+		if _, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips}); err != nil {
+			return fmt.Sprintf("failed to release %d floating IP(s) locally: %v", len(target.ips), err), false
+		}
+	}
+
+	// Keep the local assignment list honest whatever the mode: BringDownIP only
+	// maintains it in active-active, and a deleted group's addresses left on the
+	// list are reported as held forever, since nothing can recompute them
+	// downward once the group is gone (defect #58).
+	if member := s.memberList.GetMemberByID(target.nodeID); member != nil {
+		member.RemoveActiveIPs(target.ips)
+	}
+
+	inventory, err := network.BuildIPInventory()
+	if err != nil {
+		// A host whose addresses cannot be read is a problem of its own, but
+		// refusing the delete over it would leave no way to finish one. Say so
+		// and take the release at its word.
+		return fmt.Sprintf("released %d floating IP(s) locally but could not read interface state to confirm: %v",
+			len(target.ips), err), true
+	}
+
+	// Checked over every address the group could have here, not only the ones the
+	// record said to release. That record was append-only until defect #58 and is
+	// about to be deleted along with the group, so the kernel is the authority for
+	// the one node where it can be read — and an address it reports up is exactly
+	// the strand this whole ordering exists to prevent.
+	var stillHeld []string
+	for _, ip := range target.candidates {
+		addr, cerr := utils.GetCIDR(ip)
+		if cerr != nil || addr == nil {
+			continue
+		}
+		if held, _, eerr := inventory.Exists(addr.String()); eerr == nil && held {
+			stillHeld = append(stillHeld, ip)
+		}
+	}
+	if len(stillHeld) > 0 {
+		return fmt.Sprintf("%d floating IP(s) of this group are still up locally on %s: %s",
+			len(stillHeld), target.iface, strings.Join(stillHeld, ", ")), false
+	}
+	return "", true
 }
 
 // ListGroups implements the CLI.ListGroups RPC method
@@ -3366,7 +4755,15 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 			finalPort = localNode.Port
 		}
 	}
-	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(req.BindIp), finalPort)
+	// JoinHostPort rather than the FormatIPv6 + "%s:%s" idiom used for the
+	// listener addresses elsewhere in this file: the two are equivalent for every
+	// input (FormatIPv6 brackets a v6 literal and JoinHostPort brackets any host
+	// containing a colon), but `go vet` cannot see through the helper and reports
+	// every "%s:%s" reaching net.Dial as broken for IPv6. Silencing it here keeps
+	// a real finding from being buried in known noise. Only the dial sites are
+	// converted — the listener addresses are string-compared against each other
+	// by clusterListenerServing, so they change together or not at all.
+	address := net.JoinHostPort(utils.SanitizeIPv6(req.BindIp), finalPort)
 	readyDeadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(readyDeadline) {
 		conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
@@ -3538,7 +4935,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		s.logger.Warn("CONFIG_SYNC: No configuration data provided")
 		return &rpc.ConfigSyncResponse{
 			Success: false,
-			Message: "no configuration data provided",
+			Message: permanentRejectionPrefix + "no configuration data provided",
 		}, nil
 	}
 
@@ -3566,6 +4963,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		incomingMemberStates map[string]membership.MemberStatus
 		incomingEpoch        int64
 		incomingLeaderID     string
+		senderID             string
+		senderActiveIPs      []string
+		incomingStamp        configStamp
 	)
 	// Defer cleanup of any allocated maps
 	defer func() {
@@ -3575,10 +4975,14 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	}()
 	{
 		type enhanced struct {
-			MemberStates map[string]int    `json:"member_states"`
-			Epoch        *int64            `json:"epoch"`
-			LeaderID     string            `json:"leader_id"`
-			Leases       map[string]string `json:"leases"`
+			MemberStates    map[string]int    `json:"member_states"`
+			Epoch           *int64            `json:"epoch"`
+			LeaderID        string            `json:"leader_id"`
+			Leases          map[string]string `json:"leases"`
+			SenderID        string            `json:"sender_id"`
+			SenderActiveIPs []string          `json:"sender_active_ips"`
+			ConfigVersion   int64             `json:"config_version"`
+			ConfigOrigin    string            `json:"config_origin"`
 		}
 		var e enhanced
 		if err := json.Unmarshal(req.Config, &e); err == nil {
@@ -3592,10 +4996,55 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				incomingEpoch = *e.Epoch
 			}
 			incomingLeaderID = e.LeaderID
+			senderID = e.SenderID
+			senderActiveIPs = e.SenderActiveIPs
+			// A binary that versions configs but does not name the origin gets the
+			// sender treated as the origin — right for a direct mutation broadcast,
+			// and the pre-origin behaviour otherwise.
+			origin := e.ConfigOrigin
+			if origin == "" {
+				origin = e.SenderID
+			}
+			incomingStamp = configStamp{version: e.ConfigVersion, origin: origin}
 		}
 	}
 
+	// The epoch this node held *before* this sync is what decides whether the
+	// payload carries a decision or merely re-asserts an already-agreed view.
+	// Both branches below adopt a higher incoming epoch as soon as they see one,
+	// so reading s.clusterEpoch after them compared the payload against the very
+	// epoch it had just installed — never greater, so nothing was ever decisive
+	// and every peer's view of the local node's own status was discarded,
+	// including a real demotion (docs/TEST-PLAN.md defect #28).
+	//
+	// Read under the lock: this runs before the branch below takes it, so a bare
+	// read races the config broadcaster and any concurrent sync.
+	preSyncEpoch := s.GetClusterEpoch()
+
 	if isFullConfig {
+		// Drop a snapshot the sender has already superseded. ConfigSync applies a
+		// carried group wholesale, and since defect #43 applies its absence too, so
+		// an older snapshot delivered late used to overwrite a newer one with no way
+		// back (docs/TEST-PLAN.md defect #5) — and now could delete from it. This
+		// guard is what makes absence safe to honour: it is only ever read as a
+		// removal on a payload strictly newer than what this node holds. Not an
+		// error: the sender has nothing to fix, the message is simply obsolete.
+		if !s.shouldApplyIncomingConfig(incomingStamp) {
+			held := s.loadConfigStamp()
+			s.logger.Debug("CONFIG_SYNC: ignoring config already superseded or held",
+				"sender", senderID, "version", incomingStamp.version,
+				"origin", incomingStamp.origin,
+				"held", held.version, "heldOrigin", held.origin)
+			return &rpc.ConfigSyncResponse{
+				Success: true,
+				Message: configNotAppliedMessage(incomingStamp, held),
+			}, nil
+		}
+
+		// One snapshot of the live pointer for every preserve-read below, so a
+		// concurrent Reconfigure swapping it cannot be observed mid-function.
+		cur := s.currentConfig()
+
 		// Create a new config instance to hold incoming cluster-wide configuration
 		newConfig := &config.Config{}
 
@@ -3604,12 +5053,13 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			s.logger.Error("Failed to unmarshal configuration", "error", err)
 			return &rpc.ConfigSyncResponse{
 				Success: false,
-				Message: fmt.Sprintf("failed to unmarshal configuration: %v", err),
+				Message: permanentRejectionPrefix +
+					fmt.Sprintf("failed to unmarshal configuration: %v", err),
 			}, nil
 		}
 
 		// Preserve the local node identity from our existing configuration to avoid adopting remote LocalNode
-		prevLocalID := s.config.Pulse.LocalNode
+		prevLocalID := cur.Pulse.LocalNode
 		if prevLocalID != "" && newConfig.Pulse.LocalNode != prevLocalID {
 			s.logger.Debugf("ConfigSync: preserving local node identity: %s (incoming had %s)", prevLocalID, newConfig.Pulse.LocalNode)
 			newConfig.Pulse.LocalNode = prevLocalID
@@ -3618,7 +5068,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Nodes = map[string]*config.Node{}
 			}
 			if _, ok := newConfig.Nodes[prevLocalID]; !ok {
-				if existing := s.config.Nodes[prevLocalID]; existing != nil {
+				if existing := cur.Nodes[prevLocalID]; existing != nil {
 					// Shallow copy to avoid aliasing
 					copied := *existing
 					newConfig.Nodes[prevLocalID] = &copied
@@ -3628,17 +5078,39 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 		// Preserve local-specific settings before applying cluster config
 		// These should not be overwritten by a remote ConfigSync
-		localIDPreserve := s.config.Pulse.LocalNode
-		loggingLevelPreserve := s.config.Pulse.LoggingLevel
-		logToFilePreserve := s.config.Pulse.LogToFile
-		logFileLocationPreserve := s.config.Pulse.LogFileLocation
-		logToSyslogPreserve := s.config.Pulse.LogToSyslog
-		syslogNetworkPreserve := s.config.Pulse.SyslogNetwork
-		syslogAddressPreserve := s.config.Pulse.SyslogAddress
-		syslogFacilityPreserve := s.config.Pulse.SyslogFacility
-		syslogTagPreserve := s.config.Pulse.SyslogTag
+		localIDPreserve := cur.Pulse.LocalNode
+		loggingLevelPreserve := cur.Pulse.LoggingLevel
+		logToFilePreserve := cur.Pulse.LogToFile
+		logFileLocationPreserve := cur.Pulse.LogFileLocation
+		logToSyslogPreserve := cur.Pulse.LogToSyslog
+		syslogNetworkPreserve := cur.Pulse.SyslogNetwork
+		syslogAddressPreserve := cur.Pulse.SyslogAddress
+		syslogFacilityPreserve := cur.Pulse.SyslogFacility
+		syslogTagPreserve := cur.Pulse.SyslogTag
+		// Whether this sync is the one that flips us into active-active decides
+		// whether we have to seed the assignment map below.
+		prevMode := cur.Pulse.Mode
 
 		s.Lock()
+
+		// Re-check now the write lock is held. The guard above ran before it, and a
+		// local mutation takes s.Lock(), bumps the version and edits the config in
+		// that window — unmarshalling a 200-address config is long enough for one of
+		// the back-to-back add-ip calls that produce defect #38 to land inside it.
+		// Applying anyway would erase an add that had already reported success and
+		// leave the version claiming otherwise, which is the very shape being fixed.
+		if !configIsNewer(incomingStamp, s.loadConfigStamp()) {
+			held := s.loadConfigStamp()
+			s.Unlock()
+			s.logger.Debug("CONFIG_SYNC: this config was superseded or already held mid-apply",
+				"sender", senderID, "version", incomingStamp.version,
+				"origin", incomingStamp.origin,
+				"held", held.version, "heldOrigin", held.origin)
+			return &rpc.ConfigSyncResponse{
+				Success: true,
+				Message: configNotAppliedMessage(incomingStamp, held),
+			}, nil
+		}
 
 		// Apply preserved local-specific settings onto the incoming config
 		newConfig.Pulse.LocalNode = localIDPreserve
@@ -3651,8 +5123,37 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		newConfig.Pulse.SyslogFacility = syslogFacilityPreserve
 		newConfig.Pulse.SyslogTag = syslogTagPreserve
 
-		// Merge: preserve/merge groups and interface assignments when missing or empty in incoming
-		if len(newConfig.Groups) == 0 && len(s.config.Groups) > 0 {
+		// Groups: a payload that carries the field is authoritative about it,
+		// including about what is no longer in it (docs/TEST-PLAN.md defect #43).
+		//
+		// This used to merge — "if the incoming list is missing or empty, prefer
+		// mine" — which is unanswerable for a removal, because absence and
+		// emptiness are exactly what a removal looks like on the wire. All three
+		// removing mutations were therefore undone by every receiver:
+		// commitGroupDeletion deletes the key, UnassignGroupFromNode deletes an
+		// interface entry that has no groups left, and RemoveIPFromGroup leaves the
+		// group present with an empty list. Worse, the receiver still answered
+		// Success, so the sender's broadcaster recorded full propagation and
+		// cleared #43's retry state — the repair could never fire, because nothing
+		// reported a failure. On whitecrane a `group delete --force` on the
+		// coordinator propagated write 1 (the release) to all four and write 2 (the
+		// delete) to none, leaving three nodes listing a group the coordinator had
+		// dropped, which is the state that puts a group's addresses outside every
+		// computable set (defect #59).
+		//
+		// Keyed on nil, not on emptiness. nil means the field was absent from the
+		// JSON or explicitly null, which is a sender that has no opinion about
+		// groups — the case the merge was written for, and the only one that still
+		// preserves local. `floating_ip_groups`/`group_assignments` carry no
+		// omitempty and config.New/Load always initialise the maps, so any live
+		// daemon sending a full config emits at least `{}`: "I have no groups" is
+		// distinguishable from "I do not speak groups".
+		//
+		// Safe because this point is past two stamp checks, the second under
+		// s.Lock(): the payload is strictly newer than what this node holds, and
+		// the wholesale semantics are what a newer config already had for a group's
+		// address list. Absence is now ordered on the same clock as content.
+		if newConfig.Groups == nil && len(s.config.Groups) > 0 {
 			// Deep copy local groups
 			newConfig.Groups = make(map[string][]string, len(s.config.Groups))
 			for g, ips := range s.config.Groups {
@@ -3661,24 +5162,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Groups[g] = copySlice
 			}
 		}
-		// For any group present with empty list, prefer local non-empty list
-		if len(s.config.Groups) > 0 {
-			if newConfig.Groups == nil {
-				newConfig.Groups = make(map[string][]string)
-			}
-			for g, localIPs := range s.config.Groups {
-				if len(localIPs) == 0 {
-					continue
-				}
-				incomingIPs, ok := newConfig.Groups[g]
-				if !ok || len(incomingIPs) == 0 {
-					copySlice := make([]string, len(localIPs))
-					copy(copySlice, localIPs)
-					newConfig.Groups[g] = copySlice
-				}
-			}
-		}
-		// Preserve per-node interface group assignments when missing in incoming
+		// Preserve per-node interface group assignments when the incoming node
+		// entry carries none at all — same nil-versus-empty rule as the groups
+		// above, for the same reason.
 		localNodeID, _ := s.config.GetLocalNodeUUID()
 		for nodeID, existing := range s.config.Nodes {
 			if existing == nil {
@@ -3700,23 +5186,11 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				newConfig.Nodes[nodeID] = &copied
 				continue
 			}
-			if len(nIncoming.IPGroups) == 0 && len(existing.IPGroups) > 0 {
+			if nIncoming.IPGroups == nil && len(existing.IPGroups) > 0 {
 				nIncoming.IPGroups = make(map[string][]string, len(existing.IPGroups))
 				for iface, groups := range existing.IPGroups {
 					gg := make([]string, len(groups))
 					copy(gg, groups)
-					nIncoming.IPGroups[iface] = gg
-				}
-			}
-			// For any interface present with empty group list, prefer local list
-			for iface, localGroups := range existing.IPGroups {
-				if len(localGroups) == 0 {
-					continue
-				}
-				incomingGroups, ok := nIncoming.IPGroups[iface]
-				if !ok || len(incomingGroups) == 0 {
-					gg := make([]string, len(localGroups))
-					copy(gg, localGroups)
 					nIncoming.IPGroups[iface] = gg
 				}
 			}
@@ -3731,6 +5205,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		if err := newConfig.Save(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to save synchronized configuration", "error", err)
 			s.Unlock()
+			// Deliberately *not* marked permanent: the payload was understood and only
+			// storing it failed, which is ENOSPC, EIO or a read-only mount and clears
+			// on its own. The sender has to keep this peer in its retry set, or the
+			// broadcast reports full propagation to a node holding none of the config.
 			return &rpc.ConfigSyncResponse{
 				Success: false,
 				Message: fmt.Sprintf("failed to save synchronized configuration: %v", err),
@@ -3749,9 +5227,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		s.config = newConfig
-		s.Unlock()
 
-		// Update convergence metadata if newer
+		// Adopted in the same critical section as the pointer swap, and only once
+		// the config is actually in place: a save failure above cannot make this
+		// node claim a version it never applied, and a local mutation cannot land
+		// between the two. Adopting after the unlock left exactly that gap — the
+		// mutation minted its version against the stamp this sync was about to
+		// overwrite, so the next reconcile silently reverted it.
+		s.adoptConfigStamp(incomingStamp)
+
+		// Update convergence metadata if newer. Also under the lock: the config
+		// broadcaster reads s.clusterEpoch under RLock, so writing it after the
+		// unlock is a data race the detector flags.
 		if incomingEpoch > s.clusterEpoch {
 			s.logger.Debug("CONFIG_SYNC: Updating cluster epoch",
 				"oldEpoch", s.clusterEpoch,
@@ -3761,6 +5248,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			s.leaderID = incomingLeaderID
 		}
 
+		s.Unlock()
+
 		// Immediately refresh member list from new configuration so peers become visible
 		s.logger.Debug("CONFIG_SYNC: Updating member list with new config")
 		s.memberList.UpdateConfig(s.config)
@@ -3769,12 +5258,42 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		if err := s.loadInitialMembers(); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to load members after sync", "error", err)
 		}
-	} else {
-		// Envelope-only update: do NOT overwrite config; just apply incoming states and metadata
-		if incomingEpoch > s.clusterEpoch {
-			s.clusterEpoch = incomingEpoch
-			s.leaderID = incomingLeaderID
+
+		// Seed the assignment map on the node that learns the mode changed, not
+		// only on the node that handled the request. Whoever ends up
+		// active-active coordinator makes the redistribute-or-rebalance decision
+		// from its own member list, and on whitecrane that was a different node:
+		// it saw no assignments anywhere, called all 201 addresses orphaned and
+		// placed them on top of the ones the previous Active still held
+		// (docs/TEST-PLAN.md defects #2/#26). Every node derives the same answer
+		// from the config it just applied, so seeding here is consistent rather
+		// than a second opinion.
+		//
+		// Under s.RLock(): this runs after the pointer swap released the write
+		// lock, and seedActiveActiveAssignments reads the config maps through
+		// groupIPsForNode. The read lock is enough — it writes only member state —
+		// and it must be the read lock, because the write lock is what the swap
+		// above already released.
+		s.RLock()
+		switchedToActiveActive := prevMode != "active-active" && s.config.Pulse.Mode == "active-active"
+		if switchedToActiveActive {
+			s.logger.Info("CONFIG_SYNC: cluster switched to active-active, seeding assignments")
 		}
+		seeded := switchedToActiveActive && s.seedActiveActiveAssignments()
+		s.RUnlock()
+
+		if switchedToActiveActive && !seeded {
+			s.logger.Warn("CONFIG_SYNC: no active node found while seeding active-active assignments")
+		}
+	} else {
+		// Envelope-only update: do NOT overwrite config; just apply incoming states
+		// and metadata.
+		//
+		// Adopted under the lock, like the full-config branch above. This branch
+		// never takes s.Lock() at all, so the compare-and-write here was the same
+		// unsynchronised access on a different path: the config broadcaster reads
+		// both fields under RLock, so -race flags it.
+		s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
 		// Keep member list as-is for envelope updates to avoid clobbering runtime states
 		// s.memberList.UpdateConfig(s.config)
 		// Skip loadInitialMembers here; members are stable
@@ -3784,8 +5303,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	if len(incomingMemberStates) > 0 {
 		// Decide whether to apply incoming states based on epoch and leader to avoid cross-over
 		applyStates := false
-		currentEpoch := s.clusterEpoch
-		currentLeader := s.leaderID
+		// Both branches above have released the lock by now, so read the pair
+		// under it — and as a pair, so the leader belongs to the epoch.
+		currentEpoch, currentLeader := s.convergenceMetadata()
 		s.logger.Debug("CONFIG_SYNC: Evaluating incoming member states", "incoming_epoch", incomingEpoch, "current_epoch", currentEpoch,
 			"incoming_leader", incomingLeaderID, "current_leader", currentLeader, "states", incomingMemberStates)
 
@@ -3805,10 +5325,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		if applyStates {
-			// Update epoch/leader if needed
-			if incomingEpoch >= currentEpoch {
-				s.clusterEpoch = incomingEpoch
-				s.leaderID = incomingLeaderID
+			// Update epoch/leader if needed. An equal epoch is adopted here as well
+			// as a higher one, which is why this takes the atLeast comparison.
+			if s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, true) {
 				s.logger.Debug("CONFIG_SYNC: Updated cluster epoch and leader", "epoch", incomingEpoch, "leader", incomingLeaderID)
 			}
 
@@ -3825,11 +5344,49 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 			s.logger.Debug("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
 			syncLocalID, _ := s.config.GetLocalNodeUUID()
+
+			// Whether this sync carries a decision or merely re-asserts an agreed view.
+			// Only a strictly higher epoch is a decision; an equal epoch is a peer's
+			// heartbeat, which has no authority over what this node knows about itself.
+			// Compared against the epoch held on entry, not currentEpoch: by this
+			// point a higher incoming epoch has already been adopted above.
+			decisive := incomingEpoch > preSyncEpoch
+
 			for id, st := range incomingMemberStates {
-				if m := s.memberList.GetMemberByID(id); m != nil {
+				m := s.memberList.GetMemberByID(id)
+				if m == nil {
+					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
+					continue
+				}
+
+				// Status, ActiveIPs and LoadFactor are read under the member
+				// lock elsewhere — the post-load VIP reconcile in
+				// loadInitialMembers, GetActiveIPs — so this writer has to hold
+				// it too. A func literal rather than an inline block because
+				// the guard clauses below bail out early and each has to
+				// release the lock.
+				func() {
+					m.Lock()
+					defer m.Unlock()
+
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
+						// The same principle applied to status generally. This node knows
+						// its own status better than a peer whose view may predate the
+						// change — most importantly when a coordinator has just assigned
+						// it IPs in active-active and it has gone Active in response. An
+						// equal-epoch peer that still remembers it as Passive would
+						// otherwise demote it and have its new IPs stripped, only for the
+						// coordinator to assign them again (docs/TEST-PLAN.md defect #2).
+						// A real demotion — election, mode switch, explicit promote —
+						// always arrives at a higher epoch and still applies.
+						if !decisive && st != m.Status {
+							s.logger.Debug("CONFIG_SYNC: Ignoring peer's equal-epoch view of local status",
+								"node_id", id, "local", membership.StatusToString(m.Status),
+								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
+							return
+						}
 						if node := s.config.Nodes[id]; node != nil {
 							if node.Maintenance {
 								// Config says we're in maintenance — enforce it.
@@ -3837,21 +5394,30 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 									m.Status = membership.StatusMaintenance
 									s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
 								}
-								continue
+								return
 							}
 							// Config says we're NOT in maintenance — reject stale StatusMaintenance from peers.
 							if st == membership.StatusMaintenance {
 								s.logger.Debug("CONFIG_SYNC: Rejected stale maintenance status from peer; local config shows not in maintenance", "node_id", id)
-								continue
+								return
 							}
 						}
 					}
 					oldStatus := m.Status
 					m.Status = st
+					// A Passive or Maintenance node cannot hold floating IPs, so
+					// drop any assignment still recorded against it. Without
+					// this, status keeps listing IPs the node already released
+					// (after a demote, or a switch to active-passive) because
+					// the node's own clear is never reported to its peers.
+					// StatusUnknown is deliberately left alone: failover reads a
+					// failed active's last-known IPs to hand to its replacement.
+					if st == membership.StatusPassive || st == membership.StatusMaintenance {
+						m.ActiveIPs = nil
+						m.LoadFactor = 0
+					}
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
-				} else {
-					s.logger.Warn("CONFIG_SYNC: Member not found in member list", "node_id", id)
-				}
+				}()
 			}
 
 			// Check if LOCAL node transitioned to Active - if so, bring up VIPs
@@ -3864,6 +5430,20 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				}
 			}
 
+			// The mirror case: a node that learns it has been demoted must
+			// release the floating IPs it still holds. Without this the release
+			// waits on the monitor's periodic reconcile, and until then this
+			// node and the surviving Active ARP-fight over every floating IP.
+			// See isDemotion for why a transition to Unknown is not one.
+			if hadLocalMember {
+				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil &&
+					isDemotion(oldLocalStatus, newLocalMember.Status) {
+					s.logger.Info("ConfigSync: LOCAL node demoted from Active, releasing floating IPs",
+						"newStatus", membership.StatusToString(newLocalMember.Status))
+					go s.refreshLocalMonitorExpectedIPs()
+				}
+			}
+
 			// Do not coerce non-leader nodes to Passive here; let health checks set Unknown/Passive
 		} else {
 			s.logger.Debug("ConfigSync: ignoring incoming member_states due to stale epoch or lower-priority leader",
@@ -3872,13 +5452,34 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 	}
 
+	// Apply the sender's self-reported hosted IPs (active-active only). A
+	// node's report about itself is authoritative, so no epoch gating; this
+	// keeps every peer's view of the IP assignment map current enough to
+	// redistribute correctly if the sender later fails.
+	if s.config.Pulse.Mode == "active-active" && senderID != "" && senderActiveIPs != nil {
+		if localID, err := s.config.GetLocalNodeUUID(); err == nil && senderID != localID {
+			if senderMember := s.memberList.GetMemberByID(senderID); senderMember != nil {
+				senderMember.Lock()
+				senderMember.ActiveIPs = append([]string{}, senderActiveIPs...)
+				senderMember.Unlock()
+			}
+		}
+	}
+
 	// Only reconfigure when full config changed; skip for envelope-only state updates
 	if isFullConfig {
+		// Counted before the spawn, not inside it: a Wait racing the goroutine's
+		// own Add would return before the reconfigure had started.
+		s.asyncReconfigures.Add(1)
 		go func() {
+			defer s.asyncReconfigures.Done()
 			if err := s.Reconfigure(); err != nil {
 				s.logger.Error("Async reconfigure failed after ConfigSync", "error", err)
 			} else {
 				s.logger.Debug("Async reconfigure completed after ConfigSync")
+			}
+			if s.onAsyncReconfigure != nil {
+				s.onAsyncReconfigure()
 			}
 		}()
 	}
@@ -3912,14 +5513,91 @@ func (s *Server) AddNode(nodeID string) error {
 	return nil
 }
 
+// configKeyScope says where a `pulsectl config set` key takes effect.
+type configKeyScope int
+
+const (
+	// scopeCluster keys describe how the cluster behaves as a whole, so every
+	// node has to hold the same value. A cluster running two different values
+	// for one of these is exactly the divergence quorum exists to prevent.
+	scopeCluster configKeyScope = iota
+	// scopeNode keys describe how this one daemon logs. ConfigSync deliberately
+	// preserves them when it applies an incoming full config, so that a peer
+	// left at debug for an investigation is not reset by the next broadcast —
+	// which also means a broadcast cannot carry them, and they are node-local by
+	// design rather than by omission.
+	scopeNode
+)
+
+// settableConfigKeys is every key `config set` accepts and the scope it takes
+// effect at.
+//
+// Keys absent from the table are refused rather than written. The tag-based
+// setter underneath will happily overwrite `local_node` or `cluster_token`, and
+// neither is a value an operator sets by hand: the first is this node's identity
+// in the member list, the second the shared cluster secret.
+var settableConfigKeys = map[string]configKeyScope{
+	"mode":              scopeCluster,
+	"hcs_interval":      scopeCluster,
+	"fos_interval":      scopeCluster,
+	"fo_limit":          scopeCluster,
+	"auto_failback":     scopeCluster,
+	"logging_level":     scopeNode,
+	"log_to_file":       scopeNode,
+	"log_file_location": scopeNode,
+	"log_to_syslog":     scopeNode,
+	"syslog_network":    scopeNode,
+	"syslog_address":    scopeNode,
+	"syslog_facility":   scopeNode,
+	"syslog_tag":        scopeNode,
+}
+
+// What UpdateConfig reports back about the reach of a change it applied. The CLI
+// prints these verbatim, because "Successfully updated mode to active-passive"
+// meant one node on whitecrane and the whole cluster in the help text.
+const (
+	configScopeClusterMessage = "applied to every node in the cluster"
+	configScopeNodeMessage    = "applied to this node only — this key is node-local and has to be set on each node"
+)
+
 // UpdateConfig implements CLI.UpdateConfig
 func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest) (*rpc.UpdateConfigResponse, error) {
-	s.Lock()
-	defer s.Unlock()
-
 	if req == nil || req.Key == "" {
 		return &rpc.UpdateConfigResponse{Success: false, Message: "invalid request"}, nil
 	}
+
+	scope, settable := settableConfigKeys[req.Key]
+	if !settable {
+		return &rpc.UpdateConfigResponse{
+			Success: false,
+			Message: fmt.Sprintf("%q is not a settable configuration key", req.Key),
+		}, nil
+	}
+
+	// The mode is not a value to write and push: changing it consolidates or
+	// spreads the floating IPs and re-broadcasts the member statuses that go with
+	// the new mode, and SetMode owns all of that. Writing `mode` into the config
+	// here instead left the node that ran the command in active-passive while its
+	// peers stayed in active-active — it logged "4 nodes are Active in
+	// active-passive mode; waiting for the coordinator to consolidate" 529 times
+	// against a coordinator that was not in active-passive and never would be
+	// (docs/TEST-PLAN.md defect #42).
+	//
+	// Delegated before the lock below is taken: SetMode takes s.Lock() itself and
+	// the lock is not reentrant.
+	if req.Key == "mode" {
+		resp, err := s.SetMode(ctx, &rpc.SetModeRequest{Mode: req.Value})
+		if err != nil {
+			return nil, err
+		}
+		if resp == nil {
+			return &rpc.UpdateConfigResponse{Success: false, Message: "mode change returned no result"}, nil
+		}
+		return &rpc.UpdateConfigResponse{Success: resp.Success, Message: resp.Message}, nil
+	}
+
+	s.Lock()
+	defer s.Unlock()
 
 	if err := s.config.UpdateValue(req.Key, req.Value); err != nil {
 		s.logger.Errorf("Failed to update config %s: %v", req.Key, err)
@@ -3933,7 +5611,18 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 		}
 	}
 
-	return &rpc.UpdateConfigResponse{Success: true, Message: "updated"}, nil
+	if scope == scopeNode {
+		return &rpc.UpdateConfigResponse{Success: true, Message: configScopeNodeMessage}, nil
+	}
+
+	// Stamp and broadcast, the same way a group mutation does. Without this the
+	// value only ever reached the node the CLI happened to run on, while the
+	// operator was told it had been applied to the cluster — and the broadcaster
+	// is also what retries a push a peer could not take (defect #43), so a peer
+	// that is briefly unreachable still converges.
+	s.markConfigDirty()
+
+	return &rpc.UpdateConfigResponse{Success: true, Message: configScopeClusterMessage}, nil
 }
 
 // ReadConfig implements CLI.ReadConfig — returns the daemon's live config as JSON.
@@ -4032,7 +5721,6 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 		if enable {
 			member.Status = membership.StatusMaintenance
 			member.ActiveIPs = nil
-			member.PartialActive = false
 			member.LoadFactor = 0
 		} else {
 			member.Status = membership.StatusPassive
@@ -4086,7 +5774,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 		// Demote first if active so the cluster elects a new active node.
 		// Abort maintenance if demotion fails — otherwise the node would be marked
 		// maintenance while still holding active IPs, leaving the cluster in a split state.
-		if currentStatus == membership.StatusActive || currentStatus == membership.StatusPartialActive {
+		if currentStatus == membership.StatusActive {
 			s.logger.Info("Maintenance: local node is active — triggering failover before entering maintenance")
 			resp, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID})
 			if err != nil {
@@ -4152,6 +5840,68 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 	return &rpc.SetMaintenanceResponse{Success: true, Message: fmt.Sprintf("node %s returned to passive — eligible for promotion", localID)}, nil
 }
 
+// SetCapacity implements CLI.SetCapacity. Capacity is a config-only setting:
+// it is persisted and broadcast here, and every node (including this one)
+// applies it to its member list when the synced config lands. Existing IP
+// assignments above the new capacity are not evicted; the active-active
+// reconcile loop simply stops placing new IPs on the node.
+func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (*rpc.SetCapacityResponse, error) {
+	s.Lock()
+	defer s.Unlock()
+
+	if !s.config.ClusterCheck() {
+		return &rpc.SetCapacityResponse{Success: false, Message: "no cluster configured"}, nil
+	}
+
+	if req.Capacity < 0 {
+		return &rpc.SetCapacityResponse{Success: false, Message: "capacity must be >= 0 (0 = unlimited)"}, nil
+	}
+
+	// Resolve target; empty means local, otherwise accept UUID or hostname
+	targetID := req.NodeId
+	if targetID == "" {
+		localID, err := s.config.GetLocalNodeUUID()
+		if err != nil {
+			return &rpc.SetCapacityResponse{Success: false, Message: "failed to resolve local node: " + err.Error()}, nil
+		}
+		targetID = localID
+	}
+	if _, ok := s.config.Nodes[targetID]; !ok {
+		if member := s.memberList.GetMemberByIdentifier(targetID); member != nil {
+			targetID = member.ID
+		}
+	}
+
+	node, ok := s.config.Nodes[targetID]
+	if !ok {
+		return &rpc.SetCapacityResponse{Success: false, Message: fmt.Sprintf("node %s not found in config", req.NodeId)}, nil
+	}
+
+	node.Capacity = int(req.Capacity)
+
+	if err := s.config.Save(); err != nil {
+		return &rpc.SetCapacityResponse{Success: false, Message: fmt.Sprintf("failed to save config: %v", err)}, nil
+	}
+
+	// Apply to the in-memory member immediately so local distribution
+	// decisions don't wait for the next config sync
+	if member := s.memberList.GetMemberByID(targetID); member != nil {
+		member.Lock()
+		member.Capacity = int(req.Capacity)
+		member.Unlock()
+	}
+
+	// Broadcast updated config to peers
+	s.markConfigDirty()
+
+	limit := "unlimited"
+	if req.Capacity > 0 {
+		limit = fmt.Sprintf("%d floating IP(s)", req.Capacity)
+	}
+	s.logger.Info("Node capacity updated", "node", node.Hostname, "capacity", req.Capacity)
+	return &rpc.SetCapacityResponse{Success: true, Message: fmt.Sprintf("capacity for node %s set to %s", node.Hostname, limit)}, nil
+}
+
 // ResyncNetwork implements CLI.ResyncNetwork RPC
 func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkRequest) (*rpc.ResyncNetworkResponse, error) {
 	// Avoid holding the server lock while calling Reconfigure to prevent deadlocks,
@@ -4192,12 +5942,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 				if node != nil {
 					for iface := range node.IPGroups {
 						// Recompute expected IPs (likely empty at creation time)
-						var ifaceIPs []string
-						for _, g := range node.IPGroups[iface] {
-							if ips, ok := s.config.Groups[g]; ok {
-								ifaceIPs = append(ifaceIPs, ips...)
-							}
-						}
+						ifaceIPs := s.expectedIfaceIPs(localID, iface)
 						s.ipMonitor.ClearExpectedIPs(iface)
 						if len(ifaceIPs) > 0 {
 							s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -4304,7 +6049,9 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 
 		// Wait briefly for the cluster listener to become ready after resync
 		if localNode, err := s.config.GetLocalNode(); err == nil {
-			address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
+			// JoinHostPort for the same reason as the dial probe above: equivalent
+			// to FormatIPv6 + "%s:%s", but visible to `go vet`.
+			address := net.JoinHostPort(utils.SanitizeIPv6(localNode.IP), localNode.Port)
 			readyDeadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(readyDeadline) {
 				conn, err := net.DialTimeout("tcp", address, 300*time.Millisecond)
@@ -4451,66 +6198,178 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		return &rpc.UpIpResponse{Success: false, Message: "interface does not exist"}, nil
 	}
 
-	for _, raw := range req.Ips {
-		ip := raw
-		// Normalize to CIDR
-		if !utils.IsCIDR(ip) {
-			if utils.IsIPv4(ip) {
-				ip = ip + "/32"
-			} else if utils.IsIPv6(ip) {
-				ip = ip + "/128"
-			} else {
-				return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
-			}
-		}
-
-		// Inform monitor of expectation before manipulations
-		s.ipMonitor.AddExpectedIPs(req.Iface, []string{ip})
-
-		// Pre-check if already present
-		ipOnly, ipNet := utils.GetCIDR(ip)
-		s.logger.Warn("DEBUG: GetCIDR result", "inputIP", ip, "ipOnly", ipOnly, "ipNet", ipNet)
-		if ipOnly != nil {
-			ex, eIface, checkErr := network.CheckIfIPExists(ipOnly.String())
-			s.logger.Warn("DEBUG: CheckIfIPExists for IP", "ip", ipOnly.String(), "exists", ex, "iface", eIface, "targetIface", req.Iface, "error", checkErr)
-			if ex {
-				if eIface == req.Iface {
-					// Already present on desired interface: send GARP and continue
-					s.logger.Info("IP already exists on target interface, skipping", "ip", ip, "iface", req.Iface)
-					_ = network.SendGARP(req.Iface, ip)
-					continue
-				}
-				// Present on a different interface: try to remove there first (best-effort)
-				_ = network.BringIPdown(eIface, ip)
-			}
-		}
-		if err := network.BringIPup(req.Iface, ip); err != nil {
-			// If add failed, recheck if it is now present on target iface (treat as success)
-			if ipOnly != nil {
-				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
-				if ex && eIface == req.Iface {
-					s.logger.Info("BringUpIP: IP assignment failed but IP is now present on target interface", "ip", ip, "iface", req.Iface)
-					_ = network.SendGARP(req.Iface, ip)
-					continue
-				}
-			}
-			// Additional fallback check - this prevents the emergency loop
-			s.logger.Warn("BringUpIP failed, doing final verification", "iface", req.Iface, "ip", ip, "error", err)
-			if ipOnly != nil {
-				ex, eIface, _ := network.CheckIfIPExists(ipOnly.String())
-				if ex && eIface == req.Iface {
-					s.logger.Info("BringUpIP: Final check confirms IP is present on target interface, treating as success")
-					_ = network.SendGARP(req.Iface, ip)
-					continue
-				}
-			}
-			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", ip, "error", err)
-			return &rpc.UpIpResponse{Success: false, Message: err.Error()}, nil
-		}
-
-		// Best-effort GARP
-		_ = network.SendGARP(req.Iface, ip)
+	// Normalized once, up front, so the expectation set below can be registered
+	// for the whole request. An address that cannot be parsed rejects the request
+	// without touching the interface — see normalizeUpRequest.
+	normalized, invalid := normalizeUpRequest(req.Ips)
+	if len(invalid) > 0 {
+		s.logger.Error("BringUpIP: rejecting request carrying unparseable addresses",
+			"iface", req.Iface, "invalid", invalid, "of", len(req.Ips))
+		return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
 	}
+
+	// One call for the whole request, not one per address. AddExpectedIPs takes the
+	// monitor lock and calls TriggerEnforce — which starts an enforceExpectations
+	// *goroutine*, coalesced since #63 to one pass in flight and one queued. That
+	// bound is a backstop for this batching, not a replacement: it caps the passes,
+	// while batching is what stops the lock and log churn of a trigger per address.
+	// Per address, a 62-address request started 62 concurrent enforce
+	// passes, each with its own netlink dump and its own placement loop, racing
+	// this handler's own loop as it brought the rest up. That is the herd #34
+	// removed from the release path by batching RemoveExpectedIPs, left in place on
+	// this one, and it is a large part of how run 32's node-4 came to run 34 enforce
+	// placement batches inside one second (docs/TEST-PLAN.md defects #64, #63).
+	//
+	// Still before the placement below, where the per-address call was: the
+	// expectation has to exist before the address does, or the netlink watcher's
+	// restore path and the enforce pass disagree about whether it belongs here.
+	s.ipMonitor.AddExpectedIPs(req.Iface, normalized)
+
+	// One snapshot for the whole request, so an address this node already holds on
+	// the requested interface costs no syscall to recognise. See placeRequestedIPs
+	// for why that matters and why a failed dump means attempt everything.
+	var heldOn func(ip string) (bool, string)
+	if len(normalized) > 0 {
+		inventory, invErr := network.BuildIPInventory()
+		if invErr != nil {
+			s.logger.Warn("BringUpIP: could not read interface addresses; attempting every requested address",
+				"iface", req.Iface, "error", invErr)
+		} else {
+			heldOn = ipInventoryLookup(inventory)
+		}
+	}
+
+	// Live, per failing address, and only for a failing address: its whole job is
+	// to be newer than the syscall that just failed (#45).
+	liveHeldOnIface := func(ip string) bool {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			return false
+		}
+		ex, eIface, err := network.CheckIfIPExists(ipOnly.String())
+		return err == nil && ex && eIface == req.Iface
+	}
+
+	attempts := placeRequestedIPs(req.Iface, normalized, heldOn, liveHeldOnIface,
+		network.BringIPdown, network.BringIPup)
+	summary := summarizeUpAttempts(attempts)
+
+	// Per address only for the outcome worth reading, as on the release path (#61).
+	for _, attempt := range attempts {
+		if attempt.Outcome == upFailed {
+			s.logger.Error("BringUpIP failed", "iface", req.Iface, "ip", attempt.IP, "error", attempt.Err)
+		}
+	}
+	if summary.AlreadyHeld > 0 || summary.Moved > 0 || summary.Satisfied > 0 {
+		// The positive control for #64: on a redundant re-place this is the line
+		// that says the request cost nothing. Debug rather than Info because a
+		// converged cluster emits it on every re-place.
+		s.logger.Debug("BringUpIP: addresses that needed no placement",
+			"iface", req.Iface, "alreadyHeld", summary.AlreadyHeld, "movedFromOtherIface", summary.Moved,
+			"heldDespiteFailedAdd", summary.Satisfied, "placed", summary.Placed, "of", len(normalized))
+	}
+
+	// Announcements are collected and sent as one batch once every address is up.
+	// Announcing inside the placement loop cost about four seconds per address,
+	// which for a large group held this RPC — and the caller waiting on it — open
+	// for minutes (docs/TEST-PLAN.md defects #4/#8).
+	//
+	// Batching moved the announcement after the loop, but the loop still abandons
+	// the request on the first address it cannot bring up — so every exit has to
+	// announce what is already up first. Skipping it leaves those addresses live on
+	// the interface and unannounced: peers keep the old MAC in ARP and the traffic
+	// goes nowhere, a silent partial outage mid-failover, where the per-IP version
+	// had at least announced each success as it happened.
+	//
+	// The set announced is every address this request got as far as attempting,
+	// not the ones the loop concluded were up, and it includes the ones no syscall
+	// was made for — see attemptedIPs. Offering that set is safe because the batch
+	// re-reads each address against the kernel immediately before its own arping,
+	// announcing what the interface holds and returning the rest as skipped: the
+	// kernel decides, at announce time.
+	if attempted := attemptedIPs(attempts); len(attempted) > 0 {
+		skipped, err := network.SendGARPBatch(req.Iface, attempted)
+		if err != nil {
+			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
+		}
+		if len(skipped) > 0 {
+			// Reported here rather than in packages/network, whose package-level
+			// logger nothing ever calls SetLevel on — a Debug line there cannot
+			// reach the journal at any logging_level, so the skip would be
+			// unverifiable live (#61's lesson, #33's positive control).
+			s.logger.Debug("BringUpIP: skipped announcing addresses this node no longer holds",
+				"iface", req.Iface, "count", len(skipped), "of", len(attempted))
+		}
+	}
+
+	// Abandoned on a genuine failure, as before, and after the announcement above:
+	// the addresses placed before it are on the interface either way. The failure
+	// is always the last attempt, since the loop stops at it.
+	if summary.Failed > 0 {
+		message := "failed to bring up IP"
+		if last := attempts[len(attempts)-1]; last.Err != nil {
+			message = last.Err.Error()
+		}
+		return &rpc.UpIpResponse{Success: false, Message: message}, nil
+	}
+
+	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
+	// call means the coordinator has assigned these IPs to us. Transition to
+	// Active so the ENFORCE loop doesn't immediately strip the IPs back off.
+	if s.config.Pulse.Mode == "active-active" {
+		localID, err := s.config.GetLocalNodeUUID()
+		if err == nil {
+			localMember := s.memberList.GetMemberByID(localID)
+			if localMember != nil {
+				localMember.Lock()
+				if localMember.Status == membership.StatusPassive || localMember.Status == membership.StatusUnknown {
+					localMember.Status = membership.StatusActive
+					s.logger.Info("BringUpIP: Transitioned local node to Active for active-active mode")
+				}
+				// The normalized forms, not the raw request: this list is what
+				// IPMonitor.deriveExpectedIPs matches against the configured group
+				// to decide what this node is still expected to hold, so an entry
+				// spelled differently there is an entry that expectation misses.
+				for _, ip := range normalized {
+					found := false
+					for _, existing := range localMember.ActiveIPs {
+						if existing == ip {
+							found = true
+							break
+						}
+					}
+					if !found {
+						localMember.ActiveIPs = append(localMember.ActiveIPs, ip)
+					}
+				}
+				localMember.Unlock()
+
+				// Deliberately no refreshLocalMonitorExpectedIPs() here. That call
+				// was defect #64's whole-share re-place, and it was this handler
+				// calling it on *every* request that made the flood: the function
+				// rescans the node's entire expected share against the kernel and
+				// issues a fresh s.BringUpIP for everything it finds missing, which
+				// re-enters this handler. So a one-address bring-up arriving mid-
+				// convergence turned into a 62-address bring-up — run 32's node-4
+				// took 17 requests for the 62 addresses that were already its share
+				// plus 14 single-address ones, and the load rejected five correctly
+				// batched requests from #37's new batcher with DeadlineExceeded.
+				// Both the 62s and the 1s were this site, at different points in
+				// convergence; there is no per-address caller of BringUpIP to find.
+				//
+				// Nothing is lost by dropping it. AddExpectedIPs above already woke
+				// the enforce pass exactly once, and that pass does the same job
+				// strictly better: in active-active it re-derives the expectation
+				// set from this node's own assignments rather than trusting whoever
+				// wrote the cache last, takes one interface snapshot for the whole
+				// pass, and places what is missing with placeMissingFloatingIPs.
+				// Role transitions still refresh — SetMode, Promote, MakePassive,
+				// ConfigSync and the election paths all call it — and the 30s
+				// periodic reconcile backs all of them up.
+			}
+		}
+	}
+
 	return &rpc.UpIpResponse{Success: true, Message: "IPs brought up"}, nil
 }
 
@@ -4518,28 +6377,94 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
 	s.logger.Infof("RPC BringDownIP on iface %s for %d IP(s)", req.Iface, len(req.Ips))
 
-	var failed []string
-	for _, ip := range req.Ips {
-		if !utils.IsCIDR(ip) {
-			if utils.IsIPv4(ip) {
-				ip = ip + "/32"
-			} else if utils.IsIPv6(ip) {
-				ip = ip + "/128"
-			} else {
-				s.logger.Warn("BringDownIP skipping invalid IP", "ip", ip)
-				continue
+	normalized, invalid := normalizeDownRequest(req.Ips)
+	for _, ip := range invalid {
+		s.logger.Warn("BringDownIP skipping invalid IP", "ip", ip)
+	}
+
+	// One call for the whole request, not one per address. RemoveExpectedIPs
+	// takes the monitor lock, logs the remaining expectation set, and calls
+	// TriggerEnforce — which starts an enforceExpectations *goroutine*, coalesced
+	// since #63 to one pass in flight and one queued. That bound is a backstop for
+	// this batching, not a replacement: it caps the passes, while batching is what
+	// stops the lock and log churn of a trigger per address. Per
+	// address that was one enforce pass per requested address: 201 of them for a
+	// group-delete, each with its own netlink dump and its own release loop,
+	// running concurrently with this loop as it deleted the rest. Every one of
+	// those passes saw a different half-released set, which is a large part of
+	// how defect #34 got to ~18 duplicate release attempts per address. Batched,
+	// the request removes the expectations once and wakes the enforce pass once.
+	//
+	// Still before the bring-downs, as it was: the expectation has to be gone
+	// first, or the restore paths put the address straight back (#60).
+	s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+
+	// One snapshot for the whole request. See releaseRequestedIPs for why the
+	// filter belongs here rather than in the caller; the nil on failure is
+	// deliberate — unable to see what this node holds, attempt everything.
+	var heldHere func(ip string) bool
+	// No addresses to look up means no reason to dump the interface table.
+	if len(normalized) > 0 {
+		if inventory, invErr := network.BuildIPInventory(); invErr != nil {
+			s.logger.Warn("BringDownIP: could not read interface addresses; attempting every requested release",
+				"iface", req.Iface, "error", invErr)
+		} else {
+			heldHere = func(ip string) bool {
+				ipOnly, _ := utils.GetCIDR(ip)
+				if ipOnly == nil {
+					return true
+				}
+				exists, foundIface, err := inventory.Exists(ipOnly.String())
+				if err != nil {
+					return true
+				}
+				return exists && foundIface == req.Iface
 			}
 		}
+	}
 
-		s.ipMonitor.RemoveExpectedIPs(req.Iface, []string{ip})
+	attempts := releaseRequestedIPs(req.Iface, normalized, heldHere, network.BringIPdownClassified)
+	summary := summarizeDownAttempts(attempts)
 
-		if err := network.BringIPdown(req.Iface, ip); err != nil {
-			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", ip, "error", err)
-			failed = append(failed, ip)
-			continue
+	// Per address only for the outcome worth reading. The other three are
+	// counted, and reported through this logger rather than packages/network's,
+	// whose level nothing sets — a classification that cannot reach the journal
+	// cannot be verified live (#61's lesson).
+	for _, attempt := range attempts {
+		if attempt.Outcome == downFailed {
+			s.logger.Error("BringDownIP failed", "iface", req.Iface, "ip", attempt.IP, "error", attempt.Err)
 		}
 	}
-	if len(failed) > 0 {
+	if summary.Skipped > 0 || summary.Vanished > 0 {
+		s.logger.Debug("BringDownIP: addresses this node was not holding",
+			"iface", req.Iface, "notHeld", summary.Skipped, "vanishedBeforeRelease", summary.Vanished,
+			"released", summary.Released, "of", len(normalized))
+	}
+
+	// In active-active mode keep the local member's ActiveIPs bookkeeping in
+	// sync (mirror of BringUpIP) so a later monitor refresh doesn't resurrect
+	// IPs that were deliberately moved to another node.
+	if s.config.Pulse.Mode == "active-active" {
+		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
+			if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
+				removed := make(map[string]bool, len(req.Ips))
+				for _, ip := range req.Ips {
+					removed[ip] = true
+				}
+				localMember.Lock()
+				var remaining []string
+				for _, ip := range localMember.ActiveIPs {
+					if !removed[ip] {
+						remaining = append(remaining, ip)
+					}
+				}
+				localMember.ActiveIPs = remaining
+				localMember.Unlock()
+			}
+		}
+	}
+
+	if summary.Failed > 0 {
 		return &rpc.DownIpResponse{Success: true, Message: "Best-effort: some IPs may not have been present"}, nil
 	}
 	return &rpc.DownIpResponse{Success: true, Message: "IPs brought down"}, nil
@@ -4832,15 +6757,10 @@ func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string
 	if s.ipMonitor != nil && newNodeID == s.config.Pulse.LocalNode {
 		s.logger.Debug("IP_FAILOVER: Refreshing IP monitor expected IPs", "interface_count", len(newIfaceToIPs))
 		for iface := range newIfaceToIPs {
-			// Recompute expected IPs for this interface from authoritative config
-			var ifaceIPs []string
-			if localNode := s.config.Nodes[newNodeID]; localNode != nil {
-				for _, g := range localNode.IPGroups[iface] {
-					if grpIPs, ok := s.config.Groups[g]; ok {
-						ifaceIPs = append(ifaceIPs, grpIPs...)
-					}
-				}
-			}
+			// Recompute from authoritative config, honouring this node's assignments.
+			// The BringUpIP above has already recorded the moved addresses per-IP, so
+			// in active-active this must not widen the set back out to the whole group.
+			ifaceIPs := s.expectedIfaceIPs(newNodeID, iface)
 			s.ipMonitor.ClearExpectedIPs(iface)
 			if len(ifaceIPs) > 0 {
 				s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
@@ -4897,6 +6817,35 @@ func (s *Server) groupIPsByInterfaceForNode(nodeID string, ips []string) (map[st
 	return ifaceToIPs, nil
 }
 
+// Remote IP-batch deadline sizing.
+//
+// A flat 5s on both helpers below was defect #57. `BringUpIP` and `BringDownIP`
+// each carry a whole batch, so their cost scales with the batch; run 25 moved
+// 23–24 addresses at a time onto a node already bringing up ~71, the bring-up
+// RPC overran, and the coordinator logged `IP_FAILOVER: Failed to bring IPs up
+// remotely … DeadlineExceeded` → `ACTIVE_CHECK: rebalance move failed` for seven
+// moves whose addresses had all in fact arrived. Same family as #39/#13/#21/#31:
+// the returned status was not evidence of what happened — and here it is read,
+// not just logged, since the rebalance loop breaks on it.
+//
+// Bring-down is #52's demotion shape exactly — release and verify, per address —
+// so it reuses that sizing, as `releaseDeletedGroupIPs` already does.
+//
+// Bring-up needs more than the address work, which is why 5s was too short for a
+// batch that was up in well under a second: the RPC ends in one gratuitous-ARP
+// batch, and those arping waves dominate the call. Capped for the same reason
+// DemotionTimeoutFor is — this deadline is a bound on how long a coordinator
+// blocks in a single move.
+const bringUpMaxTimeout = 120 * time.Second
+
+func bringUpTimeoutFor(ipCount int) time.Duration {
+	timeout := membership.DemotionTimeoutFor(ipCount) + network.AnnounceBatchTimeout(ipCount)
+	if timeout > bringUpMaxTimeout {
+		return bringUpMaxTimeout
+	}
+	return timeout
+}
+
 // bringIPsOnNodeUp contacts a specific node and asks it to bring IPs up on the given interface
 func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
 	node := s.config.Nodes[nodeID]
@@ -4911,7 +6860,7 @@ func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
 	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
 	defer cancel()
 	_, err = remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{Iface: iface, Ips: ips})
 	return err
@@ -4931,7 +6880,7 @@ func (s *Server) bringIPsOnNodeDown(nodeID, iface string, ips []string) error {
 	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), membership.DemotionTimeoutFor(len(ips)))
 	defer cancel()
 	_, err = remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{Iface: iface, Ips: ips})
 	return err
@@ -4949,6 +6898,40 @@ func (s *Server) GetLeaderID() string {
 	s.RLock()
 	defer s.RUnlock()
 	return s.leaderID
+}
+
+// convergenceMetadata returns the cluster epoch and its leader as one consistent
+// pair.
+//
+// Reading the two fields separately can straddle an adopt and pair a new epoch
+// with the previous leader, which reads as a decision from the wrong node.
+func (s *Server) convergenceMetadata() (epoch int64, leaderID string) {
+	s.RLock()
+	defer s.RUnlock()
+	return s.clusterEpoch, s.leaderID
+}
+
+// adoptConvergenceMetadata records an incoming epoch and its leader, and reports
+// whether they were adopted.
+//
+// atLeast selects the comparison: false adopts a strictly newer epoch, true also
+// adopts an equal one (re-asserting the same epoch under its leader). The compare
+// and the write are one critical section, because two syncs arriving together
+// would otherwise both compare against the same stale read and the later writer
+// would win regardless of epoch.
+//
+// Must NOT be called with the server lock already held — the lock is not
+// reentrant. ConfigSync's full-config branch adopts inline for that reason.
+func (s *Server) adoptConvergenceMetadata(epoch int64, leaderID string, atLeast bool) bool {
+	s.Lock()
+	defer s.Unlock()
+
+	if epoch < s.clusterEpoch || (epoch == s.clusterEpoch && !atLeast) {
+		return false
+	}
+	s.clusterEpoch = epoch
+	s.leaderID = leaderID
+	return true
 }
 
 // GetLeaderLeaseUntil returns the current leader lease expiry
@@ -5034,6 +7017,45 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	if leases != nil {
 		payload["leases"] = leases
 	}
+
+	localID, _ := s.config.GetLocalNodeUUID()
+
+	if localID != "" {
+		if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
+			localMember.Lock()
+			// A non-active node cannot host floating IPs — the IP monitor
+			// enforces that on the interface — so clear any stale claim before
+			// reporting state. Otherwise peers keep counting these IPs as
+			// hosted and the reconciler never re-places them, and status shows
+			// IPs on a node that doesn't actually hold them. Active-passive
+			// demotions (mode switch, failover, maintenance) all leave the same
+			// stale claims behind.
+			//
+			// Active-active is excluded because there is no demotion to clean up
+			// after: every eligible node is Active, so a non-Active status there
+			// is a transient — a missed health check, a peer's stale broadcast.
+			// Discarding the assignment map over one of those cost the node every
+			// address the coordinator had given it, and the addresses were off the
+			// cluster until it noticed and re-placed them (docs/TEST-PLAN.md
+			// defects #2/#26). The map is what the coordinator decided, not a
+			// claim about this node's health.
+			if s.config.Pulse.Mode != "active-active" &&
+				localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
+				localMember.ActiveIPs = nil
+				localMember.LoadFactor = 0
+			}
+			// In active-active, self-report this node's hosted IPs so peers
+			// keep an accurate view of the assignment map. Without this, a peer
+			// that takes over as redistribution coordinator wouldn't know which
+			// IPs this node held when it failed.
+			if s.config.Pulse.Mode == "active-active" {
+				payload["sender_id"] = localID
+				payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
+			}
+			localMember.Unlock()
+		}
+	}
+
 	enhancedBytes, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -5043,7 +7065,6 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	_, _ = s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: enhancedBytes})
 
 	// Broadcast to peers best-effort using connection pool
-	localID, _ := s.config.GetLocalNodeUUID()
 	for peerID, node := range s.config.Nodes {
 		if peerID == localID {
 			continue
@@ -5060,22 +7081,779 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	return nil
 }
 
-func (s *Server) broadcastFullConfigToPeers() {
-	configBytes, err := json.Marshal(s.config)
+// buildFullConfigPayload renders the cluster config and the member states that
+// belong with it into a single ConfigSync payload, plus the sender identity and
+// config version that let the receiver decide whether this payload is newer than
+// what it already holds (docs/TEST-PLAN.md defects #5 and #38).
+//
+// ConfigSync recognises a full config by its "pulseha" root key and reads
+// member_states/epoch/leader_id off the same JSON object, so one message can carry
+// both. Keeping them in one message is the whole point — see
+// broadcastConfigAndStates.
+//
+// There is deliberately no unstamped wrapper around this. There was one —
+// buildConfigAndStatePayload, hardcoding an empty senderID and stamp — and
+// SetMode's direct push was its only caller, which is how the cluster's most
+// ordering-sensitive broadcast came to be the one broadcast nobody could order.
+// Callers that genuinely want the unversioned form pass it explicitly.
+//
+// An empty origin / version 0 means unversioned: the receiver cannot order it and
+// applies it. That is the required behaviour for a peer still running an older
+// binary during a rolling upgrade, so the guard degrades to today's
+// last-writer-wins rather than dropping the message. The key is deliberately
+// `config_version` and not the `config_generation` it replaced: an older binary
+// reads that key as a per-sender generation with different semantics, and a mixed
+// cluster is better off treating the field as absent than comparing two clocks.
+//
+// `config_origin` is sent alongside `sender_id` and is not the same field.
+// sender_id is whoever put these bytes on the wire; config_origin is whoever's
+// mutation produced the content, and they differ on every re-broadcast — the
+// coordinator re-sends the cluster's config once a minute without having authored
+// it. The receiver's tiebreak needs the latter (see configStamp). A peer running a
+// binary that omits the key falls back to sender_id, which is correct for a direct
+// mutation broadcast and no worse than the previous behaviour otherwise.
+func buildFullConfigPayload(cfg *config.Config, states map[string]membership.MemberStatus,
+	epoch int64, leaderID, senderID string, stamp configStamp) ([]byte, error) {
+
+	configBytes, err := json.Marshal(cfg)
 	if err != nil {
+		return nil, err
+	}
+	payload := map[string]interface{}{}
+	if err := json.Unmarshal(configBytes, &payload); err != nil {
+		return nil, err
+	}
+
+	ms := make(map[string]int, len(states))
+	for id, st := range states {
+		ms[id] = int(st)
+	}
+	payload["member_states"] = ms
+	payload["epoch"] = epoch
+	payload["leader_id"] = leaderID
+	if senderID != "" && !stamp.isEmpty() {
+		payload["sender_id"] = senderID
+		payload["config_version"] = stamp.version
+		payload["config_origin"] = stamp.origin
+	}
+
+	return json.Marshal(payload)
+}
+
+// nextConfigStamp moves the clock one above everything this node has seen and
+// stamps this node as the origin, so the mutation about to be broadcast outranks
+// the config every peer holds. Two concurrent mutations on the same node can
+// never be handed the same number, and two on different nodes are separated by
+// the origin — the receiver's whole ability to order them depends on both.
+// Versions start at 1, since 0 means "unversioned".
+//
+// Takes no lock deliberately: its callers hold s.Lock() (see configStamp).
+func (s *Server) nextConfigStamp(origin string) configStamp {
+	next := &configStamp{origin: origin}
+	for {
+		heldPtr := s.configStamp.Load()
+		next.version = 1
+		if heldPtr != nil {
+			next.version = heldPtr.version + 1
+		}
+		if s.configStamp.CompareAndSwap(heldPtr, next) {
+			return *next
+		}
+	}
+}
+
+// markConfigDirty records that the local config changed and wakes the
+// broadcaster.
+//
+// This replaced a `go broadcastFullConfigToPeers()` (since deleted) that used to
+// end every group mutation. Each of those goroutines marshalled s.config whenever
+// it was scheduled, so N concurrent mutations put N unordered snapshots on the wire and
+// the last to arrive won even when it was the oldest — 200 rapid add-ip calls
+// left whitecrane's four nodes at 200/189/192/193, permanently. Signalling a
+// single broadcaster instead means concurrent mutations coalesce into one
+// broadcast of the final state, and only one broadcast from this node is ever in
+// flight.
+//
+// The local node ID is read from s.config directly rather than through
+// currentConfig(): every group mutation calls this while holding s.Lock(), where
+// taking the read lock self-deadlocks. That makes the read safe at those call
+// sites and no less safe than the surrounding code at the one that holds no lock
+// (HandleNodeJoin, which mutates s.config bare throughout) — part of the residual
+// noted against defect #32, not new exposure. An empty ID degrades the tiebreak
+// to last-writer-wins rather than corrupting it.
+func (s *Server) markConfigDirty() {
+	origin, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		origin = ""
+	}
+	s.nextConfigStamp(origin)
+	s.requestConfigBroadcast()
+}
+
+// RequestConfigReconcile re-sends the current config to every peer without
+// claiming a new generation, repairing a peer that missed a broadcast. Called by
+// the health checker's periodic reconcile, which gates it on this node being the
+// coordinator — see HealthChecker.reconcileConfigAcrossPeers for why that gate
+// matters. A peer already holding this generation ignores the message.
+func (s *Server) RequestConfigReconcile() {
+	s.requestConfigBroadcast()
+}
+
+// requestConfigBroadcast wakes the broadcaster without claiming a new
+// generation, for a re-send of the current config rather than a change to it.
+//
+// The trigger channel has capacity 1 and the send is non-blocking, so a signal
+// arriving while a broadcast is already queued is dropped: the queued broadcast
+// has not snapshotted the config yet and will pick up everything. A nil channel
+// (a Server built directly in a test) makes the select fall to default, so this
+// is inert rather than a panic.
+func (s *Server) requestConfigBroadcast() {
+	select {
+	case s.broadcastTrigger <- struct{}{}:
+	default:
+	}
+}
+
+// startConfigBroadcaster runs the single goroutine that owns pushing this node's
+// config to its peers. Idempotent — Start and the tests may both call it.
+//
+// It wakes on a mutation and on its own retry timer. The timer is the fix for
+// defect #43: a broadcast that exhausted its four attempts used to log a warning
+// deferring to "the periodic reconcile", which only runs on the coordinator, so a
+// mutation taken on any other node stayed local for an unbounded time. The node
+// that owns the change is the one that retries it now, regardless of who
+// coordinates.
+func (s *Server) startConfigBroadcaster() {
+	s.broadcastOnce.Do(func() {
+		if s.broadcastTrigger == nil {
+			return
+		}
+		go func() {
+			var (
+				retry      <-chan time.Time
+				retryTimer *time.Timer
+			)
+			// A nil retry channel blocks forever, which is the "nothing
+			// outstanding" state.
+			stopRetry := func() {
+				if retryTimer != nil {
+					retryTimer.Stop()
+					retryTimer = nil
+				}
+				retry = nil
+			}
+			for {
+				mutated := false
+				select {
+				case <-s.broadcastStop:
+					stopRetry()
+					return
+				case <-s.broadcastTrigger:
+					mutated = true
+				case <-retry:
+				}
+				stopRetry()
+
+				if mutated && !s.lingerForMoreMutations() {
+					return
+				}
+
+				s.broadcastConfigToPeersOnce()
+
+				if outstanding, ok := s.pendingPropagation(); ok {
+					s.logger.Debug("CONFIG_PROPAGATION: scheduling a re-push of an unpropagated config",
+						"version", outstanding.version, "peers", outstanding.peers,
+						"attempt", outstanding.attempts, "in", outstanding.backoff)
+					retryTimer = time.NewTimer(outstanding.backoff)
+					retry = retryTimer.C
+				}
+			}
+		}()
+	})
+}
+
+// configBroadcastLinger is how long the broadcaster waits after a mutation
+// before pushing, so a burst of them costs one push rather than one each.
+//
+// The trigger channel already coalesces *concurrent* mutations: it holds one
+// slot and the send is non-blocking, so anything that lands while a broadcast is
+// in flight folds into the next one. Serial mutations get no such benefit. Since
+// #37 an `add-ip` completes in ~38ms and a healthy broadcast finishes well
+// inside that, so the 248 back-to-back adds that produced defect #62 produced
+// ~248 broadcasts — 744 ConfigSync RPCs at the receivers, each one a parse, a
+// file write, a member-list reload and a `go Reconfigure()`. That is the "every
+// version is pushed separately" half of #62: the deadline fix stops the pushes
+// being abandoned, this stops most of them being made. The receiver those
+// pushes saturate is the same receiver whose slowness the deadline had to
+// absorb, so the two fixes work the same problem from both ends.
+//
+// The window is FIXED, not sliding, for the reason #37 settled on the same
+// shape for the bring-up fan-out: a sliding window resets on every mutation, so
+// a long enough burst starves the push entirely and the config propagates only
+// once the operator stops typing. A fixed window bounds the delay for any single
+// mutation at one window and caps the push rate at one per window however long
+// the burst runs.
+//
+// Only a mutation lingers. A retry firing is already late by construction and
+// re-pushes immediately.
+const configBroadcastLinger = 250 * time.Millisecond
+
+// lingerForMoreMutations waits out the window and then consumes any trigger that
+// arrived inside it, reporting false if the broadcaster was stopped instead.
+//
+// Draining before the caller broadcasts is what makes the coalescing real: the
+// snapshot taken next carries every mutation that landed during the window, so
+// leaving their triggers behind would push the same config again. It also
+// restores the "superseded by a newer broadcast" check in
+// broadcastConfigToPeersOnce, which reads the same channel — under a burst that
+// check used to see a non-empty trigger on every retry and abandon the pass.
+//
+// A mutation landing between the drain and the snapshot is not lost either way:
+// it is either included in the snapshot, or it re-arms the trigger and gets the
+// next window.
+func (s *Server) lingerForMoreMutations() bool {
+	select {
+	case <-s.broadcastStop:
+		return false
+	case <-time.After(configBroadcastLinger):
+	}
+
+	select {
+	case <-s.broadcastTrigger:
+	default:
+	}
+	return true
+}
+
+// unpropagatedConfig is a config version this node committed but could not push
+// to every peer, together with the state of the retry that will.
+//
+// peers is the diagnostic rather than the work list: the retry re-snapshots and
+// re-pushes to everyone, because by then this node's config may have moved on
+// again and a peer not in this list may have fallen behind for its own reasons. A
+// peer already holding the version ignores the message, so the redundancy costs
+// one RPC and cannot diverge anything.
+type unpropagatedConfig struct {
+	version  int64
+	peers    []string
+	attempts int
+	backoff  time.Duration
+}
+
+// The retry schedule. The first wait deliberately outlasts a listener rebind:
+// under defect #31 a peer refuses connections for seconds at a time while it
+// reconfigures, which is precisely the window the four in-pass attempts (~1.75s
+// of backoff) fall inside, so retrying sooner just spends attempts against a
+// socket that is not there. The ceiling matches the coordinator's once-a-minute
+// reconcile, so a peer that is genuinely down is retried no more often than it
+// was before.
+const (
+	propagationRetryBase = 5 * time.Second
+	propagationRetryMax  = 60 * time.Second
+)
+
+// recordUnpropagated notes that a broadcast did not reach every peer and returns
+// the delay before the next attempt, doubling it on each consecutive failure.
+func (s *Server) recordUnpropagated(stamp configStamp, peers []string) time.Duration {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	next := propagationRetryBase
+	attempts := 0
+	if s.unpropagated != nil {
+		attempts = s.unpropagated.attempts
+		if next = s.unpropagated.backoff * 2; next > propagationRetryMax {
+			next = propagationRetryMax
+		}
+	}
+	s.unpropagated = &unpropagatedConfig{
+		version:  stamp.version,
+		peers:    peers,
+		attempts: attempts + 1,
+		backoff:  next,
+	}
+	return next
+}
+
+// clearUnpropagated drops the retry state after a broadcast every peer accepted,
+// reporting how many attempts it took so the repair is visible in the log rather
+// than only inferable from the absence of further warnings.
+func (s *Server) clearUnpropagated() (attempts int, wasOutstanding bool) {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	if s.unpropagated == nil {
+		return 0, false
+	}
+	attempts = s.unpropagated.attempts
+	s.unpropagated = nil
+	return attempts, true
+}
+
+// pendingPropagation returns the outstanding retry state, if any.
+func (s *Server) pendingPropagation() (unpropagatedConfig, bool) {
+	s.propagationMu.Lock()
+	defer s.propagationMu.Unlock()
+
+	if s.unpropagated == nil {
+		return unpropagatedConfig{}, false
+	}
+	return *s.unpropagated, true
+}
+
+// stopConfigBroadcaster shuts the broadcaster down. Safe to call more than once.
+func (s *Server) stopConfigBroadcaster() {
+	if s.broadcastStop == nil {
 		return
 	}
+	select {
+	case <-s.broadcastStop:
+	default:
+		close(s.broadcastStop)
+	}
+}
+
+// Config-push deadline sizing.
+//
+// A flat 2s on every ConfigSync push was defect #62. Building a 248-address
+// group with back-to-back add-ip calls left one peer without the group key at
+// all for ~3 minutes: the sender logged `CONFIG_BROADCAST: ConfigSync failed,
+// will retry … error=DeadlineExceeded` through all four attempts, and only
+// #43's 40s re-push eventually carried it — while every one of those mutations
+// had already returned success to the operator.
+//
+// The defect was written up as #57's mistake on the config path, and the fix
+// shape it suggested was to scale with the payload. Measuring the receiver says
+// the shape is right but the reason is not, and the difference decides the
+// numbers. The payload-proportional half of the handler — three full parses of
+// the message, the group deep-copies, the MarshalIndent and the file write —
+// costs well under a millisecond per KiB (~1ms for the 9KiB payload run 32
+// timed out on, ~4ms at 5000 addresses). The payload is not what overran 2s.
+//
+// What overran it is everything the handler has to get past before it can start:
+// s.Lock(), which every group mutation and the sync's own predecessors hold,
+// and the member-list write lock inside UpdateConfig, which the health-check
+// cycle holds while it does IP work. On top of that the RPC pays for the
+// transport itself — grpc.NewClient dials lazily, so a cached but idle peer
+// client establishes TCP, TLS and the HTTP/2 handshake inside this deadline. A
+// receiver in the middle of the burst that produced the config is the normal
+// case for this RPC, not the pathological one.
+//
+// So the base carries the fix and is sized for a busy receiver, while the
+// per-KiB term keeps the deadline from being blind to the payload the way the
+// flat 2s was. That coefficient is headroom, not the measurement above: a bigger
+// config also means more enforce work, more netlink and more member state in
+// flight on the node receiving it.
+//
+// The cap is where this deadline hands over to #43's retry, and the two cover
+// different faults on purpose. A *busy* peer is what a deadline should wait out;
+// an *unavailable* one — run 32's coordinator was unresponsive for ~40s — is
+// what the retry exists for, and blocking the broadcaster on it only delays the
+// next config behind a peer that is not going to answer either way.
+const (
+	configSyncBaseTimeout   = 10 * time.Second
+	configSyncPerKiBTimeout = 250 * time.Millisecond
+	configSyncMaxTimeout    = 20 * time.Second
+)
+
+func configSyncTimeoutFor(payloadBytes int) time.Duration {
+	if payloadBytes < 0 {
+		payloadBytes = 0
+	}
+	kib := (payloadBytes + 1023) / 1024
+	timeout := configSyncBaseTimeout + time.Duration(kib)*configSyncPerKiBTimeout
+	if timeout > configSyncMaxTimeout {
+		return configSyncMaxTimeout
+	}
+	return timeout
+}
+
+// broadcastConfigToPeersOnce snapshots the config under the read lock, then
+// pushes it to every peer, retrying the ones that fail.
+//
+// The retry is the other half of defect #5. The old code discarded both the
+// response and the error (`_, _ = ...ConfigSync(...)`) on a 2s timeout with
+// nothing behind it, so a single dropped RPC was permanent divergence — which is
+// how run 17 left node-3 holding precisely the last four adds it had missed,
+// under serial mutation where there was no reordering to blame. #31 (a
+// ConfigSync cycling the peer's gRPC listener) makes a refused RPC mid-switch a
+// routine event rather than a rare one.
+func (s *Server) broadcastConfigToPeersOnce() {
+	const (
+		maxAttempts = 4
+		baseBackoff = 250 * time.Millisecond
+	)
+
+	s.RLock()
+	stamp := s.loadConfigStamp()
 	localID, _ := s.config.GetLocalNodeUUID()
+	states := s.memberStatesForBroadcast()
+	payloadBytes, err := buildFullConfigPayload(s.config, states, s.clusterEpoch, s.leaderID, localID, stamp)
+	pending := make(map[string]*config.Node, len(s.config.Nodes))
 	for id, node := range s.config.Nodes {
-		if id == localID {
+		if id != localID {
+			pending[id] = node
+		}
+	}
+	s.RUnlock()
+
+	if err != nil {
+		s.logger.Error("CONFIG_BROADCAST: failed to build payload", "error", err)
+		return
+	}
+
+	// Peers that answered with a rejection no retry can fix. Tracked separately from
+	// `pending` because the two need opposite handling: these must not be re-sent,
+	// but they must also not be mistaken for peers that accepted the config.
+	var permanentlyRejected []string
+
+	for attempt := 1; attempt <= maxAttempts && len(pending) > 0; attempt++ {
+		// A newer broadcast is already queued; it carries everything this one
+		// would have delivered, so stop rather than compete with it.
+		if attempt > 1 && len(s.broadcastTrigger) > 0 {
+			s.logger.Debug("CONFIG_BROADCAST: superseded by a newer broadcast, abandoning retries",
+				"version", stamp.version, "peersOutstanding", len(pending))
+			return
+		}
+
+		if attempt > 1 {
+			select {
+			case <-s.broadcastStop:
+				return
+			case <-time.After(baseBackoff * time.Duration(1<<uint(attempt-2))):
+			}
+		}
+
+		for id, node := range pending {
+			remoteClient, err := s.getPeerClient(id, node)
+			if err != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payloadBytes)))
+			resp, err := remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
+			cancel()
+			switch {
+			case err != nil:
+				s.logger.Debug("CONFIG_BROADCAST: ConfigSync failed, will retry",
+					"peer", id, "attempt", attempt, "version", stamp.version, "error", err)
+			case resp != nil && resp.Message == supersededConfigMessage:
+				// This node's config is older than the cluster's, so the change it
+				// just made will not propagate — the next sync will overwrite it.
+				// Warn, because the mutation reported success to the operator and
+				// is about to be undone: defect #38's signature seen from the
+				// sending end. Reachable when a node is mutated between its restart
+				// and its first full ConfigSync, while configVersion still reads 0.
+				//
+				// Only the peer-is-ahead case reaches here. A peer that holds this
+				// exact version answers configAlreadyHeldMessage instead and falls
+				// into the default arm below as the plain accept it is.
+				s.logger.Warn("CONFIG_BROADCAST: peer holds a newer config; this node's "+
+					"change will not propagate and will be reverted by the next sync",
+					"peer", id, "version", stamp.version)
+				delete(pending, id)
+			case resp != nil && !resp.Success && isPermanentRejection(resp.Message):
+				// The payload itself is unusable to this peer, so re-sending the same
+				// bytes cannot change the answer. Dropped from the retry set, but
+				// recorded and logged loudly: the peer is diverged and nothing here
+				// will repair it, which is worse than a peer that is merely behind.
+				s.logger.Error("CONFIG_BROADCAST: peer permanently rejected the config; "+
+					"retrying cannot fix this and the peer is now diverged",
+					"peer", id, "version", stamp.version, "message", resp.Message)
+				permanentlyRejected = append(permanentlyRejected, id)
+				delete(pending, id)
+			case resp != nil && !resp.Success:
+				// A rejection on the peer's own terms that is *not* marked permanent:
+				// a save failure, or any rejection from a binary predating the marker.
+				// Both are transient as far as this node can tell, so the peer stays in
+				// `pending` — it gets the in-pass retries and, failing those, reaches
+				// recordUnpropagated. Warn rather than Debug: this used to be the quiet
+				// path that let a diverged peer sit behind a broadcast reporting
+				// success.
+				s.logger.Warn("CONFIG_BROADCAST: peer declined ConfigSync, will retry",
+					"peer", id, "attempt", attempt, "version", stamp.version,
+					"message", resp.Message)
+			default:
+				delete(pending, id)
+			}
+		}
+	}
+
+	// A permanent rejection is not propagation, so it is recorded like any other
+	// peer this config did not reach. Retrying it is futile, and the retry state is
+	// what makes the divergence visible at all — clearing it here would report full
+	// propagation to a peer that rejected the config outright, which is the exact lie
+	// this branch removed everywhere else.
+	unreached := make([]string, 0, len(pending)+len(permanentlyRejected))
+	for id := range pending {
+		unreached = append(unreached, id)
+	}
+	unreached = append(unreached, permanentlyRejected...)
+	sort.Strings(unreached)
+
+	if len(unreached) > 0 {
+		// Warn, not Debug: this is the state that diverges a config. It used to say
+		// "waiting for the periodic reconcile", which was only true on the
+		// coordinator — see startConfigBroadcaster and defect #43.
+		s.logger.Warn("CONFIG_BROADCAST: peers did not accept the config after all retries; "+
+			"this node will keep retrying",
+			"version", stamp.version, "peers", unreached,
+			"permanentlyRejected", permanentlyRejected,
+			"retryIn", s.recordUnpropagated(stamp, unreached))
+		return
+	}
+	if attempts, wasOutstanding := s.clearUnpropagated(); wasOutstanding {
+		// Info: this is the repair landing, and the whole point of #43 is that it
+		// previously never did on a non-coordinator.
+		s.logger.Info("CONFIG_PROPAGATION: every peer accepted the config",
+			"version", stamp.version, "afterRetries", attempts)
+	}
+}
+
+// memberStatesForBroadcast reads the current member statuses to send alongside
+// the config, so a peer never has to reconcile a config against states that
+// arrived in a different message (defect #27).
+func (s *Server) memberStatesForBroadcast() map[string]membership.MemberStatus {
+	states := map[string]membership.MemberStatus{}
+	if s.memberList == nil {
+		return states
+	}
+	for id, m := range s.memberList.MembersSnapshot() {
+		if m == nil {
 			continue
 		}
+		m.Lock()
+		states[id] = m.Status
+		m.Unlock()
+	}
+	return states
+}
+
+// currentConfig returns the live config pointer, read under the read lock.
+//
+// ConfigSync spawns `go s.Reconfigure()`, which swaps the pointer under the write
+// lock, so a second ConfigSync arriving while that goroutine is still running
+// races every bare `s.config` read — and two ConfigSyncs landing close together
+// is ordinary behaviour on a four-node cluster, not an edge case. The race
+// detector catches it via the tests in config_generation_test.go.
+//
+// This closes the reads in ConfigSync only. The wider residual noted against
+// defect #32 stands: ~278 unsynchronized s.config reads remain across
+// internal/server, and closing those properly means this accessor (or an
+// atomic.Pointer) applied at every one of them.
+func (s *Server) currentConfig() *config.Config {
+	s.RLock()
+	defer s.RUnlock()
+	return s.config
+}
+
+// permanentRejectionPrefix marks a ConfigSync rejection that re-sending the same
+// bytes cannot fix: the payload itself is unusable, as opposed to the receiver
+// having been briefly unable to store a payload it understood perfectly well.
+//
+// Both used to come back as a bare Success:false, and the sender dropped the peer
+// from its retry set for either — which is right for the first and wrong for the
+// second, since a save failure is ENOSPC, EIO or a read-only mount and clears on
+// its own. The peer left the retry set before recordUnpropagated could see it, so
+// the broadcast went on to report full propagation while the peer held none of the
+// config. That is defect #43's signature reached by a different route.
+//
+// A marker on the message rather than a new proto field, deliberately: the wire
+// contract here is two fields wide and shared with binaries that predate this
+// branch, and an older peer simply omits the marker. That reads as transient, which
+// is the safe direction — four retries and a warning, rather than a peer silently
+// dropped. isPermanentRejection is prefix-anchored so the classification cannot be
+// changed by editing an error string.
+const permanentRejectionPrefix = "permanent: "
+
+func isPermanentRejection(message string) bool {
+	return strings.HasPrefix(message, permanentRejectionPrefix)
+}
+
+// supersededConfigMessage is the reply to a config payload older than the one
+// this node holds. Success is true — the sender has nothing to fix and no reason
+// to retry — but the sender reads the message to notice that it is the one
+// behind, so the string is part of the wire contract, not just a log line.
+const supersededConfigMessage = "superseded config version ignored"
+
+// configAlreadyHeldMessage is the reply to a payload the receiver holds already —
+// same version, same origin — as opposed to one it has moved past.
+//
+// Both are "not applied", and both used to come back as supersededConfigMessage,
+// but they mean opposite things to the sender. Superseded means the sender is
+// behind and its mutation is about to be undone, which is worth a Warn. This one
+// means the sender's change arrived and is held at exactly the version it claims,
+// which is a plain accept. SetMode makes the difference routine rather than
+// theoretical: since #68 it puts the same stamp on the wire twice — the direct
+// broadcastConfigAndStates push, and the markConfigDirty broadcast 250ms behind
+// it — so every mode switch produced one false "will be reverted" Warn per peer.
+//
+// The sender needs no new case for this: Success is true and the message is not
+// supersededConfigMessage, so it lands in broadcastConfigToPeersOnce's default
+// arm and counts as delivered. That is deliberate, and it is what makes the new
+// message safe against a mixed-version cluster in the sending direction too.
+const configAlreadyHeldMessage = "config version already held"
+
+// configNotAppliedMessage names which of the two "not applied" replies fits: the
+// receiver is the only party that can tell an equal config from a stale one, so
+// the distinction is made here rather than guessed at by the sender.
+//
+// Exact equality is version *and* origin. An equal version from a different
+// origin is the concurrent-mutation case, where one of the two really is lost and
+// the sender does need to hear about it.
+func configNotAppliedMessage(incoming, held configStamp) string {
+	if incoming == held {
+		return configAlreadyHeldMessage
+	}
+	return supersededConfigMessage
+}
+
+// configStamp identifies a config's content: the Lamport clock value, and the ID
+// of the node whose mutation produced it.
+//
+// The origin has to travel with the version because breaking a tie between two
+// equal versions is only convergent if every node compares the same two things.
+// The tiebreak used to be sender-versus-receiver, which is not that: if nodes A
+// and B concurrently mint version N+1, a third node C whose UUID sorts above both
+// rejects each late arrival and keeps whichever it applied first, while A and B
+// each accept the other's and settle on max(A,B). The periodic reconcile re-runs
+// the same receiver-relative comparison, so it cannot separate them either and
+// the split is *stable* — the permanent divergence this clock exists to prevent.
+// Comparing origin against origin gives every node the same answer,
+// max(originA, originB), so all three converge.
+type configStamp struct {
+	version int64
+	origin  string
+}
+
+// isEmpty reports a stamp that carries no ordering information, either because
+// nothing has been applied yet or because the payload came from a binary that
+// does not version its configs.
+func (c configStamp) isEmpty() bool { return c.origin == "" || c.version <= 0 }
+
+// loadConfigStamp reads the stamp for the config this node currently holds. The
+// zero stamp — a node that has applied nothing since it started — orders below
+// everything.
+func (s *Server) loadConfigStamp() configStamp {
+	if held := s.configStamp.Load(); held != nil {
+		return *held
+	}
+	return configStamp{}
+}
+
+// shouldApplyIncomingConfig decides whether a full config payload carries newer
+// content than what this node already holds.
+//
+// Strictly greater wins. A peer re-sending the version this node already holds
+// has nothing to add — the periodic reconcile repairs a node that is *behind*,
+// and that node's version is lower, so it still heals.
+//
+// Equal versions from two different origins are the concurrent-mutation case, and
+// they have to be broken deterministically or each side rejects the other and the
+// reconcile, also equal, cannot separate them. The origin node ID is the tiebreak
+// because it is the one input every node agrees on. The losing mutation is lost;
+// that is the standing limitation of applying a config wholesale, and convergence
+// is worth more than a permanent split.
+func (s *Server) shouldApplyIncomingConfig(incoming configStamp) bool {
+	return configIsNewer(incoming, s.loadConfigStamp())
+}
+
+// configIsNewer is the comparison itself, taking both stamps as arguments so
+// ConfigSync can re-run it under s.Lock() without re-entering the read lock.
+//
+// An empty held stamp loses every tie, which is the same "cannot order this,
+// apply it" default as an unversioned payload.
+func configIsNewer(incoming, held configStamp) bool {
+	if incoming.isEmpty() {
+		return true // unversioned: cannot be ordered, so apply it
+	}
+	if held.isEmpty() {
+		return true
+	}
+	if incoming.version != held.version {
+		return incoming.version > held.version
+	}
+	return incoming.origin > held.origin
+}
+
+// adoptConfigStamp raises this node's stamp to the one it just applied, which is
+// what keeps the clock shared: a node that only ever receives configs still
+// speaks the cluster's current version rather than its own zero.
+//
+// Never lowers it. The tiebreak above can apply a config at the version already
+// held, and a concurrent local mutation may have moved past it. At equal versions
+// the origin still moves, so the stamp continues to describe the content actually
+// held rather than the tie it won.
+func (s *Server) adoptConfigStamp(incoming configStamp) {
+	if incoming.isEmpty() {
+		return
+	}
+	next := &configStamp{version: incoming.version, origin: incoming.origin}
+	for {
+		heldPtr := s.configStamp.Load()
+		var held configStamp
+		if heldPtr != nil {
+			held = *heldPtr
+		}
+		if !configIsNewer(incoming, held) {
+			return
+		}
+		if s.configStamp.CompareAndSwap(heldPtr, next) {
+			return
+		}
+	}
+}
+
+// broadcastConfigAndStates pushes the config and the member states it implies to
+// every peer in one ConfigSync.
+//
+// Splitting the two is what broke the return to active-passive. SetMode used to
+// send the config on its own and the states afterwards, both only once its IP
+// work had finished, which left every peer holding two contradictory beliefs for
+// the length of the switch: the cluster is active-passive, and I am still Active.
+// On whitecrane at 19:52 on 2026-07-27 that window was over thirty seconds, and
+// a peer spent it still acting as active-active coordinator — redistributing 150
+// addresses it considered orphaned, then consolidating the group onto a target of
+// its own choosing while the node handling the request consolidated onto another.
+// Two whole-group consolidations onto two different nodes is how the entire group
+// ended up on two nodes at once (docs/TEST-PLAN.md defect #27).
+//
+// Peers must therefore learn the mode and their new status together, and before
+// any address moves.
+//
+// The payload is stamped, like every other broadcast on this path. It used to go
+// through an unstamped wrapper, so ConfigSync's ordering guard read it as
+// unversioned and every peer applied it unconditionally — including one holding
+// strictly newer content, which reopened the #5/#38 window for the length of a
+// switch. SetMode's caller has already run markConfigDirty(), so the clock the
+// receiver needs is minted before this is reached; reading it here under the same
+// lock as the config keeps the two describing each other.
+func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberStatus,
+	epoch int64, leaderID string) {
+
+	s.Lock()
+	localID, _ := s.config.GetLocalNodeUUID()
+	payloadBytes, buildErr := buildFullConfigPayload(
+		s.config, states, epoch, leaderID, localID, s.loadConfigStamp())
+	peers := make(map[string]*config.Node, len(s.config.Nodes))
+	for id, node := range s.config.Nodes {
+		if id != localID {
+			peers[id] = node
+		}
+	}
+	s.Unlock()
+
+	if buildErr != nil {
+		s.logger.Error("Failed to build the combined config and state payload", "error", buildErr)
+		return
+	}
+
+	for id, node := range peers {
 		remoteClient, err := s.getPeerClient(id, node)
 		if err != nil {
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: configBytes})
+		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payloadBytes)))
+		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
 		cancel()
 	}
 }

@@ -1,4 +1,12 @@
-.PHONEY: clean get protos test integration-test quiet-integration-test test-all
+# Every target here is a recipe, not a file. This MUST stay .PHONY (it read
+# .PHONEY until 2026-07-28, which make treats as an ordinary target, leaving
+# every rule below file-shadowable): build.sh generates PHP proto stubs into
+# ./test/, and that directory silently turned `make test` into
+# "make: 'test' is up to date" — a green run that executed no tests at all.
+.PHONY: default all build buildrace netcore hcping hcserial genemailalerts \
+	get tools cli protos test testrace integration-test \
+	quiet-integration-test test-all clean install install-netcore \
+	install-hcping install-hcserial install-genemailalerts
 
 VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
@@ -22,22 +30,34 @@ genemailalerts: get
 	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
 	 go mod download
-	 go get -u google.golang.org/protobuf/cmd/protoc-gen-go
-	 go get -u google.golang.org/grpc/cmd/protoc-gen-go-grpc
+# Installs the protoc plugins that `protos` needs on PATH. Run once, or after
+# changing the protobuf/grpc versions — deliberately not a prerequisite of
+# `build`: `go install pkg@ver` is module-agnostic and leaves go.mod alone,
+# whereas the `go get -u` calls this replaces rewrote go.mod and go.sum on every
+# single build. Keep the versions in step with .github/workflows/{dev,master}.yml
+# — rpc/*.pb.go is generated rather than committed, so a skew between a
+# developer and CI surfaces as differing generated code.
+tools:
+	 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.7
+	 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 cli: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulsectl/bin/pulsectl ./cmd/pulsectl
 protos:
 	 protoc --go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		./rpc/server.proto
+# 120s, not 30s. internal/server alone runs ~15s on a dev machine and ~20s under
+# -race, and a CI runner is slower than that -- with both targets now actually
+# running in CI, a 30s per-package budget was close enough to the wall to fail on
+# runner load rather than on a real regression.
 test:
-	 go test -timeout 30s -v ./internal/...
-	 go test -timeout 30s -v ./cmd/...
-	 go test -timeout 30s -v ./packages/...
+	 go test -timeout 120s -v ./internal/...
+	 go test -timeout 120s -v ./cmd/...
+	 go test -timeout 120s -v ./packages/...
 testrace:
-	 go test -race -timeout 30s -v ./internal/...
-	 go test -race -timeout 30s -v ./cmd/...
-	 go test -race -timeout 30s -v ./packages/...
+	 go test -race -timeout 120s -v ./internal/...
+	 go test -race -timeout 120s -v ./cmd/...
+	 go test -race -timeout 120s -v ./packages/...
 integration-test:
 	 @echo "Running integration tests (verbose mode)..."
 	 go test -timeout 2m -v ./tests/integration/...

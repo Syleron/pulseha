@@ -46,6 +46,13 @@ func TestQuorumAutoManagement(t *testing.T) {
 	require.NoError(t, node3.Join(node1))
 	time.Sleep(1 * time.Second)
 
+	// The manager samples len(cfg.Nodes) once, at construction, so it still believes
+	// the cluster is the two nodes it was built against. UpdateNodeCount is what the
+	// daemon calls on a membership change and is what this test is really asserting
+	// about — that quorum availability tracks the node count rather than the count
+	// that happened to be current when the manager was made.
+	tqm.UpdateNodeCount(3)
+
 	// Now quorum voting is available; majority should pass (2 of 3)
 	_, err = tqm.StartTestVotingSession(quorum.VoteTypeNodeStatus, "subj2", "desc2", 10*time.Second)
 	require.NoError(t, err)

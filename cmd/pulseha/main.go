@@ -123,12 +123,19 @@ func main() {
 		sig := <-sigChan
 		switch sig {
 		case syscall.SIGUSR2:
-			// Reload configuration
+			// Reload configuration. Reload returns a fresh *Config rather
+			// than rewriting the live one under its readers (defect #32),
+			// so the new pointer has to be handed to everything that
+			// holds one.
 			logger.Info("Reloading configuration...")
-			if err := cfg.Reload(); err != nil {
+			newCfg, err := cfg.Reload()
+			if err != nil {
 				logger.Error("Failed to reload config", "error", err)
 				continue
 			}
+			cfg = newCfg
+			// The health checker reads the config through the member list.
+			memberList.UpdateConfig(cfg)
 			// Restart server with new config
 			wg.Add(1)
 			go func() {

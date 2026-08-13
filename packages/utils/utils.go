@@ -17,7 +17,9 @@
 package utils
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	log "github.com/charmbracelet/log"
 	"io/ioutil"
 	"net"
@@ -66,6 +68,28 @@ func Execute(cmd string, args ...string) (string, error) {
 	}
 
 	return string(output), err
+}
+
+// ExecuteWithTimeout is Execute with a deadline: the process is killed if it has
+// not finished in time and the deadline is reported as the error.
+//
+// Needed wherever a wedged child process would hold a lock or an RPC open. The
+// GARP fan-out is the case that forced it — the batch ends in an unconditional
+// wg.Wait(), so one arping that never exits keeps the bring-up RPC, and the
+// failover waiting on it, open forever.
+func ExecuteWithTimeout(timeout time.Duration, cmd string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	output, err := exec.CommandContext(ctx, cmd, args...).CombinedOutput()
+	if ctxErr := ctx.Err(); errors.Is(ctxErr, context.DeadlineExceeded) {
+		return "", fmt.Errorf("%s timed out after %s: %w", cmd, timeout, ctxErr)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	return string(output), nil
 }
 
 /*

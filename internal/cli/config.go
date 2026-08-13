@@ -181,8 +181,22 @@ func newConfigSetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "set <key> <value>",
 		Short: "Set configuration value",
-		Long:  `Set a configuration value and apply it to the cluster`,
-		Args:  cobra.ExactArgs(2),
+		Long: `Set a configuration value.
+
+Cluster-wide keys are applied to every node:
+  mode, hcs_interval, fos_interval, fo_limit, auto_failback
+
+The timing keys (hcs_interval, fos_interval, fo_limit) are read when the health
+checker starts, so a change to one of them takes effect on the next restart of
+each daemon. mode takes effect immediately.
+
+Logging keys apply to the node the command runs on only, and have to be set on
+each node individually:
+  logging_level, log_to_file, log_file_location, log_to_syslog,
+  syslog_network, syslog_address, syslog_facility, syslog_tag
+
+The reach of each change is reported back on success.`,
+		Args: cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
 			key := args[0]
 			value := args[1]
@@ -207,7 +221,14 @@ func newConfigSetCmd() *cobra.Command {
 			}
 
 			if resp.Success {
-				fmt.Printf("Successfully updated %s to %s\n", key, value)
+				// The daemon reports the reach of the change; print it rather than
+				// leaving the operator to infer it from the help text, which used to
+				// promise the cluster for a value that reached one node.
+				if resp.Message != "" {
+					fmt.Printf("Successfully updated %s to %s (%s)\n", key, value, resp.Message)
+				} else {
+					fmt.Printf("Successfully updated %s to %s\n", key, value)
+				}
 			} else {
 				fmt.Printf("Error: %s\n", resp.Message)
 				os.Exit(1)
