@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/syleron/pulseha/rpc"
 	"github.com/syleron/pulseha/tests/testutils"
 )
 
@@ -38,5 +39,42 @@ func requireMemberStatus(t *testing.T, observer *testutils.TestNode, targetHostn
 	}
 
 	t.Fatalf("%s: %s's view of %s = %q after %s, want %q",
+		msg, observer.Hostname, targetHostname, got, statusSettleTimeout, want)
+}
+
+// requireReportedStatus waits for the status observer *publishes* for target to
+// reach want, and fails with the last value it actually saw.
+//
+// The sibling above reads the member list directly, which is a different
+// question: it sees what the daemon believes, not what it tells an operator.
+// Only this one crosses deriveMemberStatus, and END-2289 was a defect that lived
+// entirely on the far side of it.
+func requireReportedStatus(
+	t *testing.T,
+	observer *testutils.TestNode,
+	targetHostname string,
+	want rpc.MemberStatusEnum,
+	msg string,
+) {
+	t.Helper()
+
+	var (
+		got rpc.MemberStatusEnum
+		err error
+	)
+	deadline := time.Now().Add(statusSettleTimeout)
+	for time.Now().Before(deadline) {
+		got, err = observer.ReportedStatus(targetHostname)
+		if err == nil && got == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if err != nil {
+		t.Fatalf("%s: %s could not report a status for %s within %s: %v",
+			msg, observer.Hostname, targetHostname, statusSettleTimeout, err)
+	}
+	t.Fatalf("%s: %s reports %s as %v after %s, want %v",
 		msg, observer.Hostname, targetHostname, got, statusSettleTimeout, want)
 }
