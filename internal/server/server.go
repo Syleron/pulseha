@@ -1236,26 +1236,36 @@ func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*r
 // active-active existed. Standby separates them for display: healthy, eligible
 // for promotion, serving nothing.
 //
+// Standby is an active-active status and nothing else, which makes Active
+// mode-relative: in active-passive it means "elected", in active-active it means
+// "serving at least one address" (docs/adr/0001-standby-is-active-active-only.md).
+// The alternative was worse. This used to trust a node's record of itself in
+// either mode, so in active-passive the only row that could read Standby was the
+// row you happened to be asking about: a healthy elected node holding nothing
+// called itself Standby while its peer called it Active, and both were answering
+// from the same healthy cluster (END-2289). A status an operator cannot compare
+// between two nodes is not a status.
+//
 // Tenancy is derived here and nowhere else. It is not stored on the member, not
 // put on the wire between nodes, and not consulted by any placement or demotion
 // decision, because a stored copy would be the #1/#21 defect with a new name:
 // MakePassive returned success having released nothing, since ActiveIPs was
 // empty on a node that in fact held every address.
 //
-// hasAssignmentTruth is the reason this takes three arguments rather than two.
-// An empty assignment list only means "holds nothing" where the list is
+// selfReportsAssignments is the reason this takes three arguments rather than
+// two. An empty assignment list only means "holds nothing" where the list is
 // knowledge; elsewhere it means "this node does not know". Peers self-report
 // their hosted IPs over ConfigSync in active-active only (see the sender at the
-// buildFullConfigPayload self-report and its application in ConfigSync), so a
-// remote member's list is current in that mode. In active-passive there is no
-// self-report and a node promoted by election "holds them all while its
-// ActiveIPs is still empty" (internal/membership/health_check.go) — reporting
-// that node as Standby would be the most misleading answer available. A node's
-// record of itself is authoritative in either mode.
-func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, hasAssignmentTruth bool) rpc.MemberStatusEnum {
+// buildFullConfigPayload self-report and its application in ConfigSync), so
+// every member's list is current in that mode and no member's list is in the
+// other. In active-passive there is no self-report and a node promoted by
+// election "holds them all while its ActiveIPs is still empty"
+// (internal/membership/health_check.go) — reporting that node as Standby would
+// be the most misleading answer available.
+func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, selfReportsAssignments bool) rpc.MemberStatusEnum {
 	switch status {
 	case membership.StatusActive:
-		if assignedIPs == 0 && hasAssignmentTruth {
+		if assignedIPs == 0 && selfReportsAssignments {
 			return rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY
 		}
 		return rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
@@ -1273,20 +1283,15 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 	s.RLock()
 	defer s.RUnlock()
 
-	// Resolved once rather than per member: IsLocal() re-reads the config and
-	// logs on every call, and this loop runs for every node in the cluster.
-	localID, _ := s.config.GetLocalNodeUUID()
+	// Read once rather than per member: this loop runs for every node in the
+	// cluster and the answer is the same for all of them.
 	selfReportsAssignments := s.config.Pulse.Mode == "active-active"
 
 	var members []*rpc.Member
 	membersSnapshot := s.memberList.MembersSnapshot()
 	for _, member := range membersSnapshot {
 		health := member.GetHealthStatus()
-		st := deriveMemberStatus(
-			health.Status,
-			len(health.ActiveIPs),
-			selfReportsAssignments || (localID != "" && member.ID == localID),
-		)
+		st := deriveMemberStatus(health.Status, len(health.ActiveIPs), selfReportsAssignments)
 
 		// Stamp a fresh last response for local display if empty/stale
 		lastResp := ""

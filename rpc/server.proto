@@ -140,6 +140,14 @@ enum MemberStatusEnum {
     // placement decision. Reporting such a node as ACTIVE said nothing about
     // whether it was serving anything, which is what PARTIAL_ACTIVE (3, now
     // reserved) failed to fix by adding a stored value to this same enum.
+    //
+    // Reported in active-active clusters only, because that is the only mode
+    // where every member's assignment list is current — peers self-report their
+    // hosted addresses over ConfigSync there and nowhere else. In active-passive
+    // an empty list is absence of knowledge rather than evidence of holding
+    // nothing, so ACTIVE means "elected" and this value is never sent. A
+    // consumer must still handle it in either mode: the mode is runtime
+    // configuration, not a build-time fact.
     MEMBER_STATUS_STANDBY = 5;
 }
 
