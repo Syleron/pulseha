@@ -142,9 +142,9 @@ func TestRemoveActiveIPsDropsOnlyTheGivenAddresses(t *testing.T) {
 }
 
 // A node that released everything must report an empty list, not a nil-vs-empty
-// distinction that reads as "no information" — deriveMemberStatus reports
-// Standby off an empty list, and that is the honest answer for a node serving
-// nothing.
+// distinction that reads as "no information" — in active-active
+// deriveMemberStatus reports Standby off an empty list, and that is the honest
+// answer for a node serving nothing.
 func TestRemoveActiveIPsCanEmptyTheList(t *testing.T) {
 	m := &Member{ActiveIPs: []string{"10.0.0.1/24", "10.0.0.2/24"}}
 

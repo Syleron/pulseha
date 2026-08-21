@@ -453,6 +453,42 @@ func (n *TestNode) GetMemberStatus(targetHostname string) string {
 	}
 }
 
+// ReportedStatus asks this node's daemon for the status it publishes for
+// targetHostname, through the same GetClusterStatus RPC the CLI and the
+// appliance's API call.
+//
+// GetMemberStatus above reads member.Status straight off the member list, which
+// skips deriveMemberStatus entirely — so every existing assertion in this suite
+// is blind to the whole status boundary, and END-2289 lived in that blind spot:
+// a healthy elected node published Standby about itself while its peer published
+// Active about the same node, and no test could see either value. Anything
+// asserting what an operator is told has to come through here.
+//
+// Returns the wire enum rather than a string so a value the harness has not been
+// taught about cannot be flattened into "unknown" and read as agreement.
+func (n *TestNode) ReportedStatus(targetHostname string) (rpc.MemberStatusEnum, error) {
+	c, err := n.callDaemon()
+	if err != nil {
+		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN, err
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := c.CLI().Status(ctx, &rpc.StatusRequest{})
+	if err != nil {
+		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN, fmt.Errorf("status RPC to %s: %v", n.Hostname, err)
+	}
+	for _, m := range resp.Members {
+		if m.Hostname == targetHostname {
+			return m.Status, nil
+		}
+	}
+	return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN,
+		fmt.Errorf("%s does not report a member named %s", n.Hostname, targetHostname)
+}
+
 // CreateGroup creates a new IP group
 // callDaemon dials this node's own daemon and hands the caller a connected
 // client.

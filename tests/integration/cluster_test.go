@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/syleron/pulseha/rpc"
 	"github.com/syleron/pulseha/tests/testutils"
 )
 
@@ -192,4 +193,65 @@ func TestActiveActiveMode(t *testing.T) {
 	// Verify that at least one node has active IPs
 	allActiveIPs := append(node1.GetActiveIPs(), node2.GetActiveIPs()...)
 	require.NotEmpty(t, allActiveIPs, "At least one node should have active IPs")
+}
+
+// END-2289. Two nodes in one healthy cluster published contradictory views of
+// that cluster at the same instant: asked on the elected node, its own row read
+// Standby; asked on its peer, the same node read Active. Nothing was wrong with
+// the cluster — the elected node held no addresses because none were configured,
+// and it was the only observer permitted to draw a conclusion from that.
+//
+// On the appliance the two views became "Standby / No Data" with cluster health
+// 1·1 on one node against "Active / Online" and 2·0 on the other.
+//
+// The generic agreement check at the end is the invariant, and it is deliberately
+// not spelled out as a pair of expected values: whatever a node publishes about
+// a member, every other node must publish the same thing, including values this
+// test was never taught to expect.
+func TestNodesAgreeOnTheStatusTheyPublish(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("integration tests run only on Linux")
+	}
+	os.Setenv("PULSEHA_TEST", "true")
+	defer os.Unsetenv("PULSEHA_TEST")
+
+	cluster := testutils.NewTestCluster()
+	defer cluster.Cleanup()
+
+	node1, err := cluster.AddNode("node1")
+	require.NoError(t, err, "Failed to add first node")
+	require.NoError(t, node1.Start(), "Failed to start first node")
+	require.NoError(t, cluster.WaitForPort("node1", 40), "node1 never accepted connections")
+
+	node2, err := cluster.AddNode("node2")
+	require.NoError(t, err, "Failed to add second node")
+	require.NoError(t, node2.Start(), "Failed to start second node")
+	require.NoError(t, cluster.WaitForPort("node2", 40), "node2 never accepted connections")
+
+	require.NoError(t, node2.Join(node1), "Failed to join second node to cluster")
+
+	// No groups are created anywhere in this test on purpose. A freshly paired
+	// appliance has no floating IPs, which is what made the elected node's
+	// assignment list empty and put it one branch away from Standby.
+	require.Equal(t, "active-passive", node1.Config.Pulse.Mode, "the default mode is the one under test")
+
+	// The defect, from the affected node's own point of view: elected, holding
+	// nothing, and nothing to hold. Active is the answer.
+	requireReportedStatus(t, node1, node1.Hostname, rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE,
+		"the elected node must not call itself Standby in active-passive")
+	requireReportedStatus(t, node2, node1.Hostname, rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE,
+		"the peer's view of the elected node was always correct and must stay so")
+	requireReportedStatus(t, node1, node2.Hostname, rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE,
+		"the passive node's row was always correct and must stay so")
+	requireReportedStatus(t, node2, node2.Hostname, rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE,
+		"the passive node must agree with its peer about itself")
+
+	for _, target := range []string{node1.Hostname, node2.Hostname} {
+		fromNode1, err := node1.ReportedStatus(target)
+		require.NoError(t, err, "node1 should report a status for %s", target)
+		fromNode2, err := node2.ReportedStatus(target)
+		require.NoError(t, err, "node2 should report a status for %s", target)
+		require.Equal(t, fromNode1, fromNode2,
+			"both nodes must publish the same status for %s", target)
+	}
 }
