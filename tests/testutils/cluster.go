@@ -489,6 +489,29 @@ func (n *TestNode) ReportedStatus(targetHostname string) (rpc.MemberStatusEnum, 
 		fmt.Errorf("%s does not report a member named %s", n.Hostname, targetHostname)
 }
 
+// ReportedMode asks this node's daemon which cluster mode it is actually running
+// in, rather than reading the TestNode's own config struct.
+//
+// Not the same question. The struct is what the test asked for; this is what the
+// daemon is acting on, and END-2289 was entirely about the gap between a local
+// copy of a fact and the answer a daemon publishes.
+func (n *TestNode) ReportedMode() (string, error) {
+	c, err := n.callDaemon()
+	if err != nil {
+		return "", err
+	}
+	defer c.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	resp, err := c.CLI().Status(ctx, &rpc.StatusRequest{})
+	if err != nil {
+		return "", fmt.Errorf("status RPC to %s: %v", n.Hostname, err)
+	}
+	return resp.Mode, nil
+}
+
 // CreateGroup creates a new IP group
 // callDaemon dials this node's own daemon and hands the caller a connected
 // client.

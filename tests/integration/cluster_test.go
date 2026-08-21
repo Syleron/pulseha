@@ -220,11 +220,17 @@ func TestNodesAgreeOnTheStatusTheyPublish(t *testing.T) {
 
 	node1, err := cluster.AddNode("node1")
 	require.NoError(t, err, "Failed to add first node")
+	// Set explicitly rather than relying on a default: the harness writes no mode
+	// at all, and an empty mode only behaves like active-passive by accident of
+	// every gate testing for the other value. The appliance ships active-passive
+	// (packages/config/config.go), and that is the configuration under test.
+	node1.Config.Pulse.Mode = "active-passive"
 	require.NoError(t, node1.Start(), "Failed to start first node")
 	require.NoError(t, cluster.WaitForPort("node1", 40), "node1 never accepted connections")
 
 	node2, err := cluster.AddNode("node2")
 	require.NoError(t, err, "Failed to add second node")
+	node2.Config.Pulse.Mode = "active-passive"
 	require.NoError(t, node2.Start(), "Failed to start second node")
 	require.NoError(t, cluster.WaitForPort("node2", 40), "node2 never accepted connections")
 
@@ -233,7 +239,15 @@ func TestNodesAgreeOnTheStatusTheyPublish(t *testing.T) {
 	// No groups are created anywhere in this test on purpose. A freshly paired
 	// appliance has no floating IPs, which is what made the elected node's
 	// assignment list empty and put it one branch away from Standby.
-	require.Equal(t, "active-passive", node1.Config.Pulse.Mode, "the default mode is the one under test")
+	//
+	// Asked of the daemon rather than read off the config struct. The struct is
+	// what this test requested; only the daemon can say what it is acting on, and
+	// asserting the request would make the precondition self-referential.
+	for _, n := range []*testutils.TestNode{node1, node2} {
+		mode, err := n.ReportedMode()
+		require.NoError(t, err, "%s should report its cluster mode", n.Hostname)
+		require.Equal(t, "active-passive", mode, "%s must be running the mode under test", n.Hostname)
+	}
 
 	// The defect, from the affected node's own point of view: elected, holding
 	// nothing, and nothing to hold. Active is the answer.
