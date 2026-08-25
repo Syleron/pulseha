@@ -40,6 +40,10 @@ type stubServer struct {
 	announced     []string
 	announceFails bool
 
+	// failovers records the node each promotion was orchestrated onto, in order, so a
+	// selection that depends on Go's randomised map iteration can be caught.
+	failovers []string
+
 	// sequence interleaves demotions and announcements in call order, because
 	// consolidation's correctness depends on which came last: an announcement made
 	// before the demotions is overwritten on the segment by the demoted node's own
@@ -50,6 +54,7 @@ type stubServer struct {
 func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return nil }
 
 func (s *stubServer) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string) error {
+	s.failovers = append(s.failovers, newNodeID)
 	return nil
 }
 

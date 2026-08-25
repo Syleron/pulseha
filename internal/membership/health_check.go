@@ -2169,44 +2169,62 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 
 			member.Status = StatusUnknown
 
-			// Find a passive node to promote
+			// Find a passive node to promote.
+			//
+			// Lowest ID rather than whichever the map yielded first, because Go randomises
+			// map iteration and the vote below is decided on the subject's ID: picking at
+			// random meant asking about a node the deterministic rule would refuse roughly
+			// half the time, and `!voteResult` abandons the failover rather than trying the
+			// other one. Selection and adjudication have to agree on who the candidate is
+			// (END-2325).
+			var candidate *Member
 			for _, otherMember := range membersSnapshot {
-				if otherMember.ID != member.ID && otherMember.Status == StatusPassive {
-					h.logger.Infof("Promoting passive node %s to active", otherMember.Hostname)
+				if otherMember.ID == member.ID || otherMember.Status != StatusPassive {
+					continue
+				}
+				if candidate == nil || otherMember.ID < candidate.ID {
+					candidate = otherMember
+				}
+			}
 
-					// If quorum is enabled, we need to initiate a vote before promoting
-					if quorumEnabled {
-						member.Unlock() // Unlock before initiating vote
+			if candidate != nil {
+				h.logger.Infof("Promoting passive node %s to active", candidate.Hostname)
 
-						// Initiate vote for promotion
-						voteResult := h.initiateNodeStatusVote(otherMember.ID, StatusActive)
+				// If quorum is enabled, we need to initiate a vote before promoting
+				if quorumEnabled {
+					member.Unlock() // Unlock before initiating vote
 
-						if !voteResult {
-							h.logger.Warn("Quorum vote failed, not promoting node")
-							return
-						}
+					// Initiate vote for promotion
+					voteResult := h.initiateNodeStatusVote(candidate.ID, StatusActive)
 
-						h.logger.Info("Quorum vote passed, proceeding with promotion")
-						member.Lock() // Lock again to continue
+					if !voteResult {
+						h.logger.Warn("Quorum vote failed, not promoting node")
+						return
 					}
 
-					if h.server != nil {
-						if err := h.server.OrchestrateIPFailover(member.ID, otherMember.ID,
-							member.ActiveIPs); err != nil {
-							h.logger.Errorf("Failed to promote passive node: %v", err)
-						} else {
-							h.logger.Infof("Passive node %s promoted to active", otherMember.Hostname)
-							// Update member IP state
-							otherMember.Lock()
-							otherMember.ActiveIPs = append([]string{}, member.ActiveIPs...)
-							otherMember.Unlock()
+					h.logger.Info("Quorum vote passed, proceeding with promotion")
+					member.Lock() // Lock again to continue
+				}
 
-							member.Lock()
-							member.ActiveIPs = nil
-							member.Unlock()
-						}
+				if h.server != nil {
+					if err := h.server.OrchestrateIPFailover(member.ID, candidate.ID,
+						member.ActiveIPs); err != nil {
+						h.logger.Errorf("Failed to promote passive node: %v", err)
+					} else {
+						h.logger.Infof("Passive node %s promoted to active", candidate.Hostname)
+						// Update member IP state
+						candidate.Lock()
+						candidate.ActiveIPs = append([]string{}, member.ActiveIPs...)
+						candidate.Unlock()
+
+						// member is already held — locked at the top of this function and
+						// re-locked after the vote — and Member embeds a plain sync.RWMutex,
+						// which is not reentrant. Taking it here deadlocked the caller, and
+						// this runs on the health-check goroutine holding h.Lock(), so it
+						// wedged the health checker with a write lock held: #56's and #79's
+						// shape a third time.
+						member.ActiveIPs = nil
 					}
-					break
 				}
 			}
 		}
@@ -2275,10 +2293,14 @@ func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string)
 		}
 	}
 
+	// Released before RemoveIPs, which takes the member lock itself. Calling it while
+	// holding that lock deadlocked every path through this function, not only the promotion
+	// one — the same non-reentrant trap as above.
+	member.Unlock()
+
 	// Remove failed IPs from member
 	h.logger.Debugf("Removing failed IPs from member %s: %v", member.Hostname, failedIPs)
 	member.RemoveIPs(failedIPs)
-	member.Unlock()
 
 	// If quorum is enabled, we need to initiate a vote before redistributing IPs
 	if quorumEnabled {
@@ -2346,37 +2368,57 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			// dark one. See docs/adr/0002-two-node-availability-over-safety.md. Routing the
 			// two-node election into this branch would reverse that decision.
 			//
-			// Known defect, END-2325: the rule below answers "should *I* win" to a
-			// question asked about nodeID. Via attemptVotingElection the candidate is often
-			// not the local node, so a coordinator whose own ID sorts higher blocks a
-			// promotion that should proceed.
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
-				// Find the other available node
-				localNodeID, err := h.localNodeID()
-				if err != nil {
-					h.logger.Error("Failed to get local node ID for tie-breaking", "error", err)
-					return false
-				}
-				var otherNodeID string
+				// Decided about nodeID, the subject of the vote, and never about the node
+				// running it (END-2325).
+				//
+				// The rule used to be `localNodeID < otherNodeID`, which answers "should *I*
+				// win" to a question asked about someone else. Via attemptVotingElection the
+				// candidate is frequently not the local node — selectBestCandidate gives the
+				// local node only +5 against a score built from status, latency and recency —
+				// so a coordinator whose own ID sorted higher returned false and blocked the
+				// promotion of a perfectly good candidate. In handlePartialFailure that
+				// answer is not advisory: `!voteResult` returns, abandoning the failover.
+				//
+				// Worse than blocking one promotion, it made the answer depend on who asked.
+				// Two nodes running this concurrently for the same candidate computed
+				// opposite results, which is precisely what a tie-break with no majority
+				// behind it must never do. Deciding on the subject is viewer-independent:
+				// every node reaches the same verdict about the same candidate. Same lesson
+				// as the config tiebreak, which had to become origin-versus-origin rather
+				// than sender-versus-receiver (internal/server/config_generation_test.go).
+				lowest := ""
+				subjectAvailable := false
 				for _, member := range membersSnapshot {
 					member.Lock()
 					isAvailable := member.Status == StatusActive || member.Status == StatusPassive
 					memberID := member.ID
 					member.Unlock()
-					if isAvailable && memberID != localNodeID {
-						otherNodeID = memberID
-						break
+					if !isAvailable {
+						continue
+					}
+					if memberID == nodeID {
+						subjectAvailable = true
+					}
+					if lowest == "" || memberID < lowest {
+						lowest = memberID
 					}
 				}
-				if otherNodeID == "" {
-					h.logger.Info("No other available node found, allowing Active promotion")
+
+				// A subject that is not one of the two contenders is not in the tie this rule
+				// exists to break, so it has nothing to say about it. Allowed rather than
+				// refused, which is what the old code did for its own unresolvable case, and
+				// the promotion still has to get past confirmPeerReleasedIPs.
+				if !subjectAvailable {
+					h.logger.Info("2-node tie-breaking: subject is not an available node, allowing",
+						"subject", nodeID)
 					return true
 				}
-				// Deterministic rule: smaller node ID wins
-				shouldWin := localNodeID < otherNodeID
-				h.logger.Infof("2-node tie-breaking: local=%s, other=%s, shouldWin=%v", localNodeID, otherNodeID,
-					shouldWin)
+
+				shouldWin := nodeID == lowest
+				h.logger.Infof("2-node tie-breaking: subject=%s, lowest=%s, shouldWin=%v",
+					nodeID, lowest, shouldWin)
 				return shouldWin
 			}
 			return true // Allow non-Active status changes

@@ -516,10 +516,18 @@ func (m *Member) IsLocal() bool {
 	return result
 }
 
-// RemoveIPs removes the specified IPs from the member's active IPs
+// RemoveIPs removes the specified IPs from the member's active IPs, and brings them down.
+//
+// The record update holds the member lock; the bring-down does not, and must not.
+// BringDownIPs takes the same lock to read IsLocal and Status, and Member embeds a plain
+// sync.RWMutex — so holding it across that call self-deadlocked, on both the local and the
+// remote branch. Same non-reentrant trap as #46, RebalanceCluster, hasQuorumLocked and #32.
+//
+// Releasing between the two is safe here because the bring-down is driven by the caller's
+// `ips` argument rather than by anything read under the lock, so a concurrent writer can
+// change the record without changing which addresses this call was asked to drop.
 func (m *Member) RemoveIPs(ips []string) {
 	m.Lock()
-	defer m.Unlock()
 
 	// Create a lookup map for IPs to remove
 	toRemove := make(map[string]bool)
@@ -537,9 +545,11 @@ func (m *Member) RemoveIPs(ips []string) {
 
 	// Update active IPs
 	m.ActiveIPs = newActiveIPs
+	isLocal := m.IsLocal()
+	m.Unlock()
 
 	// Only try to bring down IPs that are actually present on the interface
-	if m.IsLocal() {
+	if isLocal {
 		// Check which IPs actually exist on local interfaces before trying to bring them down
 		var ipsToRemove []string
 		for _, ip := range ips {
