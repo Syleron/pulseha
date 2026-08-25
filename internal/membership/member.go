@@ -9,7 +9,6 @@ import (
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
-	"github.com/syleron/pulseha/packages/utils"
 	"github.com/syleron/pulseha/rpc"
 )
 
@@ -516,69 +515,6 @@ func (m *Member) IsLocal() bool {
 	return result
 }
 
-// RemoveIPs removes the specified IPs from the member's active IPs, and brings them down.
-//
-// The record update holds the member lock; the bring-down does not, and must not.
-// BringDownIPs takes the same lock to read IsLocal and Status, and Member embeds a plain
-// sync.RWMutex — so holding it across that call self-deadlocked, on both the local and the
-// remote branch. Same non-reentrant trap as #46, RebalanceCluster, hasQuorumLocked and #32.
-//
-// Releasing between the two is safe here because the bring-down is driven by the caller's
-// `ips` argument rather than by anything read under the lock, so a concurrent writer can
-// change the record without changing which addresses this call was asked to drop.
-func (m *Member) RemoveIPs(ips []string) {
-	m.Lock()
-
-	// Create a lookup map for IPs to remove
-	toRemove := make(map[string]bool)
-	for _, ip := range ips {
-		toRemove[ip] = true
-	}
-
-	// Filter out the IPs to remove
-	var newActiveIPs []string
-	for _, ip := range m.ActiveIPs {
-		if !toRemove[ip] {
-			newActiveIPs = append(newActiveIPs, ip)
-		}
-	}
-
-	// Update active IPs
-	m.ActiveIPs = newActiveIPs
-	isLocal := m.IsLocal()
-	m.Unlock()
-
-	// Only try to bring down IPs that are actually present on the interface
-	if isLocal {
-		// Check which IPs actually exist on local interfaces before trying to bring them down
-		var ipsToRemove []string
-		for _, ip := range ips {
-			// Extract IP without CIDR if needed
-			ipOnly := ip
-			if cidr, _ := utils.GetCIDR(ip); cidr != nil {
-				ipOnly = cidr.String()
-			}
-			exists, _, err := network.CheckIfIPExists(ipOnly)
-			if err == nil && exists {
-				ipsToRemove = append(ipsToRemove, ip)
-			}
-		}
-		// Only call BringDownIPs if there are actually IPs to remove
-		if len(ipsToRemove) > 0 {
-			if err := m.BringDownIPs(ipsToRemove); err != nil {
-				m.logger.Error("Failed to bring down IPs", "error", err)
-			}
-		} else {
-			m.logger.Debug("No IPs found on interface to remove", "ips", ips)
-		}
-	} else {
-		// Remote node - trust the health checker and try to bring them down anyway
-		if err := m.BringDownIPs(ips); err != nil {
-			m.logger.Error("Failed to bring down IPs", "error", err)
-		}
-	}
-}
-
 // GetHealthStatus returns detailed health information about the member
 func (m *Member) GetHealthStatus() MemberHealth {
 	m.Lock()
@@ -596,17 +532,40 @@ func (m *Member) GetHealthStatus() MemberHealth {
 // EnterMaintenance transitions this member to maintenance mode.
 // If the member is currently active, its IPs are brought down first so the
 // cluster can elect a new active node before marking the transition.
+// The bring-down happens with the lock RELEASED. BringDownIPs takes the member lock itself
+// to read IsLocal and Status, and Member embeds a plain sync.RWMutex, which is not reentrant
+// — so holding it across that call deadlocked `pulsectl node maintenance` against an Active
+// node holding addresses, which is the case the command exists for. The goroutine then held
+// the member lock forever, so anything else touching that member wedged behind it.
+//
+// The ordering the comment above promises is preserved: the addresses are down before the
+// status is marked, so peers see a node that has stopped serving before they see one that is
+// ineligible.
 func (m *Member) EnterMaintenance() error {
 	m.Lock()
-	defer m.Unlock()
 	if m.Status == StatusMaintenance {
+		m.Unlock()
 		return nil
 	}
-	if m.Status == StatusActive {
+	// Snapshotted rather than passed by reference, because the field is cleared below and
+	// the bring-down runs between the two critical sections.
+	var toRelease []string
+	if m.Status == StatusActive && len(m.ActiveIPs) > 0 {
+		toRelease = append([]string{}, m.ActiveIPs...)
+	}
+	m.Unlock()
+
+	if len(toRelease) > 0 {
 		// Bring down all hosted IPs before leaving active state
-		if len(m.ActiveIPs) > 0 {
-			_ = m.BringDownIPs(m.ActiveIPs)
-		}
+		_ = m.BringDownIPs(toRelease)
+	}
+
+	m.Lock()
+	defer m.Unlock()
+	// Re-checked: the status can have moved while the addresses were coming down, and a node
+	// that is no longer Active must not have its assignment list cleared out from under
+	// whatever moved it.
+	if m.Status == StatusActive {
 		m.ActiveIPs = nil
 		m.LoadFactor = 0
 	}

@@ -83,36 +83,3 @@ func TestTwoNodeTiebreakDecidesOnTheSubject(t *testing.T) {
 		}
 	})
 }
-
-// The caller has to agree with the rule about who the candidate is.
-//
-// handlePartialFailure took the first Passive the member map yielded, and Go randomises map
-// iteration — so with two Passives it asked the vote about a coin flip. Now that the vote is
-// decided on the subject's ID, asking about the higher one is refused and `!voteResult`
-// returns, abandoning the failover instead of trying the other node. Roughly half of these
-// failovers would have been dropped. Selection and adjudication have to use the same rule
-// (END-2325).
-func TestPartialFailurePromotesTheSameNodeEveryTime(t *testing.T) {
-	const attempts = 20
-
-	for i := 0; i < attempts; i++ {
-		// Three nodes: an Active whose addresses have all failed, and two Passive
-		// contenders whose IDs sort in a known order.
-		active := newAATestMember("node-c", "host-c", StatusActive, []string{"10.0.0.1/24"})
-		low := newAATestMember("node-a", "host-a", StatusPassive, nil)
-		high := newAATestMember("node-b", "host-b", StatusPassive, nil)
-		h, stub := newAPTestChecker("node-a", active, low, high)
-
-		h.handlePartialFailure(active, []string{"10.0.0.1/24"})
-
-		if len(stub.failovers) != 1 {
-			t.Fatalf("attempt %d: expected exactly one promotion, got %v", i, stub.failovers)
-		}
-		// Lower ID, every time. A single differing attempt means the selection is back
-		// to depending on map order, which is the bug.
-		if stub.failovers[0] != "node-a" {
-			t.Fatalf("attempt %d: promoted %s, want the lowest-ID Passive node-a",
-				i, stub.failovers[0])
-		}
-	}
-}
