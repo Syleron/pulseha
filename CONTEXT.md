@@ -4,8 +4,9 @@ The clustering daemon that keeps a set of appliances agreed on which of them is 
 traffic, and moves floating IP addresses between them when that answer changes.
 
 This glossary covers the vocabulary of **node status** — the words PulseHA publishes about the
-members of a cluster, and which an operator reads on the appliance's High availability page.
-It is deliberately narrow; terms are added as they are pinned down, not in advance.
+members of a cluster, and which an operator reads on the appliance's High availability page —
+together with the named conditions those statuses combine to describe. It is deliberately
+narrow; terms are added as they are pinned down, not in advance.
 
 ## Language
 
@@ -26,9 +27,11 @@ _Avoid_: pool, set, cluster IPs
 
 **Active**:
 Mode-relative, and the one term here that requires knowing the Cluster Mode before it can be
-read. In active-passive: the elected node — the single member the cluster has chosen, whether
-or not it currently holds any address. In active-active: a member holding at least one Floating
-IP.
+read. In active-passive: the elected node — normally the single member the cluster has chosen,
+whether or not it currently holds any address. In active-active: a member holding at least one
+Floating IP.
+A partitioned two-node cluster is the deliberate exception: each side elects itself, so two
+members report Active at once. See [ADR-0002](./docs/adr/0002-two-node-availability-over-safety.md).
 _Avoid_: master, primary, leader
 
 **Passive**:
@@ -53,3 +56,12 @@ A member that has given no healthy answer — not yet reached, or no longer answ
 checks. A statement about knowledge of the member, not about a state the member is in.
 _Avoid_: offline, down, dead, unavailable, suspicious — the last two are appliance WebUI
 vocabulary with no PulseHA status behind them
+
+**Split-brain**:
+Two members both Active in active-passive, each believing the other is gone. Not a status —
+no node ever publishes it — but the name for a condition an operator reads off two nodes at
+once. A defect in a cluster of three or more, where a majority exists and should prevent it;
+the accepted behaviour of a partitioned two-node cluster, which has no majority to appeal to.
+See [ADR-0002](./docs/adr/0002-two-node-availability-over-safety.md).
+_Avoid_: dual active, both active — these name the symptom without saying it is unintended in
+one case and not the other

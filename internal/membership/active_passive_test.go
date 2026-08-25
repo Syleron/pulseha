@@ -2,6 +2,7 @@ package membership
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -31,6 +32,19 @@ type stubServer struct {
 	// made consolidation take tens of seconds on the health-check tick. Set before
 	// the pass starts and not written afterwards.
 	makePassiveDelay time.Duration
+
+	// announced records, in order, the nodes asked to re-announce their floating
+	// IPs, and announceFails makes that request fail. Ordering against demoted
+	// matters: an announcement that lands before the demotions is the last word on
+	// nothing, because the demoted node's own bring-up already announced later.
+	announced     []string
+	announceFails bool
+
+	// sequence interleaves demotions and announcements in call order, because
+	// consolidation's correctness depends on which came last: an announcement made
+	// before the demotions is overwritten on the segment by the demoted node's own
+	// earlier bring-up, which is the fault being fixed rather than the fix.
+	sequence []string
 }
 
 func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return nil }
@@ -79,6 +93,7 @@ func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveReques
 		return &rpc.MakePassiveResponse{Success: false, Message: "node unreachable"}, nil
 	}
 	s.demoted = append(s.demoted, req.NodeId)
+	s.sequence = append(s.sequence, "demote:"+req.NodeId)
 	if member := s.members.GetMemberByID(req.NodeId); member != nil {
 		member.Lock()
 		member.Status = StatusPassive
@@ -87,6 +102,15 @@ func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveReques
 		member.Unlock()
 	}
 	return &rpc.MakePassiveResponse{Success: true}, nil
+}
+
+func (s *stubServer) AnnounceNodeIPs(nodeID string) error {
+	if s.announceFails {
+		return errors.New("announce failed")
+	}
+	s.announced = append(s.announced, nodeID)
+	s.sequence = append(s.sequence, "announce:"+nodeID)
+	return nil
 }
 
 // newAPTestChecker wires a health checker past its startup grace period with a

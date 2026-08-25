@@ -14,10 +14,7 @@
     "syslog_address": "",
     "syslog_facility": "LOG_LOCAL0",
     "syslog_tag": "pulseha",
-    "mode": "active-passive",
-    "quorum_enabled": false,
-    "quorum_min_nodes": 2,
-    "quorum_majority": true
+    "mode": "active-passive"
   },
   "floating_ip_groups": {},
   "nodes": {},
