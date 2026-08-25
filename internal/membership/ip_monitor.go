@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/charmbracelet/log"
@@ -55,6 +56,15 @@ type IPMonitor struct {
 	// enforce is the pass itself, indirected so the coalescing above can be tested
 	// on any platform — enforceExpectations needs netlink, and is a no-op off Linux.
 	enforce func()
+
+	// running says whether the loops are up, so Start can be called again without
+	// spawning a second pair of them.
+	//
+	// Atomic rather than a field under the monitor's own RWMutex because Start is
+	// now driven by cluster membership arriving, which the daemon learns about from
+	// several places, and the cheap "already up?" answer must not have to take a
+	// lock initializeExpectedIPs is holding.
+	running atomic.Bool
 }
 
 // NewIPMonitor creates a new IP monitor
@@ -73,17 +83,40 @@ func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 }
 
 // Start begins monitoring IP addresses
+// Idempotent, and it has to be. initializeExpectedIPs needs a local node ID, which needs a
+// configured cluster, so on a node that starts before it joins one this fails — and the daemon
+// then has no enforce loop for the rest of its life unless something calls Start again. That
+// is the normal first-time sequence (install, start the daemon, then `cluster create`), and it
+// left a demoted node still holding a whole floating IP group with no loop to release it. See
+// docs/TEST-PLAN.md defect #83. Start is therefore retried whenever cluster membership
+// arrives, and every call after the first has to be a no-op rather than a second monitorLoop
+// and a second periodicReconcile racing the first over the same addresses.
 func (m *IPMonitor) Start() error {
 	if m == nil {
 		return nil
 	}
+	if m.running.Load() {
+		return nil
+	}
+
 	m.Lock()
 	defer m.Unlock()
 
+	// Re-checked under the lock: two callers can pass the check above at once.
+	if m.running.Load() {
+		return nil
+	}
+
 	// Initialize the expected IPs from the current member
 	if err := m.initializeExpectedIPs(); err != nil {
+		// Left not-running deliberately, so a later call retries. This is the no-cluster-yet
+		// case, and it is expected on a node that has not joined one.
 		return fmt.Errorf("failed to initialize expected IPs: %v", err)
 	}
+
+	// Marked before the goroutines start, not after: a concurrent caller that got past the
+	// outer check must not be able to spawn its own pair while this one is still launching.
+	m.running.Store(true)
 
 	// Start platform-specific event monitoring (pure event-driven)
 	go m.monitorLoop()
@@ -92,6 +125,14 @@ func (m *IPMonitor) Start() error {
 
 	m.logger.Info("IP monitor started")
 	return nil
+}
+
+// IsRunning reports whether the monitor's loops are up.
+func (m *IPMonitor) IsRunning() bool {
+	if m == nil {
+		return false
+	}
+	return m.running.Load()
 }
 
 // TriggerEnforce performs an immediate expectations check asynchronously, with at
@@ -184,6 +225,7 @@ func (m *IPMonitor) Stop() {
 	}
 	m.stopOnce.Do(func() {
 		close(m.stopChan)
+		m.running.Store(false)
 		m.logger.Info("IP monitor stopped")
 	})
 }

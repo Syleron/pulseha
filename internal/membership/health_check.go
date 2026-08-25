@@ -67,6 +67,9 @@ type ServerReference interface {
 	Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error)
 	// Demotion orchestration; releases every group IP the node could host
 	MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error)
+	// Re-announcement of the addresses a node is configured to hold, for when the
+	// segment's idea of who owns them has gone stale without any address moving
+	AnnounceNodeIPs(nodeID string) error
 	// Re-broadcast of the current config, for the periodic reconcile below
 	RequestConfigReconcile()
 }
@@ -119,11 +122,16 @@ type HealthCheck struct {
 // HealthChecker handles health checking for nodes and IPs
 type HealthChecker struct {
 	sync.RWMutex
-	members               *MemberList
-	checkTicker           *time.Ticker
-	stopChan              chan struct{}
-	stopOnce              sync.Once // Ensure we only close stopChan once
-	logger                *log.Logger
+	members     *MemberList
+	checkTicker *time.Ticker
+	stopChan    chan struct{}
+	stopOnce    sync.Once // Ensure we only close stopChan once
+	logger      *log.Logger
+	// lastPeerStatuses is the previous pass's view of every OTHER member, so a status
+	// change can be detected regardless of which node originated it. Only read and
+	// written from the health-check goroutine, under the same lock as the pass.
+	lastPeerStatuses map[string]MemberStatus
+
 	// ready and stopped are atomic rather than plain fields under the health
 	// checker's own RWMutex, because IsRunning is read from a caller that already
 	// holds the *server's* write lock — Server.Start's startHealthChecker probe —
@@ -753,6 +761,8 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		return
 	}
 
+	h.announceOnPeerDemotion(members)
+
 	if activeMember == nil {
 		h.logger.Error("ACTIVE_CHECK: No active node found in cluster, initiating leader election")
 		h.electNewActiveNode()
@@ -897,6 +907,92 @@ func (h *HealthChecker) makePassiveTimeout() time.Duration {
 // holds them all while its ActiveIPs is still empty.
 //
 // Returns true if any node was demoted.
+// announceOnPeerDemotion re-announces this node's floating IPs when a peer stops being able to
+// hold them, so the segment stops pointing at a node that has just let them go.
+//
+// A gratuitous ARP is only ever sent by a bring-up and there is no periodic re-announce, so a
+// node that has held an address continuously never announces it again. After a two-node split
+// both nodes held the group and the one that promoted second announced last; when it is then
+// demoted it drops those addresses without announcing anything — bring-down never does — and
+// every ARP cache is left pointing at a node that no longer answers. The address is present on
+// the survivor and reachable by nobody until the caches age out. See
+// docs/adr/0002-two-node-availability-over-safety.md and docs/TEST-PLAN.md #80.
+//
+// Detected here, on the health-check pass, rather than at either end of the state broadcast.
+// Both were tried and both are half of the answer: the ConfigSync receive hook fires only on a
+// node that is TOLD of the demotion, and which node that is depends on node-ID ordering
+// deciding who survives consolidation — measured across three runs, the surviving Active was
+// the receiver once and the originator twice, so one announcement was made in three heals. The
+// send side cannot diff reliably either, because callers apply the state to the member list
+// before broadcasting it. This pass sees the settled view every tick whoever produced it, which
+// is the property the other two placements lack.
+//
+// Ordering against the peer's release does not matter, which is what makes a tick-based
+// detector sufficient: a bring-down never announces, so any announcement made after the peer's
+// last bring-up is the last word on the segment regardless of when the release lands.
+//
+// Edge-triggered against the previous pass, and the server debounces on top of that. The
+// trigger has to accept a peer arriving from Unknown, because that is what a healed partition
+// produces — this node lost sight of the peer during the split, so its last known status was
+// never Active — and that is also what a merely slow peer produces (defects #2/#26), which is
+// why the debounce exists rather than a tighter condition here.
+func (h *HealthChecker) announceOnPeerDemotion(members map[string]*Member) {
+	if h.server == nil {
+		return
+	}
+	cfg := h.members.Config()
+	if cfg == nil {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+
+	previous := h.lastPeerStatuses
+	current := make(map[string]MemberStatus, len(members))
+
+	localIsActive := false
+	demoted := make([]string, 0, 1)
+
+	for id, member := range members {
+		member.Lock()
+		status := member.Status
+		member.Unlock()
+
+		if id == localID {
+			localIsActive = status == StatusActive
+			continue
+		}
+		current[id] = status
+
+		if status != StatusPassive && status != StatusMaintenance {
+			continue
+		}
+		// A peer present in the previous view under a different status is the edge. A peer
+		// not in it at all is this node's first pass, where there is no transition to react
+		// to and announcing would fire on every daemon start.
+		if prev, seen := previous[id]; seen && prev != status {
+			demoted = append(demoted, id)
+		}
+	}
+
+	h.lastPeerStatuses = current
+
+	if len(demoted) == 0 || !localIsActive {
+		return
+	}
+
+	h.logger.Info("ACTIVE_CHECK: peer can no longer hold floating IPs, re-announcing",
+		"demoted_peers", demoted)
+	if err := h.server.AnnounceNodeIPs(localID); err != nil {
+		// The addresses are up here either way; a failed announcement leaves the stale ARP
+		// entries rather than creating a new fault, so the pass continues.
+		h.logger.Error("ACTIVE_CHECK: failed to re-announce floating IPs after a peer was demoted",
+			"error", err)
+	}
+}
+
 func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 	if cycles, _ := h.reconcileCounters(); cycles < reconcileGraceCycles || h.server == nil {
 		return false
@@ -974,6 +1070,31 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 
 	if !demoted {
 		return false
+	}
+
+	// Make the target announce what it already holds. Nothing moved onto it — it was
+	// Active throughout — so no bring-up fires and, without this, it never announces.
+	// Meanwhile the node just demoted has dropped addresses the segment has learned
+	// from it, because its bring-up announced after the target's. Half the time, on
+	// node-ID ordering alone, every ARP cache now points at a node that no longer
+	// answers, and the group is dark on a healed cluster until the caches expire.
+	// That is the recovery creating the outage the split-brain avoided
+	// (docs/adr/0002-two-node-availability-over-safety.md).
+	//
+	// After the demotions, so the announcement is the last word on the segment, and
+	// before the state broadcast, which is cheap and local by comparison. Synchronous
+	// for that ordering: a fire-and-forget announcement can land before the release it
+	// is meant to follow, and a discarded RPC result is what defect #5 cost.
+	//
+	// Bounded per interface by bringUpTimeoutFor (capped at bringUpMaxTimeout, 120s),
+	// the same order as the single MakePassive above it, and this pass already runs
+	// server calls of that length under the health-checker lock — see #79 for why the
+	// lock held across them is a known and separately-tracked problem.
+	if err := h.server.AnnounceNodeIPs(target.ID); err != nil {
+		// The addresses are up on the target either way; this leaves the stale ARP
+		// entries in place rather than creating a new fault, so the pass continues.
+		h.logger.Error("ACTIVE_CHECK: failed to re-announce floating IPs after consolidation",
+			"target", target.Hostname, "error", err)
 	}
 
 	// Push the corrected state out so demoted nodes stop claiming IPs instead
@@ -2210,7 +2331,25 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			h.logger.Infof("Only 1 node available, becoming active immediately")
 			return true
 		} else if availableNodes == 2 {
-			// 2-node fallback: use deterministic ID-based tie-breaking
+			// Two nodes *available*, which is not the same as a two-node cluster and must
+			// never be reached from one. availableNodes counts only Active and Passive
+			// members, so this branch belongs to a degraded cluster of three or more — the
+			// Active has failed and two Passives remain (handlePartialFailure), or two of
+			// four are Unknown (attemptVotingElection). A genuine two-node cluster never
+			// arrives here at all: attemptVotingElection returns at availableCount < 3 and
+			// handlePartialFailure only votes at clusterSize >= 3, so the pair promotes
+			// directly and both sides claim the group.
+			//
+			// That is deliberate, not an oversight. Electing a single owner by node ID means
+			// deciding from a node that cannot see its peer, so the winner may be the one
+			// whose service network is the broken half — turning a duplicated address into a
+			// dark one. See docs/adr/0002-two-node-availability-over-safety.md. Routing the
+			// two-node election into this branch would reverse that decision.
+			//
+			// Known defect, END-2325: the rule below answers "should *I* win" to a
+			// question asked about nodeID. Via attemptVotingElection the candidate is often
+			// not the local node, so a coordinator whose own ID sorts higher blocks a
+			// promotion that should proceed.
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
 				// Find the other available node

@@ -256,6 +256,12 @@ type Server struct {
 	// reads it without synchronisation.
 	onAsyncReconfigure func()
 
+	// lastAnnounce debounces re-announcements, guarded by its own mutex because it is
+	// written from the health-check pass and must not queue behind whatever else holds the
+	// server lock.
+	announceMu   sync.Mutex
+	lastAnnounce time.Time
+
 	// asyncReconfigures counts the Reconfigure goroutines full ConfigSyncs have
 	// spawned and not yet finished, so awaitAsyncReconfigures can wait them out.
 	//
@@ -431,16 +437,14 @@ func (s *Server) Start() error {
 		s.logger.Warn("Quorum handler is nil, quorum RPC methods will not be available")
 	}
 
-	// Start the health checker
-	s.startHealthChecker()
-
-	// Start the IP monitor - re-enabled with clean architectural separation from health checker
-	if err := s.ipMonitor.Start(); err != nil {
-		s.logger.Error("Failed to start IP monitor", "error", err)
-		// Continue anyway, as this is not critical
-	}
-
-	// Only start health checker if we have a configured cluster
+	// Only start the cluster loops if we have a configured cluster.
+	//
+	// This used to be preceded by an unconditional startHealthChecker() and an unconditional
+	// ipMonitor.Start(), which between them made the guard below decorative: the checker was
+	// started either way, and the monitor was started at the one moment it could not possibly
+	// succeed — before any cluster exists — logging an Error and never being retried
+	// (docs/TEST-PLAN.md defect #83). startHealthChecker now owns both, and every path that
+	// creates or joins a cluster already calls it.
 	if s.config.ClusterCheck() {
 		s.startHealthChecker()
 	} else {
@@ -588,6 +592,23 @@ func (s *Server) startHealthChecker() {
 	s.logger.Info("Initializing health checker", "interval", interval)
 	s.healthCheck.Start(interval)
 	s.logger.Info("Health checker started successfully")
+
+	// The IP monitor is started here, with the health checker, because the two share a
+	// precondition and a trigger: neither can run without a configured cluster, and both
+	// become startable at the same moments — daemon start on an already-configured node,
+	// cluster create, join, resync, node removal. Every one of those already calls this
+	// function, so pairing them is what stops a seventh caller from starting one and not the
+	// other, which is how defect #83 happened: the monitor's one Start call sat in
+	// Server.Start, ran before any cluster existed, failed, and was never retried.
+	//
+	// Idempotent on both sides, so the repeat calls this attracts cost nothing.
+	if s.ipMonitor != nil && !s.ipMonitor.IsRunning() {
+		if err := s.ipMonitor.Start(); err != nil {
+			// Not fatal, and on a node that has not joined a cluster yet it is not even
+			// wrong — the next caller retries. Debug rather than Error for that reason.
+			s.logger.Debug("IP monitor not started yet", "error", err)
+		}
+	}
 }
 
 // Stop gracefully shuts down the server
@@ -1822,16 +1843,52 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 	defer remoteClient.Close()
 
 	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
-		// Nothing accepted the connection, so no daemon is holding those addresses. This is
-		// also what a network partition looks like from here, which is why the caller still
-		// requires quorum before acting on it.
-		return false, true, fmt.Errorf("failed to connect to %s: %w", nodeID, err)
+		// Only a malformed target reaches here — grpc.NewClient does not dial — so this is a
+		// local fault, not evidence about the peer.
+		return false, false, fmt.Errorf("failed to create connection to %s: %w", nodeID, err)
 	}
+
+	// Prove the socket is reachable before asking anything of it.
+	//
+	// Without this the two failures that decide a promotion are the same error. A peer that
+	// refuses the connection answers Unavailable; a peer whose packets are being dropped —
+	// a dead switch port, a powered-off node, a firewall DROP — leaves the call waiting for a
+	// transport that never arrives, which gRPC reports as DeadlineExceeded, and that is the
+	// identical code a peer returns when it accepts the call and then hangs. Reading the
+	// second as the first aborted every failover away from a blackholed node:
+	// `Aborting promotion - cannot confirm unreachable node released its floating IPs
+	// peer_still_alive=true have_quorum=true`, repeating for as long as the partition lasted.
+	// The symptom is a floating IP that stays dark for as long as the node stays dead, and it
+	// is not limited to two-node clusters — peerStillAlive short-circuits ahead of the quorum
+	// check, so a majority cannot override it at any cluster size.
+	//
+	// Only `systemctl stop` hid this: a closed port refuses, which is Unavailable, so every
+	// failover this project has verified live took the working branch. A node that loses power
+	// or a link that starts dropping produces no refusal and took the other one.
+	//
+	// A bare TCP dial, deliberately, and NOT gRPC's own connectivity state. Waiting for a
+	// ClientConn to reach READY reports the HTTP/2 connection, which a daemon wedged before it
+	// can send its SETTINGS frame never completes — so readiness would classify a wedged-but-
+	// live Active as gone and promote over a node still holding every address, which is TC-6
+	// reintroduced through a new door. The kernel accepts on behalf of a wedged process, so
+	// the socket answering is exactly the signal that keeps that case safe while the blackhole
+	// case gets fixed. It is also the probe checkNodeConnectivity already uses to decide the
+	// same question.
+	dialAddr := net.JoinHostPort(utils.SanitizeIPv6(node.IP), node.Port)
+	probe, dialErr := net.DialTimeout("tcp", dialAddr, transportProbeTimeout)
+	if dialErr != nil {
+		// Nothing is listening, or nothing can reach it. Either way no daemon is holding those
+		// addresses. This is also what a network partition looks like from here, which is why
+		// the caller still requires quorum before acting on it.
+		return false, true, fmt.Errorf("no daemon reachable at %s: %w", dialAddr, dialErr)
+	}
+	_ = probe.Close()
 
 	resp, err := remoteClient.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
 	if err != nil {
-		// Unavailable means the transport dropped; the daemon is not serving. A deadline means
-		// it accepted the call and never finished — it is alive and still owns its IPs.
+		// The socket answered a moment ago, so a deadline here genuinely means the peer took
+		// the call and never finished — alive, and still owning its IPs. Unavailable means the
+		// transport dropped under the call; the daemon is not serving.
 		return false, status.Code(err) == codes.Unavailable, err
 	}
 	if !resp.Success {
@@ -1840,6 +1897,26 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 	}
 	return true, false, nil
 }
+
+// transportProbeTimeout bounds how long confirmPeerReleasedIPs waits for a TCP connection to
+// the peer before concluding nothing is there.
+//
+// Sized for a kernel handshake on a healthy segment, not for an application response — that
+// separation is the whole point of probing the socket rather than the RPC, since a loaded peer
+// still completes a handshake in milliseconds while its daemon may take much longer to answer.
+// Long enough to absorb a retransmit or two; short enough that a dead node does not hold a
+// promotion open for the length of TCP's own SYN backoff, which is what made the blackhole
+// case look like a hang rather than a failure.
+//
+// Six times checkNodeConnectivity's 500ms. That probe runs every health-check tick and can be
+// wrong cheaply — the next tick corrects it. This one runs once, and being wrong here either
+// strands a floating IP or dual-homes it, so it buys margin against a transient loss that
+// probe would simply retry past.
+//
+// Deliberately NOT derived from the group size the way DemotionTimeoutFor is: the number of
+// addresses a peer has to release affects how long it takes to ANSWER, never how long it takes
+// to accept a connection.
+const transportProbeTimeout = 3 * time.Second
 
 // canPromoteWithoutConfirmedRelease decides whether a promotion may claim the floating IPs
 // when the previous Active is unreachable and its release could not be confirmed.
@@ -6849,6 +6926,149 @@ func bringUpTimeoutFor(ipCount int) time.Duration {
 		return bringUpMaxTimeout
 	}
 	return timeout
+}
+
+// announceDebounceInterval is the shortest gap between two re-announcements.
+//
+// The trigger has to accept `Unknown -> Passive`, because that is the transition a healed
+// partition produces — and it is also the transition a merely *slow* peer produces, over and
+// over. A node doing bulk IP work is slow enough to answer that its peers mark it Unknown and
+// then Passive again a tick later (docs/TEST-PLAN.md defects #2/#26), and the two are
+// indistinguishable from here. Without a bound, each flap re-places and re-announces the whole
+// group: on the 201-address topology that is #4's per-address arping cost paid on a peer's
+// health-check jitter.
+//
+// One announcement is all a stale ARP cache needs, so suppressing the repeats inside the window
+// costs nothing the first one did not already buy.
+const announceDebounceInterval = 30 * time.Second
+
+// allowAnnounce reports whether enough time has passed since the last re-announcement, and
+// records this one when it says yes.
+//
+// Applied to every caller rather than only to the demotion detector. Consolidation is rare
+// enough that it will not be suppressed in practice, and if it is, the only way that happens
+// is that something announced these same addresses from this same node moments earlier — so
+// the segment already holds what the suppressed announcement would have told it.
+func (s *Server) allowAnnounce() bool {
+	s.announceMu.Lock()
+	defer s.announceMu.Unlock()
+
+	now := time.Now()
+	if !s.lastAnnounce.IsZero() &&
+		now.Sub(s.lastAnnounce) < announceDebounceInterval {
+		return false
+	}
+	s.lastAnnounce = now
+	return true
+}
+
+// announcePlan maps each of nodeID's interfaces to the floating IPs that node is configured to
+// hold on it, skipping interfaces with nothing to announce.
+//
+// Derived from config through expectedIfaceIPs, never from the member record. In
+// active-passive a peer does not self-report what it hosts, so a remote node's ActiveIPs is
+// empty and a plan built from it would announce nothing at all — silently, and precisely for
+// the remote target that consolidation most often picks (ADR-0001).
+//
+// Reads s.config unlocked, and so does expectedIfaceIPs below it, which means a ConfigSync
+// swapping the pointer mid-plan can have the node entry and the group list come from different
+// configs — #71's shape, on Server.config rather than MemberList.config. Left that way rather
+// than half-locked, for two reasons. Taking s.RLock here would put it above the member-list
+// lock that expectedIfaceIPs' active-active branch takes, inverting an order nothing else in
+// this file inverts. And a stale plan is harmless *here* specifically: SendGARPBatch re-reads
+// every address against the kernel immediately before its own arping and returns the rest as
+// skipped (#33), so an address this plan names but the node does not hold is not announced.
+// The kernel decides, at announce time. That is a property of the announce path, not a general
+// licence — a caller using this plan to *place* addresses would not be covered by it.
+func (s *Server) announcePlan(nodeID string) (map[string][]string, error) {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return nil, fmt.Errorf("no configuration for node %s", nodeID)
+	}
+
+	plan := make(map[string][]string, len(node.IPGroups))
+	for iface := range node.IPGroups {
+		if ips := s.expectedIfaceIPs(nodeID, iface); len(ips) > 0 {
+			plan[iface] = ips
+		}
+	}
+	return plan, nil
+}
+
+// AnnounceNodeIPs re-places on nodeID every floating IP that node is configured to hold, for
+// the sole purpose of making it announce them.
+//
+// A gratuitous ARP is only ever sent by a bring-up — bringUpIPsLocally, the enforce loop's
+// missing set, and BringUpIP — and there is no periodic re-announce. So a node that has held
+// an address continuously never announces it again, however wrong the segment's idea of who
+// owns it has become. Consolidation after a two-node split-brain is exactly that case: both
+// nodes held the whole group, the loser's bring-up announced last, and when the loser is
+// demoted every ARP cache still points at it while the surviving node stays silent. The
+// address is then present on the survivor and reachable by nobody until the caches age out.
+// See docs/adr/0002-two-node-availability-over-safety.md.
+//
+// Expressed as a re-place rather than a bare announce because BringUpIP already announces
+// every address it got as far as attempting, including the ones it made no syscall for, and
+// treats an address already on the interface as satisfied (#45/#64). A redundant re-place
+// therefore costs no placement and yields the announcement; summary.AlreadyHeld is the log
+// line that says so.
+//
+// Called without the server lock held, as refreshLocalMonitorExpectedIPs does, so that
+// expectedIfaceIPs' active-active branch can take the member-list lock without inverting the
+// order.
+//
+// Best effort by construction. Every address is up either way; failing to announce leaves the
+// pre-existing dark window rather than creating one, so failures are reported and the
+// remaining interfaces are still attempted.
+func (s *Server) AnnounceNodeIPs(nodeID string) error {
+	// Debounced here rather than at each caller, because the trigger that drives most of
+	// these has to accept a peer arriving from Unknown — which is what a healed partition
+	// produces and also what a merely slow peer produces (defects #2/#26). Unbounded, a
+	// flapping peer re-places and re-announces the whole group on every flap: on the
+	// 201-address topology that is #4's per-address arping cost paid on health-check jitter.
+	if !s.allowAnnounce() {
+		s.logger.Debug("ANNOUNCE: suppressed, one was made within the debounce window",
+			"node_id", nodeID, "interval", announceDebounceInterval)
+		return nil
+	}
+
+	plan, err := s.announcePlan(nodeID)
+	if err != nil {
+		return err
+	}
+
+	localID, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		return fmt.Errorf("failed to resolve local node: %w", err)
+	}
+
+	var failed []string
+	announced := 0
+	for iface, ips := range plan {
+		if nodeID == localID {
+			ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
+			_, err = s.BringUpIP(ctx, &rpc.UpIpRequest{Iface: iface, Ips: ips})
+			cancel()
+		} else {
+			err = s.bringIPsOnNodeUp(nodeID, iface, ips)
+		}
+
+		if err != nil {
+			s.logger.Error("ANNOUNCE: failed to re-announce floating IPs",
+				"node_id", nodeID, "iface", iface, "count", len(ips), "error", err)
+			failed = append(failed, iface)
+			continue
+		}
+		s.logger.Info("ANNOUNCE: re-announced floating IPs",
+			"node_id", nodeID, "iface", iface, "count", len(ips))
+		announced += len(ips)
+	}
+
+	if len(failed) > 0 {
+		return fmt.Errorf("failed to announce on %d interface(s) of node %s: %v", len(failed), nodeID, failed)
+	}
+	s.logger.Debug("ANNOUNCE: completed", "node_id", nodeID, "addresses", announced)
+	return nil
 }
 
 // bringIPsOnNodeUp contacts a specific node and asks it to bring IPs up on the given interface
