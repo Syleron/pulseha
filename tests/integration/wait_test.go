@@ -78,3 +78,48 @@ func requireReportedStatus(
 	t.Fatalf("%s: %s reports %s as %v after %s, want %v",
 		msg, observer.Hostname, targetHostname, got, statusSettleTimeout, want)
 }
+
+// requireAgreedStatus waits for two observers to publish the same status for target,
+// and fails with what each of them last said.
+//
+// The same lesson as requireMemberStatus above, applied to the one assertion in this
+// package that still asserted at an arbitrary instant. Comparing two ReportedStatus
+// calls directly is two sequential RPCs against a cluster whose statuses are still
+// moving -- the tests drive a 1ms health-check interval, so an election can land
+// between them and the reads straddle it. That is a race in the assertion, not
+// disagreement between the nodes: what the test means is that the two converge on one
+// answer, which is a property with a deadline rather than an instant.
+//
+// Measured before this existed: the containerised run failed 6 of 15 on the branch that
+// added it and 15 of 15 on origin/dev, so it is the assertion that is wrong rather than
+// any one change under it.
+func requireAgreedStatus(
+	t *testing.T,
+	a, b *testutils.TestNode,
+	targetHostname string,
+	msg string,
+) {
+	t.Helper()
+
+	var (
+		fromA, fromB rpc.MemberStatusEnum
+		errA, errB   error
+	)
+	deadline := time.Now().Add(statusSettleTimeout)
+	for time.Now().Before(deadline) {
+		fromA, errA = a.ReportedStatus(targetHostname)
+		fromB, errB = b.ReportedStatus(targetHostname)
+		if errA == nil && errB == nil && fromA == fromB {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	if errA != nil {
+		t.Fatalf("%s should report a status for %s: %v", a.Hostname, targetHostname, errA)
+	}
+	if errB != nil {
+		t.Fatalf("%s should report a status for %s: %v", b.Hostname, targetHostname, errB)
+	}
+	t.Fatalf("%s: %s says %v, %s says %v", msg, a.Hostname, fromA, b.Hostname, fromB)
+}
