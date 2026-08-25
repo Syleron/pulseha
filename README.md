@@ -60,9 +60,10 @@ PulseHA attempts to solve high availability with a more simple approach but with
 
 ### Advanced Features
 - **Quorum-Based Decision Making**
-  - Prevents split-brain scenarios in network partitions
-  - Configurable quorum policies (majority or fixed count)
+  - Prevents a minority side of a partition from claiming addresses the majority still serves
+  - Automatic: a majority is `(N/2)+1`, recalculated as nodes join and leave
   - Automatic leader election and consensus protocols
+  - Not applied below three nodes — see [Quorum](#quorum)
 
 - **Plugin Architecture**
   - Extensible plugin system for custom integrations
@@ -273,31 +274,33 @@ pulsectl node promote --hostname node1.example.com
 pulsectl node remove --hostname node1.example.com
 ```
 
-### Quorum Management
+### Quorum
 
-Quorum prevents split-brain scenarios by requiring a minimum number of nodes to agree before making cluster decisions.
+Quorum requires a majority of the cluster to agree before a node status change or an IP
+redistribution is acted on, so that a minority side of a network partition cannot claim
+addresses the majority is still serving.
 
-```bash
-# Enable quorum with majority rule (recommended)
-# Requires (N/2)+1 nodes - automatically adjusts as nodes join/leave
-# Example: 3 nodes = need 2, 5 nodes = need 3, 7 nodes = need 4
-pulsectl quorum enable --majority
+**There is nothing to configure.** Quorum is automatic and derived from the cluster size:
+a majority is `(N/2)+1`, recalculated as nodes join and leave. There is no `pulsectl quorum`
+command and no quorum key in `config.json`.
 
-# Enable quorum with fixed count (advanced)
-# Requires exactly the specified number of nodes
-# Example: Always need exactly 2 nodes regardless of cluster size
-pulsectl quorum enable --min-nodes 2
+| Cluster size | Majority | Behaviour |
+|---|---|---|
+| 2 | n/a | No majority exists. See below |
+| 3 | 2 | Quorum voting active |
+| 4 | 3 | Quorum voting active |
+| 5 | 3 | Quorum voting active |
 
-# Disable quorum (not recommended for production)
-pulsectl quorum disable
+**Two-node clusters are a deliberate exception.** Two nodes give the question "am I on the
+surviving side" no answer to find, so quorum is not applied below three nodes. If the two
+members lose contact with each other while both remain healthy, **both will bring up the
+floating IPs**. This is intended: it guarantees the addresses are never held by nobody, at the
+cost of their being held twice. Note that this does not give you two serving paths — clients
+and switches keep one MAC per address — so the gain is continuity, not capacity.
 
-# View current quorum status
-pulsectl quorum status
-```
-
-**Majority vs Fixed Count:**
-- **Majority Rule**: Dynamic quorum that scales with cluster size - safer for most deployments
-- **Fixed Count**: Static quorum useful for specific network architectures or testing scenarios
+If you need a single-owner guarantee, run three or more nodes. See
+[ADR-0002](docs/adr/0002-two-node-availability-over-safety.md) for the full reasoning and the
+options that were rejected.
 
 ## CLI Tool
 
@@ -356,20 +359,6 @@ PulseHA supports multiple logging destinations with flexible configuration:
 ```
 
 ## Advanced Configuration
-
-### Quorum Configuration
-
-For clusters with 3+ nodes, enable quorum to prevent split-brain scenarios:
-
-```json
-{
-  "pulseha": {
-    "quorum_enabled": true,
-    "quorum_min_nodes": 2,
-    "quorum_majority": true
-  }
-}
-```
 
 ### Performance Tuning
 
