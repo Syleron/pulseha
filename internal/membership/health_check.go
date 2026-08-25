@@ -2128,182 +2128,6 @@ func (h *HealthChecker) checkIP(ip string) HealthCheck {
 	}
 }
 
-// handlePartialFailure manages the redistribution of failed IPs
-func (h *HealthChecker) handlePartialFailure(member *Member, failedIPs []string) {
-	h.logger.Infof("Handling partial failure for member %s with %d failed IPs", member.Hostname, len(failedIPs))
-
-	membersSnapshot := h.members.MembersSnapshot()
-
-	// Determine if we should use quorum based on cluster size
-	cfg := h.members.Config()
-	if cfg == nil {
-		return
-	}
-	clusterSize := len(membersSnapshot)
-	quorumEnabled := clusterSize >= 3
-
-	// Update member status based on mode
-	member.Lock()
-	switch cfg.Pulse.Mode {
-	case "active-passive":
-		if len(failedIPs) == len(member.ActiveIPs) {
-			// All IPs failed in active-passive mode - mark node as down
-			h.logger.Warnf("All IPs failed for active node %s, marking as unknown", member.Hostname)
-
-			// If quorum is enabled, we need to initiate a vote before changing status
-			if quorumEnabled {
-				h.logger.Info("Quorum voting is enabled, initiating vote for node status change")
-				member.Unlock() // Unlock before initiating vote
-
-				// Initiate vote through the server component
-				voteResult := h.initiateNodeStatusVote(member.ID, StatusUnknown)
-
-				if !voteResult {
-					h.logger.Warn("Quorum vote failed, not changing node status")
-					return
-				}
-
-				h.logger.Info("Quorum vote passed, proceeding with status change")
-				member.Lock() // Lock again to continue with status change
-			}
-
-			member.Status = StatusUnknown
-
-			// Find a passive node to promote
-			for _, otherMember := range membersSnapshot {
-				if otherMember.ID != member.ID && otherMember.Status == StatusPassive {
-					h.logger.Infof("Promoting passive node %s to active", otherMember.Hostname)
-
-					// If quorum is enabled, we need to initiate a vote before promoting
-					if quorumEnabled {
-						member.Unlock() // Unlock before initiating vote
-
-						// Initiate vote for promotion
-						voteResult := h.initiateNodeStatusVote(otherMember.ID, StatusActive)
-
-						if !voteResult {
-							h.logger.Warn("Quorum vote failed, not promoting node")
-							return
-						}
-
-						h.logger.Info("Quorum vote passed, proceeding with promotion")
-						member.Lock() // Lock again to continue
-					}
-
-					if h.server != nil {
-						if err := h.server.OrchestrateIPFailover(member.ID, otherMember.ID,
-							member.ActiveIPs); err != nil {
-							h.logger.Errorf("Failed to promote passive node: %v", err)
-						} else {
-							h.logger.Infof("Passive node %s promoted to active", otherMember.Hostname)
-							// Update member IP state
-							otherMember.Lock()
-							otherMember.ActiveIPs = append([]string{}, member.ActiveIPs...)
-							otherMember.Unlock()
-
-							member.Lock()
-							member.ActiveIPs = nil
-							member.Unlock()
-						}
-					}
-					break
-				}
-			}
-		}
-
-	case "active-active":
-		if len(failedIPs) == len(member.ActiveIPs) {
-			// All IPs failed in active-active mode - mark as unknown
-			h.logger.Warnf("All IPs failed for member %s, marking as unknown", member.Hostname)
-
-			// If quorum is enabled, we need to initiate a vote before changing status
-			if quorumEnabled {
-				h.logger.Info("Quorum voting is enabled, initiating vote for node status change")
-				member.Unlock() // Unlock before initiating vote
-
-				// Initiate vote through the server component
-				voteResult := h.initiateNodeStatusVote(member.ID, StatusUnknown)
-
-				if !voteResult {
-					h.logger.Warn("Quorum vote failed, not changing node status")
-					return
-				}
-
-				h.logger.Info("Quorum vote passed, proceeding with status change")
-				member.Lock() // Lock again to continue with status change
-			}
-
-			member.Status = StatusUnknown
-		} else {
-			// Partial failure in active-active — node keeps StatusActive with reduced IPs.
-			// No status transition needed; update LoadFactor to reflect reduced load.
-			h.logger.Infof("Partial IP failure for member %s, updating load factor", member.Hostname)
-			if member.Capacity > 0 {
-				// Clamped at zero: failedIPs is built from a separate observation of
-				// the interface, so it can name an address ActiveIPs no longer lists
-				// and make this subtraction negative. A negative load factor reads as
-				// "emptier than empty" everywhere it is compared.
-				remaining := len(member.ActiveIPs) - len(failedIPs)
-				if remaining < 0 {
-					remaining = 0
-				}
-				member.LoadFactor = float64(remaining) / float64(member.Capacity)
-			}
-		}
-
-	default:
-		h.logger.Warnf("Unknown cluster mode %s, defaulting to active-passive behavior", cfg.Pulse.Mode)
-		if len(failedIPs) == len(member.ActiveIPs) {
-			// If quorum is enabled, we need to initiate a vote before changing status
-			if quorumEnabled {
-				h.logger.Info("Quorum voting is enabled, initiating vote for node status change")
-				member.Unlock() // Unlock before initiating vote
-
-				// Initiate vote through the server component
-				voteResult := h.initiateNodeStatusVote(member.ID, StatusUnknown)
-
-				if !voteResult {
-					h.logger.Warn("Quorum vote failed, not changing node status")
-					return
-				}
-
-				h.logger.Info("Quorum vote passed, proceeding with status change")
-				member.Lock() // Lock again to continue with status change
-			}
-
-			member.Status = StatusUnknown
-		}
-	}
-
-	// Remove failed IPs from member
-	h.logger.Debugf("Removing failed IPs from member %s: %v", member.Hostname, failedIPs)
-	member.RemoveIPs(failedIPs)
-	member.Unlock()
-
-	// If quorum is enabled, we need to initiate a vote before redistributing IPs
-	if quorumEnabled {
-		h.logger.Info("Quorum voting is enabled, initiating vote for IP redistribution")
-
-		// Initiate vote for IP redistribution
-		voteResult := h.initiateIPRedistributionVote(failedIPs)
-
-		if !voteResult {
-			h.logger.Warn("Quorum vote failed, not redistributing IPs")
-			return
-		}
-
-		h.logger.Info("Quorum vote passed, proceeding with IP redistribution")
-	}
-
-	// Trigger IP redistribution
-	h.logger.Info("Initiating IP redistribution for failed IPs")
-	if err := h.members.RedistributeIPs(failedIPs); err != nil {
-		h.logger.Errorf("Failed to redistribute IPs after partial failure: %v", err)
-	} else {
-		h.logger.Info("IP redistribution completed successfully")
-	}
-}
-
 // initiateNodeStatusVote initiates a quorum vote for a node status change
 // Returns true if the vote passes or if quorum voting is not applicable
 func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberStatus) bool {
@@ -2346,37 +2170,57 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 			// dark one. See docs/adr/0002-two-node-availability-over-safety.md. Routing the
 			// two-node election into this branch would reverse that decision.
 			//
-			// Known defect, END-2325: the rule below answers "should *I* win" to a
-			// question asked about nodeID. Via attemptVotingElection the candidate is often
-			// not the local node, so a coordinator whose own ID sorts higher blocks a
-			// promotion that should proceed.
 			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
 			if newStatus == StatusActive {
-				// Find the other available node
-				localNodeID, err := h.localNodeID()
-				if err != nil {
-					h.logger.Error("Failed to get local node ID for tie-breaking", "error", err)
-					return false
-				}
-				var otherNodeID string
+				// Decided about nodeID, the subject of the vote, and never about the node
+				// running it (END-2325).
+				//
+				// The rule used to be `localNodeID < otherNodeID`, which answers "should *I*
+				// win" to a question asked about someone else. Via attemptVotingElection the
+				// candidate is frequently not the local node — selectBestCandidate gives the
+				// local node only +5 against a score built from status, latency and recency —
+				// so a coordinator whose own ID sorted higher returned false and blocked the
+				// promotion of a perfectly good candidate. In handlePartialFailure that
+				// answer is not advisory: `!voteResult` returns, abandoning the failover.
+				//
+				// Worse than blocking one promotion, it made the answer depend on who asked.
+				// Two nodes running this concurrently for the same candidate computed
+				// opposite results, which is precisely what a tie-break with no majority
+				// behind it must never do. Deciding on the subject is viewer-independent:
+				// every node reaches the same verdict about the same candidate. Same lesson
+				// as the config tiebreak, which had to become origin-versus-origin rather
+				// than sender-versus-receiver (internal/server/config_generation_test.go).
+				lowest := ""
+				subjectAvailable := false
 				for _, member := range membersSnapshot {
 					member.Lock()
 					isAvailable := member.Status == StatusActive || member.Status == StatusPassive
 					memberID := member.ID
 					member.Unlock()
-					if isAvailable && memberID != localNodeID {
-						otherNodeID = memberID
-						break
+					if !isAvailable {
+						continue
+					}
+					if memberID == nodeID {
+						subjectAvailable = true
+					}
+					if lowest == "" || memberID < lowest {
+						lowest = memberID
 					}
 				}
-				if otherNodeID == "" {
-					h.logger.Info("No other available node found, allowing Active promotion")
+
+				// A subject that is not one of the two contenders is not in the tie this rule
+				// exists to break, so it has nothing to say about it. Allowed rather than
+				// refused, which is what the old code did for its own unresolvable case, and
+				// the promotion still has to get past confirmPeerReleasedIPs.
+				if !subjectAvailable {
+					h.logger.Info("2-node tie-breaking: subject is not an available node, allowing",
+						"subject", nodeID)
 					return true
 				}
-				// Deterministic rule: smaller node ID wins
-				shouldWin := localNodeID < otherNodeID
-				h.logger.Infof("2-node tie-breaking: local=%s, other=%s, shouldWin=%v", localNodeID, otherNodeID,
-					shouldWin)
+
+				shouldWin := nodeID == lowest
+				h.logger.Infof("2-node tie-breaking: subject=%s, lowest=%s, shouldWin=%v",
+					nodeID, lowest, shouldWin)
 				return shouldWin
 			}
 			return true // Allow non-Active status changes

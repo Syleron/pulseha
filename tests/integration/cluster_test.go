@@ -261,11 +261,7 @@ func TestNodesAgreeOnTheStatusTheyPublish(t *testing.T) {
 		"the passive node must agree with its peer about itself")
 
 	for _, target := range []string{node1.Hostname, node2.Hostname} {
-		fromNode1, err := node1.ReportedStatus(target)
-		require.NoError(t, err, "node1 should report a status for %s", target)
-		fromNode2, err := node2.ReportedStatus(target)
-		require.NoError(t, err, "node2 should report a status for %s", target)
-		require.Equal(t, fromNode1, fromNode2,
-			"both nodes must publish the same status for %s", target)
+		requireAgreedStatus(t, node1, node2, target,
+			"both nodes must publish the same status for "+target)
 	}
 }

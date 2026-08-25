@@ -740,7 +740,16 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 		m.logger.Error("IP monitor init: local member not found", "nodeID", localNodeID)
 		return fmt.Errorf("local member not found")
 	}
-	m.logger.Debug("IP monitor init: found local member", "status", localMember.Status)
+	// Snapshotted under the member lock. ConfigSync writes Status while holding it, and this
+	// runs concurrently with that now: Start is driven from startHealthChecker, so a sync can
+	// land while the monitor is initialising, where the old unconditional Start in Server.Start
+	// ran before the cluster listener was up. -race caught it as a write in ConfigSync against
+	// this read (docs/TEST-PLAN.md #86).
+	localMember.Lock()
+	localStatus := localMember.Status
+	localMember.Unlock()
+
+	m.logger.Debug("IP monitor init: found local member", "status", localStatus)
 
 	nodeCfg, ok := cfg.Nodes[localNodeID]
 	if !ok || nodeCfg == nil {
@@ -753,7 +762,7 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 	m.expectedIPs = make(map[string][]string)
 	m.logger.Debug("IP monitor init: reset expected IPs map")
 
-	if localMember.Status == StatusActive {
+	if localStatus == StatusActive {
 		m.logger.Info("IP monitor init: node is Active, setting up expected IPs")
 		for iface, ips := range m.deriveExpectedIPs(localNodeID, localMember) {
 			m.expectedIPs[iface] = ips
@@ -762,9 +771,9 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 		m.logger.Info("IP monitor initialization complete for Active node", "expected_ifaces", len(m.expectedIPs), "expectedIPs", m.expectedIPs)
 	} else {
 		// If we're not active, ensure no expected IPs and clean up any floating IPs
-		m.logger.Info("IP monitor init: node is not Active, cleaning up floating IPs", "status", localMember.Status)
+		m.logger.Info("IP monitor init: node is not Active, cleaning up floating IPs", "status", localStatus)
 		m.cleanupFloatingIPsOnRestart(nodeCfg)
-		m.logger.Info("IP monitor initialization complete for non-Active node", "status", localMember.Status, "expected_ifaces", 0)
+		m.logger.Info("IP monitor initialization complete for non-Active node", "status", localStatus, "expected_ifaces", 0)
 	}
 
 	m.TriggerEnforce()

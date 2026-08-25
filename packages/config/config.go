@@ -165,7 +165,12 @@ func (c *Config) NodeCount() int {
 
 // GetLocalNodeUUID returns the UUID of the local node
 func (c *Config) GetLocalNodeUUID() (string, error) {
-	if !c.ClusterCheck() {
+	c.Lock()
+	defer c.Unlock()
+
+	// clusterCheckLocked, not ClusterCheck: the exported one takes this same lock and
+	// sync.Mutex is not reentrant.
+	if !c.clusterCheckLocked() {
 		return "", errors.New("cluster check failed")
 	}
 	return c.Pulse.LocalNode, nil
@@ -478,7 +483,7 @@ func (c *Config) Validate() error {
 	}
 
 	// Only validate cluster configuration if we're in a cluster
-	if c.ClusterCheck() {
+	if c.clusterCheckLocked() {
 		// Check if we have a local node UUID set
 		if c.Pulse.LocalNode == "" {
 			return errors.New("local node UUID is not set")
@@ -530,7 +535,24 @@ func (c *Config) LocalNode() Node {
 }
 
 // ClusterCheck - Check to see if wea re in a configured cluster or not.
+// Synchronised because the health-check tick reaches this on every pass — through
+// Member.IsLocal, which calls GetLocalNodeUUID — while a join writes c.Nodes under this same
+// lock. `len` on a map is a map read, so the two raced: `-race` reported it against the
+// `s.config.Nodes[nodeID] = ...` in the join handler, and it made `make testrace` fail at
+// roughly a third of runs (docs/TEST-PLAN.md #87).
 func (c *Config) ClusterCheck() bool {
+	c.Lock()
+	defer c.Unlock()
+	return c.clusterCheckLocked()
+}
+
+// clusterCheckLocked is ClusterCheck for callers already holding the lock.
+//
+// Both exist because Validate calls this and is itself called from Load and saveLocked with
+// the lock held — so a Validate that went through the exported form would deadlock the config
+// load path. That asymmetry is the reason for the `Locked` suffix convention rather than a
+// stylistic preference (END-2339).
+func (c *Config) clusterCheckLocked() bool {
 	return len(c.Nodes) > 0
 }
 

@@ -18,11 +18,11 @@ func TestSyslogLoggingSetup(t *testing.T) {
 	defer os.Unsetenv("PULSEHA_TEST")
 
 	testCases := []struct {
-		name           string
-		config         *config.Config
-		expectHook     bool
-		expectError    bool
-		expectedTag    string
+		name             string
+		config           *config.Config
+		expectHook       bool
+		expectError      bool
+		expectedTag      string
 		expectedFacility syslog.Priority
 	}{
 		{
@@ -59,9 +59,9 @@ func TestSyslogLoggingSetup(t *testing.T) {
 					SyslogTag: "", // Empty tag triggers default behavior
 				},
 			},
-			expectHook:       true,  // May succeed on macOS
-			expectError:      false, // May succeed on macOS
-			expectedTag:      "pulseha", // Default tag
+			expectHook:       true,            // May succeed on macOS
+			expectError:      false,           // May succeed on macOS
+			expectedTag:      "pulseha",       // Default tag
 			expectedFacility: syslog.LOG_INFO, // Default facility
 		},
 	}
@@ -73,7 +73,7 @@ func TestSyslogLoggingSetup(t *testing.T) {
 
 			// Test the syslog setup logic
 			err := setupSyslogForTest(tc.config, logger)
-			
+
 			// Platform-specific test expectations
 			if !tc.config.Pulse.LogToSyslog {
 				// If syslog is disabled, no error should occur
@@ -96,14 +96,14 @@ func TestSyslogLoggingSetup(t *testing.T) {
 // setupSyslogForTest simulates the syslog setup logic from main.go
 func setupSyslogForTest(cfg *config.Config, logger *log.Logger) error {
 	// Replicate the syslog setup logic from main.go setupLogging function
-	
+
 	// Setup syslog logging if enabled (default to true if not explicitly set)
 	logToSyslog := cfg.Pulse.LogToSyslog
 	if cfg.Pulse.SyslogTag == "" {
 		// Old config or missing syslog config - use defaults
 		logToSyslog = true
 	}
-	
+
 	if logToSyslog {
 		// Convert facility string to syslog priority
 		facility := syslog.LOG_INFO
@@ -139,7 +139,7 @@ func setupSyslogForTest(cfg *config.Config, logger *log.Logger) error {
 		if syslogTag == "" {
 			syslogTag = "pulseha"
 		}
-		
+
 		hook, err := logrus_syslog.NewSyslogHook(cfg.Pulse.SyslogNetwork, cfg.Pulse.SyslogAddress, facility, syslogTag)
 		if err != nil {
 			return err
@@ -147,13 +147,13 @@ func setupSyslogForTest(cfg *config.Config, logger *log.Logger) error {
 		logger.AddHook(hook)
 		logger.Info("Syslog logging enabled")
 	}
-	
+
 	return nil
 }
 
 func TestSyslogFacilityMapping(t *testing.T) {
 	testCases := []struct {
-		facilityString string
+		facilityString   string
 		expectedFacility syslog.Priority
 	}{
 		{"LOG_LOCAL0", syslog.LOG_LOCAL0},
@@ -167,7 +167,7 @@ func TestSyslogFacilityMapping(t *testing.T) {
 		{"LOG_USER", syslog.LOG_USER},
 		{"LOG_DAEMON", syslog.LOG_DAEMON},
 		{"LOG_SYSLOG", syslog.LOG_SYSLOG},
-		{"", syslog.LOG_INFO}, // Default
+		{"", syslog.LOG_INFO},        // Default
 		{"INVALID", syslog.LOG_INFO}, // Default
 	}
 
@@ -201,7 +201,7 @@ func TestSyslogFacilityMapping(t *testing.T) {
 			default:
 				facility = syslog.LOG_INFO
 			}
-			
+
 			assert.Equal(t, tc.expectedFacility, facility, "Facility mapping should be correct for: %s", tc.facilityString)
 		})
 	}
@@ -237,7 +237,7 @@ func TestSyslogTagDefaults(t *testing.T) {
 			if syslogTag == "" {
 				syslogTag = "pulseha"
 			}
-			
+
 			assert.Equal(t, tc.expectedTag, syslogTag, "Tag should match expected value")
 		})
 	}
@@ -263,7 +263,7 @@ func TestSyslogConfigCompatibility(t *testing.T) {
 		if cfg.Pulse.SyslogTag == "" {
 			logToSyslog = true
 		}
-		
+
 		assert.True(t, logToSyslog, "Old config should default to syslog enabled")
 	})
 
@@ -281,24 +281,24 @@ func TestSyslogConfigCompatibility(t *testing.T) {
 		if cfg.Pulse.SyslogTag == "" {
 			logToSyslog = true
 		}
-		
+
 		assert.False(t, logToSyslog, "New config should respect explicit syslog setting")
 	})
 }
 
 func TestSyslogErrorHandling(t *testing.T) {
 	logger := log.New()
-	
+
 	// Capture log output to verify error handling
 	var logOutput strings.Builder
 	logger.SetOutput(&logOutput)
-	
+
 	// Test with invalid syslog configuration
 	_, err := logrus_syslog.NewSyslogHook("invalid", "invalid:address", syslog.LOG_INFO, "test")
-	
+
 	// Should get an error for invalid syslog configuration
 	assert.Error(t, err, "Should error with invalid syslog configuration")
-	
+
 	// In real implementation, this error would be logged and execution would continue
 	// The main.go setupLogging function handles this gracefully
 }
