@@ -1,0 +1,102 @@
+# Two-node rig for END-2320: the partition/heal cycle of a cluster with no majority.
+#
+# Two networks, deliberately. The failure being reproduced is a CLUSTER-LINK-ONLY
+# one -- the members lose their heartbeat path while both stay healthy and reachable
+# by clients -- and on a single bridge there is no way to cut one without the other.
+#
+#   pulseha-cluster  10.66.0.0/24   PulseHA gRPC. This is the link the test severs.
+#   pulseha-service  10.77.0.0/24   Floating IPs, and the probe that polls them.
+#
+# The probe container sits on the service network only. It has no opinion about the
+# cluster and exists to answer the one question `pulsectl status` cannot: is the
+# address actually answering, from somewhere that is not either node?
+#
+# LIMITATION, and it is the reason this rig cannot close the ticket on its own: a
+# Linux bridge is not a switch. It relearns a MAC from the first frame the new owner
+# sends and has no configurable ARP ageing, so the DURATION of a dark window after
+# consolidation cannot be measured here -- only whether the announcement that ends
+# it was sent at all. See docs/TEST-PLAN.md.
+
+version: '3.8'
+
+services:
+  pulseha-node1:
+    build:
+      context: ../../
+      dockerfile: docker/test/Dockerfile
+    container_name: pulseha-2node-1
+    hostname: node1
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      pulseha-cluster:
+        ipv4_address: 10.66.0.10
+      pulseha-service:
+        ipv4_address: 10.77.0.10
+    volumes:
+      - n1-config:/home/pulseha/.pulseha
+    # PULSEHA_TEST is deliberately NOT set. Under it Server.Start gives the CLI
+    # socket a random name (`/tmp/pulseha-test-<uuid8>.sock`) that pulsectl never
+    # looks for, so every `docker exec ... pulsectl` fails and the rig cannot drive
+    # the cluster at all.
+    environment:
+      - PULSEHA_NODE_ID=node1
+    command: ["/bin/bash", "-c", "mkdir -p /etc/pulseha /var/log/pulseha && echo '{\"pulseha\":{\"logging_level\":\"debug\",\"log_to_file\":false}, \"nodes\":{}}' > /etc/pulseha/config.json && /usr/local/bin/pulseha"]
+
+  pulseha-node2:
+    build:
+      context: ../../
+      dockerfile: docker/test/Dockerfile
+    container_name: pulseha-2node-2
+    hostname: node2
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      pulseha-cluster:
+        ipv4_address: 10.66.0.11
+      pulseha-service:
+        ipv4_address: 10.77.0.11
+    volumes:
+      - n2-config:/home/pulseha/.pulseha
+    environment:
+      - PULSEHA_NODE_ID=node2
+    command: ["/bin/bash", "-c", "mkdir -p /etc/pulseha /var/log/pulseha && echo '{\"pulseha\":{\"logging_level\":\"debug\",\"log_to_file\":false}, \"nodes\":{}}' > /etc/pulseha/config.json && sleep 5 && /usr/local/bin/pulseha"]
+
+  # Third party on the service segment. Never joins the cluster, so its view of the
+  # floating IP is the closest thing this rig has to a client's.
+  probe:
+    build:
+      context: ../../
+      dockerfile: docker/test/Dockerfile
+    container_name: pulseha-2node-probe
+    hostname: probe
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      pulseha-service:
+        ipv4_address: 10.77.0.50
+    command: ["/bin/bash", "-c", "mkdir -p /var/log/pulseha && sleep infinity"]
+
+networks:
+  pulseha-cluster:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.66.0.0/24
+          gateway: 10.66.0.1
+  pulseha-service:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.77.0.0/24
+          gateway: 10.77.0.1
+
+volumes:
+  n1-config:
+  n2-config:
