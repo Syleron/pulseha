@@ -37,6 +37,42 @@ const (
 	StatusMaintenance MemberStatus = 4 // Node is up but excluded from failover promotion
 )
 
+// Claim is what a member asserts about itself: its status, together with the
+// Floating IPs it says it holds.
+//
+// The two are one value because either alone misleads. A status with no
+// addresses behind it tells peers a node is serving nothing; addresses recorded
+// against a member that has stopped serving keep the cluster from re-placing
+// them (docs/TEST-PLAN.md #2/#26/#58). Every defect in that family came from one
+// of the pair being written without the other.
+//
+// A claim is an assertion of ownership, not a report on any interface's
+// contents: a member can truthfully claim an address a moment before that
+// address is up, because the lock covers the state transition and never the
+// network I/O (docs/adr/0004-the-lock-covers-the-state-transition.md).
+type Claim struct {
+	Status    MemberStatus
+	ActiveIPs []string
+}
+
+// copyIPs returns the claim with its assignment set detached from whatever slice
+// the caller passed or the member holds.
+//
+// Claims cross the membership/server boundary, and the pre-claim code aliased
+// instead: MakeActive assigned the caller's slice straight into m.ActiveIPs, so
+// a caller that reused its buffer mutated the member's record from outside the
+// lock. Nothing depended on that, and nothing should be able to.
+func (c Claim) copyIPs() Claim {
+	if len(c.ActiveIPs) == 0 {
+		c.ActiveIPs = nil
+		return c
+	}
+	ips := make([]string, len(c.ActiveIPs))
+	copy(ips, c.ActiveIPs)
+	c.ActiveIPs = ips
+	return c
+}
+
 // Member defines our member object
 type Member struct {
 	pulselock.Mutex
@@ -128,10 +164,11 @@ func (m *Member) Close() {
 // In active-passive mode the node receives all floating IPs.
 // In active-active mode the node receives its assigned subset of IPs.
 func (m *Member) MakeActive(ips []string) error {
-	m.Lock()
-	m.Status = StatusActive
-	m.ActiveIPs = ips
-	m.Unlock()
+	// The claim first, and on its own. A caller that wants only the claim --
+	// SetMode's consolidation, which deliberately defers the address work until
+	// the server lock drops -- calls SetClaim directly and does not come through
+	// here at all.
+	m.SetClaim(Claim{Status: StatusActive, ActiveIPs: ips})
 
 	// Deliberately outside the lock. Bringing up a large group touches the network
 	// for every address, and every reader of this member's status — health check
@@ -149,26 +186,43 @@ func (m *Member) MakeActive(ips []string) error {
 // active-active mode, where MakeActive's replace semantics would lose track
 // of a node's existing assignments.
 func (m *Member) AddActiveIPs(ips []string) error {
-	m.Lock()
-	existing := make(map[string]bool, len(m.ActiveIPs))
-	for _, ip := range m.ActiveIPs {
-		existing[ip] = true
-	}
+	// The claim change and the addresses it added, decided under one lock. Only
+	// what was genuinely new gets brought up: re-announcing an address this
+	// member already holds is what defect #33's stale announce set cost.
 	var added []string
-	for _, ip := range ips {
-		if !existing[ip] {
-			existing[ip] = true
-			m.ActiveIPs = append(m.ActiveIPs, ip)
-			added = append(added, ip)
-		}
-	}
-	m.Status = StatusActive
-	m.Unlock()
+	m.UpdateClaim(func(current Claim) (Claim, bool) {
+		added = addressesNotIn(current.ActiveIPs, ips)
+		current.Status = StatusActive
+		current.ActiveIPs = append(current.ActiveIPs, added...)
+		return current, true
+	})
 
 	if len(added) == 0 {
 		return nil
 	}
+	// Outside the lock, per docs/adr/0004. See MakeActive for what holding it
+	// across a bring-up cost.
 	return m.BringUpIPs(added)
+}
+
+// addressesNotIn returns the entries of want that held does not already
+// contain, in the order they were offered and without duplicates of its own.
+func addressesNotIn(held, want []string) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(held)+len(want))
+	for _, ip := range held {
+		seen[ip] = true
+	}
+	var missing []string
+	for _, ip := range want {
+		if !seen[ip] {
+			seen[ip] = true
+			missing = append(missing, ip)
+		}
+	}
+	return missing
 }
 
 // RemoveActiveIPs drops the given IPs from this member's assignment list,
@@ -196,32 +250,102 @@ func (m *Member) RemoveActiveIPs(ips []string) {
 		removed[ip] = true
 	}
 
+	m.UpdateClaim(func(current Claim) (Claim, bool) {
+		remaining := make([]string, 0, len(current.ActiveIPs))
+		for _, ip := range current.ActiveIPs {
+			if !removed[ip] {
+				remaining = append(remaining, ip)
+			}
+		}
+		current.ActiveIPs = remaining
+		return current, true
+	})
+}
+
+// Claim returns what this member currently asserts, read as one consistent
+// pair.
+//
+// Reading Status and ActiveIPs through separate accessors can straddle a write
+// and pair a new status with the previous status's addresses, which is the
+// mismatch the type exists to prevent.
+func (m *Member) Claim() Claim {
+	m.Lock()
+	defer m.Unlock()
+	return m.claimLocked()
+}
+
+// SetClaim replaces what this member asserts, both fields together.
+//
+// Touches nothing else -- no network, no interfaces. A caller that also needs
+// the addresses brought up or down calls BringUpIPs or BringDownIPs after this
+// returns and outside the lock, per docs/adr/0004.
+func (m *Member) SetClaim(c Claim) {
+	m.Lock()
+	defer m.Unlock()
+	m.setClaimLocked(c)
+}
+
+// UpdateClaim reads this member's claim, offers it to decide, and writes back
+// what comes out -- all under one acquisition. Reports whether it wrote.
+//
+// This exists for the callers whose new claim depends on the current one, where
+// splitting the read and the write into two acquisitions would open a window for
+// something else to move the member in between. ConfigSync applying a peer's
+// view is the case that needs it: the decision consults the incoming status, the
+// current status, the config's maintenance flag and the epoch, and must not
+// commit against a status that has since changed.
+//
+// The function receives and returns only a Claim, never the *Member, so a
+// caller in another package cannot reach any other field or take any other
+// lock. Returning false leaves the member untouched.
+//
+// It runs with the member lock held, so it must not call back into a locking
+// Member method -- that is #85's shape exactly. What makes offering this
+// acceptable at all is that such a call now announces itself: pulselock panics
+// on it under test and reports it on stderr live, where before it wedged the
+// member lock in silence (docs/adr/0003-instrumented-mutexes.md).
+func (m *Member) UpdateClaim(decide func(current Claim) (Claim, bool)) bool {
 	m.Lock()
 	defer m.Unlock()
 
-	remaining := make([]string, 0, len(m.ActiveIPs))
-	for _, ip := range m.ActiveIPs {
-		if !removed[ip] {
-			remaining = append(remaining, ip)
-		}
+	next, ok := decide(m.claimLocked())
+	if !ok {
+		return false
 	}
-	m.ActiveIPs = remaining
+	m.setClaimLocked(next)
+	return true
+}
+
+// SetActiveIPs replaces the addresses this member claims, leaving its status
+// alone.
+//
+// For the callers that are recording an assignment rather than a role change:
+// the coordinator seeding an active-active map, and a peer self-reporting what
+// it holds.
+func (m *Member) SetActiveIPs(ips []string) {
+	m.Lock()
+	defer m.Unlock()
+	m.ActiveIPs = Claim{ActiveIPs: ips}.copyIPs().ActiveIPs
+}
+
+// SetCapacity records how many Floating IPs this member may hold.
+//
+// Not part of the claim: capacity is a configured limit an operator sets, not
+// something the member asserts about its own state. It is read under this lock
+// to build the placement snapshots in MemberList and the health checker.
+func (m *Member) SetCapacity(capacity int) {
+	m.Lock()
+	defer m.Unlock()
+	m.Capacity = capacity
 }
 
 // GetActiveIPs returns a copy of the IPs this member currently hosts.
 //
-// Callers deciding what a node should hold need this under the member lock —
+// Callers deciding what a node should hold need this under the member lock --
 // the health check loop and the IP monitor both read it while promotions and
 // rebalance moves are writing it.
 func (m *Member) GetActiveIPs() []string {
-	m.Lock()
-	defer m.Unlock()
-	if len(m.ActiveIPs) == 0 {
-		return nil
-	}
-	ips := make([]string, len(m.ActiveIPs))
-	copy(ips, m.ActiveIPs)
-	return ips
+	return m.Claim().ActiveIPs
 }
 
 // GetStatus returns this member's status, read under the member lock.
@@ -235,7 +359,12 @@ func (m *Member) GetStatus() MemberStatus {
 	return m.Status
 }
 
-// SetStatus records this member's status under the member lock.
+// SetStatus records this member's status under the member lock, leaving the
+// addresses it claims alone.
+//
+// Prefer SetClaim where the addresses move too. This is for a genuine
+// status-only transition -- ExitMaintenance returning a member to Passive, which
+// it reaches holding nothing.
 func (m *Member) SetStatus(status MemberStatus) {
 	m.Lock()
 	defer m.Unlock()
@@ -243,17 +372,28 @@ func (m *Member) SetStatus(status MemberStatus) {
 }
 
 // MarkUnreachable records that this member is no longer known to hold any
-// floating IPs — status Unknown with an empty assignment set.
+// floating IPs -- status Unknown with an empty assignment set.
 //
 // Promotion uses this when an incumbent could not be reached, so the addresses
 // it may still be holding can be accounted for elsewhere. The two fields have to
-// move together under one lock: a reader seeing Unknown against the old ActiveIPs
-// would conclude a down node still owns the group.
+// move together under one lock: a reader seeing Unknown against the old
+// ActiveIPs would conclude a down node still owns the group. That is what a
+// Claim is, so this is now a named case of one.
 func (m *Member) MarkUnreachable() {
-	m.Lock()
-	defer m.Unlock()
-	m.Status = StatusUnknown
-	m.ActiveIPs = nil
+	m.SetClaim(Claim{Status: StatusUnknown})
+}
+
+// claimLocked and setClaimLocked are the claim accessors for code that already
+// holds the member lock, per this codebase's xLocked convention. pulselock is
+// not reentrant, so the exported versions cannot be reached from inside it.
+func (m *Member) claimLocked() Claim {
+	return Claim{Status: m.Status, ActiveIPs: m.ActiveIPs}.copyIPs()
+}
+
+func (m *Member) setClaimLocked(c Claim) {
+	c = c.copyIPs()
+	m.Status = c.Status
+	m.ActiveIPs = c.ActiveIPs
 }
 
 // BringUpIPs brings up the specified IPs on this member
