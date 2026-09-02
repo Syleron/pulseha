@@ -1544,11 +1544,32 @@ func (s *Server) Leave(ctx context.Context, req *rpc.LeaveRequest) (*rpc.LeaveRe
 		// Remove all members from member list locally (leave into clean, non-clustered state)
 		s.memberList.Clear()
 
-		// Wipe local cluster configuration (nodes and groups) and clear local identifiers
+		// Wipe local cluster configuration (nodes and groups) and clear local
+		// identifiers, under the server lock.
+		//
+		// These four ran unguarded. Worth being precise about why, because a
+		// flow-insensitive read of this function suggests otherwise: the
+		// s.RLock() above is inside a func(){...}() whose deferred unlock fires
+		// when that closure returns, so by here nothing is held at all.
+		//
+		// s.Lock() rather than s.config.Lock(), for local consistency: the
+		// closure above reads s.config.Nodes under the server lock, so the read
+		// and the write in this one function now use the same mutex. Which lock
+		// owns the config's contents cluster-wide is genuinely undecided --
+		// thirty-seven writes across four incompatible disciplines -- and is its
+		// own ticket rather than something to settle in passing here.
+		//
+		// Scoped to the four assignments. Save() writes to disk and takes the
+		// config's own lock; holding the server lock across it would stall every
+		// other operation on this daemon for a file write, which is #4/#8's
+		// lesson.
+		s.Lock()
 		s.config.Nodes = make(map[string]*config.Node)
 		s.config.Groups = make(map[string][]string)
 		s.config.Pulse.LocalNode = ""
 		s.config.Pulse.ClusterToken = ""
+		s.Unlock()
+
 		if err := s.config.Save(); err != nil {
 			s.logger.Warn("Failed to save config after leave", "error", err)
 		}
