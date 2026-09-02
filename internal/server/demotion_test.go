@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/rpc"
@@ -89,7 +90,17 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 		ml.GetMemberByID(id).Status = membership.StatusActive
 	}
 
-	s := &Server{config: cfg, logger: logger, memberList: ml}
+	s := &Server{
+		config:     cfg,
+		logger:     logger,
+		memberList: ml,
+		// The real constructor initialises this at server.go:308, and
+		// getPeerClient writes to it without a nil check -- correctly, since it
+		// can never be nil in the daemon. A &Server{} literal has to supply it
+		// or any test that reaches a peer broadcast panics on a nil map, which
+		// is why nothing drove BroadcastClusterState until END-2339.
+		peerClients: make(map[string]*client.Client),
+	}
 
 	// Registered last, so it runs first: cleanups are LIFO, and both the
 	// CONFIG_LOCATION restore above and t.TempDir's own removal are writes that

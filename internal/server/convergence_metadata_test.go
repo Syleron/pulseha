@@ -210,3 +210,71 @@ func TestConfigSyncFullConfigAdoptsTheEpochAndItsLeader(t *testing.T) {
 	sync(t, 4, 9, "leader-nine")
 	assertConvergence(t, 9, "leader-nine", "a later strictly newer epoch must still be adopted")
 }
+
+// The epoch and the elected node are one decision, and twelve broadcast sites
+// used to read them separately: the epoch through its locking accessor, then
+// s.leaderID bare in the same expression. broadcastNextEpoch reads the pair
+// under one acquisition instead.
+//
+// It matters more than a race-detector complaint because BroadcastClusterState
+// assigns s.leaderID unconditionally -- the `epoch > s.clusterEpoch` check
+// guards only the epoch -- so a stale leader read in that window is installed
+// and broadcast with nothing standing in its way.
+func TestBroadcastNextEpochAdvancesTheEpochUnderTheCurrentElectedNode(t *testing.T) {
+	// No peers: the broadcast then has nobody to dial, so this exercises the
+	// local epoch and elected-node bookkeeping without waiting on gRPC.
+	s, _ := newConfigSyncTestServer(t, "node-local")
+
+	if !s.adoptConvergenceMetadata(4, "leader-four", false) {
+		t.Fatal("expected epoch 4 to be adopted")
+	}
+
+	_ = s.broadcastNextEpoch(map[string]membership.MemberStatus{
+		"node-local": membership.StatusActive,
+	})
+
+	epoch, leader := s.convergenceMetadata()
+	if epoch != 5 {
+		t.Errorf("epoch = %d, want 5 (one past the epoch it read)", epoch)
+	}
+	if leader != "leader-four" {
+		t.Errorf("leader = %q, want leader-four — the broadcast must carry the "+
+			"elected node it read, not replace it", leader)
+	}
+}
+
+// TestBroadcastNextEpochDoesNotRaceAnAdopt is the test the old idiom fails.
+//
+// s.leaderID is written by adoptConvergenceMetadata under the write lock and was
+// read bare by every broadcast site, so -race has both sides here. Run under
+// -race this is the whole point; run without it, it still exercises the paths
+// concurrently.
+func TestBroadcastNextEpochDoesNotRaceAnAdopt(t *testing.T) {
+	s, _ := newConfigSyncTestServer(t, "node-local")
+
+	states := map[string]membership.MemberStatus{
+		"node-local": membership.StatusActive,
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 1; i <= 200; i++ {
+			s.adoptConvergenceMetadata(int64(i), "leader-"+string(rune('a'+i%26)), true)
+		}
+	}()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			_ = s.broadcastNextEpoch(states)
+		}
+	}()
+	wg.Wait()
+
+	// The epoch must never have gone backwards, whichever writer won.
+	if epoch, _ := s.convergenceMetadata(); epoch < 200 {
+		t.Errorf("final epoch = %d, want at least 200", epoch)
+	}
+}

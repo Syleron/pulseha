@@ -1110,7 +1110,7 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		for id, m := range membersSnapshot {
 			states[id] = m.Status
 		}
-		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+		_ = s.broadcastNextEpoch(states)
 		putStatusMap(states)
 	}()
 
@@ -1957,7 +1957,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				// Abort and restore
 				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion due to demotion failure")
 				s.restoreMemberStates(originalStates)
-				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+				_ = s.broadcastNextEpoch(originalStates)
 				return
 			}
 
@@ -2016,7 +2016,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 					"reachable_nodes", reachableCount,
 					"error", err)
 				s.restoreMemberStates(originalStates)
-				_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+				_ = s.broadcastNextEpoch(originalStates)
 				return
 			}
 
@@ -2049,7 +2049,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				}
 			}
 			s.restoreMemberStates(originalStates)
-			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+			_ = s.broadcastNextEpoch(originalStates)
 			return
 		}
 		s.logger.Info("PROMOTE_ASYNC: Successfully promoted local node to Active", "node_id", targetNodeID)
@@ -2058,21 +2058,21 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		node := s.config.Nodes[targetNodeID]
 		if node == nil {
 			s.logger.Error("PROMOTE_ASYNC: Node configuration not found", "node_id", targetNodeID)
-			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+			_ = s.broadcastNextEpoch(originalStates)
 			return
 		}
 
 		remoteClient, err := client.New()
 		if err != nil {
 			s.logger.Error("PROMOTE_ASYNC: Failed to create client", "error", err)
-			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+			_ = s.broadcastNextEpoch(originalStates)
 			return
 		}
 		defer remoteClient.Close()
 
 		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
 			s.logger.Error("PROMOTE_ASYNC: Failed to connect to target node", "error", err)
-			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+			_ = s.broadcastNextEpoch(originalStates)
 			return
 		}
 
@@ -2098,7 +2098,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				}
 			}
 			s.restoreMemberStates(originalStates)
-			_ = s.BroadcastClusterState(originalStates, s.GetClusterEpoch()+1, s.leaderID, nil)
+			_ = s.broadcastNextEpoch(originalStates)
 			return
 		}
 
@@ -5729,7 +5729,7 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 	for id, m := range s.memberList.MembersSnapshot() {
 		states[id] = m.Status
 	}
-	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+	_ = s.broadcastNextEpoch(states)
 	putStatusMap(states)
 
 	return resp, nil
@@ -5801,7 +5801,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 		for id, m := range s.memberList.MembersSnapshot() {
 			states[id] = m.Status
 		}
-		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+		_ = s.broadcastNextEpoch(states)
 		putStatusMap(states)
 
 		s.logger.Info("Node entered maintenance mode")
@@ -5826,7 +5826,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 	for id, m := range s.memberList.MembersSnapshot() {
 		states[id] = m.Status
 	}
-	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+	_ = s.broadcastNextEpoch(states)
 	putStatusMap(states)
 
 	s.logger.Info("Node exited maintenance mode")
@@ -6598,7 +6598,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 	for id, m := range s.memberList.MembersSnapshot() {
 		states[id] = m.Status
 	}
-	_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, s.leaderID, nil)
+	_ = s.broadcastNextEpoch(states)
 
 	return &rpc.InitiateJoinResponse{Success: true, Message: "join initiated"}, nil
 }
@@ -7032,6 +7032,39 @@ func (s *Server) convergenceMetadata() (epoch int64, leaderID string) {
 	s.RLock()
 	defer s.RUnlock()
 	return s.clusterEpoch, s.leaderID
+}
+
+// broadcastNextEpoch publishes memberStates at one past the current epoch,
+// attributed to the node the cluster currently believes is Active.
+//
+// Exists because the idiom it replaces was wrong in a way that read as correct.
+// Twelve sites passed the epoch through the locking accessor and the elected
+// node bare, in one expression: GetClusterEpoch() takes the read lock and
+// releases it, then s.leaderID was read with nothing held. So the two were
+// never read together, and an adopt landing between them pairs a new epoch with
+// the previous one's leader.
+//
+// That is not only a race-detector complaint, and the reason is worth stating
+// precisely. BroadcastClusterState gates the epoch on `epoch > s.clusterEpoch`
+// but assigns s.leaderID *unconditionally*, outside that check -- reasonable in
+// itself, since this is the outgoing path where the node asserts its own view
+// rather than the incoming one where a peer's claim has to be epoch-gated. The
+// consequence is that a stale leaderID is installed as the elected node and
+// broadcast to every peer as authoritative, with no epoch comparison standing
+// in its way. The caller passing a self-consistent pair is the only protection
+// there is.
+//
+// convergenceMetadata returns the two under one acquisition, which is what was
+// needed: the pair has to be self-consistent, not fresh. Staleness is already
+// handled, because BroadcastClusterState re-checks the epoch under its own lock
+// before adopting anything.
+//
+// A method rather than two lines at each site, so the invariant lives in one
+// place -- and so that the four calls sharing one scope in
+// performPromotionAsync do not need four differently-named epoch variables.
+func (s *Server) broadcastNextEpoch(memberStates map[string]membership.MemberStatus) error {
+	epoch, electedNode := s.convergenceMetadata()
+	return s.BroadcastClusterState(memberStates, epoch+1, electedNode, nil)
 }
 
 // adoptConvergenceMetadata records an incoming epoch and its leader, and reports
