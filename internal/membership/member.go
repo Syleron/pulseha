@@ -2,13 +2,13 @@ package membership
 
 import (
 	"fmt"
-	"sync"
 	"time"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/rpc"
 )
 
@@ -39,7 +39,7 @@ const (
 
 // Member defines our member object
 type Member struct {
-	sync.Mutex
+	pulselock.Mutex
 	ID             string
 	Hostname       string
 	IP             string // Node's IP address

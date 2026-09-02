@@ -18,10 +18,10 @@ package server
 
 import (
 	"context"
-	"sync"
 	"time"
 
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/rpc"
 )
 
@@ -65,7 +65,7 @@ type vipReconcileSnapshot struct {
 // because a pass always begins strictly after the newest snapshot it will act on
 // was taken.
 type vipReconciler struct {
-	mu      sync.Mutex
+	mu      pulselock.Mutex
 	running bool
 	pending *vipReconcileSnapshot
 

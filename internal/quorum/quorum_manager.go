@@ -8,6 +8,7 @@ import (
 	log "github.com/charmbracelet/log"
 	"github.com/google/uuid"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/pulselock"
 )
 
 // Constants for session history management
@@ -108,7 +109,7 @@ type CompactSessionHistory struct {
 
 // QuorumManager handles quorum-based voting for cluster decisions
 type QuorumManager struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	config         *config.Config
 	logger         *log.Logger
 	activeSessions map[string]*VotingSession

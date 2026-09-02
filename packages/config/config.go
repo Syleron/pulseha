@@ -24,12 +24,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 
 	"github.com/google/uuid"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/jsonHelper"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 )
 
@@ -73,7 +73,7 @@ type Config struct {
 	Groups  map[string][]string    `json:"floating_ip_groups"`
 	Nodes   map[string]*Node       `json:"nodes"`
 	Plugins map[string]interface{} `json:"plugins"`
-	sync.Mutex
+	pulselock.Mutex
 }
 
 type Local struct {

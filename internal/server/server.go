@@ -24,6 +24,7 @@ import (
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
@@ -129,7 +130,7 @@ func callerAddr(ctx context.Context) string {
 
 // Server represents the PulseHA server
 type Server struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	config      *config.Config
 	logger      *log.Logger
 	memberList  *membership.MemberList
@@ -138,13 +139,13 @@ type Server struct {
 
 	// peerBringUp coalesces per-address peer bring-ups (defect #37); see
 	// peerBringUpQueue for why it is built lazily.
-	peerBringUpMu sync.Mutex
+	peerBringUpMu pulselock.Mutex
 	peerBringUp   *peerBringUpBatcher
 
 	// vipReconcile coalesces the post-load VIP reconcile, which loadInitialMembers
 	// schedules on every full ConfigSync (defect #65). Lazily built for the same
 	// reason as peerBringUp.
-	vipReconcileMu sync.Mutex
+	vipReconcileMu pulselock.Mutex
 	vipReconcile   *vipReconciler
 
 	quorumManager *quorum.QuorumManager
@@ -161,18 +162,18 @@ type Server struct {
 	leaderLeaseUntil time.Time
 	// Connection pool for peer clients
 	peerClients map[string]*client.Client
-	clientMutex sync.RWMutex
+	clientMutex pulselock.RWMutex
 	// Unix socket path used by the CLI gRPC server
 	cliSocketPath string
 	// reconfigureMu serializes Reconfigure() so concurrent callers (such as
 	// ConfigSync-triggered reconfigures) don't race on the cluster listener
 	// bind to IP:port.
-	reconfigureMu sync.Mutex
+	reconfigureMu pulselock.Mutex
 
 	// clusterInitMu serializes CreateCluster and InitiateJoin to prevent a
 	// TOCTOU race where both pass the ClusterCheck() guard concurrently and
 	// both activate as the "first node", causing dual-active in active-passive mode.
-	clusterInitMu sync.Mutex
+	clusterInitMu pulselock.Mutex
 
 	// Config propagation ordering (docs/TEST-PLAN.md defects #5 and #38).
 	//
@@ -227,7 +228,7 @@ type Server struct {
 	// its own mutex: the broadcaster writes it at the end of a pass and reads it
 	// to schedule the next one, and neither point can take s.RWMutex, which the
 	// mutation that started the broadcast may still hold.
-	propagationMu sync.Mutex
+	propagationMu pulselock.Mutex
 	unpropagated  *unpropagatedConfig
 
 	// clusterListenSrv/clusterListenAddr record what the cluster gRPC listener is
@@ -235,7 +236,7 @@ type Server struct {
 	// that actually moves the bind address (defect #31). Guarded by their own
 	// mutex because the serving goroutine clears them when Serve returns, off any
 	// path that holds s.RWMutex.
-	clusterListenMu   sync.Mutex
+	clusterListenMu   pulselock.Mutex
 	clusterListenSrv  *grpc.Server
 	clusterListenAddr string
 
@@ -259,7 +260,7 @@ type Server struct {
 	// lastAnnounce debounces re-announcements, guarded by its own mutex because it is
 	// written from the health-check pass and must not queue behind whatever else holds the
 	// server lock.
-	announceMu   sync.Mutex
+	announceMu   pulselock.Mutex
 	lastAnnounce time.Time
 
 	// asyncReconfigures counts the Reconfigure goroutines full ConfigSyncs have
@@ -4353,7 +4354,7 @@ func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupRele
 	defer cancel()
 
 	var (
-		mu sync.Mutex
+		mu pulselock.Mutex
 		wg sync.WaitGroup
 	)
 	for _, target := range targets {

@@ -3,16 +3,16 @@ package membership
 import (
 	"fmt"
 	"sort"
-	"sync"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/pulselock"
 )
 
 // MemberList defines our member list object
 type MemberList struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	Members   map[string]*Member
 	config    *config.Config
 	logger    *log.Logger

@@ -18,6 +18,7 @@ import (
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
 )
@@ -121,7 +122,7 @@ type HealthCheck struct {
 
 // HealthChecker handles health checking for nodes and IPs
 type HealthChecker struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	members     *MemberList
 	checkTicker *time.Ticker
 	stopChan    chan struct{}
