@@ -5,8 +5,8 @@
 //
 // Go's mutexes are not reentrant, so a method holding a lock cannot call a
 // sibling that takes the same lock. Nothing enforced that, and it produced nine
-// deadlocks: docs/TEST-PLAN.md #32, #46, #56, #85, #88, plus RebalanceCluster,
-// hasQuorumLocked, Server.PromoteNode and config.GetLocalNodeUUID (#87). Every
+// deadlocks: docs/TEST-PLAN.md #32, #46, #56, #85, #87, plus RebalanceCluster,
+// hasQuorumLocked, Server.PromoteNode and Member.RemoveIPs. Every
 // one was a method calling a locking sibling on its own receiver, in its own
 // file — which is to say the constraint was already local and already
 // auditable, and was still missed nine times.
