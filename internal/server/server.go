@@ -799,58 +799,61 @@ func (s *Server) loadInitialMembers() error {
 		if member := s.memberList.GetMemberByID(id); member != nil {
 			s.logger.Debugf("Verified member %s exists in member list", id)
 
-			// Set member details from config
-			member.IP = node.IP
-			member.Port = node.Port
-			member.Hostname = node.Hostname
+			// Set member details from config. Under the member lock: the member
+			// is already in the list, so a health-check pass can be reading
+			// Hostname to log against and IP/Port to dial while this writes them.
+			member.SetEndpoint(node.IP, node.Port, node.Hostname)
 
 			// Determine initial status based on node role and cluster state
 			localNodeID, err := s.config.GetLocalNodeUUID()
 			isLocalNode := err == nil && id == localNodeID
 
-			// Default to Unknown for all nodes initially - health checks will determine actual status
-			member.Status = membership.StatusUnknown
-
-			// For local node, we can set initial status based on cluster mode
-			if isLocalNode {
-				// Restore maintenance state across restarts before applying any other default
-				if node.Maintenance {
-					member.Status = membership.StatusMaintenance
-					member.ActiveIPs = nil
-					s.logger.Infof("Restoring local node %s to Maintenance (persisted in config)", id)
-				} else if s.config.Pulse.Mode == "active-passive" {
-					// In active-passive mode, determine who should be active
-					totalNodes := len(s.config.Nodes)
-
-					if totalNodes == 1 {
-						// Single node cluster - should be active
-						member.Status = membership.StatusActive
-						s.logger.Infof("Setting single node %s as Active", id)
-					} else {
-						// Multi-node cluster - start as passive, election will determine active
-						member.Status = membership.StatusPassive
-						// Clear ActiveIPs for passive nodes to prevent health check loops
-						member.ActiveIPs = nil
-						s.logger.Infof("Setting local node %s as Passive (election will determine active)", id)
-					}
-				} else {
-					// Active-active mode - start as passive
-					member.Status = membership.StatusPassive
-					// Clear ActiveIPs for passive nodes to prevent health check loops
-					member.ActiveIPs = nil
-					s.logger.Infof("Setting local node %s as Passive in active-active mode", id)
-				}
-			} else {
+			// Decided first, written once. These branches used to assign
+			// member.Status and member.ActiveIPs directly, with no lock at all,
+			// while the health check loop and the IP monitor read both -- the
+			// residual #48 left open.
+			//
+			// Default to Unknown for all nodes initially; health checks will
+			// determine the actual status.
+			initial := membership.Claim{Status: membership.StatusUnknown}
+			var reason string
+			switch {
+			case !isLocalNode:
 				// Remote nodes start as Unknown until health checks establish connection
-				member.Status = membership.StatusUnknown
-				s.logger.Infof("Setting remote node %s as Unknown (will be determined via health checks)", id)
+				reason = "Setting remote node %s as Unknown (will be determined via health checks)"
+			case node.Maintenance:
+				// Restore maintenance state across restarts before applying any other default
+				initial.Status = membership.StatusMaintenance
+				reason = "Restoring local node %s to Maintenance (persisted in config)"
+			case s.config.Pulse.Mode == "active-passive" && len(s.config.Nodes) == 1:
+				// Single node cluster - should be active
+				initial.Status = membership.StatusActive
+				reason = "Setting single node %s as Active"
+			case s.config.Pulse.Mode == "active-passive":
+				// Multi-node cluster - start as passive, election will determine active
+				initial.Status = membership.StatusPassive
+				reason = "Setting local node %s as Passive (election will determine active)"
+			default:
+				// Active-active mode - start as passive
+				initial.Status = membership.StatusPassive
+				reason = "Setting local node %s as Passive in active-active mode"
 			}
+			// A zero Claim carries no addresses, so the branches that used to
+			// clear ActiveIPs still do. The three that left them alone are
+			// unaffected, and the reason is the guard at the top of this loop:
+			// a member already in the list is skipped with `continue`, so
+			// everything reaching here was just created by AddMember and holds
+			// nothing. loadInitialMembers runs again after every full ConfigSync,
+			// so that skip is what makes writing a whole claim here safe.
+			member.SetClaim(initial)
+			s.logger.Infof(reason, id)
 
 			// No longer try to determine status based on node order
 			// Let the health checks and election process handle this
 
+			ip, port, hostname := member.Endpoint()
 			s.logger.Debugf("Set initial details for member %s: IP=%s, Port=%s, Hostname=%s, Status=%s",
-				id, member.IP, member.Port, member.Hostname, membership.StatusToString(member.Status))
+				id, ip, port, hostname, membership.StatusToString(member.GetStatus()))
 		} else {
 			s.logger.Warnf("Member %s was not found in member list after adding!", id)
 		}
@@ -1319,14 +1322,15 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			lastResp = time.Now().Format(time.RFC3339)
 		}
 
+		ip, port, _ := member.Endpoint()
 		members = append(members, &rpc.Member{
 			Hostname:     health.Hostname,
 			Status:       st,
 			ActiveIps:    health.ActiveIPs,
 			LastResponse: lastResp,
 			Latency:      health.Latency,
-			Ip:           member.IP,
-			Port:         member.Port,
+			Ip:           ip,
+			Port:         port,
 			NodeId:       member.ID,
 		})
 	}
@@ -5292,7 +5296,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			var hadLocalMember bool
 			if err == nil {
 				if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
-					oldLocalStatus = localMember.Status
+					oldLocalStatus = localMember.GetStatus()
 					hadLocalMember = true
 				}
 			}

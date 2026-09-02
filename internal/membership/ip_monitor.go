@@ -746,9 +746,9 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 	// land while the monitor is initialising, where the old unconditional Start in Server.Start
 	// ran before the cluster listener was up. -race caught it as a write in ConfigSync against
 	// this read (docs/TEST-PLAN.md #86).
-	localMember.Lock()
+	localMember.mu.Lock()
 	localStatus := localMember.Status
-	localMember.Unlock()
+	localMember.mu.Unlock()
 
 	m.logger.Debug("IP monitor init: found local member", "status", localStatus)
 

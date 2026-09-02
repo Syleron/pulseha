@@ -97,7 +97,11 @@ func (c Claim) copyIPs() Claim {
 
 // Member defines our member object
 type Member struct {
-	pulselock.Mutex
+	// mu is a named private field rather than an embedded mutex, so Lock() is
+	// not part of Member's public surface and nothing outside this package can
+	// take it. See docs/adr/0003-instrumented-mutexes.md for why that is worth
+	// doing on this type and not on the others.
+	mu             pulselock.Mutex
 	ID             string
 	Hostname       string
 	IP             string // Node's IP address
@@ -172,8 +176,8 @@ func (m *Member) initializeClient() error {
 // Close properly closes the member's client connection to prevent memory leaks
 // Only call this when the member is being permanently removed from the cluster
 func (m *Member) Close() {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	if m.Client != nil && m.Client.Connection != nil {
 		m.logger.Debug(fmt.Sprintf("Closing client connection for member %s (permanent removal)", m.Hostname))
@@ -290,8 +294,8 @@ func (m *Member) RemoveActiveIPs(ips []string) {
 // and pair a new status with the previous status's addresses, which is the
 // mismatch the type exists to prevent.
 func (m *Member) Claim() Claim {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.claimLocked()
 }
 
@@ -301,8 +305,8 @@ func (m *Member) Claim() Claim {
 // the addresses brought up or down calls BringUpIPs or BringDownIPs after this
 // returns and outside the lock, per docs/adr/0004.
 func (m *Member) SetClaim(c Claim) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.setClaimLocked(c)
 }
 
@@ -326,8 +330,8 @@ func (m *Member) SetClaim(c Claim) {
 // on it under test and reports it on stderr live, where before it wedged the
 // member lock in silence (docs/adr/0003-instrumented-mutexes.md).
 func (m *Member) UpdateClaim(decide func(current Claim) (Claim, bool)) bool {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	next, ok := decide(m.claimLocked())
 	if !ok {
@@ -344,9 +348,32 @@ func (m *Member) UpdateClaim(decide func(current Claim) (Claim, bool)) bool {
 // the coordinator seeding an active-active map, and a peer self-reporting what
 // it holds.
 func (m *Member) SetActiveIPs(ips []string) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.ActiveIPs = Claim{ActiveIPs: ips}.copyIPs().ActiveIPs
+}
+
+// SetEndpoint records where this member is reached, from the config that
+// described it.
+//
+// Not part of the claim -- these say where a node is, not what it asserts about
+// itself. Synchronised because loadInitialMembers wrote all three bare, while
+// the health-check loop reads Hostname to log against and the client pool reads
+// IP and Port to dial: the member is already in the list by the time these are
+// set, so a pass could observe a half-described member.
+func (m *Member) SetEndpoint(ip, port, hostname string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.IP = ip
+	m.Port = port
+	m.Hostname = hostname
+}
+
+// Endpoint returns where this member is reached, as one consistent triple.
+func (m *Member) Endpoint() (ip, port, hostname string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.IP, m.Port, m.Hostname
 }
 
 // SetCapacity records how many Floating IPs this member may hold.
@@ -355,8 +382,8 @@ func (m *Member) SetActiveIPs(ips []string) {
 // something the member asserts about its own state. It is read under this lock
 // to build the placement snapshots in MemberList and the health checker.
 func (m *Member) SetCapacity(capacity int) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Capacity = capacity
 }
 
@@ -375,8 +402,8 @@ func (m *Member) GetActiveIPs() []string {
 // maintenance transitions, so deciding anything from a bare read races with all
 // three.
 func (m *Member) GetStatus() MemberStatus {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.Status
 }
 
@@ -387,8 +414,8 @@ func (m *Member) GetStatus() MemberStatus {
 // status-only transition -- ExitMaintenance returning a member to Passive, which
 // it reaches holding nothing.
 func (m *Member) SetStatus(status MemberStatus) {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.Status = status
 }
 
@@ -534,10 +561,10 @@ func (m *Member) bringUpIPsLocally(iface string, ips []string) error {
 // BringDownIPs brings down the specified IPs on this member based on configuration
 func (m *Member) BringDownIPs(ips []string) error {
 	// For passive nodes, prevent continuous BringDownIP calls that cause loops
-	m.Lock()
+	m.mu.Lock()
 	isLocal := m.IsLocal()
 	status := m.Status
-	m.Unlock()
+	m.mu.Unlock()
 
 	ifaceToIPs, err := m.groupIPsByInterface(ips)
 	if err != nil {
@@ -664,8 +691,8 @@ func (m *Member) IsLocal() bool {
 
 // GetHealthStatus returns detailed health information about the member
 func (m *Member) GetHealthStatus() MemberHealth {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	return MemberHealth{
 		Hostname:     m.Hostname,
@@ -689,9 +716,9 @@ func (m *Member) GetHealthStatus() MemberHealth {
 // status is marked, so peers see a node that has stopped serving before they see one that is
 // ineligible.
 func (m *Member) EnterMaintenance() error {
-	m.Lock()
+	m.mu.Lock()
 	if m.Status == StatusMaintenance {
-		m.Unlock()
+		m.mu.Unlock()
 		return nil
 	}
 	// Snapshotted rather than passed by reference, because the field is cleared below and
@@ -700,15 +727,15 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusActive && len(m.ActiveIPs) > 0 {
 		toRelease = append([]string{}, m.ActiveIPs...)
 	}
-	m.Unlock()
+	m.mu.Unlock()
 
 	if len(toRelease) > 0 {
 		// Bring down all hosted IPs before leaving active state
 		_ = m.BringDownIPs(toRelease)
 	}
 
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	// Re-checked: the status can have moved while the addresses were coming down, and a node
 	// that is no longer Active must not have its assignment list cleared out from under
 	// whatever moved it.
@@ -722,8 +749,8 @@ func (m *Member) EnterMaintenance() error {
 // ExitMaintenance returns this member to passive state so it can be
 // considered for promotion again.
 func (m *Member) ExitMaintenance() error {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Status != StatusMaintenance {
 		return nil
 	}

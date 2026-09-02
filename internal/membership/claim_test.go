@@ -229,9 +229,9 @@ func TestSetCapacityIsNotPartOfTheClaim(t *testing.T) {
 
 	m.SetCapacity(7)
 
-	m.Lock()
+	m.mu.Lock()
 	capacity := m.Capacity
-	m.Unlock()
+	m.mu.Unlock()
 	if capacity != 7 {
 		t.Errorf("Capacity = %d, want 7", capacity)
 	}
@@ -334,5 +334,34 @@ func TestAddressesNotIn(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestMemberDoesNotExposeItsLock pins the un-embedding.
+//
+// Member's mutex is a named private field, so Lock() is not part of its public
+// surface and no other package can take it. That is worth a test because
+// re-embedding it is a one-word change that would compile, pass everything else,
+// and silently reopen the boundary: internal/server held this lock at twenty
+// sites and edited the fields underneath it by hand.
+//
+// Checked through sync.Locker rather than by reflection over field names,
+// because what matters is whether the method set exposes the lock, not what the
+// field is called.
+func TestMemberDoesNotExposeItsLock(t *testing.T) {
+	var m any = &Member{}
+
+	if _, ok := m.(sync.Locker); ok {
+		t.Error("*Member satisfies sync.Locker, so its mutex is embedded again — " +
+			"callers outside this package can take it, and the claim operations " +
+			"stop being the only way in")
+	}
+	// The claim operations are the intended surface, and they must still be there.
+	if _, ok := m.(interface {
+		Claim() Claim
+		SetClaim(Claim)
+		UpdateClaim(func(Claim) (Claim, bool)) bool
+	}); !ok {
+		t.Error("*Member no longer offers the claim operations")
 	}
 }

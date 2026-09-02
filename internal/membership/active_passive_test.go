@@ -95,10 +95,10 @@ func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveReques
 	s.demoted = append(s.demoted, req.NodeId)
 	s.sequence = append(s.sequence, "demote:"+req.NodeId)
 	if member := s.members.GetMemberByID(req.NodeId); member != nil {
-		member.Lock()
+		member.mu.Lock()
 		member.Status = StatusPassive
 		member.ActiveIPs = nil
-		member.Unlock()
+		member.mu.Unlock()
 	}
 	return &rpc.MakePassiveResponse{Success: true}, nil
 }
