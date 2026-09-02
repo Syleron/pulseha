@@ -937,9 +937,7 @@ func (s *Server) reconcileVIPPlan(localID string, groupIPs map[string][]string, 
 	// Under the member lock: ConfigSync applies incoming member states
 	// concurrently with this reconcile, and reading the status bare raced with
 	// that write.
-	member.Lock()
-	claim := member.Status == membership.StatusActive
-	member.Unlock()
+	claim := member.GetStatus() == membership.StatusActive
 
 	if !claim || !activeActive {
 		return groupIPs, claim
@@ -2201,10 +2199,9 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 			}, nil
 		}
 
-		member.Lock()
-		member.Status = membership.StatusPassive
-		member.ActiveIPs = nil
-		member.Unlock()
+		// Passive with nothing claimed: a demoted node must not go on telling
+		// peers it holds addresses it has given up.
+		member.SetClaim(membership.Claim{Status: membership.StatusPassive})
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -2244,10 +2241,9 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 			return &rpc.MakePassiveResponse{Success: false, Message: rresp.Message}, nil
 		}
 		// Reflect locally
-		member.Lock()
-		member.Status = membership.StatusPassive
-		member.ActiveIPs = nil
-		member.Unlock()
+		// Passive with nothing claimed: a demoted node must not go on telling
+		// peers it holds addresses it has given up.
+		member.SetClaim(membership.Claim{Status: membership.StatusPassive})
 	}
 
 	// Success
@@ -3052,16 +3048,22 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 					continue
 				}
 
-				member.Lock()
-				heldIPs := append([]string{}, member.ActiveIPs...)
-				wasActive := member.Status == membership.StatusActive
-				member.ActiveIPs = nil
-				// Only Active nodes are demoted; a failed or maintenance node
-				// keeps its status so it isn't falsely reported as healthy.
-				if wasActive {
-					member.Status = membership.StatusPassive
-				}
-				member.Unlock()
+				// One acquisition: what this node held has to be read in the same
+				// breath as clearing it, or a concurrent assignment lands between
+				// the two and its addresses are dropped without being released.
+				var heldIPs []string
+				var wasActive bool
+				member.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
+					heldIPs = current.ActiveIPs
+					wasActive = current.Status == membership.StatusActive
+					current.ActiveIPs = nil
+					// Only Active nodes are demoted; a failed or maintenance node
+					// keeps its status so it isn't falsely reported as healthy.
+					if wasActive {
+						current.Status = membership.StatusPassive
+					}
+					return current, true
+				})
 
 				if wasActive {
 					s.logger.Info("Demoted node to passive for active-passive mode", "hostname", member.Hostname)
@@ -3089,10 +3091,13 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			// — including the health checks peers use to decide it is still alive
 			// (docs/TEST-PLAN.md defects #4/#8) — and it claimed the addresses before
 			// the demoted nodes had released them.
-			activeNode.Lock()
-			activeNode.Status = membership.StatusActive
-			activeNode.ActiveIPs = activeIPs
-			activeNode.Unlock()
+			// The claim only. MakeActive would bring the addresses up here too,
+			// and the whole point of this site is that the bring-up waits until
+			// s.Lock() is dropped -- see the comment above.
+			activeNode.SetClaim(membership.Claim{
+				Status:    membership.StatusActive,
+				ActiveIPs: activeIPs,
+			})
 			if len(activeIPs) > 0 {
 				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
 			}
@@ -3131,9 +3136,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// a health check may have moved on in the meantime.
 	switchStates := getStatusMap()
 	for id, member := range s.memberList.MembersSnapshot() {
-		member.Lock()
-		switchStates[id] = member.Status
-		member.Unlock()
+		switchStates[id] = member.GetStatus()
 	}
 	switchEpoch := s.clusterEpoch
 	switchLeader := s.leaderID
@@ -3190,9 +3193,7 @@ func (s *Server) seedActiveActiveAssignments() bool {
 
 	var owner *membership.Member
 	for _, member := range members {
-		member.Lock()
-		isActive := member.Status == membership.StatusActive
-		member.Unlock()
+		isActive := member.GetStatus() == membership.StatusActive
 		if isActive {
 			owner = member
 			break
@@ -3211,13 +3212,13 @@ func (s *Server) seedActiveActiveAssignments() bool {
 		"hostname", owner.Hostname, "ip_count", len(ownedIPs))
 
 	for _, member := range members {
-		member.Lock()
+		// The assignment map only: this seeds who holds what, and says nothing
+		// about any member's status.
 		if member.ID == owner.ID {
-			member.ActiveIPs = ownedIPs
+			member.SetActiveIPs(ownedIPs)
 		} else {
-			member.ActiveIPs = nil
+			member.SetActiveIPs(nil)
 		}
-		member.Unlock()
 	}
 	return true
 }
@@ -3247,10 +3248,12 @@ func (s *Server) leastLoadedNodeForGroup(groupName string) string {
 		if member == nil {
 			continue
 		}
-		member.Lock()
-		status := member.Status
-		count := len(member.ActiveIPs)
-		member.Unlock()
+		// One read, not two: placing an address against a status from before a
+		// write and a count from after it is how a node gets given work it has
+		// just stopped being eligible for.
+		claim := member.Claim()
+		status := claim.Status
+		count := len(claim.ActiveIPs)
 		if status == membership.StatusUnknown || status == membership.StatusMaintenance {
 			continue
 		}
@@ -3562,21 +3565,20 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	// for remote nodes, including the transition to Active in active-active.
 	if localBroughtUp {
 		if member := s.memberList.GetMemberByID(s.config.Pulse.LocalNode); member != nil {
-			member.Lock()
-			alreadyTracked := false
-			for _, ip := range member.ActiveIPs {
-				if ip == ipToUse {
-					alreadyTracked = true
-					break
+			// Read before the decision runs, not inside it: the closure holds the
+			// member lock, and the less it reaches for from there the better.
+			activeActiveMode := s.config.Pulse.Mode == "active-active"
+			member.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
+				current = current.WithAddresses(ipToUse)
+				// A node given an address in active-active is serving, so it
+				// stops being Passive. Only from Passive: a node in maintenance
+				// or one not answering must not be promoted by an address
+				// landing on it.
+				if activeActiveMode && current.Status == membership.StatusPassive {
+					current.Status = membership.StatusActive
 				}
-			}
-			if !alreadyTracked {
-				member.ActiveIPs = append(member.ActiveIPs, ipToUse)
-			}
-			if s.config.Pulse.Mode == "active-active" && member.Status == membership.StatusPassive {
-				member.Status = membership.StatusActive
-			}
-			member.Unlock()
+				return current, true
+			})
 		}
 	}
 
@@ -5312,16 +5314,27 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					continue
 				}
 
-				// Status and ActiveIPs are read under the member
-				// lock elsewhere — the post-load VIP reconcile in
-				// loadInitialMembers, GetActiveIPs — so this writer has to hold
-				// it too. A func literal rather than an inline block because
-				// the guard clauses below bail out early and each has to
-				// release the lock.
-				func() {
-					m.Lock()
-					defer m.Unlock()
+				// Read before the decision runs rather than inside it, so the
+				// locked region reaches for as little as possible. Unsynchronised
+				// either way -- config contents are guarded by nothing, which is
+				// its own ticket -- so hoisting it changes no behaviour.
+				nodeCfg := s.config.Nodes[id]
 
+				// UpdateClaim rather than the member lock taken by hand. The
+				// decision has to see the current status to judge the incoming
+				// one, and commit against the status it judged: reading and
+				// writing in two acquisitions would let a promotion land in
+				// between and be silently overwritten by a peer's older view.
+				//
+				// The guard clauses return false, which leaves the member
+				// untouched -- what "ignored" has to mean here.
+				//
+				// The Debug lines stay inside the decision. They take no member
+				// lock, the locked region is the same as it was, and this repo's
+				// live verification is grep-based (docs/TEST-PLAN.md passim), so
+				// moving the log surface would cost more than the shorter
+				// critical section is worth.
+				m.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
@@ -5334,30 +5347,35 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 						// coordinator to assign them again (docs/TEST-PLAN.md defect #2).
 						// A real demotion — election, mode switch, explicit promote —
 						// always arrives at a higher epoch and still applies.
-						if !decisive && st != m.Status {
+						if !decisive && st != current.Status {
 							s.logger.Debug("CONFIG_SYNC: Ignoring peer's equal-epoch view of local status",
-								"node_id", id, "local", membership.StatusToString(m.Status),
+								"node_id", id, "local", membership.StatusToString(current.Status),
 								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
-							return
+							return current, false
 						}
-						if node := s.config.Nodes[id]; node != nil {
-							if node.Maintenance {
+						if nodeCfg != nil {
+							if nodeCfg.Maintenance {
 								// Config says we're in maintenance — enforce it.
-								if m.Status != membership.StatusMaintenance {
-									m.Status = membership.StatusMaintenance
+								if current.Status != membership.StatusMaintenance {
+									current.Status = membership.StatusMaintenance
 									s.logger.Debug("CONFIG_SYNC: Restored local maintenance status overridden by peer", "node_id", id)
+									// The status only: enforcing maintenance says
+									// nothing about which addresses the record
+									// still lists, and clearing them here was not
+									// what the hand-written version did.
+									return current, true
 								}
-								return
+								return current, false
 							}
 							// Config says we're NOT in maintenance — reject stale StatusMaintenance from peers.
 							if st == membership.StatusMaintenance {
 								s.logger.Debug("CONFIG_SYNC: Rejected stale maintenance status from peer; local config shows not in maintenance", "node_id", id)
-								return
+								return current, false
 							}
 						}
 					}
-					oldStatus := m.Status
-					m.Status = st
+					oldStatus := current.Status
+					current.Status = st
 					// A Passive or Maintenance node cannot hold floating IPs, so
 					// drop any assignment still recorded against it. Without
 					// this, status keeps listing IPs the node already released
@@ -5366,10 +5384,11 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					// StatusUnknown is deliberately left alone: failover reads a
 					// failed active's last-known IPs to hand to its replacement.
 					if st == membership.StatusPassive || st == membership.StatusMaintenance {
-						m.ActiveIPs = nil
+						current.ActiveIPs = nil
 					}
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
-				}()
+					return current, true
+				})
 			}
 
 			// Check if LOCAL node transitioned to Active - if so, bring up VIPs
@@ -5411,9 +5430,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	if s.config.Pulse.Mode == "active-active" && senderID != "" && senderActiveIPs != nil {
 		if localID, err := s.config.GetLocalNodeUUID(); err == nil && senderID != localID {
 			if senderMember := s.memberList.GetMemberByID(senderID); senderMember != nil {
-				senderMember.Lock()
-				senderMember.ActiveIPs = append([]string{}, senderActiveIPs...)
-				senderMember.Unlock()
+				// SetActiveIPs copies, so the explicit append is no longer
+				// needed to detach the payload's slice.
+				senderMember.SetActiveIPs(senderActiveIPs)
 			}
 		}
 	}
@@ -5628,9 +5647,7 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 			if id == targetID {
 				continue
 			}
-			m.Lock()
-			st := m.Status
-			m.Unlock()
+			st := m.GetStatus()
 			if st != membership.StatusMaintenance && st != membership.StatusUnknown {
 				availableAfter++
 			}
@@ -5669,14 +5686,18 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 
 	// Reflect the state change in our local member list so status is correct here too
 	if member := s.memberList.GetMemberByID(targetID); member != nil {
-		member.Lock()
 		if enable {
-			member.Status = membership.StatusMaintenance
-			member.ActiveIPs = nil
+			// Maintenance with nothing claimed: the addresses were released
+			// before the transition, so the record must stop asserting them.
+			member.SetClaim(membership.Claim{Status: membership.StatusMaintenance})
 		} else {
-			member.Status = membership.StatusPassive
+			// SetStatus, not SetClaim, and the asymmetry is deliberate: leaving
+			// maintenance restores eligibility and nothing else. A node in
+			// maintenance holds no addresses, so there is no assignment set to
+			// write, and clearing one here would discard anything a coordinator
+			// had already given it on the way back in.
+			member.SetStatus(membership.StatusPassive)
 		}
-		member.Unlock()
 	}
 
 	states := getStatusMap()
@@ -5697,9 +5718,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 	}
 
 	if enable {
-		member.Lock()
-		currentStatus := member.Status
-		member.Unlock()
+		currentStatus := member.GetStatus()
 
 		if currentStatus == membership.StatusMaintenance {
 			return &rpc.SetMaintenanceResponse{Success: true, Message: "node is already in maintenance mode"}, nil
@@ -5711,9 +5730,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 			if id == localID {
 				continue
 			}
-			m.Lock()
-			st := m.Status
-			m.Unlock()
+			st := m.GetStatus()
 			if st != membership.StatusMaintenance && st != membership.StatusUnknown {
 				availableAfter++
 			}
@@ -5837,9 +5854,7 @@ func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (
 	// Apply to the in-memory member immediately so local distribution
 	// decisions don't wait for the next config sync
 	if member := s.memberList.GetMemberByID(targetID); member != nil {
-		member.Lock()
-		member.Capacity = int(req.Capacity)
-		member.Unlock()
+		member.SetCapacity(int(req.Capacity))
 	}
 
 	// Broadcast updated config to peers
@@ -6272,28 +6287,26 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		if err == nil {
 			localMember := s.memberList.GetMemberByID(localID)
 			if localMember != nil {
-				localMember.Lock()
-				if localMember.Status == membership.StatusPassive || localMember.Status == membership.StatusUnknown {
-					localMember.Status = membership.StatusActive
+				var promoted bool
+				localMember.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
+					// Only from Passive or Unknown. A node the operator has put
+					// in maintenance must not be promoted by an incoming
+					// bring-up, and one already Active needs no transition.
+					if current.Status == membership.StatusPassive || current.Status == membership.StatusUnknown {
+						current.Status = membership.StatusActive
+						promoted = true
+					}
+					// The normalized forms, not the raw request: this list is what
+					// IPMonitor.deriveExpectedIPs matches against the configured group
+					// to decide what this node is still expected to hold, so an entry
+					// spelled differently there is an entry that expectation misses.
+					return current.WithAddresses(normalized...), true
+				})
+				// Logged after the decision returns, so nothing but the claim
+				// itself happens with the member lock held.
+				if promoted {
 					s.logger.Info("BringUpIP: Transitioned local node to Active for active-active mode")
 				}
-				// The normalized forms, not the raw request: this list is what
-				// IPMonitor.deriveExpectedIPs matches against the configured group
-				// to decide what this node is still expected to hold, so an entry
-				// spelled differently there is an entry that expectation misses.
-				for _, ip := range normalized {
-					found := false
-					for _, existing := range localMember.ActiveIPs {
-						if existing == ip {
-							found = true
-							break
-						}
-					}
-					if !found {
-						localMember.ActiveIPs = append(localMember.ActiveIPs, ip)
-					}
-				}
-				localMember.Unlock()
 
 				// Deliberately no refreshLocalMonitorExpectedIPs() here. That call
 				// was defect #64's whole-share re-place, and it was this handler
@@ -7032,6 +7045,28 @@ func (s *Server) adoptConvergenceMetadataLocked(epoch int64, leaderID string, at
 	return true
 }
 
+// selfReportedAddresses is what this node tells its peers it holds, in
+// active-active, so that whichever of them becomes redistribution coordinator
+// knows what to account for if this node fails.
+//
+// Always non-nil, and that is load-bearing rather than defensive. ConfigSync
+// gates the incoming report on `senderActiveIPs != nil`, so an empty slice
+// marshals to `[]` and says "I hold nothing, clear my list", while nil marshals
+// to `null` and says "no report, keep what you have". A node that had released
+// every address would otherwise go quiet about it and its peers would keep
+// counting those addresses as hosted, which is defect #58's shape.
+//
+// Member.GetActiveIPs returns nil for an empty set, so the distinction has to be
+// restored here. It is a function rather than an inline append because nothing
+// in the suite caught the difference when it was inline (END-2339).
+func selfReportedAddresses(m *membership.Member) []string {
+	held := m.GetActiveIPs()
+	if held == nil {
+		return []string{}
+	}
+	return held
+}
+
 // GetLeaderLeaseUntil returns the current leader lease expiry
 func (s *Server) GetLeaderLeaseUntil() time.Time {
 	s.RLock()
@@ -7120,36 +7155,49 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 
 	if localID != "" {
 		if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
-			localMember.Lock()
-			// A non-active node cannot host floating IPs — the IP monitor
-			// enforces that on the interface — so clear any stale claim before
-			// reporting state. Otherwise peers keep counting these IPs as
-			// hosted and the reconciler never re-places them, and status shows
-			// IPs on a node that doesn't actually hold them. Active-passive
-			// demotions (mode switch, failover, maintenance) all leave the same
-			// stale claims behind.
-			//
-			// Active-active is excluded because there is no demotion to clean up
-			// after: every eligible node is Active, so a non-Active status there
-			// is a transient — a missed health check, a peer's stale broadcast.
-			// Discarding the assignment map over one of those cost the node every
-			// address the coordinator had given it, and the addresses were off the
-			// cluster until it noticed and re-placed them (docs/TEST-PLAN.md
-			// defects #2/#26). The map is what the coordinator decided, not a
-			// claim about this node's health.
-			if s.config.Pulse.Mode != "active-active" &&
-				localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
-				localMember.ActiveIPs = nil
-			}
-			// In active-active, self-report this node's hosted IPs so peers
-			// keep an accurate view of the assignment map. Without this, a peer
-			// that takes over as redistribution coordinator wouldn't know which
-			// IPs this node held when it failed.
-			if s.config.Pulse.Mode == "active-active" {
+			// The two arms below are mutually exclusive on mode, so they are two
+			// operations rather than one locked region: nothing needs the clear
+			// and the self-report to be atomic with each other, because no mode
+			// does both.
+			if s.config.Pulse.Mode != "active-active" {
+				// A non-active node cannot host floating IPs — the IP monitor
+				// enforces that on the interface — so clear any stale claim before
+				// reporting state. Otherwise peers keep counting these IPs as
+				// hosted and the reconciler never re-places them, and status shows
+				// IPs on a node that doesn't actually hold them. Active-passive
+				// demotions (mode switch, failover, maintenance) all leave the same
+				// stale claims behind.
+				//
+				// The status and the addresses are read and written in one
+				// acquisition, because the decision is about their relationship:
+				// a status read before a promotion paired with a clear applied
+				// after it would strip a node that had just legitimately gone
+				// Active.
+				localMember.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
+					if current.Status == membership.StatusActive || len(current.ActiveIPs) == 0 {
+						return current, false
+					}
+					current.ActiveIPs = nil
+					return current, true
+				})
+			} else {
+				// Active-active is excluded from the clear above because there is
+				// no demotion to clean up after: every eligible node is Active, so
+				// a non-Active status there is a transient — a missed health check,
+				// a peer's stale broadcast. Discarding the assignment map over one
+				// of those cost the node every address the coordinator had given
+				// it, and the addresses were off the cluster until it noticed and
+				// re-placed them (docs/TEST-PLAN.md defects #2/#26). The map is
+				// what the coordinator decided, not a claim about this node's
+				// health.
+				//
+				// Instead, self-report what this node holds so peers keep an
+				// accurate view of the assignment map. Without this, a peer that
+				// takes over as redistribution coordinator wouldn't know which
+				// IPs this node held when it failed.
 				payload["sender_id"] = localID
-				payload["sender_active_ips"] = append([]string{}, localMember.ActiveIPs...)
+				payload["sender_active_ips"] = selfReportedAddresses(localMember)
 			}
-			localMember.Unlock()
 		}
 	}
 
@@ -7718,9 +7766,7 @@ func (s *Server) memberStatesForBroadcast() map[string]membership.MemberStatus {
 		if m == nil {
 			continue
 		}
-		m.Lock()
-		states[id] = m.Status
-		m.Unlock()
+		states[id] = m.GetStatus()
 	}
 	return states
 }

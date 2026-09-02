@@ -55,6 +55,28 @@ type Claim struct {
 	ActiveIPs []string
 }
 
+// WithAddresses returns the claim with ips added, ignoring any it already
+// claims.
+//
+// A value method, so it takes no lock and can be used from inside an
+// UpdateClaim decision -- which is where it is wanted, since appending to a
+// claim's assignment set is the commonest thing such a decision does.
+//
+// Deduplicating matters beyond tidiness: the resulting set is what gets
+// announced, and announcing an address the interface does not hold is what
+// #33's stale announce set cost.
+func (c Claim) WithAddresses(ips ...string) Claim {
+	added := addressesNotIn(c.ActiveIPs, ips)
+	if len(added) == 0 {
+		return c
+	}
+	next := make([]string, 0, len(c.ActiveIPs)+len(added))
+	next = append(next, c.ActiveIPs...)
+	next = append(next, added...)
+	c.ActiveIPs = next
+	return c
+}
+
 // copyIPs returns the claim with its assignment set detached from whatever slice
 // the caller passed or the member holds.
 //
@@ -193,8 +215,7 @@ func (m *Member) AddActiveIPs(ips []string) error {
 	m.UpdateClaim(func(current Claim) (Claim, bool) {
 		added = addressesNotIn(current.ActiveIPs, ips)
 		current.Status = StatusActive
-		current.ActiveIPs = append(current.ActiveIPs, added...)
-		return current, true
+		return current.WithAddresses(ips...), true
 	})
 
 	if len(added) == 0 {
