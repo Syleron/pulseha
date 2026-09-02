@@ -5193,13 +5193,20 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// Update convergence metadata if newer. Also under the lock: the config
 		// broadcaster reads s.clusterEpoch under RLock, so writing it after the
 		// unlock is a data race the detector flags.
-		if incomingEpoch > s.clusterEpoch {
+		//
+		// adoptConvergenceMetadataLocked, not adoptConvergenceMetadata: the
+		// latter takes the lock this branch already holds. Until that split
+		// existed this was a hand-copied compare-and-write, which is how one
+		// rule came to have two implementations — see the Locked variant.
+		//
+		// atLeast is false, which is what the copy did: it adopted on
+		// `incomingEpoch > s.clusterEpoch` and nothing else.
+		oldEpoch := s.clusterEpoch
+		if s.adoptConvergenceMetadataLocked(incomingEpoch, incomingLeaderID, false) {
 			s.logger.Debug("CONFIG_SYNC: Updating cluster epoch",
-				"oldEpoch", s.clusterEpoch,
+				"oldEpoch", oldEpoch,
 				"newEpoch", incomingEpoch,
 				"leaderID", incomingLeaderID)
-			s.clusterEpoch = incomingEpoch
-			s.leaderID = incomingLeaderID
 		}
 
 		s.Unlock()
@@ -7011,18 +7018,31 @@ func (s *Server) convergenceMetadata() (epoch int64, leaderID string) {
 // adoptConvergenceMetadata records an incoming epoch and its leader, and reports
 // whether they were adopted.
 //
+// Takes the server lock. Callers already holding it want
+// adoptConvergenceMetadataLocked — the lock is not reentrant, so calling this
+// one from inside a locked region deadlocks.
+func (s *Server) adoptConvergenceMetadata(epoch int64, leaderID string, atLeast bool) bool {
+	s.Lock()
+	defer s.Unlock()
+	return s.adoptConvergenceMetadataLocked(epoch, leaderID, atLeast)
+}
+
+// adoptConvergenceMetadataLocked is adoptConvergenceMetadata for callers that
+// already hold the server lock.
+//
 // atLeast selects the comparison: false adopts a strictly newer epoch, true also
 // adopts an equal one (re-asserting the same epoch under its leader). The compare
 // and the write are one critical section, because two syncs arriving together
 // would otherwise both compare against the same stale read and the later writer
 // would win regardless of epoch.
 //
-// Must NOT be called with the server lock already held — the lock is not
-// reentrant. ConfigSync's full-config branch adopts inline for that reason.
-func (s *Server) adoptConvergenceMetadata(epoch int64, leaderID string, atLeast bool) bool {
-	s.Lock()
-	defer s.Unlock()
-
+// This split exists because the constraint above used to be paid for by
+// duplication. ConfigSync's full-config branch runs inside s.Lock(), could not
+// call the locking version, and so carried a hand-copied compare-and-write of
+// its own — two implementations of one rule, kept in step by whoever remembered
+// both. Non-reentrancy causing copy-paste rather than a deadlock is the quieter
+// half of the same problem (docs/adr/0003, END-2339).
+func (s *Server) adoptConvergenceMetadataLocked(epoch int64, leaderID string, atLeast bool) bool {
 	if epoch < s.clusterEpoch || (epoch == s.clusterEpoch && !atLeast) {
 		return false
 	}

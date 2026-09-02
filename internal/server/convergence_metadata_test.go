@@ -1,8 +1,13 @@
 package server
 
 import (
+	"context"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/syleron/pulseha/internal/membership"
+	"github.com/syleron/pulseha/rpc"
 )
 
 // The epoch and its leader are one decision, so they have to move together.
@@ -112,4 +117,96 @@ func TestConvergenceMetadataIsNeverObservedMismatched(t *testing.T) {
 	if epoch, _ := s.convergenceMetadata(); epoch != adopts {
 		t.Errorf("final epoch = %d, want %d (the highest adopt offered)", epoch, adopts)
 	}
+}
+
+// The reason the split had to be a split rather than just calling the exported
+// one: ConfigSync's full-config branch holds the server lock, and the lock is
+// not reentrant, so an adopt that retook it would wedge that RPC forever while
+// holding the lock every other operation on this daemon needs.
+//
+// Asserted on a timeout, because a deadlock hangs the package rather than
+// failing it (the shape #56's test uses for the same reason).
+func TestAdoptingUnderTheServerLockDoesNotWedge(t *testing.T) {
+	s, _ := newConfigSyncTestServer(t, "node-local", "node-peer")
+
+	done := make(chan bool, 1)
+	go func() {
+		s.Lock()
+		adopted := s.adoptConvergenceMetadataLocked(7, "leader-7", false)
+		s.Unlock()
+		done <- adopted
+	}()
+
+	select {
+	case adopted := <-done:
+		if !adopted {
+			t.Fatal("epoch 7 should have been adopted from 0")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("adopting under the server lock did not return — it retook a non-reentrant lock")
+	}
+
+	if epoch, leader := s.convergenceMetadata(); epoch != 7 || leader != "leader-7" {
+		t.Errorf("epoch=%d leader=%q, want 7 and leader-7", epoch, leader)
+	}
+}
+
+// ConfigSync's full-config branch adopts the incoming epoch and its leader, and
+// applies the same rule the envelope-only branch does.
+//
+// This is the test that should have existed before the branch was refactored,
+// and did not. Flipping its atLeast argument from false to true — which changes
+// which syncs are allowed to install a new leader — passed the entire
+// internal/server suite. The branch had no coverage at all: the hand-copied
+// compare-and-write it used to carry was correct, and nothing would have said so
+// if it had stopped being.
+//
+// Case two is the one that matters. An equal epoch must NOT install a different
+// leader, because that is #2's rule: an equal-epoch peer view does not get to
+// override what this node already believes, and a real decision always arrives
+// at a higher epoch.
+func TestConfigSyncFullConfigAdoptsTheEpochAndItsLeader(t *testing.T) {
+	const localID, peerID = "node-local", "node-peer"
+	s, _ := newConfigSyncTestServer(t, localID, peerID)
+
+	states := map[string]membership.MemberStatus{
+		localID: membership.StatusActive,
+		peerID:  membership.StatusActive,
+	}
+
+	// The config stamp has to advance every time or the branch is not entered:
+	// a payload that is not newer is rejected before it reaches the adopt.
+	sync := func(t *testing.T, stampVersion int64, epoch int64, leaderID string) {
+		t.Helper()
+		cfg := peerConfigWithGroup(s, "group1", 2)
+		payload, err := buildFullConfigPayload(cfg, states, epoch, leaderID, peerID,
+			configStamp{version: stampVersion, origin: peerID})
+		if err != nil {
+			t.Fatalf("buildFullConfigPayload: %v", err)
+		}
+		if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+			t.Fatalf("ConfigSync(stamp %d, epoch %d): %v", stampVersion, epoch, err)
+		}
+	}
+
+	assertConvergence := func(t *testing.T, wantEpoch int64, wantLeader, why string) {
+		t.Helper()
+		epoch, leader := s.convergenceMetadata()
+		if epoch != wantEpoch || leader != wantLeader {
+			t.Errorf("%s: epoch=%d leader=%q, want %d and %q", why, epoch, leader, wantEpoch, wantLeader)
+		}
+	}
+
+	sync(t, 1, 5, "leader-five")
+	assertConvergence(t, 5, "leader-five", "a strictly newer epoch must be adopted")
+
+	sync(t, 2, 5, "leader-five-impostor")
+	assertConvergence(t, 5, "leader-five",
+		"an equal epoch must not install a different leader (docs/TEST-PLAN.md #2)")
+
+	sync(t, 3, 4, "leader-four")
+	assertConvergence(t, 5, "leader-five", "an older epoch must be refused")
+
+	sync(t, 4, 9, "leader-nine")
+	assertConvergence(t, 9, "leader-nine", "a later strictly newer epoch must still be adopted")
 }
