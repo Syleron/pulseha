@@ -52,7 +52,7 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 		within(t, 5*time.Second, "EnterMaintenance", func() { _ = m.EnterMaintenance() })
 
 		m.Lock()
-		status, ips, load := m.Status, m.ActiveIPs, m.LoadFactor
+		status, ips := m.Status, m.ActiveIPs
 		m.Unlock()
 
 		if status != StatusMaintenance {
@@ -62,9 +62,6 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 		// count these as hosted when deciding what to redistribute.
 		if len(ips) != 0 {
 			t.Errorf("expected ActiveIPs cleared, got %v", ips)
-		}
-		if load != 0 {
-			t.Errorf("expected LoadFactor cleared, got %v", load)
 		}
 	})
 

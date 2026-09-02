@@ -1404,7 +1404,6 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s (silent for %s)",
 					len(member.ActiveIPs), member.Hostname, time.Since(member.LastHCResponse).Round(time.Second))
 				member.ActiveIPs = nil
-				member.LoadFactor = 0
 			}
 		}
 		member.Unlock()

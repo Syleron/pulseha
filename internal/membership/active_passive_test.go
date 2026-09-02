@@ -98,7 +98,6 @@ func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveReques
 		member.Lock()
 		member.Status = StatusPassive
 		member.ActiveIPs = nil
-		member.LoadFactor = 0
 		member.Unlock()
 	}
 	return &rpc.MakePassiveResponse{Success: true}, nil

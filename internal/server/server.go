@@ -2204,7 +2204,6 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.LoadFactor = 0
 		member.Unlock()
 	} else {
 		node := s.config.Nodes[req.NodeId]
@@ -2248,7 +2247,6 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		member.Lock()
 		member.Status = membership.StatusPassive
 		member.ActiveIPs = nil
-		member.LoadFactor = 0
 		member.Unlock()
 	}
 
@@ -3058,7 +3056,6 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 				heldIPs := append([]string{}, member.ActiveIPs...)
 				wasActive := member.Status == membership.StatusActive
 				member.ActiveIPs = nil
-				member.LoadFactor = 0
 				// Only Active nodes are demoted; a failed or maintenance node
 				// keeps its status so it isn't falsely reported as healthy.
 				if wasActive {
@@ -3095,11 +3092,6 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			activeNode.Lock()
 			activeNode.Status = membership.StatusActive
 			activeNode.ActiveIPs = activeIPs
-			if activeNode.Capacity > 0 {
-				activeNode.LoadFactor = float64(len(activeIPs)) / float64(activeNode.Capacity)
-			} else {
-				activeNode.LoadFactor = 1.0
-			}
 			activeNode.Unlock()
 			if len(activeIPs) > 0 {
 				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
@@ -3224,7 +3216,6 @@ func (s *Server) seedActiveActiveAssignments() bool {
 			member.ActiveIPs = ownedIPs
 		} else {
 			member.ActiveIPs = nil
-			member.LoadFactor = 0
 		}
 		member.Unlock()
 	}
@@ -5321,7 +5312,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					continue
 				}
 
-				// Status, ActiveIPs and LoadFactor are read under the member
+				// Status and ActiveIPs are read under the member
 				// lock elsewhere — the post-load VIP reconcile in
 				// loadInitialMembers, GetActiveIPs — so this writer has to hold
 				// it too. A func literal rather than an inline block because
@@ -5376,7 +5367,6 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					// failed active's last-known IPs to hand to its replacement.
 					if st == membership.StatusPassive || st == membership.StatusMaintenance {
 						m.ActiveIPs = nil
-						m.LoadFactor = 0
 					}
 					s.logger.Debug("CONFIG_SYNC: Updated member status", "node_id", id, "old_status", membership.StatusToString(oldStatus), "new_status", membership.StatusToString(st))
 				}()
@@ -5683,7 +5673,6 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 		if enable {
 			member.Status = membership.StatusMaintenance
 			member.ActiveIPs = nil
-			member.LoadFactor = 0
 		} else {
 			member.Status = membership.StatusPassive
 		}
@@ -6409,19 +6398,10 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 	if s.config.Pulse.Mode == "active-active" {
 		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
 			if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
-				removed := make(map[string]bool, len(req.Ips))
-				for _, ip := range req.Ips {
-					removed[ip] = true
-				}
-				localMember.Lock()
-				var remaining []string
-				for _, ip := range localMember.ActiveIPs {
-					if !removed[ip] {
-						remaining = append(remaining, ip)
-					}
-				}
-				localMember.ActiveIPs = remaining
-				localMember.Unlock()
+				// RemoveActiveIPs rather than a filter written out here. The two
+				// were the same loop apart from the LoadFactor recompute, and
+				// with that field gone there is nothing left to keep separate.
+				localMember.RemoveActiveIPs(req.Ips)
 			}
 		}
 	}
@@ -7160,7 +7140,6 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 			if s.config.Pulse.Mode != "active-active" &&
 				localMember.Status != membership.StatusActive && len(localMember.ActiveIPs) > 0 {
 				localMember.ActiveIPs = nil
-				localMember.LoadFactor = 0
 			}
 			// In active-active, self-report this node's hosted IPs so peers
 			// keep an accurate view of the assignment map. Without this, a peer

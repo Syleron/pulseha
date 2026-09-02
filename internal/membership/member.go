@@ -55,9 +55,8 @@ type Member struct {
 	memberList     *MemberList
 
 	// Active-Active support
-	ActiveIPs  []string // IPs currently hosted by this member
-	Capacity   int      // Node capacity for weighted distribution
-	LoadFactor float64  // Current load factor (0.0-1.0)
+	ActiveIPs []string // IPs currently hosted by this member
+	Capacity  int      // Node capacity for weighted distribution
 }
 
 // NewMember creates a new member instance
@@ -132,11 +131,6 @@ func (m *Member) MakeActive(ips []string) error {
 	m.Lock()
 	m.Status = StatusActive
 	m.ActiveIPs = ips
-	if m.Capacity > 0 {
-		m.LoadFactor = float64(len(ips)) / float64(m.Capacity)
-	} else {
-		m.LoadFactor = 1.0
-	}
 	m.Unlock()
 
 	// Deliberately outside the lock. Bringing up a large group touches the network
@@ -169,11 +163,6 @@ func (m *Member) AddActiveIPs(ips []string) error {
 		}
 	}
 	m.Status = StatusActive
-	if m.Capacity > 0 {
-		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
-	} else {
-		m.LoadFactor = 1.0
-	}
 	m.Unlock()
 
 	if len(added) == 0 {
@@ -186,12 +175,17 @@ func (m *Member) AddActiveIPs(ips []string) error {
 // leaving the rest untouched. Bookkeeping only: it brings nothing down, because
 // its caller is the release pass, which has already done that.
 //
-// The counterpart to AddActiveIPs, and the reason it exists separately from the
-// BringDownIP RPC handler's inline equivalent: the enforce loop releases
-// addresses locally without going through that handler, so the list it maintains
-// was never updated. Every address the pass released stayed on the list
-// permanently — reported as held by a node serving nothing, and counted as that
-// node's load by placement (docs/TEST-PLAN.md defect #58).
+// The counterpart to AddActiveIPs, and it exists because the enforce loop
+// releases addresses locally without going through the BringDownIP RPC handler,
+// so the list that handler maintains was never updated. Every address the pass
+// released stayed on the list permanently — reported as held by a node serving
+// nothing, and counted as that node's load by placement (docs/TEST-PLAN.md
+// defect #58).
+//
+// The BringDownIP handler used to carry its own copy of this loop, and the only
+// thing separating them was that this one also recomputed LoadFactor. That field
+// was write-only and is now deleted, so the handler calls this instead
+// (END-2339).
 func (m *Member) RemoveActiveIPs(ips []string) {
 	if len(ips) == 0 {
 		return
@@ -212,14 +206,6 @@ func (m *Member) RemoveActiveIPs(ips []string) {
 		}
 	}
 	m.ActiveIPs = remaining
-
-	// The same formula AddActiveIPs uses, so the two stay consistent: with no
-	// capacity configured the load factor is not meaningful.
-	if m.Capacity > 0 {
-		m.LoadFactor = float64(len(m.ActiveIPs)) / float64(m.Capacity)
-	} else {
-		m.LoadFactor = 1.0
-	}
 }
 
 // GetActiveIPs returns a copy of the IPs this member currently hosts.
@@ -567,7 +553,6 @@ func (m *Member) EnterMaintenance() error {
 	// whatever moved it.
 	if m.Status == StatusActive {
 		m.ActiveIPs = nil
-		m.LoadFactor = 0
 	}
 	m.Status = StatusMaintenance
 	return nil
