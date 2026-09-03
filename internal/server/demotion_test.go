@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/rpc"
@@ -89,7 +90,14 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 		ml.GetMemberByID(id).Status = membership.StatusActive
 	}
 
-	s := &Server{config: cfg, logger: logger, memberList: ml}
+	// peerClients is written on the first dial, so a test that reaches a peer at
+	// all -- a config broadcast, a repair pull -- panics on a nil map without it.
+	s := &Server{
+		config:      cfg,
+		logger:      logger,
+		memberList:  ml,
+		peerClients: make(map[string]*client.Client),
+	}
 
 	// Registered last, so it runs first: cleanups are LIFO, and both the
 	// CONFIG_LOCATION restore above and t.TempDir's own removal are writes that

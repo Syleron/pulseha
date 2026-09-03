@@ -111,6 +111,21 @@ func (h *HealthChecker) reconcileConfigAcrossPeers(members map[string]*Member) {
 	h.server.RequestConfigReconcile()
 }
 
+// Coordinator names the node the cluster treats as authoritative for config, or
+// "" while nobody qualifies.
+//
+// Exported so the server's divergence detector reads the role from the same
+// function and the same member list as the periodic reconcile does. Two
+// reckonings of "who is the coordinator" would be worse than none: a node could
+// pull a repair from a peer that does not consider itself authoritative, or
+// refuse one from the peer that is.
+func (h *HealthChecker) Coordinator() string {
+	if h.members == nil {
+		return ""
+	}
+	return clusterCoordinator(h.members.MembersSnapshot(), h.failoverGrace())
+}
+
 // HealthCheck represents the result of a health check
 type HealthCheck struct {
 	IP        string

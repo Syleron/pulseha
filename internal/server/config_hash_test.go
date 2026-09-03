@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"reflect"
 	"regexp"
@@ -219,5 +220,73 @@ func TestANilConfigHashesToNothing(t *testing.T) {
 	}
 	if h != "" {
 		t.Errorf("nil config hashed to %q, want the empty string", h)
+	}
+}
+
+// TestAbsentAndEmptyHashTheSame is the false positive that a repair would have
+// created for itself, and it was found by the end-to-end repair test rather than
+// by reasoning.
+//
+// A config that has never had a plugin marshals `"plugins": null`. The same config
+// after a round trip through a sync payload marshals `"plugins": {}`. So the moment
+// a node finished repairing itself from the coordinator its hash disagreed with the
+// coordinator's again -- and it would have pulled another repair every interval,
+// forever, having already converged.
+func TestAbsentAndEmptyHashTheSame(t *testing.T) {
+	absent := hashTestConfig()
+	absent.Plugins = nil
+	empty := hashTestConfig()
+	empty.Plugins = map[string]interface{}{}
+
+	if hashOf(t, absent) != hashOf(t, empty) {
+		t.Error("a nil map and an empty one hashed differently. A repair is a round " +
+			"trip through JSON, so the repaired node would disagree with the " +
+			"coordinator the instant it agreed with it, and pull again every interval")
+	}
+
+	// The same for the two other maps and a slice, since all four cross the wire.
+	nilGroups := hashTestConfig()
+	nilGroups.Groups = nil
+	emptyGroups := hashTestConfig()
+	emptyGroups.Groups = map[string][]string{}
+	if hashOf(t, nilGroups) != hashOf(t, emptyGroups) {
+		t.Error("a nil Groups map and an empty one hashed differently")
+	}
+
+	nilIPGroups := hashTestConfig()
+	nilIPGroups.Nodes["node-a"].IPGroups = nil
+	emptyIPGroups := hashTestConfig()
+	emptyIPGroups.Nodes["node-a"].IPGroups = map[string][]string{}
+	if hashOf(t, nilIPGroups) != hashOf(t, emptyIPGroups) {
+		t.Error("a nil IPGroups map and an empty one hashed differently")
+	}
+}
+
+// TestAHashSurvivesARoundTripThroughAPayload is the property the test above is
+// really about, checked end to end through the code that actually does it: a
+// config that has been through a sync payload must hash the same as the one it
+// came from, or every repair leaves the node looking diverged.
+func TestAHashSurvivesARoundTripThroughAPayload(t *testing.T) {
+	cfg := hashTestConfig()
+	cfg.Plugins = nil
+	before := hashOf(t, cfg)
+
+	payload, err := buildFullConfigPayload(cfg, nil, 1, "", "node-a",
+		configStamp{version: 1, origin: "node-a"})
+	if err != nil {
+		t.Fatalf("buildFullConfigPayload: %v", err)
+	}
+	var after config.Config
+	if err := json.Unmarshal(payload, &after); err != nil {
+		t.Fatalf("unmarshalling the payload: %v", err)
+	}
+
+	// The receiver preserves its own identity, so match what it would hold.
+	after.Pulse.LocalNode = "node-b"
+
+	if got := hashOf(t, &after); got != before {
+		t.Errorf("a config hashed %s, and %s after a round trip through a sync "+
+			"payload. Every repaired node would still look diverged",
+			shortHash(before), shortHash(got))
 	}
 }

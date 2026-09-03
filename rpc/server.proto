@@ -76,6 +76,9 @@ service CLI {
 // operational actions (IP bring up/down, health checks, removal, etc.).
 service Server {
     rpc ConfigSync(ConfigSyncRequest) returns (ConfigSyncResponse) {}
+    // Pull, not push: a node that has detected its own config diverged asks the
+    // coordinator for the authoritative copy. See FetchConfigRequest.
+    rpc FetchConfig(FetchConfigRequest) returns (FetchConfigResponse) {}
     rpc MakePassive(MakePassiveRequest) returns (MakePassiveResponse) {}
     rpc BringUpIP(UpIpRequest) returns (UpIpResponse) {}
     rpc BringDownIP(DownIpRequest) returns (DownIpResponse) {}
@@ -185,6 +188,35 @@ message ConfigSyncRequest {
 message ConfigSyncResponse {
     bool success = 1;
     string message = 2;
+}
+
+// FetchConfig Request/Response
+//
+// The repair half of config divergence detection. A node that has established it
+// holds the minority view asks the coordinator for the authoritative copy.
+//
+// A pull rather than a push, for two reasons that are not symmetry. The decision
+// to change a config stays with the node whose config changes, so nothing arrives
+// unrequested and a peer that agrees with the coordinator is never touched. And the
+// payload can be addressed to the asker -- see `repair_for` -- which is what lets
+// it be exempt from the generation guard without that exemption being replayable
+// at any other node.
+//
+// The pull direction is not what keeps a diverged coordinator from overwriting the
+// cluster: a hash mismatch is symmetric, so "I disagree with the coordinator,
+// therefore I adopt its copy" would obey a wrong coordinator exactly as a push
+// would. The majority tally in Server.noteConfigDivergence is what does that.
+message FetchConfigRequest {
+    // Who is asking. Echoed back in the payload's `repair_for` key, which is what
+    // lets the requester apply a config at its own generation: the exemption is
+    // addressed to one node, so a stray copy cannot force it on anyone else.
+    string requester_id = 1;
+}
+
+message FetchConfigResponse {
+    bool success = 1;
+    string message = 2;
+    bytes config = 3;
 }
 
 // MakePassive Request/Response
