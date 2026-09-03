@@ -28,6 +28,7 @@ import (
 	"time"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -364,7 +365,7 @@ func addressAbsentFrom(iface, ip string) bool {
 func sendGARPBatch(iface string, ips []string, announce announceFunc, absent absentFunc) (skipped []string, err error) {
 	sem := make(chan struct{}, garpFanout)
 	var wg sync.WaitGroup
-	var mu sync.Mutex
+	var mu pulselock.Mutex
 	var failed []string
 
 	for _, ip := range ips {

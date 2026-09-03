@@ -18,6 +18,7 @@ import (
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 	rpc "github.com/syleron/pulseha/rpc"
 )
@@ -136,7 +137,7 @@ type HealthCheck struct {
 
 // HealthChecker handles health checking for nodes and IPs
 type HealthChecker struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	members     *MemberList
 	checkTicker *time.Ticker
 	stopChan    chan struct{}
@@ -416,10 +417,10 @@ func (h *HealthChecker) performHealthChecks() {
 	for _, member := range membersSnapshot {
 		// If this is the local node, just update its health check time
 		if member.IsLocal() {
-			member.Lock()
+			member.mu.Lock()
 			member.LastHCResponse = time.Now()
 			member.Latency = "0ms"
-			member.Unlock()
+			member.mu.Unlock()
 			// Add to display status (local node)
 			clusterStatus = append(clusterStatus, fmt.Sprintf("%s(local/%s)",
 				member.Hostname, StatusToString(member.Status)))
@@ -431,9 +432,9 @@ func (h *HealthChecker) performHealthChecks() {
 		}
 
 		// Store previous state for change detection
-		member.Lock()
+		member.mu.Lock()
 		wasUnknown := member.Status == StatusUnknown
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Check node connectivity. Every 5th cycle we do a full cluster-membership gRPC
 		// check (verifies the remote node shares our cluster token, catching split-cluster
@@ -510,7 +511,7 @@ func (h *HealthChecker) performHealthChecks() {
 		h.logger.Debugf("Connectivity check result for %s: reachable=%v, responseTime=%v", member.Hostname, isReachable,
 			responseTime)
 
-		member.Lock()
+		member.mu.Lock()
 		// Stamped only when the member actually answered. It used to be stamped
 		// here unconditionally, immediately before the branch below decided the
 		// member was unreachable — so the field recorded whether a member had
@@ -525,7 +526,7 @@ func (h *HealthChecker) performHealthChecks() {
 			previousStatus := member.Status
 			member.Status = StatusUnknown
 			member.Latency = "N/A"
-			member.Unlock()
+			member.mu.Unlock()
 
 			// Log status change if node went from reachable to unreachable
 			if previousStatus != StatusUnknown {
@@ -535,9 +536,9 @@ func (h *HealthChecker) performHealthChecks() {
 				if h.server != nil {
 					states := getMemberStatusMap()
 					for id, m := range membersSnapshot {
-						m.Lock()
+						m.mu.Lock()
 						states[id] = m.Status
-						m.Unlock()
+						m.mu.Unlock()
 					}
 					_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(),
 						nil)
@@ -607,7 +608,7 @@ func (h *HealthChecker) performHealthChecks() {
 		clusterStatusForComparison = append(clusterStatusForComparison, fmt.Sprintf("%s(%s)",
 			member.Hostname, StatusToString(member.Status)))
 
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Floating IP health checks are disabled; failover decisions are based solely on node health
 	}
@@ -632,9 +633,9 @@ func (h *HealthChecker) performHealthChecks() {
 			h.logger.Debug("HEALTH_CHECK: Broadcasting cluster state due to health check changes")
 			states := getMemberStatusMap()
 			for id, m := range membersSnapshot {
-				m.Lock()
+				m.mu.Lock()
 				states[id] = m.Status
-				m.Unlock()
+				m.mu.Unlock()
 			}
 			_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
 			putMemberStatusMap(states)
@@ -658,9 +659,9 @@ func (h *HealthChecker) performHealthChecks() {
 				checksWithoutChange)
 			states := getMemberStatusMap()
 			for id, m := range membersSnapshot {
-				m.Lock()
+				m.mu.Lock()
 				states[id] = m.Status
-				m.Unlock()
+				m.mu.Unlock()
 			}
 			// Deliberately the current epoch, not epoch+1. This fires on *unchanged*
 			// state, so it carries no decision — it exists to advance LastResponse and
@@ -740,9 +741,9 @@ func (h *HealthChecker) getCurrentLeaderID() string {
 	members := h.members.MembersSnapshot()
 
 	for id, m := range members {
-		m.Lock()
+		m.mu.Lock()
 		isActive := m.Status == StatusActive
-		m.Unlock()
+		m.mu.Unlock()
 		if isActive {
 			return id
 		}
@@ -862,11 +863,11 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 	var activeMember *Member
 	var memberStatuses []string
 	for _, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		isActive := member.Status == StatusActive
 		status := StatusToString(member.Status)
 		memberStatuses = append(memberStatuses, fmt.Sprintf("%s:%s", member.Hostname, status))
-		member.Unlock()
+		member.mu.Unlock()
 		if isActive {
 			activeMember = member
 		}
@@ -899,13 +900,13 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 
 	// Check if the active node has been unreachable for too long
 	member := activeMember
-	member.Lock()
+	member.mu.Lock()
 	timeSinceLastResponse := time.Since(member.LastHCResponse)
 	isUnreachable := member.Status == StatusUnknown ||
 		timeSinceLastResponse > time.Duration(config.Pulse.FailOverLimit)*time.Millisecond
 	hostname := member.Hostname
 	activeIPs := member.ActiveIPs
-	member.Unlock()
+	member.mu.Unlock()
 
 	h.logger.Debug("ACTIVE_CHECK: Active node health status", "hostname", hostname, "timeSinceLastResponse",
 		timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit, "isUnreachable", isUnreachable)
@@ -915,11 +916,11 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 			"timeSinceLastResponse", timeSinceLastResponse, "failOverLimit", config.Pulse.FailOverLimit)
 
 		// Mark the active node as unknown
-		member.Lock()
+		member.mu.Lock()
 		oldNodeID := member.ID
 		activeIPsCopy := append([]string{}, activeIPs...)
 		member.Status = StatusUnknown
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Elect a new active node and transfer IPs
 		h.logger.Info("ACTIVE_CHECK: Starting leader election due to failed active node", "failedNode", hostname)
@@ -934,13 +935,13 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 					h.logger.Errorf("Failed to transfer IPs to new active node: %v", err)
 				} else {
 					// Update member IP state
-					newActive.Lock()
+					newActive.mu.Lock()
 					newActive.ActiveIPs = append([]string{}, activeIPsCopy...)
-					newActive.Unlock()
+					newActive.mu.Unlock()
 
-					member.Lock()
+					member.mu.Lock()
 					member.ActiveIPs = nil
-					member.Unlock()
+					member.mu.Unlock()
 				}
 			}
 		}
@@ -1082,9 +1083,9 @@ func (h *HealthChecker) announceOnPeerDemotion(members map[string]*Member) {
 	demoted := make([]string, 0, 1)
 
 	for id, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
-		member.Unlock()
+		member.mu.Unlock()
 
 		if id == localID {
 			localIsActive = status == StatusActive
@@ -1126,9 +1127,9 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 
 	var actives []*Member
 	for _, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		isActive := member.Status == StatusActive
-		member.Unlock()
+		member.mu.Unlock()
 		if isActive {
 			actives = append(actives, member)
 		}
@@ -1227,9 +1228,9 @@ func (h *HealthChecker) enforceSingleActive(members map[string]*Member) bool {
 	// of waiting to notice the change on their own.
 	states := getMemberStatusMap()
 	for id, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		states[id] = member.Status
-		member.Unlock()
+		member.mu.Unlock()
 	}
 	_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, target.ID, nil)
 	putMemberStatusMap(states)
@@ -1287,9 +1288,9 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 	if (deduped || redistributed || moved) && h.server != nil {
 		states := getMemberStatusMap()
 		for id, m := range members {
-			m.Lock()
+			m.mu.Lock()
 			states[id] = m.Status
-			m.Unlock()
+			m.mu.Unlock()
 		}
 		_ = h.server.BroadcastClusterState(states, h.server.GetClusterEpoch()+1, h.getCurrentLeaderID(), nil)
 		putMemberStatusMap(states)
@@ -1310,10 +1311,10 @@ func (h *HealthChecker) reconcileActiveActive(members map[string]*Member) {
 func clusterCoordinator(members map[string]*Member, grace time.Duration) string {
 	coordinator := ""
 	for id, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		healthy := member.Status == StatusActive || member.Status == StatusPassive ||
 			(member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace)
-		member.Unlock()
+		member.mu.Unlock()
 		if healthy && (coordinator == "" || id < coordinator) {
 			coordinator = id
 		}
@@ -1421,9 +1422,9 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 
 	candidates := rebalanceCandidates(members)
 	for _, node := range candidates {
-		node.Lock()
+		node.mu.Lock()
 		ips := append([]string{}, node.ActiveIPs...)
-		node.Unlock()
+		node.mu.Unlock()
 
 		// A node listing the same IP twice is a bookkeeping duplicate, not a
 		// conflict: the address is up once and belongs here. Treating it as a
@@ -1450,9 +1451,9 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 					delete(seenHere, ip)
 				}
 			}
-			node.Lock()
+			node.mu.Lock()
 			node.ActiveIPs = unique
-			node.Unlock()
+			node.mu.Unlock()
 			ips = unique
 			resolved = true
 		}
@@ -1482,11 +1483,11 @@ func (h *HealthChecker) resolveDuplicateAssignments(members map[string]*Member) 
 			continue
 		}
 
-		node.Lock()
+		node.mu.Lock()
 		for _, ip := range ips {
 			node.ActiveIPs = removeIPFromList(node.ActiveIPs, ip)
 		}
-		node.Unlock()
+		node.mu.Unlock()
 
 		if err := node.BringDownIPs(ips); err != nil {
 			h.logger.Error("ACTIVE_CHECK: failed to bring down duplicate IPs", "ips", ips,
@@ -1517,7 +1518,7 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 	grace := h.failoverGrace()
 	hosted := make(map[string]bool)
 	for _, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		switch {
 		case member.Status == StatusActive || member.Status == StatusPassive,
 			member.Status == StatusUnknown && time.Since(member.LastHCResponse) <= grace:
@@ -1529,10 +1530,9 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 				h.logger.Warnf("ACTIVE_CHECK: clearing %d IP(s) stranded on failed node %s (silent for %s)",
 					len(member.ActiveIPs), member.Hostname, time.Since(member.LastHCResponse).Round(time.Second))
 				member.ActiveIPs = nil
-				member.LoadFactor = 0
 			}
 		}
-		member.Unlock()
+		member.mu.Unlock()
 	}
 
 	orphaned := orphanedGroupIPs(cfg.Groups, hosted)
@@ -1614,17 +1614,17 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 			break
 		}
 
-		src.Lock()
+		src.mu.Lock()
 		for _, ip := range ips {
 			src.ActiveIPs = removeIPFromList(src.ActiveIPs, ip)
 		}
-		src.Unlock()
+		src.mu.Unlock()
 
 		// Skip what the destination already records. A concurrent coordinator,
 		// or a self-report that landed mid-move, can have credited it already,
 		// and a doubled entry is worse than a missing one: the dedup pass then
 		// has to decide whether the address is a conflict.
-		dst.Lock()
+		dst.mu.Lock()
 		held := make(map[string]bool, len(dst.ActiveIPs))
 		for _, ip := range dst.ActiveIPs {
 			held[ip] = true
@@ -1635,7 +1635,7 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 			}
 		}
 		dst.Status = StatusActive
-		dst.Unlock()
+		dst.mu.Unlock()
 		moved = true
 	}
 	return moved
@@ -1646,9 +1646,9 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 func rebalanceCandidates(members map[string]*Member) []*Member {
 	var nodes []*Member
 	for _, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		eligible := member.Status == StatusActive || member.Status == StatusPassive
-		member.Unlock()
+		member.mu.Unlock()
 		if eligible {
 			nodes = append(nodes, member)
 		}
@@ -1679,7 +1679,7 @@ func planRebalanceMoves(nodes []*Member, cfg *config.Config) []ipam.Move {
 
 	snapshots := make([]ipam.Node, 0, len(nodes))
 	for _, node := range nodes {
-		node.Lock()
+		node.mu.Lock()
 		snapshot := ipam.Node{
 			Hostname: node.Hostname,
 			IPCount:  len(node.ActiveIPs),
@@ -1695,7 +1695,7 @@ func planRebalanceMoves(nodes []*Member, cfg *config.Config) []ipam.Move {
 			}
 			snapshot.Held = held
 		}
-		node.Unlock()
+		node.mu.Unlock()
 		snapshots = append(snapshots, snapshot)
 	}
 	return ipam.PlanMoves(snapshots)
@@ -1717,8 +1717,8 @@ func rebalanceMoveIPs(node *Member, cfg *config.Config, group string, count int)
 		index = groupIndex(cfg.Groups)
 	}
 
-	node.Lock()
-	defer node.Unlock()
+	node.mu.Lock()
+	defer node.mu.Unlock()
 
 	picked := make([]string, 0, count)
 	for i := len(node.ActiveIPs) - 1; i >= 0 && len(picked) < count; i-- {
@@ -1836,9 +1836,9 @@ func (h *HealthChecker) electNewActiveNode() {
 			return
 		}
 		// Explicitly set status after successful voting
-		bestCandidate.Lock()
+		bestCandidate.mu.Lock()
 		bestCandidate.Status = StatusActive
-		bestCandidate.Unlock()
+		bestCandidate.mu.Unlock()
 		h.logger.Infof("ELECTION: Promoted %s to Active after successful vote", bestCandidate.Hostname)
 
 		// Trigger IP refresh to bring up VIPs after successful voting
@@ -1863,9 +1863,9 @@ func (h *HealthChecker) electNewActiveNode() {
 		h.logger.Info("ELECTION: No active node found, promoting candidate directly")
 		// Since we've already coordinated with deterministic backoff, this node
 		// is the designated winner and can promote the candidate directly
-		bestCandidate.Lock()
+		bestCandidate.mu.Lock()
 		bestCandidate.Status = StatusActive
-		bestCandidate.Unlock()
+		bestCandidate.mu.Unlock()
 		h.logger.Infof("ELECTION: Promoted %s to Active", bestCandidate.Hostname)
 
 		// Trigger IP refresh to bring up VIPs after promotion
@@ -1882,9 +1882,9 @@ func (h *HealthChecker) electNewActiveNode() {
 func (h *HealthChecker) findElectionCoordinator() string {
 	var coordinatorID string
 	for nodeID, member := range h.members.MembersSnapshot() {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Only consider available nodes
 		if status == StatusPassive || status == StatusUnknown {
@@ -1902,12 +1902,12 @@ func (h *HealthChecker) selectBestCandidate() *Member {
 	var bestScore float64 = -1
 
 	for _, member := range h.members.MembersSnapshot() {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
 		latencyStr := member.Latency
 		lastResponse := member.LastHCResponse
 		isLocal := member.IsLocal()
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Skip if already active
 		if status == StatusActive {
@@ -1983,9 +1983,9 @@ func (h *HealthChecker) waitForCoordinatorElection() {
 		case <-checkInterval.C:
 			// Check if coordinator succeeded
 			for _, member := range h.members.MembersSnapshot() {
-				member.Lock()
+				member.mu.Lock()
 				status := member.Status
-				member.Unlock()
+				member.mu.Unlock()
 				if status == StatusActive {
 					h.logger.Debug("Coordinator election completed successfully")
 					return
@@ -2002,9 +2002,9 @@ func (h *HealthChecker) attemptVotingElection(candidate *Member) bool {
 	// Count available nodes for voting
 	availableCount := 0
 	for _, member := range h.members.MembersSnapshot() {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
-		member.Unlock()
+		member.mu.Unlock()
 		if status == StatusPassive || status == StatusUnknown {
 			availableCount++
 		}
@@ -2069,9 +2069,9 @@ func (h *HealthChecker) emergencyFallback() {
 	h.logger.Info("Emergency fallback: This node is coordinator, promoting best candidate")
 	candidate := h.selectBestCandidate()
 	if candidate != nil {
-		candidate.Lock()
+		candidate.mu.Lock()
 		candidate.Status = StatusActive
-		candidate.Unlock()
+		candidate.mu.Unlock()
 		h.logger.Infof("Emergency fallback: Promoted %s to Active", candidate.Hostname)
 
 		// Trigger IP refresh to bring up VIPs after emergency promotion
@@ -2323,9 +2323,9 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 		availableNodes := 0
 		membersSnapshot := h.members.MembersSnapshot()
 		for _, member := range membersSnapshot {
-			member.Lock()
+			member.mu.Lock()
 			isAvailable := member.Status == StatusActive || member.Status == StatusPassive
-			member.Unlock()
+			member.mu.Unlock()
 			if isAvailable {
 				availableNodes++
 			}
@@ -2375,10 +2375,10 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 				lowest := ""
 				subjectAvailable := false
 				for _, member := range membersSnapshot {
-					member.Lock()
+					member.mu.Lock()
 					isAvailable := member.Status == StatusActive || member.Status == StatusPassive
 					memberID := member.ID
-					member.Unlock()
+					member.mu.Unlock()
 					if !isAvailable {
 						continue
 					}
@@ -2653,10 +2653,10 @@ func (h *HealthChecker) calculateElectionBackoffWithRole(localNodeID string) (ti
 	// Get list of all available nodes that could participate in election
 	var availableNodes []string
 	for _, member := range h.members.MembersSnapshot() {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
 		nodeID := member.ID
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Only consider nodes that could potentially become active and are reachable
 		if status == StatusPassive {

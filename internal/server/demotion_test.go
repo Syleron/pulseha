@@ -90,12 +90,15 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 		ml.GetMemberByID(id).Status = membership.StatusActive
 	}
 
-	// peerClients is written on the first dial, so a test that reaches a peer at
-	// all -- a config broadcast, a repair pull -- panics on a nil map without it.
 	s := &Server{
-		config:      cfg,
-		logger:      logger,
-		memberList:  ml,
+		config:     cfg,
+		logger:     logger,
+		memberList: ml,
+		// The real constructor initialises this at server.go:308, and
+		// getPeerClient writes to it without a nil check -- correctly, since it
+		// can never be nil in the daemon. A &Server{} literal has to supply it
+		// or any test that reaches a peer broadcast panics on a nil map, which
+		// is why nothing drove BroadcastClusterState until END-2339.
 		peerClients: make(map[string]*client.Client),
 	}
 
@@ -105,6 +108,12 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 	// that goroutine to the test that spawned it, which is what every ConfigSync
 	// call site would otherwise have to remember to do individually.
 	t.Cleanup(s.awaitAsyncReconfigures)
+	// A repair pull makes a gRPC round trip, so it outlives a short test easily.
+	// Registered after the reconfigure wait so it runs before it, which is the
+	// order the work happens in: a repair applies the fetched config through
+	// ConfigSync, which spawns a reconfigure of its own. Waiting the reconfigures
+	// out first would return while a repair was still queueing one.
+	t.Cleanup(s.awaitConfigRepairs)
 
 	return s, ml
 }

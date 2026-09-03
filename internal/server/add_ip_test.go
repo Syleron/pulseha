@@ -229,10 +229,7 @@ func setMemberLoad(t *testing.T, s *Server, nodeID string, status membership.Mem
 	for i := range ips {
 		ips[i] = "10.99.0." + string(rune('1'+i)) + "/24"
 	}
-	m.Lock()
-	m.Status = status
-	m.ActiveIPs = ips
-	m.Unlock()
+	m.SetClaim(membership.Claim{Status: status, ActiveIPs: ips})
 }
 
 // A floating IP has one owner, so an add in active-active has to resolve to one

@@ -17,7 +17,7 @@
 package server
 
 import (
-	"sync"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"time"
 )
 
@@ -70,7 +70,7 @@ type peerBringUpBatch struct {
 // the peer's ENFORCE pass converges on the config regardless — that is why this
 // is allowed to be best-effort and to run late.
 type peerBringUpBatcher struct {
-	mu         sync.Mutex
+	mu         pulselock.Mutex
 	flushAfter time.Duration
 	// send is called off the caller's goroutine, once per flush, with the
 	// batch's addresses in the order they were added.

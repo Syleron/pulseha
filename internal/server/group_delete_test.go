@@ -157,9 +157,7 @@ func newGroupDeleteTestServer(t *testing.T, peerAddrs ...string) *Server {
 	for i, ip := range groupIPs {
 		id := nodeOrder[i%len(nodeOrder)]
 		m := ml.GetMemberByID(id)
-		m.Lock()
-		m.ActiveIPs = append(m.ActiveIPs, ip)
-		m.Unlock()
+		m.SetActiveIPs(append(m.GetActiveIPs(), ip))
 	}
 
 	return &Server{
@@ -380,9 +378,7 @@ func TestPlanGroupReleaseAlwaysVisitsTheLocalNode(t *testing.T) {
 	// Nobody is recorded as holding anything.
 	for _, id := range []string{"local-node", "peer-0"} {
 		m := s.memberList.GetMemberByID(id)
-		m.Lock()
-		m.ActiveIPs = nil
-		m.Unlock()
+		m.SetActiveIPs(nil)
 	}
 
 	s.RLock()

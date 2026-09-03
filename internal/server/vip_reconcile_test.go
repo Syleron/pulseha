@@ -78,7 +78,7 @@ func TestReconcileVIPPlan(t *testing.T) {
 			s := newExpectedIPsServer(tc.mode, group, tc.assigned)
 			s.memberList.GetMemberByID("node-a").Status = tc.status
 
-			groupIPs, activeActive := s.snapshotVIPGroups("node-a")
+			groupIPs, activeActive := s.snapshotVIPGroups(s.currentConfig(), "node-a")
 			plan, claim := s.reconcileVIPPlan("node-a", groupIPs, activeActive)
 			if claim != tc.wantClaim {
 				t.Errorf("claim = %v, want %v", claim, tc.wantClaim)
@@ -104,7 +104,7 @@ func TestReconcileVIPPlan(t *testing.T) {
 func TestReconcileVIPPlanUnknownNode(t *testing.T) {
 	s := newExpectedIPsServer("active-passive", []string{"10.0.0.1/24"}, nil)
 
-	groupIPs, activeActive := s.snapshotVIPGroups("node-missing")
+	groupIPs, activeActive := s.snapshotVIPGroups(s.currentConfig(), "node-missing")
 	if groupIPs != nil || activeActive {
 		t.Errorf("snapshotVIPGroups(unknown) = %v, %v; want nil, false", groupIPs, activeActive)
 	}
@@ -124,7 +124,7 @@ func TestSnapshotVIPGroupsDoesNotAliasConfig(t *testing.T) {
 	group := []string{"10.0.0.1/24", "10.0.0.2/24"}
 	s := newExpectedIPsServer("active-active", group, nil)
 
-	groupIPs, activeActive := s.snapshotVIPGroups("node-a")
+	groupIPs, activeActive := s.snapshotVIPGroups(s.currentConfig(), "node-a")
 	if !activeActive {
 		t.Fatal("activeActive = false, want true")
 	}

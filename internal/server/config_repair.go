@@ -182,7 +182,11 @@ func (s *Server) startConfigRepair(coordinatorID string) {
 	now := time.Now()
 	s.lastConfigRepair.Store(&now)
 
+	// Counted before the spawn, not inside it, so a Wait racing the goroutine's
+	// own Add cannot return before the repair has started.
+	s.configRepairs.Add(1)
 	go func() {
+		defer s.configRepairs.Done()
 		defer s.repairInFlight.Store(false)
 		s.repairConfigFrom(coordinatorID)
 	}()

@@ -51,9 +51,9 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 
 		within(t, 5*time.Second, "EnterMaintenance", func() { _ = m.EnterMaintenance() })
 
-		m.Lock()
-		status, ips, load := m.Status, m.ActiveIPs, m.LoadFactor
-		m.Unlock()
+		m.mu.Lock()
+		status, ips := m.Status, m.ActiveIPs
+		m.mu.Unlock()
 
 		if status != StatusMaintenance {
 			t.Errorf("status = %s, want Maintenance", StatusToString(status))
@@ -62,9 +62,6 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 		// count these as hosted when deciding what to redistribute.
 		if len(ips) != 0 {
 			t.Errorf("expected ActiveIPs cleared, got %v", ips)
-		}
-		if load != 0 {
-			t.Errorf("expected LoadFactor cleared, got %v", load)
 		}
 	})
 
@@ -75,9 +72,9 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 
 		within(t, 5*time.Second, "EnterMaintenance", func() { _ = m.EnterMaintenance() })
 
-		m.Lock()
+		m.mu.Lock()
 		status := m.Status
-		m.Unlock()
+		m.mu.Unlock()
 		if status != StatusMaintenance {
 			t.Errorf("status = %s, want Maintenance", StatusToString(status))
 		}
@@ -88,9 +85,9 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 
 		within(t, 5*time.Second, "EnterMaintenance", func() { _ = m.EnterMaintenance() })
 
-		m.Lock()
+		m.mu.Lock()
 		status := m.Status
-		m.Unlock()
+		m.mu.Unlock()
 		if status != StatusMaintenance {
 			t.Errorf("status = %s, want Maintenance", StatusToString(status))
 		}
@@ -105,8 +102,8 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 
 		// Acquiring the lock afterwards is the assertion: a leaked lock hangs here.
 		within(t, 5*time.Second, "re-locking after the no-op", func() {
-			m.Lock()
-			m.Unlock()
+			m.mu.Lock()
+			m.mu.Unlock()
 		})
 	})
 
@@ -115,9 +112,9 @@ func TestEnterMaintenanceDoesNotDeadlock(t *testing.T) {
 
 		within(t, 5*time.Second, "ExitMaintenance", func() { _ = m.ExitMaintenance() })
 
-		m.Lock()
+		m.mu.Lock()
 		status := m.Status
-		m.Unlock()
+		m.mu.Unlock()
 		if status != StatusPassive {
 			t.Errorf("status = %s, want Passive", StatusToString(status))
 		}

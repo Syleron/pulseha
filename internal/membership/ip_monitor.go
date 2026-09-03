@@ -13,6 +13,7 @@ import (
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 )
 
@@ -30,7 +31,7 @@ const releaseGraceWindow = 60 * time.Second
 
 // IPMonitor monitors IP addresses on interfaces and ensures they match the expected configuration
 type IPMonitor struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	members     *MemberList
 	logger      *log.Logger
 	expectedIPs map[string][]string // map[interface][]ips
@@ -50,7 +51,7 @@ type IPMonitor struct {
 	// own RWMutex: every setter that triggers a pass — UpdateExpectedIPs,
 	// AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce with m.Lock() still
 	// held by a defer, so taking that lock here would wedge the writer.
-	enforceMu      sync.Mutex
+	enforceMu      pulselock.Mutex
 	enforceRunning bool
 	enforcePending bool
 	// enforce is the pass itself, indirected so the coalescing above can be tested
@@ -745,9 +746,9 @@ func (m *IPMonitor) initializeExpectedIPs() error {
 	// land while the monitor is initialising, where the old unconditional Start in Server.Start
 	// ran before the cluster listener was up. -race caught it as a write in ConfigSync against
 	// this read (docs/TEST-PLAN.md #86).
-	localMember.Lock()
+	localMember.mu.Lock()
 	localStatus := localMember.Status
-	localMember.Unlock()
+	localMember.mu.Unlock()
 
 	m.logger.Debug("IP monitor init: found local member", "status", localStatus)
 
