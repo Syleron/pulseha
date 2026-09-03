@@ -153,8 +153,15 @@ type HealthChecker struct {
 	lastTick              time.Time       // last time a check cycle executed
 	loggedNoMembers       bool            // Tracks if a no-member condition has already been logged in the current state
 	deepCheckCounter      int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
-	membershipCheckFailed map[string]bool // nodes that failed the last deep membership check; cleared only when deep check passes
-	reconcileCycles       int             // cycles since startup; reconciliation waits for a grace period
+	membershipCheckFailed map[string]bool // nodes the last deep check REJECTED; cleared only when a later deep check confirms
+
+	// deepCheck is checkClusterMembership, indirected so a test can drive each
+	// verdict without a peer to answer it. Same reason IPMonitor indirects
+	// enforce and now: the real thing needs a network, and what needs testing
+	// here is what the caller does with the answer rather than how it is
+	// obtained. nil in the daemon, which uses the method.
+	deepCheck       func(*Member) membershipVerdict
+	reconcileCycles int // cycles since startup; reconciliation waits for a grace period
 
 	// reconcileInFlight guards the reconciliation pass, which runs off the tick.
 	// While a pass is running later ticks skip it rather than queue behind it, so
@@ -374,21 +381,43 @@ func (h *HealthChecker) performHealthChecks() {
 		// scenarios where a rebooted peer is running its own isolated cluster).
 		// All other cycles use a cheap TCP dial for low-latency failure detection.
 		//
-		// Once a node fails the deep check it stays unreachable until the next deep check
-		// passes — a passing TCP dial alone is not enough to clear the failed state.
+		// A node the deep check *rejects* — it does not know us, or it echoes a
+		// different cluster token — stays unreachable until a later deep check
+		// confirms it, because a passing TCP dial says nothing about which cluster
+		// answered. A deep check that merely could not be completed does not latch;
+		// see membershipVerdict for what that distinction cost.
 		startTime := time.Now()
 		var isReachable bool
 		if doDeepCheck {
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-			isReachable = h.checkClusterMembership(member)
-			h.membershipCheckFailed[member.ID] = !isReachable
+			verdict := h.membershipOf(member)
+
+			// Only a confirmed membership counts as reachable. An unverified
+			// check is not treated as reachable either, and deliberately does
+			// not fall back to the TCP dial: a listening socket outlives a
+			// wedged daemon (#56, #79), so answering "reachable" on the strength
+			// of TCP alone would hide exactly the failure this daemon is most
+			// prone to.
+			isReachable = verdict == membershipConfirmed
+
+			// The latch records a conclusion about the peer's cluster, so only a
+			// definite rejection sets it and only a confirmation clears it. An
+			// unverified check leaves it alone: it must not manufacture a
+			// rejection out of a timeout, and it must not clear a real one
+			// merely because the peer has since stopped answering.
+			switch verdict {
+			case membershipRejected:
+				h.membershipCheckFailed[member.ID] = true
+			case membershipConfirmed:
+				delete(h.membershipCheckFailed, member.ID)
+			}
 		} else {
 			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 			isReachable = h.checkNodeConnectivity(member)
-			// If the last deep check determined this node is in a foreign cluster,
-			// keep it marked unreachable regardless of TCP reachability.
+			// A node the last deep check placed in a different cluster stays
+			// unreachable however well it answers a TCP dial.
 			if isReachable && h.membershipCheckFailed[member.ID] {
-				h.logger.Debugf("Node %s passes TCP but failed last membership check; treating as unreachable", member.Hostname)
+				h.logger.Debugf("Node %s passes TCP but the last deep check rejected its membership; treating as unreachable", member.Hostname)
 				isReachable = false
 			}
 		}
@@ -1971,34 +2000,84 @@ func (h *HealthChecker) findActiveNode() *Member {
 // checkClusterMembership makes a gRPC HealthCheck call to the remote node and validates
 // that it shares the same cluster token. Returns false if the node is unreachable,
 // rejects the token, or is running in a different cluster.
-func (h *HealthChecker) checkClusterMembership(member *Member) bool {
+// membershipOf runs the deep membership check, through the test seam when one
+// is installed.
+func (h *HealthChecker) membershipOf(member *Member) membershipVerdict {
+	if h.deepCheck != nil {
+		return h.deepCheck(member)
+	}
+	return h.checkClusterMembership(member)
+}
+
+// membershipVerdict is what a deep membership check concluded, as distinct from
+// whether it succeeded.
+//
+// The distinction is the whole point. This check used to return a bare bool, so
+// seven unrelated causes collapsed into one false: an empty IP, a nil config, a
+// missing local node id, a client that would not construct, a transport that
+// would not connect, a gRPC deadline or Unavailable, a peer that does not have
+// us in its memberlist, and a peer echoing a different cluster token.
+//
+// The caller latches a failure until the next *passing* deep check, five cycles
+// later, and the latch exists to keep a node in a foreign cluster marked
+// unreachable even when it answers a TCP dial. Only the last two causes are
+// that. A two-second deadline on a loaded VM is not a foreign cluster, and
+// latching it cost four further cycles of Unknown after the cause had gone --
+// which is what made an lb_api CI pipeline report a node unknown on odd
+// occasions.
+type membershipVerdict int
+
+const (
+	// membershipUnverified: the check could not be completed. Says nothing
+	// about the peer's cluster, so it must not latch.
+	membershipUnverified membershipVerdict = iota
+	// membershipConfirmed: the peer answered and agrees it is in this cluster.
+	membershipConfirmed
+	// membershipRejected: the peer answered, and it is not in this cluster --
+	// it does not know this node, or it echoes a different cluster token. This
+	// is the only conclusion worth latching.
+	membershipRejected
+)
+
+func (v membershipVerdict) String() string {
+	switch v {
+	case membershipConfirmed:
+		return "confirmed"
+	case membershipRejected:
+		return "rejected"
+	default:
+		return "unverified"
+	}
+}
+
+func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict {
 	if member.IP == "" || member.Port == "" {
-		return false
+		return membershipUnverified
 	}
 
 	cfg := h.members.Config()
 	if cfg == nil {
 		h.logger.Warn("checkClusterMembership: no config")
-		return false
+		return membershipUnverified
 	}
 	localToken := cfg.Pulse.ClusterToken
 	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
-		return false
+		return membershipUnverified
 	}
 
 	remoteClient, err := client.New()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to create client: %v", err)
-		return false
+		return membershipUnverified
 	}
 	defer remoteClient.Close()
 
 	if err := remoteClient.Connect(member.IP, member.Port, false); err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to connect to %s (%s:%s): %v",
 			member.Hostname, member.IP, member.Port, err)
-		return false
+		return membershipUnverified
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2009,22 +2088,28 @@ func (h *HealthChecker) checkClusterMembership(member *Member) bool {
 		ClusterToken: localToken,
 	})
 	if err != nil {
+		// Unverified, not rejected: a DeadlineExceeded from a loaded peer and an
+		// Unavailable from a dead one are indistinguishable here, and neither is
+		// a statement about which cluster the peer belongs to.
 		h.logger.Warnf("checkClusterMembership: gRPC call to %s failed: %v", member.Hostname, err)
-		return false
+		return membershipUnverified
 	}
 
 	if !resp.Success {
+		// Rejected: the peer answered and does not have us in its memberlist,
+		// which on an appliance whose node id is re-minted by `lbcli setup` is a
+		// real and asymmetric condition worth latching.
 		h.logger.Warnf("checkClusterMembership: %s rejected membership check: %s", member.Hostname, resp.Message)
-		return false
+		return membershipRejected
 	}
 
 	// Verify the remote node echoes a matching token (detects split-cluster scenarios)
 	if localToken != "" && resp.ClusterToken != "" && resp.ClusterToken != localToken {
 		h.logger.Warnf("checkClusterMembership: %s is in a different cluster (token mismatch)", member.Hostname)
-		return false
+		return membershipRejected
 	}
 
-	return true
+	return membershipConfirmed
 }
 
 // checkNodeConnectivity verifies basic node connectivity
