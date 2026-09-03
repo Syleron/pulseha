@@ -397,7 +397,14 @@ func (h *HealthChecker) performHealthChecks() {
 			responseTime)
 
 		member.Lock()
-		member.LastHCResponse = time.Now()
+		// Stamped only when the member actually answered. It used to be stamped
+		// here unconditionally, immediately before the branch below decided the
+		// member was unreachable — so the field recorded whether a member had
+		// ever responded, not when it last did, and every consumer measuring
+		// silence with it was reading a constant.
+		if isReachable {
+			member.LastHCResponse = time.Now()
+		}
 
 		if !isReachable {
 			// Mark node as unknown when unreachable
@@ -524,7 +531,14 @@ func (h *HealthChecker) performHealthChecks() {
 		// Increment counter for unchanged state
 		checksWithoutChange := h.incChecksWithoutChangeLocked()
 
-		// Heartbeat convergence nudge every 3 checks (~3s) to advance LastResponse and align peers
+		// Heartbeat convergence nudge every 3 checks (~3s) to re-assert an
+		// already-agreed view and keep peers aligned.
+		//
+		// It used to advance every member's LastResponse here as well, "for
+		// consistent display" — including members it had just failed to reach.
+		// That is what made LastResponse unable to measure silence, and the
+		// alignment this nudge exists for does not depend on it: the broadcast
+		// carries member statuses, the epoch and the leader, and no timestamp.
 		if h.server != nil && checksWithoutChange%3 == 0 {
 			h.logger.Debug("HEALTH_CHECK: Performing heartbeat convergence nudge", "checksWithoutChange",
 				checksWithoutChange)
@@ -532,8 +546,6 @@ func (h *HealthChecker) performHealthChecks() {
 			for id, m := range membersSnapshot {
 				m.Lock()
 				states[id] = m.Status
-				// Also advance local LastResponse to now for consistent display
-				m.LastHCResponse = time.Now()
 				m.Unlock()
 			}
 			// Deliberately the current epoch, not epoch+1. This fires on *unchanged*
