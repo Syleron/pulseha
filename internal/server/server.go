@@ -1314,10 +1314,13 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 		health := member.GetHealthStatus()
 		st := deriveMemberStatus(health.Status, len(health.ActiveIPs), selfReportsAssignments)
 
-		// Stamp a fresh last response for local display if empty/stale
+		// The stored time, not time.Now(). This reported "now" for any member
+		// that had ever responded, so a node unreachable for days showed a last
+		// response of a moment ago — the one field an operator would use to tell
+		// a blip from a corpse, carrying no information at all.
 		lastResp := ""
 		if !health.LastResponse.IsZero() {
-			lastResp = time.Now().Format(time.RFC3339)
+			lastResp = health.LastResponse.Format(time.RFC3339)
 		}
 
 		members = append(members, &rpc.Member{
@@ -2298,13 +2301,15 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		}, nil
 	}
 
-	// Update last response time
+	// Genuine contact: this peer just called us, so record it.
 	member.LastHCResponse = time.Now()
 
-	// Calculate and update latency
-	latency := time.Since(member.LastHCResponse).String()
-	member.Latency = latency
-	s.logger.Debugf("Member %s latency: %s", member.Hostname, latency)
+	// Latency is deliberately not touched here. It used to be set to
+	// time.Since(member.LastHCResponse) on the line after that stamp, which is
+	// zero by construction — so an inbound health check overwrote the latency
+	// our own outbound check had measured with a meaningless ~0s. What this
+	// side of the call can see is not a round trip.
+	s.logger.Debugf("Member %s health-checked us", member.Hostname)
 
 	return &rpc.HealthCheckResponse{
 		Success:      true,
