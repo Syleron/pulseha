@@ -35,9 +35,11 @@ import (
 //     cycles that follow answered on a TCP dial alone and a frozen-but-
 //     listening peer read healthy four cycles in five. Measured on the docker
 //     rig: frozen 14s, reported Active for 6.2s of it. So an unresolved check
-//     keeps the node unreachable AND forces a deep check next cycle, which
-//     recovers a transient in about one cycle and keeps a wedged peer Unknown
-//     for as long as it stays wedged.
+//     keeps the node unreachable -- enforced in the cheap branch, which costs
+//     nothing -- and earns ONE immediate re-check, which is what recovers a
+//     transient in a cycle instead of five. It does not stay on the deep path:
+//     doing that stretched every pass by the gRPC deadline for as long as any
+//     peer was wedged.
 //   - CONFIRMED clears both.
 
 // listeningPeer returns a member pointed at a socket that accepts and holds
@@ -169,10 +171,22 @@ func TestAnUnresolvedDeepCheckKeepsTheNodeUnknownWhileItStaysUnresolved(t *testi
 	}
 }
 
-// TestAnUnresolvedNodeIsDeepCheckedEveryCycle is the mechanism behind the test
-// above, asserted directly: once a deep check fails to conclude, the node stays
-// on the expensive path instead of waiting out the five-cycle period.
-func TestAnUnresolvedNodeIsDeepCheckedEveryCycle(t *testing.T) {
+// TestAnUnresolvedNodeIsRetriedOnceThenFallsBackToTheSchedule bounds the cost
+// of keeping a wedged node Unknown.
+//
+// An earlier version deep-checked an unresolved node every cycle. Each deep
+// check makes a gRPC call with a 2s deadline, performHealthChecks holds the
+// checker's write lock for its whole body, and members are checked serially --
+// so a wedged peer stretched every pass by up to two seconds, and the whole
+// cluster's health-check rate dropped with it. The cost applied precisely when
+// the feature was working, because a wedged-but-listening peer is what keeps a
+// node unresolved.
+//
+// Staying Unknown and being re-checked often are separable: the cheap branch
+// holds an unresolved node Unknown for free, and only the first retry needs to
+// be immediate. So across twenty cycles a wedged node should cost about four
+// scheduled deep checks plus the one retry -- not twenty.
+func TestAnUnresolvedNodeIsRetriedOnceThenFallsBackToTheSchedule(t *testing.T) {
 	h, peer, verdict := newLatchTestChecker(t)
 
 	var deepChecks int
@@ -181,19 +195,61 @@ func TestAnUnresolvedNodeIsDeepCheckedEveryCycle(t *testing.T) {
 		return *verdict
 	}
 
-	// Reach the first scheduled deep check with the peer already unresolved.
 	*verdict = membershipUnverified
 	runUntilUnknown(t, h, peer, 6)
 
-	// Every one of the next eight cycles must deep-check.
 	before := deepChecks
-	for i := 0; i < 8; i++ {
+	const cycles = 20
+	for i := 0; i < cycles; i++ {
+		h.performHealthChecks()
+		// And it must stay Unknown the whole way, for free.
+		if got := statusOf(peer); got != StatusUnknown {
+			t.Fatalf("cycle %d reported %s; the cheap branch must hold an "+
+				"unresolved node Unknown", i+1, StatusToString(got))
+		}
+	}
+
+	// Scheduled checks are every fifth cycle, so four in twenty, plus at most
+	// one retry left over from the episode starting.
+	if got := deepChecks - before; got > 6 {
+		t.Errorf("%d deep checks across %d cycles while wedged, want about 4-5. "+
+			"Deep-checking every cycle stretches every pass by the gRPC deadline "+
+			"and slows detection of unrelated failures", got, cycles)
+	}
+	if got := deepChecks - before; got < 3 {
+		t.Errorf("only %d deep checks across %d cycles; the scheduled cadence "+
+			"must still run, or a wedged node could never recover", got, cycles)
+	}
+}
+
+// TestTheImmediateRetryIsUsedAtAll pins the other half: the one-shot retry has
+// to actually fire, or a transient waits out the full period again.
+func TestTheImmediateRetryIsUsedAtAll(t *testing.T) {
+	h, _, verdict := newLatchTestChecker(t)
+
+	var cyclesWithDeepCheck []int
+	cycle := 0
+	h.deepCheck = func(*Member) membershipVerdict {
+		cyclesWithDeepCheck = append(cyclesWithDeepCheck, cycle)
+		return *verdict
+	}
+
+	*verdict = membershipUnverified
+	for cycle = 1; cycle <= 8; cycle++ {
 		h.performHealthChecks()
 	}
-	if got := deepChecks - before; got != 8 {
-		t.Errorf("%d deep checks across 8 cycles after the node became "+
-			"unresolved, want 8 — it must be re-checked every cycle, not every "+
-			"fifth", got)
+
+	// The first deep check is the scheduled one at cycle 5; the retry must make
+	// cycle 6 a deep check too, and then the cadence resumes.
+	if len(cyclesWithDeepCheck) < 2 {
+		t.Fatalf("deep checks at cycles %v; expected a scheduled one and an "+
+			"immediate retry after it", cyclesWithDeepCheck)
+	}
+	first, second := cyclesWithDeepCheck[0], cyclesWithDeepCheck[1]
+	if second != first+1 {
+		t.Errorf("deep checks at cycles %v; the retry must land on the cycle "+
+			"immediately after the first failure, not %d cycles later",
+			cyclesWithDeepCheck, second-first)
 	}
 }
 
@@ -227,9 +283,22 @@ func TestAnUnresolvedDeepCheckRecoversOnTheNextCycle(t *testing.T) {
 		t.Fatal("the peer never recovered within five cycles of answering again")
 	}
 	if recovered > 1 {
-		t.Errorf("recovered after %d cycles; an unresolved node is deep-checked "+
-			"every cycle, so the first cycle after it answers again should clear it",
-			recovered)
+		t.Errorf("recovered after %d cycles; the immediate retry means the first "+
+			"cycle after it answers again should clear it", recovered)
+	}
+
+	// And it must STAY recovered. A confirmation has to clear the unresolved
+	// state as well as report the node reachable -- otherwise the next cheap
+	// cycle consults the stale flag and forces Unknown again, and the node
+	// flaps forever. The confirming cycle alone cannot show that, because on
+	// that cycle the verdict is what decides.
+	for i := 0; i < 10; i++ {
+		h.performHealthChecks()
+		if got := statusOf(peer); got == StatusUnknown {
+			t.Fatalf("the peer returned to Unknown %d cycles after being "+
+				"confirmed; a confirmation must clear the unresolved state, not "+
+				"only report reachable", i+1)
+		}
 	}
 }
 
