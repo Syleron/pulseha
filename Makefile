@@ -50,14 +50,30 @@ protos:
 # -race, and a CI runner is slower than that -- with both targets now actually
 # running in CI, a 30s per-package budget was close enough to the wall to fail on
 # runner load rather than on a real regression.
+#
+# ./tests/unit/... is listed explicitly, and it is not redundant. The three
+# trees above do not contain it, and `integration-test` below covers
+# ./tests/integration/... only -- so from the day tests/unit was written until
+# 2026-09-02 nothing in either workflow ran it. Fifteen tests, and the ones it
+# was hiding are the ones this repo can least afford to leave unrun:
+# TestCreateClusterReturnsWithoutDeadlock, TestClusterInit_* (the TOCTOU guards
+# that stop two nodes both activating as "first node") and
+# TestReconfigureConcurrent_NoBindRace. A deadlock regression test that never
+# executes is worse than none, because it reads as coverage.
+#
+# Not ./tests/... : that would re-run the integration suite, which
+# quiet-integration-test already runs with its own 2m budget and its own
+# PULSEHA_TEST_LOGLEVEL. ./tests/testutils has no test functions.
 test:
 	 go test -timeout 120s -v ./internal/...
 	 go test -timeout 120s -v ./cmd/...
 	 go test -timeout 120s -v ./packages/...
+	 go test -timeout 120s -v ./tests/unit/...
 testrace:
 	 go test -race -timeout 120s -v ./internal/...
 	 go test -race -timeout 120s -v ./cmd/...
 	 go test -race -timeout 120s -v ./packages/...
+	 go test -race -timeout 120s -v ./tests/unit/...
 integration-test:
 	 @echo "Running integration tests (verbose mode)..."
 	 go test -timeout 2m -v ./tests/integration/...

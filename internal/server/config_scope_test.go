@@ -159,11 +159,9 @@ func TestConfigSetModeGoesThroughSetMode(t *testing.T) {
 
 	actives := 0
 	for _, member := range s.memberList.MembersSnapshot() {
-		member.Lock()
-		if member.Status == membership.StatusActive {
+		if member.GetStatus() == membership.StatusActive {
 			actives++
 		}
-		member.Unlock()
 	}
 	if actives != 1 {
 		t.Errorf("%d members Active after the switch to active-passive, want exactly 1; "+

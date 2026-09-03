@@ -24,12 +24,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
 
 	"github.com/google/uuid"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/jsonHelper"
+	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/packages/utils"
 )
 
@@ -73,7 +73,7 @@ type Config struct {
 	Groups  map[string][]string    `json:"floating_ip_groups"`
 	Nodes   map[string]*Node       `json:"nodes"`
 	Plugins map[string]interface{} `json:"plugins"`
-	sync.Mutex
+	pulselock.Mutex
 }
 
 type Local struct {
@@ -203,13 +203,24 @@ func (c *Config) GetLocalNodeForBinding() (Node, error) {
 
 // GetLocalNode attempt to get local node definition in our config.
 func (c *Config) GetLocalNode() (Node, error) {
-	if !c.ClusterCheck() {
+	// One acquisition for the cluster check, the local node's id and the lookup
+	// that uses it. Previously the first two each took and released the lock and
+	// the map read took none, so a join writing c.Nodes could land between them:
+	// the id came from before the write and the lookup ran after it.
+	//
+	// The deep copy below is the other half of the same requirement -- returning
+	// the *Node would hand the caller a pointer into the config it is not
+	// holding the lock for.
+	c.Lock()
+	defer c.Unlock()
+
+	if !c.clusterCheckLocked() {
 		return Node{}, errors.New("cluster check failed")
 	}
-	uuid, err := c.GetLocalNodeUUID()
-	if err != nil {
-		return Node{}, err
-	}
+	// c.Pulse.LocalNode directly rather than GetLocalNodeUUID, which takes this
+	// same lock. An empty id simply misses the lookup below and reports "local
+	// node not found", which is what the two-call version did.
+	uuid := c.Pulse.LocalNode
 	if node, ok := c.Nodes[uuid]; ok {
 		// Create a deep copy of the node
 		nodeCopy := Node{
@@ -284,7 +295,7 @@ func (c *Config) Load() error {
 		// Migrate old configs: set default syslog values if missing
 		c.migrateConfig()
 
-		if err := c.Validate(); err != nil {
+		if err := c.validateLocked(); err != nil {
 			return fmt.Errorf("config validation failed: %v", err)
 		}
 	} else {
@@ -459,7 +470,25 @@ func (c *Config) SaveDefaultLocalConfig() error {
 }
 
 // Validate validates the config
+// Validate reports whether this config is coherent.
+//
+// Takes the lock. Callers already holding it want validateLocked -- the lock is
+// not reentrant, and Load and saveLocked both validate from inside it.
 func (c *Config) Validate() error {
+	c.Lock()
+	defer c.Unlock()
+	return c.validateLocked()
+}
+
+// validateLocked is Validate for callers already holding the lock.
+//
+// The split matters more than it looks. This function reads c.Pulse and calls
+// clusterCheckLocked, so it has always assumed the lock was held -- while being
+// named as though it took one. Load and saveLocked call it correctly from inside
+// the lock; UpdateValue called it from outside, with no lock at all, which is
+// the residual END-2325 handed to END-2339. Naming it for what it assumes is
+// what stops the next caller getting it wrong.
+func (c *Config) validateLocked() error {
 	// Validate mode
 	if c.Pulse.Mode != "" && c.Pulse.Mode != "active-passive" && c.Pulse.Mode != "active-active" {
 		return fmt.Errorf("invalid mode %q: must be either 'active-passive' or 'active-active'", c.Pulse.Mode)
@@ -612,17 +641,30 @@ func (c *Config) GenerateNodeID() string {
 // belonging to unrelated operations — and a config broadcast would have carried
 // the rejected value to the rest of the cluster.
 func (c *Config) UpdateValue(key string, value string) error {
+	// One acquisition for the whole transaction, and it has to be: this mutates
+	// c.Pulse, validates the result, persists it, and rolls the mutation back if
+	// either step fails. Split across separate locked calls, another writer
+	// could observe or overwrite the intermediate state, and the rollback would
+	// then restore a value that was never the one it replaced.
+	//
+	// It ran with no lock at all until END-2339 -- the residual END-2325
+	// recorded when it synchronised ClusterCheck and left this behind.
+	c.Lock()
+	defer c.Unlock()
+
 	previous := c.Pulse
 
 	if err := jsonHelper.SetStructFieldByTag(key, value, &c.Pulse); err != nil {
 		return err
 	}
-	if err := c.Validate(); err != nil {
+	// The Locked forms throughout: the exported Validate and Save both take the
+	// lock this already holds, and the lock is not reentrant.
+	if err := c.validateLocked(); err != nil {
 		c.Pulse = previous
 		return fmt.Errorf("invalid configuration value: %v", err)
 	}
 	// Save our config with the updated info
-	if err := c.Save(); err != nil {
+	if err := c.saveLocked(); err != nil {
 		c.Pulse = previous
 		return err
 	}
@@ -688,7 +730,7 @@ func (c *Config) saveLocked() error {
 		}
 	}
 
-	if err := c.Validate(); err != nil {
+	if err := c.validateLocked(); err != nil {
 		return fmt.Errorf("validation failed: %v", err)
 	}
 

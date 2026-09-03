@@ -97,7 +97,7 @@ func TestRedistributeIPsSnapshotsMemberStateUnderLock(t *testing.T) {
 					return
 				default:
 				}
-				m.Lock()
+				m.mu.Lock()
 				// Capped: the reader's cost is linear in this list, so letting it
 				// grow unbounded made the test quadratic without exercising
 				// anything new — the contended field accesses are what matter.
@@ -111,7 +111,7 @@ func TestRedistributeIPsSnapshotsMemberStateUnderLock(t *testing.T) {
 					m.Status = StatusActive
 				}
 				m.Capacity = n % 5
-				m.Unlock()
+				m.mu.Unlock()
 			}
 		}(i, member)
 	}

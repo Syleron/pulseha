@@ -32,10 +32,11 @@ func TestGetClusterStatusReportsTheStoredLastResponse(t *testing.T) {
 	if peer == nil {
 		t.Fatal("node-peer missing from the member list")
 	}
-	peer.Lock()
-	peer.Status = membership.StatusUnknown
-	peer.LastHCResponse = silent
-	peer.Unlock()
+	// Through the accessors: Member's mutex is private, which is the whole
+	// point of un-embedding it. SetClaim moves the status, SetLastResponse the
+	// observation about it.
+	peer.SetClaim(membership.Claim{Status: membership.StatusUnknown})
+	peer.SetLastResponse(silent)
 
 	resp, err := s.GetClusterStatus(context.Background(), &rpc.StatusRequest{})
 	if err != nil {
@@ -74,10 +75,8 @@ func TestGetClusterStatusLeavesLastResponseEmptyForANodeNeverHeardFrom(t *testin
 	s, ml := newConfigSyncTestServer(t, "node-local", "node-peer")
 
 	peer := ml.GetMemberByID("node-peer")
-	peer.Lock()
-	peer.Status = membership.StatusUnknown
-	peer.LastHCResponse = time.Time{}
-	peer.Unlock()
+	peer.SetClaim(membership.Claim{Status: membership.StatusUnknown})
+	peer.SetLastResponse(time.Time{})
 
 	resp, err := s.GetClusterStatus(context.Background(), &rpc.StatusRequest{})
 	if err != nil {

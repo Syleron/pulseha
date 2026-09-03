@@ -93,9 +93,9 @@ func TestAnUnreachableMemberKeepsItsLastResponse(t *testing.T) {
 	h, dead, _ := newSilenceTestChecker(t, nil)
 
 	silent := time.Now().Add(-30 * time.Second)
-	dead.Lock()
+	dead.mu.Lock()
 	dead.LastHCResponse = silent
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	// Several passes, including the heartbeat nudge's third-cycle stamp and a
 	// deep check on the fifth.
@@ -103,9 +103,9 @@ func TestAnUnreachableMemberKeepsItsLastResponse(t *testing.T) {
 		h.performHealthChecks()
 	}
 
-	dead.Lock()
+	dead.mu.Lock()
 	status, stamped := dead.Status, dead.LastHCResponse
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	if status != StatusUnknown {
 		t.Fatalf("the peer was not found unreachable (status %s); its port is not "+
@@ -144,17 +144,17 @@ func TestAReachableMemberDoesGetStamped(t *testing.T) {
 	}
 
 	before := time.Now().Add(-30 * time.Second)
-	peer.Lock()
+	peer.mu.Lock()
 	peer.IP, peer.Port = host, port
 	peer.LastHCResponse = before
-	peer.Unlock()
+	peer.mu.Unlock()
 
 	// One cheap cycle: a passing TCP dial.
 	h.performHealthChecks()
 
-	peer.Lock()
+	peer.mu.Lock()
 	stamped := peer.LastHCResponse
-	peer.Unlock()
+	peer.mu.Unlock()
 	if !stamped.After(before) {
 		t.Errorf("LastHCResponse was not advanced for a member that answered "+
 			"(still %v)", stamped.Format(time.RFC3339Nano))
@@ -168,17 +168,17 @@ func TestAReachableMemberDoesGetStamped(t *testing.T) {
 func TestTheCoordinatorRoleLeavesAnIndefinitelyDeadNode(t *testing.T) {
 	h, dead, ml := newSilenceTestChecker(t, nil)
 
-	dead.Lock()
+	dead.mu.Lock()
 	dead.LastHCResponse = time.Now().Add(-30 * time.Second)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	for i := 0; i < 6; i++ {
 		h.performHealthChecks()
 	}
 
-	dead.Lock()
+	dead.mu.Lock()
 	silence := time.Since(dead.LastHCResponse)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	got := clusterCoordinator(ml.MembersSnapshot(), h.failoverGrace())
 	if got == "node-dead" {
@@ -201,9 +201,9 @@ func TestTheCoordinatorRoleStaysWithABrieflySilentNode(t *testing.T) {
 	h, dead, ml := newSilenceTestChecker(t, nil)
 
 	// Silent for two seconds against a ten-second grace: busy, not gone.
-	dead.Lock()
+	dead.mu.Lock()
 	dead.LastHCResponse = time.Now().Add(-2 * time.Second)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	if got := clusterCoordinator(ml.MembersSnapshot(), h.failoverGrace()); got != "node-dead" {
 		t.Errorf("coordinator = %q, want node-dead — a briefly silent node keeps "+
@@ -224,17 +224,17 @@ func TestAddressesStrandedOnADeadNodeAreReclaimed(t *testing.T) {
 	stranded := []string{"10.0.0.1/24", "10.0.0.2/24"}
 	h, dead, _ := newSilenceTestChecker(t, map[string][]string{"group1": stranded})
 
-	dead.Lock()
+	dead.mu.Lock()
 	dead.Status = StatusUnknown
 	dead.ActiveIPs = append([]string{}, stranded...)
 	dead.LastHCResponse = time.Now().Add(-30 * time.Second)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	h.redistributeOrphanedIPs(h.members.MembersSnapshot())
 
-	dead.Lock()
+	dead.mu.Lock()
 	held := append([]string{}, dead.ActiveIPs...)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	if len(held) != 0 {
 		t.Errorf("a node silent for 30s against a %v grace still claims %v. "+
@@ -250,17 +250,17 @@ func TestAddressesOnABrieflySilentNodeAreNotReclaimed(t *testing.T) {
 	stranded := []string{"10.0.0.1/24", "10.0.0.2/24"}
 	h, dead, _ := newSilenceTestChecker(t, map[string][]string{"group1": stranded})
 
-	dead.Lock()
+	dead.mu.Lock()
 	dead.Status = StatusUnknown
 	dead.ActiveIPs = append([]string{}, stranded...)
 	dead.LastHCResponse = time.Now().Add(-2 * time.Second)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	h.redistributeOrphanedIPs(h.members.MembersSnapshot())
 
-	dead.Lock()
+	dead.mu.Lock()
 	held := len(dead.ActiveIPs)
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	if held != len(stranded) {
 		t.Errorf("a node silent for only 2s against a %v grace lost its addresses "+
@@ -281,9 +281,9 @@ func TestTheHeartbeatNudgeDoesNotStampAnUnreachableMember(t *testing.T) {
 	h.server = &stubServer{members: ml}
 
 	silent := time.Now().Add(-30 * time.Second)
-	dead.Lock()
+	dead.mu.Lock()
 	dead.LastHCResponse = silent
-	dead.Unlock()
+	dead.mu.Unlock()
 
 	// Enough unchanged cycles for the nudge to have fired several times.
 	for i := 0; i < 12; i++ {
@@ -296,9 +296,9 @@ func TestTheHeartbeatNudgeDoesNotStampAnUnreachableMember(t *testing.T) {
 			"it stamps; check the checksWithoutChange%3 gate")
 	}
 
-	dead.Lock()
+	dead.mu.Lock()
 	stamped := dead.LastHCResponse
-	dead.Unlock()
+	dead.mu.Unlock()
 	if !stamped.Equal(silent) {
 		t.Errorf("the heartbeat nudge advanced LastHCResponse to %v for a member "+
 			"that has never answered (was %v). Its stated purpose is to align "+

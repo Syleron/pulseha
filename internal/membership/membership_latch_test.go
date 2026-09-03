@@ -114,8 +114,8 @@ func runCycles(h *HealthChecker, n int) {
 }
 
 func statusOf(m *Member) MemberStatus {
-	m.Lock()
-	defer m.Unlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.Status
 }
 
@@ -398,9 +398,9 @@ func TestTheVerdictOfAnUnansweredPeerIsUnverified(t *testing.T) {
 	if err := l.Close(); err != nil {
 		t.Fatalf("releasing the port: %v", err)
 	}
-	peer.Lock()
+	peer.mu.Lock()
 	peer.IP, peer.Port = host, port
-	peer.Unlock()
+	peer.mu.Unlock()
 
 	if got := h.checkClusterMembership(peer); got != membershipUnverified {
 		t.Errorf("verdict for an undialable peer = %s, want unverified. Anything "+
@@ -413,9 +413,9 @@ func TestTheVerdictOfAPeerWithNoAddressIsUnverified(t *testing.T) {
 	h, peer, _ := newLatchTestChecker(t)
 	h.deepCheck = nil
 
-	peer.Lock()
+	peer.mu.Lock()
 	peer.IP, peer.Port = "", ""
-	peer.Unlock()
+	peer.mu.Unlock()
 
 	if got := h.checkClusterMembership(peer); got != membershipUnverified {
 		t.Errorf("verdict for a peer with no address = %s, want unverified — a "+
@@ -457,9 +457,9 @@ func servePeer(t *testing.T, member *Member, reply *rpc.HealthCheckResponse) {
 	if err != nil {
 		t.Fatalf("splitting %q: %v", ln.Addr(), err)
 	}
-	member.Lock()
+	member.mu.Lock()
 	member.IP, member.Port = host, port
-	member.Unlock()
+	member.mu.Unlock()
 }
 
 // TestTheVerdictsThatNeedARealPeer covers the three conclusions that require an

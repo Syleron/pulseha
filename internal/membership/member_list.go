@@ -3,16 +3,16 @@ package membership
 import (
 	"fmt"
 	"sort"
-	"sync"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/pulselock"
 )
 
 // MemberList defines our member list object
 type MemberList struct {
-	sync.RWMutex
+	pulselock.RWMutex
 	Members   map[string]*Member
 	config    *config.Config
 	logger    *log.Logger
@@ -96,9 +96,9 @@ func (m *MemberList) UpdateConfig(cfg *config.Config) {
 			// without recreating the member.
 			if cfg != nil {
 				if node, ok := cfg.Nodes[id]; ok {
-					member.Lock()
+					member.mu.Lock()
 					member.Capacity = node.Capacity
-					member.Unlock()
+					member.mu.Unlock()
 				}
 			}
 
@@ -207,9 +207,9 @@ func (m *MemberList) redistributeIPsLocked(failedIPs []string) error {
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
 	for _, member := range m.Members {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
-		member.Unlock()
+		member.mu.Unlock()
 
 		// Skip nodes that are down or in maintenance
 		if status == StatusUnknown || status == StatusMaintenance {
@@ -258,10 +258,10 @@ func (m *MemberList) calculateIPDistribution(ips []string, nodes []*Member) map[
 		// feeding placement have to be snapshotted under it, not read raw.
 		snapshots := make([]ipam.Node, 0, len(nodes))
 		for _, node := range nodes {
-			node.Lock()
+			node.mu.Lock()
 			ipCount := len(node.ActiveIPs)
 			capacity := node.Capacity
-			node.Unlock()
+			node.mu.Unlock()
 
 			snapshots = append(snapshots, ipam.Node{
 				Hostname: node.Hostname,
@@ -350,9 +350,9 @@ func nodeHostableGroups(cfg *config.Config, nodeID string) map[string]bool {
 // is written under the member's own lock, so it is snapshotted under it here.
 func (m *MemberList) getActiveNode() *Member {
 	for _, member := range m.Members {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
-		member.Unlock()
+		member.mu.Unlock()
 
 		if status == StatusActive {
 			return member
@@ -377,10 +377,10 @@ func ConsolidationTarget(members map[string]*Member, leaderID string) *Member {
 	mostLoadedIPs := -1
 
 	for id, member := range members {
-		member.Lock()
+		member.mu.Lock()
 		status := member.Status
 		ipCount := len(member.ActiveIPs)
-		member.Unlock()
+		member.mu.Unlock()
 
 		if status == StatusUnknown || status == StatusMaintenance {
 			continue
