@@ -135,7 +135,23 @@ type Server struct {
 	logger      *log.Logger
 	memberList  *membership.MemberList
 	healthCheck *membership.HealthChecker
-	ipMonitor   *membership.IPMonitor
+
+	// One config repair at a time, no more often than configRepairInterval. See
+	// startConfigRepair: envelope syncs arrive every few seconds, so a mismatch
+	// the pull cannot fix must not become a pull per envelope.
+	repairInFlight   atomic.Bool
+	lastConfigRepair atomic.Pointer[time.Time]
+
+	// Who the config-authoritative node is. nil in production, where it reads the
+	// health checker; see clusterCoordinatorID.
+	coordinatorID func() string
+
+	// Every peer's last reported config fingerprint, which is what lets this node
+	// tell whether it or the coordinator is the diverged one. See
+	// noteConfigDivergence.
+	peerHashMu pulselock.Mutex
+	peerHashes map[string]peerHash
+	ipMonitor  *membership.IPMonitor
 
 	// peerBringUp coalesces per-address peer bring-ups (defect #37); see
 	// peerBringUpQueue for why it is built lazily.
@@ -273,6 +289,12 @@ type Server struct {
 	// package's tests never waited, and each left a goroutine reading
 	// config.CONFIG_LOCATION past the end of the test that started it.
 	asyncReconfigures sync.WaitGroup
+
+	// configRepairs is the same bound for the repair pulls startConfigRepair
+	// spawns. A repair outlives a short test easily -- it makes a gRPC round trip
+	// to the coordinator -- and the race detector catches it writing as the test's
+	// own cleanup runs.
+	configRepairs sync.WaitGroup
 }
 
 // awaitAsyncReconfigures blocks until every Reconfigure goroutine spawned by a
@@ -281,6 +303,13 @@ type Server struct {
 // production, where nothing calls it.
 func (s *Server) awaitAsyncReconfigures() {
 	s.asyncReconfigures.Wait()
+}
+
+// awaitConfigRepairs blocks until every repair pull has returned. Same purpose
+// and same caveat as awaitAsyncReconfigures: for the test harnesses, harmless in
+// production.
+func (s *Server) awaitConfigRepairs() {
+	s.configRepairs.Wait()
 }
 
 // NewServer creates a new PulseHA server instance
@@ -4974,6 +5003,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		senderID             string
 		senderActiveIPs      []string
 		incomingStamp        configStamp
+		incomingConfigHash   string
+		repairFor            string
 	)
 	// Defer cleanup of any allocated maps
 	defer func() {
@@ -4991,6 +5022,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			SenderActiveIPs []string          `json:"sender_active_ips"`
 			ConfigVersion   int64             `json:"config_version"`
 			ConfigOrigin    string            `json:"config_origin"`
+			ConfigHash      string            `json:"config_hash"`
+			RepairFor       string            `json:"repair_for"`
 		}
 		var e enhanced
 		if err := json.Unmarshal(req.Config, &e); err == nil {
@@ -5006,6 +5039,8 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			incomingLeaderID = e.LeaderID
 			senderID = e.SenderID
 			senderActiveIPs = e.SenderActiveIPs
+			incomingConfigHash = e.ConfigHash
+			repairFor = e.RepairFor
 			// A binary that versions configs but does not name the origin gets the
 			// sender treated as the origin — right for a direct mutation broadcast,
 			// and the pre-origin behaviour otherwise.
@@ -5015,6 +5050,16 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 			incomingStamp = configStamp{version: e.ConfigVersion, origin: origin}
 		}
+	}
+
+	// Envelope syncs are the only continuous signal there is: they flow every few
+	// seconds where a full config only follows a mutation, which is why a node that
+	// missed one join broadcast stayed diverged until something unrelated changed
+	// (docs/TEST-PLAN.md #103). A full config is not checked here -- it is about to
+	// be arbitrated on its own merits, and comparing a hash it may be seconds from
+	// adopting would pull a repair for a difference that is already being fixed.
+	if !isFullConfig {
+		s.noteConfigDivergence(senderID, incomingConfigHash)
 	}
 
 	// The epoch this node held *before* this sync is what decides whether the
@@ -5037,7 +5082,24 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// guard is what makes absence safe to honour: it is only ever read as a
 		// removal on a payload strictly newer than what this node holds. Not an
 		// error: the sender has nothing to fix, the message is simply obsolete.
-		if !s.shouldApplyIncomingConfig(incomingStamp) {
+		// A repair this node asked for is exempt from the generation guard, and has
+		// to be: divergence at an *equal* generation is precisely what the guard
+		// refuses and precisely what #103 is. The exemption is safe because it is
+		// addressed -- honoured only when it names this node, so it cannot be
+		// replayed elsewhere -- and because reaching it means this node had already
+		// established, from the coordinator's own hash, that it disagreed.
+		requestedRepair := false
+		if repairFor != "" {
+			if localID, err := s.config.GetLocalNodeUUID(); err == nil && localID != "" {
+				requestedRepair = repairFor == localID
+			}
+		}
+		if requestedRepair {
+			s.logger.Info("CONFIG_SYNC: applying a repair this node requested",
+				"sender", senderID, "version", incomingStamp.version)
+		}
+
+		if !requestedRepair && !s.shouldApplyIncomingConfig(incomingStamp) {
 			held := s.loadConfigStamp()
 			s.logger.Debug("CONFIG_SYNC: ignoring config already superseded or held",
 				"sender", senderID, "version", incomingStamp.version,
@@ -5107,7 +5169,14 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// the back-to-back add-ip calls that produce defect #38 to land inside it.
 		// Applying anyway would erase an add that had already reported success and
 		// leave the version claiming otherwise, which is the very shape being fixed.
-		if !configIsNewer(incomingStamp, s.loadConfigStamp()) {
+		//
+		// A requested repair is exempt here for the same reason as at the guard
+		// above -- its whole purpose is to apply at a generation this node already
+		// holds. The window this re-check protects is a local mutation landing
+		// mid-apply, and that case is still handled: a local mutation bumps the
+		// version, so the repair is then genuinely older and the next envelope's
+		// fingerprint comparison decides whether another is needed.
+		if !requestedRepair && !configIsNewer(incomingStamp, s.loadConfigStamp()) {
 			held := s.loadConfigStamp()
 			s.Unlock()
 			s.logger.Debug("CONFIG_SYNC: this config was superseded or already held mid-apply",
@@ -7259,6 +7328,17 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 		payload["leases"] = leases
 	}
 
+	// The envelope is what makes divergence detectable in seconds rather than
+	// never: it flows continuously, where a full config only follows a mutation.
+	// A hash that cannot be computed is left off entirely rather than sent empty,
+	// so the receiver treats it as unknown instead of comparing against "".
+	if hash, err := sharedConfigHash(s.currentConfig()); err != nil {
+		s.logger.Warn("CLUSTER_STATE: could not fingerprint the config; peers "+
+			"cannot detect divergence from this node until it succeeds", "error", err)
+	} else if hash != "" {
+		payload["config_hash"] = hash
+	}
+
 	localID, _ := s.config.GetLocalNodeUUID()
 
 	if localID != "" {
@@ -7390,6 +7470,44 @@ func buildFullConfigPayload(cfg *config.Config, states map[string]membership.Mem
 		payload["config_origin"] = stamp.origin
 	}
 
+	// The fingerprint of the shared content, so a receiver can tell divergence at
+	// an equal generation from agreement -- which the generation alone cannot
+	// (docs/TEST-PLAN.md #103). The error is propagated rather than swallowed
+	// because it is unreachable: the same config marshalled successfully above.
+	hash, err := sharedConfigHash(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if hash != "" {
+		payload["config_hash"] = hash
+	}
+
+	return json.Marshal(payload)
+}
+
+// buildRepairConfigPayload is buildFullConfigPayload plus the addressed exemption
+// that makes a repair applicable at a generation the requester already holds.
+//
+// `repair_for` names exactly one node. That is what keeps the exemption from being
+// a hole in the generation guard: a copy of this payload delivered to a third node
+// carries another node's name and is refused there like any other stale config, so
+// the only node it can force anything on is the one that asked.
+func buildRepairConfigPayload(cfg *config.Config, states map[string]membership.MemberStatus,
+	epoch int64, leaderID, senderID string, stamp configStamp, repairFor string) ([]byte, error) {
+
+	payloadBytes, err := buildFullConfigPayload(cfg, states, epoch, leaderID, senderID, stamp)
+	if err != nil {
+		return nil, err
+	}
+	if repairFor == "" {
+		return payloadBytes, nil
+	}
+
+	payload := map[string]interface{}{}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return nil, err
+	}
+	payload["repair_for"] = repairFor
 	return json.Marshal(payload)
 }
 

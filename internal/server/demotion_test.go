@@ -108,6 +108,12 @@ func newConfigSyncTestServer(t *testing.T, localID string, peerIDs ...string) (*
 	// that goroutine to the test that spawned it, which is what every ConfigSync
 	// call site would otherwise have to remember to do individually.
 	t.Cleanup(s.awaitAsyncReconfigures)
+	// A repair pull makes a gRPC round trip, so it outlives a short test easily.
+	// Registered after the reconfigure wait so it runs before it, which is the
+	// order the work happens in: a repair applies the fetched config through
+	// ConfigSync, which spawns a reconfigure of its own. Waiting the reconfigures
+	// out first would return while a repair was still queueing one.
+	t.Cleanup(s.awaitConfigRepairs)
 
 	return s, ml
 }
