@@ -155,6 +155,26 @@ type HealthChecker struct {
 	deepCheckCounter      int             // incremented each cycle; triggers cluster-membership gRPC check every 5 cycles
 	membershipCheckFailed map[string]bool // nodes the last deep check REJECTED; cleared only when a later deep check confirms
 
+	// membershipUnresolved is nodes whose last deep check could not be
+	// completed. It does two things: keeps the node unreachable until a deep
+	// check actually concludes, and forces that deep check on the very next
+	// cycle instead of waiting for the fifth.
+	//
+	// Both halves matter, and getting only one of them was a live regression.
+	// Latching an unresolved check like a rejection costs four extra cycles of
+	// Unknown after a transient deadline -- the lb_api CI flake. But NOT
+	// carrying it at all is worse: the four cheap cycles that follow answer on
+	// a TCP dial alone, so a frozen-but-listening peer read healthy four cycles
+	// in five. Measured on the docker rig: a peer frozen for 14s was reported
+	// Active for 6.2s of it. A listening socket outlives a wedged daemon (#56,
+	// #79), which is the failure this daemon is most prone to.
+	//
+	// Re-checking next cycle resolves both: a transient recovers in about one
+	// cycle, and a genuinely wedged peer is deep-checked every cycle and stays
+	// Unknown for as long as it stays wedged. The cost is one extra gRPC call
+	// per cycle per suspect node, and only while it is suspect.
+	membershipUnresolved map[string]bool
+
 	// deepCheck is checkClusterMembership, indirected so a test can drive each
 	// verdict without a peer to answer it. Same reason IPMonitor indirects
 	// enforce and now: the real thing needs a network, and what needs testing
@@ -186,6 +206,7 @@ func NewHealthChecker(members *MemberList, logger *log.Logger) *HealthChecker {
 		logger:                logger,
 		stopChan:              make(chan struct{}),
 		membershipCheckFailed: make(map[string]bool),
+		membershipUnresolved:  make(map[string]bool),
 	}
 }
 
@@ -384,32 +405,41 @@ func (h *HealthChecker) performHealthChecks() {
 		// A node the deep check *rejects* — it does not know us, or it echoes a
 		// different cluster token — stays unreachable until a later deep check
 		// confirms it, because a passing TCP dial says nothing about which cluster
-		// answered. A deep check that merely could not be completed does not latch;
-		// see membershipVerdict for what that distinction cost.
+		// answered. A node whose deep check could not be *completed* also stays
+		// unreachable, but is re-checked on the next cycle rather than the fifth;
+		// see membershipUnresolved for why that distinction is not the same one.
 		startTime := time.Now()
 		var isReachable bool
-		if doDeepCheck {
+		// The scheduled deep check, or one forced because this member's last
+		// deep check could not be completed. Per member, not per pass: a single
+		// slow peer must not drag every other node onto the expensive path.
+		if doDeepCheck || h.membershipUnresolved[member.ID] {
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 			verdict := h.membershipOf(member)
 
-			// Only a confirmed membership counts as reachable. An unverified
-			// check is not treated as reachable either, and deliberately does
-			// not fall back to the TCP dial: a listening socket outlives a
-			// wedged daemon (#56, #79), so answering "reachable" on the strength
-			// of TCP alone would hide exactly the failure this daemon is most
-			// prone to.
+			// Only a confirmed membership counts as reachable. Neither a
+			// rejection nor an unresolved check falls back to the TCP dial: a
+			// listening socket outlives a wedged daemon (#56, #79), so
+			// answering "reachable" on the strength of TCP alone would hide
+			// exactly the failure this daemon is most prone to.
 			isReachable = verdict == membershipConfirmed
 
-			// The latch records a conclusion about the peer's cluster, so only a
-			// definite rejection sets it and only a confirmation clears it. An
-			// unverified check leaves it alone: it must not manufacture a
-			// rejection out of a timeout, and it must not clear a real one
-			// merely because the peer has since stopped answering.
 			switch verdict {
-			case membershipRejected:
-				h.membershipCheckFailed[member.ID] = true
 			case membershipConfirmed:
 				delete(h.membershipCheckFailed, member.ID)
+				delete(h.membershipUnresolved, member.ID)
+			case membershipRejected:
+				// A conclusion about the peer's cluster. Latches until a later
+				// deep check confirms it, because a passing TCP dial says
+				// nothing about which cluster answered.
+				h.membershipCheckFailed[member.ID] = true
+				delete(h.membershipUnresolved, member.ID)
+			default:
+				// Not a conclusion at all. Do not manufacture a rejection out
+				// of a timeout, and do not clear a real one merely because the
+				// peer has since stopped answering -- but do keep this member
+				// on the deep path until something is concluded.
+				h.membershipUnresolved[member.ID] = true
 			}
 		} else {
 			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)

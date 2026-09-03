@@ -21,6 +21,24 @@ import (
 // therefore cost four further cycles of Unknown after the peer was answering
 // again, which is what made an lb_api CI pipeline report a node unknown on odd
 // occasions.
+//
+// The contract now has three parts, and the middle one was got wrong once
+// already:
+//
+//   - REJECTED (not in the peer's memberlist, or a different cluster token) is
+//     a conclusion about the peer's cluster. It latches until a later deep
+//     check confirms, because a passing TCP dial says nothing about which
+//     cluster answered.
+//   - UNRESOLVED (a deadline, a transport failure, local misconfiguration) is
+//     not a conclusion. It must not latch like a rejection -- but it must not
+//     be dropped either. An earlier version dropped it, so the four cheap
+//     cycles that follow answered on a TCP dial alone and a frozen-but-
+//     listening peer read healthy four cycles in five. Measured on the docker
+//     rig: frozen 14s, reported Active for 6.2s of it. So an unresolved check
+//     keeps the node unreachable AND forces a deep check next cycle, which
+//     recovers a transient in about one cycle and keeps a wedged peer Unknown
+//     for as long as it stays wedged.
+//   - CONFIRMED clears both.
 
 // listeningPeer returns a member pointed at a socket that accepts and holds
 // connections, so checkNodeConnectivity's TCP dial succeeds. That is the case
@@ -99,38 +117,119 @@ func statusOf(m *Member) MemberStatus {
 	return m.Status
 }
 
-// TestAnUnverifiedDeepCheckDoesNotLatch is the CI flake, in one test.
+// runUntilUnknown advances cycles until the peer reads Unknown, up to the
+// deep-check period, and reports how many it took.
 //
-// A deep check that could not be completed leaves the peer Unknown for that
-// cycle -- honestly, since nothing answered -- but the next cheap cycle must be
-// free to recover it. Before this, the peer stayed Unknown for the remaining
-// four cycles of the deep-check period even though its TCP dial was passing the
-// whole time.
-func TestAnUnverifiedDeepCheckDoesNotLatch(t *testing.T) {
+// The latency is inherent and worth naming: a peer that stops answering gRPC
+// while still accepting TCP is invisible until the next deep check, which is up
+// to five cycles away. The docker rig measures the same thing -- frozen at
+// 11:27:02.8, first reported Unknown at 11:27:06.5.
+func runUntilUnknown(t *testing.T, h *HealthChecker, peer *Member, limit int) int {
+	t.Helper()
+	for i := 1; i <= limit; i++ {
+		h.performHealthChecks()
+		if statusOf(peer) == StatusUnknown {
+			return i
+		}
+	}
+	t.Fatalf("the peer never read Unknown within %d cycles", limit)
+	return 0
+}
+
+// TestAnUnresolvedDeepCheckKeepsTheNodeUnknownWhileItStaysUnresolved is the
+// regression the docker rig caught.
+//
+// A peer that answers a TCP dial but cannot answer gRPC is a wedged daemon, and
+// must read Unknown for as long as that is true. An earlier version of this fix
+// dropped the unresolved state instead of carrying it, so the four cheap cycles
+// that follow reported the peer healthy on the strength of the dial: frozen for
+// 14s on the rig, reported Active for 6.2s of it.
+func TestAnUnresolvedDeepCheckKeepsTheNodeUnknownWhileItStaysUnresolved(t *testing.T) {
 	h, peer, verdict := newLatchTestChecker(t)
 
-	// Settle: four cheap cycles then the deep one, all confirming.
 	runCycles(h, 5)
 	if got := statusOf(peer); got == StatusUnknown {
 		t.Fatalf("the peer never came up (status %s); its listener is not accepting",
 			StatusToString(got))
 	}
 
-	// The blip: the next deep check times out. Cycle 10 is a deep one.
+	// The peer freezes: TCP still accepts, gRPC never answers.
 	*verdict = membershipUnverified
-	runCycles(h, 5)
-	if got := statusOf(peer); got != StatusUnknown {
-		t.Errorf("status = %s after an unverified deep check, want Unknown — "+
-			"nothing answered, so Unknown is the honest report", StatusToString(got))
+	runUntilUnknown(t, h, peer, 6)
+
+	// From here every cycle must keep it Unknown, including the four in each
+	// period that would otherwise be a cheap TCP dial.
+	for i := 0; i < 12; i++ {
+		h.performHealthChecks()
+		if got := statusOf(peer); got != StatusUnknown {
+			t.Fatalf("cycle %d after the freeze was detected reported %s. A "+
+				"wedged-but-listening peer must not be reported healthy on a TCP "+
+				"dial alone", i+1, StatusToString(got))
+		}
+	}
+}
+
+// TestAnUnresolvedNodeIsDeepCheckedEveryCycle is the mechanism behind the test
+// above, asserted directly: once a deep check fails to conclude, the node stays
+// on the expensive path instead of waiting out the five-cycle period.
+func TestAnUnresolvedNodeIsDeepCheckedEveryCycle(t *testing.T) {
+	h, peer, verdict := newLatchTestChecker(t)
+
+	var deepChecks int
+	h.deepCheck = func(*Member) membershipVerdict {
+		deepChecks++
+		return *verdict
 	}
 
-	// One cheap cycle later it must be back, because the transport was never
-	// the problem.
-	runCycles(h, 1)
+	// Reach the first scheduled deep check with the peer already unresolved.
+	*verdict = membershipUnverified
+	runUntilUnknown(t, h, peer, 6)
+
+	// Every one of the next eight cycles must deep-check.
+	before := deepChecks
+	for i := 0; i < 8; i++ {
+		h.performHealthChecks()
+	}
+	if got := deepChecks - before; got != 8 {
+		t.Errorf("%d deep checks across 8 cycles after the node became "+
+			"unresolved, want 8 — it must be re-checked every cycle, not every "+
+			"fifth", got)
+	}
+}
+
+// TestAnUnresolvedDeepCheckRecoversOnTheNextCycle is the CI flake, and the
+// reason the forced re-check is worth its extra gRPC call.
+//
+// Before this, a single deadline cost four further cycles of Unknown while the
+// peer was answering again -- measured at 4.3s on a four-node lab cluster.
+func TestAnUnresolvedDeepCheckRecoversOnTheNextCycle(t *testing.T) {
+	h, peer, verdict := newLatchTestChecker(t)
+
+	runCycles(h, 5)
 	if got := statusOf(peer); got == StatusUnknown {
-		t.Errorf("the peer is still Unknown a cycle after a merely unverified " +
-			"deep check, though its TCP dial passes. A deadline is being treated " +
-			"as a foreign cluster, which costs four cycles of Unknown per blip")
+		t.Fatalf("the peer never came up (status %s)", StatusToString(got))
+	}
+
+	*verdict = membershipUnverified
+	runUntilUnknown(t, h, peer, 6)
+
+	// The peer is fine again. Recovery must not wait out the five-cycle period.
+	*verdict = membershipConfirmed
+	recovered := -1
+	for i := 1; i <= 5; i++ {
+		h.performHealthChecks()
+		if statusOf(peer) != StatusUnknown {
+			recovered = i
+			break
+		}
+	}
+	if recovered == -1 {
+		t.Fatal("the peer never recovered within five cycles of answering again")
+	}
+	if recovered > 1 {
+		t.Errorf("recovered after %d cycles; an unresolved node is deep-checked "+
+			"every cycle, so the first cycle after it answers again should clear it",
+			recovered)
 	}
 }
 
@@ -181,12 +280,12 @@ func TestAConfirmedDeepCheckClearsTheLatch(t *testing.T) {
 	}
 }
 
-// TestAnUnverifiedDeepCheckDoesNotClearARealRejection is the other half of "an
+// TestAnUnresolvedDeepCheckDoesNotClearARealRejection is the other half of "an
 // unverified check leaves the latch alone".
 //
 // A peer in a foreign cluster that then goes slow must not be readmitted
 // because the check that would have rejected it again failed to complete.
-func TestAnUnverifiedDeepCheckDoesNotClearARealRejection(t *testing.T) {
+func TestAnUnresolvedDeepCheckDoesNotClearARealRejection(t *testing.T) {
 	h, peer, verdict := newLatchTestChecker(t)
 
 	*verdict = membershipRejected
@@ -340,5 +439,44 @@ func TestTheVerdictsThatNeedARealPeer(t *testing.T) {
 				t.Errorf("verdict = %s, want %s — %s", got, tc.want, tc.why)
 			}
 		})
+	}
+}
+
+// TestAConfirmedDeepCheckReturnsTheNodeToTheCheapPath bounds the cost of the
+// forced re-check.
+//
+// While a node is unresolved it is deep-checked every cycle, which is the point.
+// A confirmation has to put it back on the five-cycle schedule, or any node that
+// ever suffered one blip is deep-checked every cycle for the life of the daemon
+// -- five times the gRPC load, permanently, for a peer that is perfectly
+// healthy. Status alone cannot see that, which is why this counts calls.
+func TestAConfirmedDeepCheckReturnsTheNodeToTheCheapPath(t *testing.T) {
+	h, peer, verdict := newLatchTestChecker(t)
+
+	var deepChecks int
+	h.deepCheck = func(*Member) membershipVerdict {
+		deepChecks++
+		return *verdict
+	}
+
+	*verdict = membershipUnverified
+	runUntilUnknown(t, h, peer, 6)
+
+	// It answers again.
+	*verdict = membershipConfirmed
+	h.performHealthChecks()
+	if statusOf(peer) == StatusUnknown {
+		t.Fatal("the peer did not recover on the cycle after it answered again")
+	}
+
+	// Ten further cycles should now contain at most two scheduled deep checks.
+	before := deepChecks
+	for i := 0; i < 10; i++ {
+		h.performHealthChecks()
+	}
+	if got := deepChecks - before; got > 3 {
+		t.Errorf("%d deep checks across 10 cycles after the node was confirmed, "+
+			"want at most 3 — a recovered node must go back to the five-cycle "+
+			"schedule rather than staying on the expensive path", got)
 	}
 }
