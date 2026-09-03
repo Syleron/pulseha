@@ -19,6 +19,10 @@ import (
 type stubServer struct {
 	members *MemberList
 
+	// quorum is what GetQuorumManager hands back. nil by default, which is what
+	// every existing test wants.
+	quorum *quorum.QuorumManager
+
 	leaderID         string
 	epoch            int64
 	demoted          []string
@@ -47,7 +51,11 @@ type stubServer struct {
 	sequence []string
 }
 
-func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return nil }
+// GetQuorumManager returns nil unless a test supplies one. attemptVotingElection
+// skips the vote entirely when it is nil, so a test that means to exercise the
+// vote has to set this or it silently measures the fallback instead -- see
+// degraded_election_test.go.
+func (s *stubServer) GetQuorumManager() *quorum.QuorumManager { return s.quorum }
 
 func (s *stubServer) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string) error {
 	return nil
