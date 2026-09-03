@@ -176,6 +176,28 @@ type HealthChecker struct {
 	// per cycle per suspect node, and only while it is suspect.
 	membershipUnresolved map[string]bool
 
+	// membershipRetry is nodes to deep-check on the very next cycle, set once
+	// when a node first becomes unresolved.
+	//
+	// It exists to bound a cost the previous version did not: the deep check
+	// makes a gRPC call with a 2s deadline, performHealthChecks holds this
+	// checker's write lock for its whole body, and members are checked
+	// serially. Deep-checking an unresolved node *every* cycle therefore
+	// stretched every pass by up to two seconds per wedged peer -- and a
+	// wedged-but-listening peer is exactly the case that keeps a node
+	// unresolved, so the cost applied precisely when the feature was working.
+	// The whole cluster's health-check rate dropped with it, delaying detection
+	// of unrelated failures.
+	//
+	// Keeping a node Unknown and re-checking it often are separable, and
+	// conflating them was the mistake. Staying Unknown needs only the cheap
+	// branch to honour membershipUnresolved, the way it already honours
+	// membershipCheckFailed. Only the *first* retry needs to be immediate,
+	// because that is what makes a transient recover in one cycle instead of
+	// five. After that the scheduled cadence is enough: the node is already
+	// being reported Unknown.
+	membershipRetry map[string]bool
+
 	// deepCheck is checkClusterMembership, indirected so a test can drive each
 	// verdict without a peer to answer it. Same reason IPMonitor indirects
 	// enforce and now: the real thing needs a network, and what needs testing
@@ -208,6 +230,7 @@ func NewHealthChecker(members *MemberList, logger *log.Logger) *HealthChecker {
 		stopChan:              make(chan struct{}),
 		membershipCheckFailed: make(map[string]bool),
 		membershipUnresolved:  make(map[string]bool),
+		membershipRetry:       make(map[string]bool),
 	}
 }
 
@@ -411,10 +434,14 @@ func (h *HealthChecker) performHealthChecks() {
 		// see membershipUnresolved for why that distinction is not the same one.
 		startTime := time.Now()
 		var isReachable bool
-		// The scheduled deep check, or one forced because this member's last
-		// deep check could not be completed. Per member, not per pass: a single
-		// slow peer must not drag every other node onto the expensive path.
-		if doDeepCheck || h.membershipUnresolved[member.ID] {
+		// The scheduled deep check, or the single immediate retry a node earns
+		// when it first becomes unresolved. Per member, not per pass: one slow
+		// peer must not drag every other node onto the expensive path.
+		if doDeepCheck || h.membershipRetry[member.ID] {
+			// One-shot. A node that stays unresolved falls back to the
+			// scheduled cadence and is held Unknown by the cheap branch below,
+			// which costs nothing.
+			delete(h.membershipRetry, member.ID)
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 			verdict := h.membershipOf(member)
 
@@ -429,26 +456,39 @@ func (h *HealthChecker) performHealthChecks() {
 			case membershipConfirmed:
 				delete(h.membershipCheckFailed, member.ID)
 				delete(h.membershipUnresolved, member.ID)
+				delete(h.membershipRetry, member.ID)
 			case membershipRejected:
 				// A conclusion about the peer's cluster. Latches until a later
 				// deep check confirms it, because a passing TCP dial says
 				// nothing about which cluster answered.
 				h.membershipCheckFailed[member.ID] = true
 				delete(h.membershipUnresolved, member.ID)
+				delete(h.membershipRetry, member.ID)
 			default:
 				// Not a conclusion at all. Do not manufacture a rejection out
 				// of a timeout, and do not clear a real one merely because the
-				// peer has since stopped answering -- but do keep this member
-				// on the deep path until something is concluded.
+				// peer has since stopped answering.
+				if !h.membershipUnresolved[member.ID] {
+					// First failure of this episode: retry at once rather than
+					// waiting out the period, which is what makes a transient
+					// cost one cycle instead of five.
+					h.membershipRetry[member.ID] = true
+				}
 				h.membershipUnresolved[member.ID] = true
 			}
 		} else {
 			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 			isReachable = h.checkNodeConnectivity(member)
 			// A node the last deep check placed in a different cluster stays
-			// unreachable however well it answers a TCP dial.
+			// unreachable however well it answers a TCP dial -- and so does one
+			// whose deep check could not be completed. A listening socket
+			// outlives a wedged daemon (#56, #79), so a passing dial is not
+			// evidence that the peer is serving.
 			if isReachable && h.membershipCheckFailed[member.ID] {
 				h.logger.Debugf("Node %s passes TCP but the last deep check rejected its membership; treating as unreachable", member.Hostname)
+				isReachable = false
+			} else if isReachable && h.membershipUnresolved[member.ID] {
+				h.logger.Debugf("Node %s passes TCP but its last deep check could not be completed; treating as unreachable", member.Hostname)
 				isReachable = false
 			}
 		}
