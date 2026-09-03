@@ -376,6 +376,29 @@ func (m *Member) Endpoint() (ip, port, hostname string) {
 	return m.IP, m.Port, m.Hostname
 }
 
+// SetLastResponse records when this member was last heard from.
+//
+// Not part of the claim: a claim is what the member asserts, and this is what we
+// observed about it. But it is read under the member lock by three consumers
+// that measure silence with it -- clusterCoordinator's grace window,
+// redistributeOrphanedIPs' decision to reclaim stranded addresses, and
+// selectBestCandidate's recency bonus -- so writing it without the lock races
+// all three (docs/TEST-PLAN.md #101).
+//
+// Exists because un-embedding the mutex made that write impossible to do
+// correctly from outside this package, which is the point: the inbound
+// HealthCheck handler in internal/server stamps this when a peer calls us, and
+// before this it did so bare.
+//
+// Takes an instant rather than always using time.Now() so that a caller
+// reconstructing a known state -- a test, or any future restore path -- can say
+// what it means. Production callers pass time.Now().
+func (m *Member) SetLastResponse(when time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.LastHCResponse = when
+}
+
 // SetCapacity records how many Floating IPs this member may hold.
 //
 // Not part of the claim: capacity is a configured limit an operator sets, not
