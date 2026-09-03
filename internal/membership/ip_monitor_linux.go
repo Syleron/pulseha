@@ -86,10 +86,12 @@ func (m *IPMonitor) monitorLoop() {
 			if localMember == nil {
 				continue
 			}
+			// One read per event, for the same reason as in enforceExpectations.
+			localClaim := localMember.Claim()
 
 			if upd.NewAddr {
 				// Address added
-				if localMember.Status != StatusActive {
+				if localClaim.Status != StatusActive {
 					// Drop any VIP additions while passive
 					_ = netlink.AddrDel(link, addrObj)
 					m.logger.Info("IP monitor: dropped IP on passive node", "ip", changedIP, "iface", iface)
@@ -129,9 +131,10 @@ func (m *IPMonitor) monitorLoop() {
 				m.logger.Debug("IP monitor: local member not found for restore check")
 				continue
 			}
+			currentClaim := currentMember.Claim()
 
-			if currentMember.Status != StatusActive {
-				m.logger.Info("IP monitor: IP removed but node is not Active, NOT restoring", "ip", changedIP, "status", currentMember.Status, "iface", iface)
+			if currentClaim.Status != StatusActive {
+				m.logger.Info("IP monitor: IP removed but node is not Active, NOT restoring", "ip", changedIP, "status", currentClaim.Status, "iface", iface)
 				continue
 			}
 
@@ -150,7 +153,7 @@ func (m *IPMonitor) monitorLoop() {
 						m.logger.Info("IP monitor: expected IP was released on request; not restoring", "ip", exp, "iface", iface)
 						break
 					}
-					m.logger.Warn("IP monitor: expected IP removed from Active node; restoring", "ip", exp, "iface", iface, "status", currentMember.Status)
+					m.logger.Warn("IP monitor: expected IP removed from Active node; restoring", "ip", exp, "iface", iface, "status", currentClaim.Status)
 					m.restoreIP(iface, exp)
 					break
 				}
@@ -270,7 +273,21 @@ func (m *IPMonitor) enforceExpectations() {
 		return
 	}
 
-	m.logger.Info("ENFORCE: Current node status and expectations", "nodeID", localID, "status", StatusToString(member.Status))
+	// One read of what this node asserts, for the whole pass.
+	//
+	// This used to read claim.Status directly, eight times, unlocked -- a data
+	// race against every writer of it, and the reason `make testrace` went red as
+	// soon as ./tests/unit/... entered a CI target (docs/TEST-PLAN.md #90): the
+	// file is Linux-only, so it never compiled on a macOS -race run.
+	//
+	// Reading it once is not just about the lock. A pass that re-read the field
+	// could decide "not Active, remove every floating IP" and then, further down,
+	// log and act as though it were Active, because a demotion or promotion landed
+	// in between -- deciding twice about one pass. That is the mismatch Claim
+	// exists to prevent.
+	claim := member.Claim()
+
+	m.logger.Info("ENFORCE: Current node status and expectations", "nodeID", localID, "status", StatusToString(claim.Status))
 
 	m.RLock()
 	expectations := make(map[string][]string, len(m.expectedIPs))
@@ -288,7 +305,7 @@ func (m *IPMonitor) enforceExpectations() {
 	// every tick and the cluster never converges (docs/TEST-PLAN.md defects #2/#26).
 	// Recomputing from the node's own assignments each tick makes the monitor
 	// self-correcting regardless of which writer last touched the cache.
-	if member.Status == StatusActive && cfg.Pulse.Mode == "active-active" {
+	if claim.Status == StatusActive && cfg.Pulse.Mode == "active-active" {
 		expectations = m.deriveExpectedIPs(localID, member)
 		m.UpdateExpectedIPsAll(expectations)
 	}
@@ -302,8 +319,8 @@ func (m *IPMonitor) enforceExpectations() {
 	}
 
 	// Passive/Unknown/Maintenance: remove all floating IPs; Active: ensure missing are added
-	if member.Status != StatusActive {
-		m.logger.Info("ENFORCE: Node is not Active, removing floating IPs", "status", StatusToString(member.Status))
+	if claim.Status != StatusActive {
+		m.logger.Info("ENFORCE: Node is not Active, removing floating IPs", "status", StatusToString(claim.Status))
 
 		// In active-active a non-Active status is a transient, not a demotion:
 		// every eligible node is Active, so this is a missed health check or a
@@ -356,7 +373,7 @@ func (m *IPMonitor) enforceExpectations() {
 				}
 				m.logger.Debug("ENFORCE: IP existence check", "ip", ipOnly.String(), "exists", exists, "foundIface", foundIface, "targetIface", iface)
 				if exists && foundIface == iface {
-					m.logger.Warn("ENFORCE: Removing stale floating IP from passive node", "ip", ip, "iface", iface, "status", StatusToString(member.Status))
+					m.logger.Warn("ENFORCE: Removing stale floating IP from passive node", "ip", ip, "iface", iface, "status", StatusToString(claim.Status))
 					if err := network.BringIPdown(iface, ip); err != nil {
 						m.logger.Error("ENFORCE: Failed to remove floating IP from passive node", "ip", ip, "iface", iface, "error", err)
 					} else {
@@ -372,7 +389,7 @@ func (m *IPMonitor) enforceExpectations() {
 	}
 
 	// Active node: bring up missing IPs
-	m.logger.Info("ENFORCE: Node is Active, ensuring expected IPs are present", "status", StatusToString(member.Status))
+	m.logger.Info("ENFORCE: Node is Active, ensuring expected IPs are present", "status", StatusToString(claim.Status))
 	for iface, ips := range expectations {
 		var missing []string
 		m.logger.Debug("ENFORCE: Checking interface for missing IPs", "iface", iface, "expectedIPs", ips)
@@ -406,7 +423,7 @@ func (m *IPMonitor) enforceExpectations() {
 				"iface", iface, "count", len(released), "ips", released)
 		}
 		if len(missing) > 0 {
-			m.logger.Info("ENFORCE: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", StatusToString(member.Status))
+			m.logger.Info("ENFORCE: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", StatusToString(claim.Status))
 
 			// This pass placed addresses and announced none of them, which run 30
 			// caught doing it for the ones that mattered most: node-1's final 72 of
@@ -414,7 +431,7 @@ func (m *IPMonitor) enforceExpectations() {
 			// announced them (docs/TEST-PLAN.md defect #33, residual half).
 			attempts, skipped, announceErr := placeMissingFloatingIPs(iface, missing,
 				func(iface, ip string) error {
-					m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(member.Status))
+					m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(claim.Status))
 					return network.BringIPup(iface, ip)
 				}, network.SendGARPBatch)
 

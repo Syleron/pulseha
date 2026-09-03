@@ -337,7 +337,7 @@ func (s *Server) Start() error {
 	if s.memberList == nil {
 		return fmt.Errorf("member list is nil")
 	}
-	if err := s.loadInitialMembers(); err != nil {
+	if err := s.loadInitialMembers(s.config); err != nil {
 		return fmt.Errorf("failed to load initial members: %v", err)
 	}
 
@@ -630,7 +630,7 @@ func (s *Server) Stop() {
 			if id == localID {
 				states[id] = membership.StatusUnknown
 			} else {
-				states[id] = m.Status
+				states[id] = m.GetStatus()
 			}
 		}
 		_ = s.BroadcastClusterState(states, s.GetClusterEpoch()+1, "", nil)
@@ -708,16 +708,30 @@ func (s *Server) Stop() {
 }
 
 // loadInitialMembers loads members from config into the member list
-func (s *Server) loadInitialMembers() error {
+// loadInitialMembers builds the member list from a config snapshot.
+//
+// The config is a parameter rather than a field read, because the callers do not
+// agree about locking: Start holds the write lock across its call, while
+// ConfigSync, HandleNodeJoin, ResyncNetwork and InitiateJoin do not. Reading
+// s.config here therefore raced Reconfigure's pointer swap, which this branch's
+// own TestConfigSyncFullConfigAdoptsTheEpochAndItsLeader caught -- it drives a
+// ConfigSync whose async reconfigure swaps the config while this function is
+// still walking it, and it failed 9 runs in 60 under -race on Linux.
+//
+// Snapshotting inside would have deadlocked rather than fixed it: currentConfig
+// takes the read lock and Start already holds the write lock. So each caller
+// passes the snapshot it is entitled to read, which is the only form of this that
+// is correct from all five.
+func (s *Server) loadInitialMembers(cfg *config.Config) error {
 	s.logger.Info("Beginning initial member loading process...")
 
-	if s.config == nil {
+	if cfg == nil {
 		s.logger.Error("FATAL: Cannot load members - config is nil!")
 		return fmt.Errorf("config is nil")
 	}
 	s.logger.Debug("Config validation passed")
 
-	if s.config.Nodes == nil {
+	if cfg.Nodes == nil {
 		s.logger.Info("No nodes section found in config, starting with empty member list")
 		return nil
 	}
@@ -725,11 +739,11 @@ func (s *Server) loadInitialMembers() error {
 
 	// Deduplicate nodes by hostname and IP:Port to avoid duplicate members lingering after joins
 	{
-		localID, _ := s.config.GetLocalNodeUUID()
+		localID, _ := cfg.GetLocalNodeUUID()
 		seenByHost := make(map[string]string)
 		seenByEP := make(map[string]string)
 		var toDelete []string
-		for id, n := range s.config.Nodes {
+		for id, n := range cfg.Nodes {
 			if n == nil {
 				continue
 			}
@@ -764,23 +778,23 @@ func (s *Server) loadInitialMembers() error {
 		}
 		if len(toDelete) > 0 {
 			for _, id := range toDelete {
-				delete(s.config.Nodes, id)
+				delete(cfg.Nodes, id)
 				_ = s.memberList.RemoveMember(id)
 			}
-			_ = s.config.Save()
+			_ = cfg.Save()
 		}
 	}
 
-	nodeCount := len(s.config.Nodes)
+	nodeCount := len(cfg.Nodes)
 	s.logger.Infof("Found %d node(s) in configuration", nodeCount)
 
 	// Log the actual nodes found
 	s.logger.Info("Nodes in configuration:")
-	for id, node := range s.config.Nodes {
+	for id, node := range cfg.Nodes {
 		s.logger.Infof("  - %s (IP: %s, Port: %s)", id, node.IP, node.Port)
 	}
 
-	for id, node := range s.config.Nodes {
+	for id, node := range cfg.Nodes {
 		s.logger.Infof("Processing node: %s", id)
 
 		// Check if member already exists
@@ -805,7 +819,7 @@ func (s *Server) loadInitialMembers() error {
 			member.SetEndpoint(node.IP, node.Port, node.Hostname)
 
 			// Determine initial status based on node role and cluster state
-			localNodeID, err := s.config.GetLocalNodeUUID()
+			localNodeID, err := cfg.GetLocalNodeUUID()
 			isLocalNode := err == nil && id == localNodeID
 
 			// Decided first, written once. These branches used to assign
@@ -825,11 +839,11 @@ func (s *Server) loadInitialMembers() error {
 				// Restore maintenance state across restarts before applying any other default
 				initial.Status = membership.StatusMaintenance
 				reason = "Restoring local node %s to Maintenance (persisted in config)"
-			case s.config.Pulse.Mode == "active-passive" && len(s.config.Nodes) == 1:
+			case cfg.Pulse.Mode == "active-passive" && len(cfg.Nodes) == 1:
 				// Single node cluster - should be active
 				initial.Status = membership.StatusActive
 				reason = "Setting single node %s as Active"
-			case s.config.Pulse.Mode == "active-passive":
+			case cfg.Pulse.Mode == "active-passive":
 				// Multi-node cluster - start as passive, election will determine active
 				initial.Status = membership.StatusPassive
 				reason = "Setting local node %s as Passive (election will determine active)"
@@ -870,8 +884,8 @@ func (s *Server) loadInitialMembers() error {
 	// so a burst of mutations used to put one whole-share bring-up — and one
 	// whole-share announcement — on every peer per mutation (docs/TEST-PLAN.md
 	// defect #65). See vipReconciler.
-	if localID, err := s.config.GetLocalNodeUUID(); err == nil {
-		groupIPs, activeActive := s.snapshotVIPGroups(localID)
+	if localID, err := cfg.GetLocalNodeUUID(); err == nil {
+		groupIPs, activeActive := s.snapshotVIPGroups(cfg, localID)
 		s.vipReconcileQueue().Schedule(vipReconcileSnapshot{
 			localID:      localID,
 			groupIPs:     groupIPs,
@@ -891,8 +905,8 @@ func (s *Server) loadInitialMembers() error {
 // freshly read file straight over the live *Config. Touching s.config after the
 // sleep is a data race against that rewrite — the config the reconcile is for
 // is the one loaded here, so read it here.
-func (s *Server) snapshotVIPGroups(localID string) (map[string][]string, bool) {
-	node := s.config.Nodes[localID]
+func (s *Server) snapshotVIPGroups(cfg *config.Config, localID string) (map[string][]string, bool) {
+	node := cfg.Nodes[localID]
 	if node == nil {
 		return nil, false
 	}
@@ -901,7 +915,7 @@ func (s *Server) snapshotVIPGroups(localID string) (map[string][]string, bool) {
 	for iface, groups := range node.IPGroups {
 		var ips []string
 		for _, g := range groups {
-			if gips, ok := s.config.Groups[g]; ok {
+			if gips, ok := cfg.Groups[g]; ok {
 				ips = append(ips, gips...)
 			}
 		}
@@ -909,7 +923,7 @@ func (s *Server) snapshotVIPGroups(localID string) (map[string][]string, bool) {
 			groupIPs[iface] = ips
 		}
 	}
-	return groupIPs, s.config.Pulse.Mode == "active-active"
+	return groupIPs, cfg.Pulse.Mode == "active-active"
 }
 
 // reconcileVIPPlan turns that snapshot into what the local node should do now:
@@ -1098,7 +1112,7 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	// Post-join: ensure health checker is running and member list is initialized promptly (async)
 	go func() {
 		s.startHealthChecker()
-		if err := s.loadInitialMembers(); err != nil {
+		if err := s.loadInitialMembers(s.currentConfig()); err != nil {
 			s.logger.Warn("Join receiver failed to load members immediately", "error", err)
 		}
 	}()
@@ -1108,7 +1122,7 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		states := getStatusMap()
 		membersSnapshot := s.memberList.MembersSnapshot()
 		for id, m := range membersSnapshot {
-			states[id] = m.Status
+			states[id] = m.GetStatus()
 		}
 		_ = s.broadcastNextEpoch(states)
 		putStatusMap(states)
@@ -1653,7 +1667,7 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 	}
 
 	// Check if already active
-	if member.Status == membership.StatusActive {
+	if member.GetStatus() == membership.StatusActive {
 		s.logger.Info("PROMOTE: Node is already active", "node_id", req.NodeId)
 		return &rpc.PromoteResponse{
 			Success: true,
@@ -2142,7 +2156,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		} else if id == targetNodeID {
 			states[id] = membership.StatusActive
 		} else {
-			states[id] = m.Status
+			states[id] = m.GetStatus()
 		}
 	}
 
@@ -2779,11 +2793,16 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 		return
 	}
 
-	s.logger.Info("REFRESH: Processing node", "nodeID", localID, "status", membership.StatusToString(member.Status))
+	// One locked read for the whole refresh. These were five unlocked reads of the
+	// field, which raced every writer -- and a refresh that re-read it could take
+	// the not-Active cleanup branch and then log its way through as Active.
+	status := member.GetStatus()
 
-	if member.Status != membership.StatusActive {
+	s.logger.Info("REFRESH: Processing node", "nodeID", localID, "status", membership.StatusToString(status))
+
+	if status != membership.StatusActive {
 		// For passive/unknown/maintenance nodes, trigger enforcement to clean up any floating IPs
-		s.logger.Info("REFRESH: Node is not Active, cleanup needed", "status", membership.StatusToString(member.Status))
+		s.logger.Info("REFRESH: Node is not Active, cleanup needed", "status", membership.StatusToString(status))
 		if s.ipMonitor != nil {
 			s.logger.Debug("REFRESH: Calling TriggerEnforce for passive node cleanup")
 			s.ipMonitor.TriggerEnforce()
@@ -2794,7 +2813,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 		return
 	}
 
-	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(member.Status))
+	s.logger.Info("REFRESH: Node is Active, setting up expected IPs", "status", membership.StatusToString(status))
 
 	// One interface snapshot for the whole refresh, not one netlink dump per
 	// expected address. network.CheckIfIPExists builds a complete inventory —
@@ -2827,7 +2846,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 					"iface", iface, "addresses", invalid)
 			}
 			if len(missing) > 0 {
-				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(member.Status))
+				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(status))
 				_, err := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: missing})
 				if err != nil {
 					s.logger.Error("REFRESH: Failed to bring up missing IPs", "error", err, "iface", iface, "ips", missing)
@@ -3425,7 +3444,7 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	ownerID := ""
 	if activePassive {
 		for id, m := range s.memberList.MembersSnapshot() {
-			if m.Status == membership.StatusActive {
+			if m.GetStatus() == membership.StatusActive {
 				ownerID = id
 				break
 			}
@@ -4707,10 +4726,19 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 		}, nil
 	}
 
-	// Make it active
+	// Make it active.
+	//
+	// Through the claim rather than a bare field write: CreateCluster clears the
+	// expectation set a few lines below, which triggers an enforce pass in its own
+	// goroutine, and that pass reads this member's claim. A direct assignment here
+	// raced it -- `make testrace` caught this the moment ./tests/unit/... entered a
+	// CI target, and only on Linux, since the reader lives in ip_monitor_linux.go.
 	member := s.memberList.GetMemberByID(nodeID)
 	if member != nil {
-		member.Status = membership.StatusActive
+		member.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
+			current.Status = membership.StatusActive
+			return current, true
+		})
 		s.logger.Info("First node activated successfully")
 	}
 
@@ -5237,12 +5265,17 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 
 		s.Unlock()
 
+		// One snapshot for everything below the unlock. These were bare s.config
+		// reads, and the async reconfigure this function spawns swaps that very
+		// pointer, so every one of them raced it.
+		installed := s.currentConfig()
+
 		// Immediately refresh member list from new configuration so peers become visible
 		s.logger.Debug("CONFIG_SYNC: Updating member list with new config")
-		s.memberList.UpdateConfig(s.config)
+		s.memberList.UpdateConfig(installed)
 
 		s.logger.Debug("CONFIG_SYNC: Loading initial members")
-		if err := s.loadInitialMembers(); err != nil {
+		if err := s.loadInitialMembers(installed); err != nil {
 			s.logger.Error("CONFIG_SYNC: Failed to load members after sync", "error", err)
 		}
 
@@ -5312,6 +5345,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 
 		if applyStates {
+			// Snapshotted for the same reason: every config read below raced the
+			// async reconfigure's pointer swap.
+			statesCfg := s.currentConfig()
 			// Update epoch/leader if needed. An equal epoch is adopted here as well
 			// as a higher one, which is why this takes the atLeast comparison.
 			if s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, true) {
@@ -5319,7 +5355,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 
 			// Capture LOCAL node's status before applying incoming states
-			localID, err := s.config.GetLocalNodeUUID()
+			localID, err := statesCfg.GetLocalNodeUUID()
 			var oldLocalStatus membership.MemberStatus
 			var hadLocalMember bool
 			if err == nil {
@@ -5330,7 +5366,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 
 			s.logger.Debug("CONFIG_SYNC: Applying member states to local member list", "count", len(incomingMemberStates))
-			syncLocalID, _ := s.config.GetLocalNodeUUID()
+			syncLocalID, _ := statesCfg.GetLocalNodeUUID()
 
 			// Whether this sync carries a decision or merely re-asserts an agreed view.
 			// Only a strictly higher epoch is a decision; an equal epoch is a peer's
@@ -5350,7 +5386,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				// locked region reaches for as little as possible. Unsynchronised
 				// either way -- config contents are guarded by nothing, which is
 				// its own ticket -- so hoisting it changes no behaviour.
-				nodeCfg := s.config.Nodes[id]
+				nodeCfg := statesCfg.Nodes[id]
 
 				// UpdateClaim rather than the member lock taken by hand. The
 				// decision has to see the current status to judge the incoming
@@ -5427,7 +5463,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// This handles the case where a node learns it's Active from ConfigSync (e.g., after restart during election)
 			// Only triggers on state CHANGE, not continuous heartbeats, so no GARP storm risk
 			if hadLocalMember && oldLocalStatus != membership.StatusActive {
-				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.Status == membership.StatusActive {
+				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil && newLocalMember.GetStatus() == membership.StatusActive {
 					s.logger.Debug("ConfigSync: LOCAL node transitioned to Active, triggering VIP setup", "oldStatus", membership.StatusToString(oldLocalStatus), "newStatus", "Active")
 					go s.refreshLocalMonitorExpectedIPs()
 				}
@@ -5439,10 +5475,16 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// node and the surviving Active ARP-fight over every floating IP.
 			// See isDemotion for why a transition to Unknown is not one.
 			if hadLocalMember {
-				if newLocalMember := s.memberList.GetMemberByID(localID); newLocalMember != nil &&
-					isDemotion(oldLocalStatus, newLocalMember.Status) {
+				// One locked read: the unlocked field read raced every writer of
+				// it, and reading twice could test one status and log another.
+				newLocalStatus := membership.StatusUnknown
+				newLocalMember := s.memberList.GetMemberByID(localID)
+				if newLocalMember != nil {
+					newLocalStatus = newLocalMember.GetStatus()
+				}
+				if newLocalMember != nil && isDemotion(oldLocalStatus, newLocalStatus) {
 					s.logger.Info("ConfigSync: LOCAL node demoted from Active, releasing floating IPs",
-						"newStatus", membership.StatusToString(newLocalMember.Status))
+						"newStatus", membership.StatusToString(newLocalStatus))
 					go s.refreshLocalMonitorExpectedIPs()
 				}
 			}
@@ -5459,8 +5501,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	// node's report about itself is authoritative, so no epoch gating; this
 	// keeps every peer's view of the IP assignment map current enough to
 	// redistribute correctly if the sender later fails.
-	if s.config.Pulse.Mode == "active-active" && senderID != "" && senderActiveIPs != nil {
-		if localID, err := s.config.GetLocalNodeUUID(); err == nil && senderID != localID {
+	senderCfg := s.currentConfig()
+	if senderCfg.Pulse.Mode == "active-active" && senderID != "" && senderActiveIPs != nil {
+		if localID, err := senderCfg.GetLocalNodeUUID(); err == nil && senderID != localID {
 			if senderMember := s.memberList.GetMemberByID(senderID); senderMember != nil {
 				// SetActiveIPs copies, so the explicit append is no longer
 				// needed to detach the payload's slice.
@@ -5734,7 +5777,7 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 
 	states := getStatusMap()
 	for id, m := range s.memberList.MembersSnapshot() {
-		states[id] = m.Status
+		states[id] = m.GetStatus()
 	}
 	_ = s.broadcastNextEpoch(states)
 	putStatusMap(states)
@@ -5806,7 +5849,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 
 		states := getStatusMap()
 		for id, m := range s.memberList.MembersSnapshot() {
-			states[id] = m.Status
+			states[id] = m.GetStatus()
 		}
 		_ = s.broadcastNextEpoch(states)
 		putStatusMap(states)
@@ -5831,7 +5874,7 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 
 	states := getStatusMap()
 	for id, m := range s.memberList.MembersSnapshot() {
-		states[id] = m.Status
+		states[id] = m.GetStatus()
 	}
 	_ = s.broadcastNextEpoch(states)
 	putStatusMap(states)
@@ -6029,7 +6072,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 		s.logger.Info("RESYNC: Loading initial members from new config",
 			"config_node_count", len(s.config.Nodes))
 
-		if err := s.loadInitialMembers(); err != nil {
+		if err := s.loadInitialMembers(s.currentConfig()); err != nil {
 			s.logger.Errorf("RESYNC: Failed to load members during resync: %v", err)
 			return &rpc.ResyncNetworkResponse{Success: false, Message: fmt.Sprintf("failed to load members: %v", err)}, nil
 		}
@@ -6120,7 +6163,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 				if member == nil {
 					continue
 				}
-				if presenceCount[id] < majority && member.Status == membership.StatusUnknown {
+				if presenceCount[id] < majority && member.GetStatus() == membership.StatusUnknown {
 					// Start a quorum vote to remove this member
 					if s.quorumManager == nil || len(s.config.Nodes) < 3 {
 						s.logger.Infof("Resync: member %s missing from majority but quorum unavailable; skipping automatic removal", id)
@@ -6587,7 +6630,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		}
 		// Ensure local member list is populated immediately for CLI status
 		s.memberList.UpdateConfig(s.config)
-		if err := s.loadInitialMembers(); err != nil {
+		if err := s.loadInitialMembers(s.currentConfig()); err != nil {
 			s.logger.Warn("InitiateJoin: failed to load members after minimal config", "error", err)
 		}
 
@@ -6603,7 +6646,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 	// Broadcast current states to peers to converge views (best-effort)
 	states := make(map[string]membership.MemberStatus)
 	for id, m := range s.memberList.MembersSnapshot() {
-		states[id] = m.Status
+		states[id] = m.GetStatus()
 	}
 	_ = s.broadcastNextEpoch(states)
 
