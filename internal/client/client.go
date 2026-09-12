@@ -647,12 +647,29 @@ func (c *Client) ListGroups(jsonOutput bool) (string, []*rpc.GroupInfo, error) {
 
 // UnassignGroupFromNode removes a group assignment from a node's interface
 func (c *Client) UnassignGroupFromNode(groupName, nodeID, iface string) error {
-	_, err := c.CLI().UnassignGroupFromNode(context.Background(), &rpc.UnassignGroupRequest{
+	resp, err := c.CLI().UnassignGroupFromNode(context.Background(), &rpc.UnassignGroupRequest{
 		GroupName: groupName,
 		NodeId:    nodeID,
 		Interface: iface,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+
+	// The response was discarded whole until #107 — warnings and Success alike —
+	// so every refusal this handler can return reached the operator as rc=0 and no
+	// output: a group that does not exist, a node_id that does not, a config that
+	// could not be saved. Same shape as the defect underneath it, at the last
+	// layer that could have reported it.
+	for _, w := range resp.Warnings {
+		fmt.Printf("Warning: %s\n", w)
+	}
+
+	if !resp.Success {
+		return errors.New(resp.Message)
+	}
+	fmt.Println(resp.Message)
+	return nil
 }
 
 // DeleteGroup removes a group and optionally its assignments

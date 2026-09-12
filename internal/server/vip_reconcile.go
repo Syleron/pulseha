@@ -30,13 +30,24 @@ import (
 // the listeners come up; it doubles as this pass's coalescing window.
 const vipReconcileDelay = 500 * time.Millisecond
 
-// vipReconcileSnapshot is the config half of one scheduled pass, taken
-// synchronously by the caller. See snapshotVIPGroups for why it cannot be read
-// after the delay below.
+// vipReconcileSnapshot identifies one scheduled pass. It carries only the node
+// the pass is about; the config it converges on is read when the pass runs, not
+// when it is scheduled.
+//
+// It used to carry the whole config half, captured by the caller before the
+// delay below — and that is what made `group remove-ip` unfixable from the
+// handler alone (docs/TEST-PLAN.md defect #105). loadInitialMembers runs on
+// every full ConfigSync, including the RESYNC the appliance issues *before* each
+// CLI mutation, so a remove landing inside the delay was acted on by a pass
+// holding the address list from before it. The pass then brought the address
+// back up and re-added it to the monitor's expectation set, and in
+// active-passive nothing ever recomputes that set downward — so the address
+// stayed up, and the netlink watcher restored it every time anyone deleted it by
+// hand.
+//
+// A pass is a convergence step: it must read the config as it is when it runs.
 type vipReconcileSnapshot struct {
-	localID      string
-	groupIPs     map[string][]string
-	activeActive bool
+	localID string
 }
 
 // vipReconciler runs the post-load VIP reconcile with one pass in flight and at
@@ -55,15 +66,15 @@ type vipReconcileSnapshot struct {
 // itself, so the node the adds were issued on is the one this path never fires
 // on.
 //
-// Newest-wins rather than #63's must-not-drop queue, and the difference is in
-// where the snapshot comes from. TriggerEnforce has to run a queued pass because
-// its callers are writes and a pass already running may have read the
-// expectation set before one of them landed. Here the snapshot is taken by the
-// scheduler, so a pending one is by construction newer than the pass in flight
-// and describes the config the node should converge on now; an older snapshot it
-// replaces can only be a superseded view of the same thing. Nothing is lost,
-// because a pass always begins strictly after the newest snapshot it will act on
-// was taken.
+// Newest-wins rather than #63's must-not-drop queue, and what makes that safe is
+// that a pass reads the config itself, when it runs. TriggerEnforce has to run a
+// queued pass because its callers are writes and a pass already running may have
+// read the expectation set before one of them landed. Here a dropped schedule
+// loses nothing: every pass converges on whatever the config says at the moment
+// it acts, so collapsing ten schedules into one pass and collapsing them into ten
+// reach the same state. That was not true while the scheduler captured the
+// addresses (#105) — then a dropped or delayed schedule meant acting on a config
+// that no longer existed.
 type vipReconciler struct {
 	mu      pulselock.Mutex
 	running bool
@@ -99,12 +110,12 @@ func (r *vipReconciler) Schedule(snapshot vipReconcileSnapshot) {
 	go r.loop()
 }
 
-// loop waits out the window, runs the newest snapshot, and repeats for whatever
-// arrived while it was busy.
+// loop waits out the window, runs the newest pending pass, and repeats for
+// whatever arrived while it was busy.
 //
-// The window is waited *before* the snapshot is taken, which is what makes the
-// coalescing work: every sync that lands during it collapses into the one pass
-// that follows.
+// The window is waited *before* the pass runs, which is what makes the coalescing
+// work: every sync that lands during it collapses into the one pass that follows,
+// and that pass reads the config after the whole burst has landed.
 func (r *vipReconciler) loop() {
 	for {
 		r.sleep(r.delay)
@@ -185,10 +196,36 @@ func vipReconcileTargets(plan map[string][]string, claim bool,
 	return narrowed, invalid
 }
 
+// vipReconcilePlanNow reads the config as it is *now* and turns it into what the
+// local node should hold, which is the whole reason a pass is worth running.
+//
+// docs/TEST-PLAN.md defect #105. This read used to happen at schedule time, up to
+// vipReconcileDelay before the pass acted on it, and the appliance issues a full
+// RESYNC immediately before each CLI mutation — so a `group remove-ip` landed
+// inside the window of a pass already holding the address list from before it.
+// Measured live on MC-LB-3-node-1: remove at 23:48:26, `Successfully brought down
+// IP 10.20.70.78/24`, expectations correctly down to one address — and at
+// 23:48:27 an `RPC BringUpIP` from this pass put the address back and re-added it
+// to the expectation set, where in active-passive nothing recomputes it downward
+// again. The address was then restored by the netlink watcher every time anyone
+// deleted it by hand.
+//
+// Under the read lock for the whole read: group edits mutate these maps in place
+// and Reconfigure/ConfigSync swap the pointer, both under the write lock.
+// snapshotVIPGroups copies what it reads, so nothing escapes aliased and the lock
+// is dropped before the planning, which takes member locks of its own.
+func (s *Server) vipReconcilePlanNow(localID string) (map[string][]string, bool) {
+	s.RLock()
+	groupIPs, activeActive := s.snapshotVIPGroups(s.config, localID)
+	s.RUnlock()
+
+	return s.reconcileVIPPlan(localID, groupIPs, activeActive)
+}
+
 // runVIPReconcile is the pass: decide what the local node should hold now, and
 // place or release accordingly.
 func (s *Server) runVIPReconcile(snapshot vipReconcileSnapshot) {
-	plan, claim := s.reconcileVIPPlan(snapshot.localID, snapshot.groupIPs, snapshot.activeActive)
+	plan, claim := s.vipReconcilePlanNow(snapshot.localID)
 	if len(plan) == 0 {
 		return
 	}

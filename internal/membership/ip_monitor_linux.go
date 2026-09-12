@@ -3,9 +3,12 @@
 package membership
 
 import (
+	"fmt"
+	"net"
 	"strings"
 	"time"
 
+	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/vishvananda/netlink"
@@ -298,14 +301,28 @@ func (m *IPMonitor) enforceExpectations() {
 	}
 	m.RUnlock()
 
-	// In active-active the cached set is not trustworthy on its own: several code
-	// paths write it, and the one that matters here — a node that was the sole
-	// active-passive Active before a mode switch — keeps the whole group until
-	// something happens to recompute it. That node then re-adds all 201 addresses
-	// every tick and the cluster never converges (docs/TEST-PLAN.md defects #2/#26).
-	// Recomputing from the node's own assignments each tick makes the monitor
-	// self-correcting regardless of which writer last touched the cache.
-	if claim.Status == StatusActive && cfg.Pulse.Mode == "active-active" {
+	// The cached set is not trustworthy on its own in either mode: several code
+	// paths write it, and nothing else recomputes it downward. In active-active the
+	// case that matters is a node that was the sole active-passive Active before a
+	// mode switch — it keeps the whole group until something recomputes it, then
+	// re-adds all 201 addresses every tick and the cluster never converges
+	// (docs/TEST-PLAN.md defects #2/#26).
+	//
+	// The mode gate that used to be here is what made #105 permanent rather than
+	// momentary. On a steady active-passive Active, nothing recomputes this set at
+	// all: RefreshLocalMonitorExpectedIPs fires only on a role transition, and
+	// Add/RemoveExpectedIPs are incremental. So one stale writer — there, a VIP
+	// reconcile acting on a config snapshot older than a `remove-ip` — left an
+	// address expected for the life of the daemon, and the netlink watcher restored
+	// it every time an operator deleted it by hand. deriveExpectedIPs has been
+	// mode-aware since #2/#26 (whole group in active-passive, assigned subset in
+	// active-active), so the derivation was already correct here; only the gate was
+	// wrong.
+	//
+	// Recomputing does not undo a release in flight: the config-derived setters
+	// deliberately leave the released record alone, so an address whose expectation
+	// comes back inside the grace window is still left down by restorableIPs (#60).
+	if claim.Status == StatusActive {
 		expectations = m.deriveExpectedIPs(localID, member)
 		m.UpdateExpectedIPsAll(expectations)
 	}
@@ -316,6 +333,17 @@ func (m *IPMonitor) enforceExpectations() {
 	ipInventory, invErr := network.BuildIPInventory()
 	if invErr != nil {
 		m.logger.Error("ENFORCE: Failed to build IP inventory snapshot", "error", invErr)
+	}
+
+	// Before the role branch, because it is not about the role: an address nothing
+	// accounts for is this node's to clean up whether it is Active or Passive, and
+	// both branches below return without reaching the other's code.
+	//
+	// Skipped outright when the inventory dump failed. Every other pass treats a
+	// failed dump as "assume the worst and act"; this one must not, because acting
+	// blind here means removing addresses chosen from no evidence.
+	if cfg.Pulse.NMAddressOwnership && ipInventory != nil {
+		m.reclaimUnownedFloatingIPs(cfg, localID, ipInventory)
 	}
 
 	// Passive/Unknown/Maintenance: remove all floating IPs; Active: ensure missing are added
@@ -459,23 +487,30 @@ func (m *IPMonitor) enforceExpectations() {
 		}
 	}
 
-	// Active nodes in active-active must also give up what is no longer theirs.
-	// The Active branch only ever added, so a node that handed addresses to a
-	// peer kept serving them: after a mode switch the former sole Active sat at
-	// 172 addresses against an expectation of 50, every one of the surplus also
-	// up on its new owner (docs/TEST-PLAN.md defects #2/#26).
+	// An Active node must also give up what is no longer its to hold. The Active
+	// branch only ever added, so a node that handed addresses to a peer kept
+	// serving them: after a mode switch the former sole Active sat at 172
+	// addresses against an expectation of 50, every one of the surplus also up on
+	// its new owner (docs/TEST-PLAN.md defects #2/#26).
 	//
-	// This keys off the expectation set, which in this mode is recomputed from
-	// the node's own assignments at the top of this function. An earlier attempt
-	// at this pass was reverted because that record could not be trusted — a
-	// node listed one address while serving a hundred the coordinator had given
-	// it, so the pass tore down legitimate traffic. What made the record
-	// reliable was fixing its writers: the mode switch now seeds the owner's
-	// assignments on every node, and a busy coordinator is no longer declared
-	// failed and its addresses re-placed behind its back.
-	if cfg.Pulse.Mode == "active-active" {
-		m.releaseUnassignedIPs(localID, expectations)
-	}
+	// This keys off the expectation set, which is recomputed from the config at
+	// the top of this function. An earlier attempt at this pass was reverted
+	// because that record could not be trusted — a node listed one address while
+	// serving a hundred the coordinator had given it, so the pass tore down
+	// legitimate traffic. What made the record reliable was fixing its writers:
+	// the mode switch now seeds the owner's assignments on every node, and a busy
+	// coordinator is no longer declared failed and its addresses re-placed behind
+	// its back.
+	//
+	// The active-active gate that used to be here is #107. surplusFloatingIPs
+	// scans every *configured* group rather than only the assigned ones — that is
+	// #40's fix and the whole reason `group unassign` is recoverable — but in
+	// active-passive nothing ever called it, so an unassigned group's addresses
+	// stayed up on the Active node with no pass able to take them down. The gate's
+	// stated reason was that the expectation set could not be trusted in
+	// active-passive, and since #105 it is derived from the config on every tick
+	// in both modes, which is the same footing active-active stands on.
+	m.releaseUnassignedIPs(localID, expectations)
 
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
 }
@@ -494,7 +529,14 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 	if cfg == nil {
 		return
 	}
-	if localNodeCfg, ok := cfg.Nodes[localID]; !ok || localNodeCfg == nil {
+
+	// Under the config's own lock, and copied: cfg.Nodes and cfg.Groups are maps
+	// the join handler writes under this same lock, and the pass below outlives
+	// the critical section. Reading them bare is #87, and ungating this call is
+	// what would have made it reachable in active-passive — the same way removing
+	// the re-derive's gate did.
+	configured, known := m.configuredGroupsFor(cfg, localID)
+	if !known {
 		return
 	}
 
@@ -530,7 +572,7 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 		return err == nil && exists && foundIface == iface
 	}
 
-	surplus := surplusFloatingIPs(cfg.Groups, expectations, locate)
+	surplus := surplusFloatingIPs(configured, expectations, locate)
 	for iface, ips := range surplus {
 		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
 			"iface", iface, "count", len(ips))
@@ -561,4 +603,162 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 				"count", len(released))
 		}
 	}
+}
+
+// reclaimUnownedFloatingIPs releases addresses this node is holding on a
+// PulseHA-managed interface that neither a floating IP group nor a
+// NetworkManager connection profile accounts for.
+//
+// Off unless pulseha.nm_address_ownership is set on this node. It exists because
+// the allowlist rule PulseHA is otherwise built on — only ever touch an address
+// some group names — cannot recover from its own mistakes: the moment an address
+// leaves the config it falls outside every set any pass computes, which is
+// docs/TEST-PLAN.md #59, #104 and #105 in three different handlers. Ownership by
+// exclusion can recover from all three.
+//
+// The order of work is deliberate. Candidates are computed from the config and
+// the inventory the pass already has, and nmcli is consulted only if that leaves
+// anything to decide — so a converged node, where every address is either a
+// configured floating IP or the node's own, runs no subprocesses at all.
+func (m *IPMonitor) reclaimUnownedFloatingIPs(cfg *config.Config, localID string, inventory *network.IPInventory) {
+	// One locked snapshot of everything this pass reads from the config, and the
+	// lock is dropped before any of the slow work below — nmcli is a subprocess
+	// and a bring-down is a syscall, neither of which belongs inside a lock the
+	// join handler needs (#87's race, #89's discipline).
+	managed, groups, protected, ok := m.reclaimInputs(cfg, localID)
+	if !ok {
+		return
+	}
+
+	candidates := reclaimCandidates(managed, groups, protected, inventory.AddressesOn)
+	if len(candidates) == 0 {
+		return
+	}
+
+	ifaces := make([]string, 0, len(managed))
+	for iface := range managed {
+		ifaces = append(ifaces, iface)
+	}
+	view, err := network.BuildNMView(ifaces)
+	if err != nil {
+		// No NetworkManager to ask means no way to tell a strand from a static
+		// address, so the setting simply does not apply on this host. Warn rather
+		// than stay silent: the operator turned something on that is not running.
+		m.logger.Warn("RECLAIM: nm_address_ownership is set but NetworkManager cannot be queried; "+
+			"no address will be reclaimed", "error", err, "candidates", candidates)
+		return
+	}
+
+	reclaim, skipped := reclaimableIPs(candidates, view)
+	for _, reason := range skipped {
+		m.logger.Debug("RECLAIM: leaving an address alone", "reason", reason)
+	}
+	if len(reclaim) == 0 {
+		return
+	}
+
+	for iface, addrs := range reclaim {
+		for _, addr := range addrs {
+			// Warn, not Info. This removes an address from a live interface on the
+			// strength of an inference, and the line that says so is the one an
+			// operator needs to find if the inference was ever wrong.
+			m.logger.Warn("RECLAIM: releasing an address no group and no NetworkManager "+
+				"profile accounts for", "ip", addr, "iface", iface)
+
+			// A bare address, deliberately: the mask the kernel holds it under is
+			// not knowable from the config here, and #104's EADDRNOTAVAIL is what a
+			// guessed prefix produces.
+			if _, err := network.BringIPdownClassified(iface, addressWithHeldPrefix(iface, addr)); err != nil {
+				m.logger.Error("RECLAIM: failed to release the address", "ip", addr, "iface", iface, "error", err)
+			}
+		}
+	}
+}
+
+// addressWithHeldPrefix returns addr with the prefix length the kernel is
+// actually holding it under on iface, so the delete matches.
+//
+// A delete whose prefix length disagrees with the kernel's is refused with
+// EADDRNOTAVAIL and the address stays up — the misclassification behind #104 —
+// and this caller, unlike every other release path, has no configured entry to
+// take the mask from. It has to ask the kernel. A lookup that fails falls back to
+// the bare address, which netlink takes as a host route and is the one form that
+// cannot be wrong about a mask it does not know.
+func addressWithHeldPrefix(iface, addr string) string {
+	link, err := net.InterfaceByName(iface)
+	if err != nil {
+		return addr
+	}
+	addrs, err := link.Addrs()
+	if err != nil {
+		return addr
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok || ipNet.IP.String() != addr {
+			continue
+		}
+		ones, _ := ipNet.Mask.Size()
+		return fmt.Sprintf("%s/%d", addr, ones)
+	}
+	return addr
+}
+
+// reclaimInputs copies what the reclaim pass needs out of the config under the
+// config's own lock — the lock the join handler writes cfg.Nodes under.
+//
+// Copied rather than referenced: the maps returned outlive the critical section,
+// and handing the caller a reference to a live config map is the same race with
+// a longer fuse. It reports false when this node has no interface PulseHA
+// manages, which is also the "nothing to do" answer.
+func (m *IPMonitor) reclaimInputs(cfg *config.Config, localID string) (
+	managed map[string][]string, groups map[string][]string, protected map[string]bool, ok bool) {
+
+	cfg.Lock()
+	defer cfg.Unlock()
+
+	nodeCfg, found := cfg.Nodes[localID]
+	if !found || nodeCfg == nil || len(nodeCfg.IPGroups) == 0 {
+		return nil, nil, nil, false
+	}
+
+	managed = make(map[string][]string, len(nodeCfg.IPGroups))
+	for iface, assigned := range nodeCfg.IPGroups {
+		managed[iface] = append([]string(nil), assigned...)
+	}
+
+	groups = make(map[string][]string, len(cfg.Groups))
+	for name, ips := range cfg.Groups {
+		groups[name] = append([]string(nil), ips...)
+	}
+
+	endpoints := make(map[string]*nodeEndpoint, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if node != nil {
+			endpoints[id] = &nodeEndpoint{IP: node.IP}
+		}
+	}
+	return managed, groups, reclaimProtectedSet(endpoints), true
+}
+
+// configuredGroupsFor copies every configured group under the config's own lock,
+// reporting false when the config has no entry for this node.
+//
+// That case is left alone deliberately and the distinction matters: a node the
+// config does not describe has an empty expectation set for want of
+// configuration, not because it should be serving nothing, and releasing on that
+// basis would tear down live traffic on a cluster mid-sync.
+func (m *IPMonitor) configuredGroupsFor(cfg *config.Config, localID string) (map[string][]string, bool) {
+	cfg.Lock()
+	defer cfg.Unlock()
+
+	if localNodeCfg, ok := cfg.Nodes[localID]; !ok || localNodeCfg == nil {
+		return nil, false
+	}
+
+	groups := make(map[string][]string, len(cfg.Groups))
+	for name, ips := range cfg.Groups {
+		groups[name] = append([]string(nil), ips...)
+	}
+	return groups, true
 }

@@ -159,6 +159,8 @@ func newConfigGetCmd() *cobra.Command {
 					fmt.Println(cfg.Pulse.FailOverLimit)
 				case "auto_failback":
 					fmt.Println(cfg.Pulse.AutoFailback)
+				case "nm_address_ownership":
+					fmt.Println(cfg.Pulse.NMAddressOwnership)
 				default:
 					// Try to get it as JSON field
 					data, _ := json.Marshal(cfg.Pulse)
@@ -194,6 +196,16 @@ Logging keys apply to the node the command runs on only, and have to be set on
 each node individually:
   logging_level, log_to_file, log_file_location, log_to_syslog,
   syslog_network, syslog_address, syslog_facility, syslog_tag
+
+nm_address_ownership is also node-local, and changes which addresses this node
+considers its own. With it off (the default) PulseHA only ever removes an address
+some floating IP group names, so an address that leaves the config stays up until
+someone removes it by hand. With it on, an address on a PulseHA-managed interface
+that no NetworkManager connection profile claims is treated as PulseHA's and is
+released once no group configures it. It has no effect on an interface whose NM
+profile is DHCP, unreadable or absent: ownership there cannot be established, and
+the node falls back to the default behaviour rather than guess about the address
+it is reachable on.
 
 The reach of each change is reported back on success.`,
 		Args: cobra.ExactArgs(2),

@@ -427,6 +427,22 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	return true
 }
 
+// RestorableIPs is restorableIPs for the one restore path outside this package.
+//
+// Server.refreshLocalMonitorExpectedIPs computes its own missing set from the
+// config and places it with a direct BringUpIP rather than through the enforce
+// pass, so it is a third restore path and has to consult the same release record
+// as the other two. Without it the refresh undoes a release that is still
+// mid-commit: an address is released before it leaves the config precisely so a
+// failure cannot strand it, and for that window the config still says the local
+// node should be holding it (defect #60's shape, third caller).
+func (m *IPMonitor) RestorableIPs(iface string, missing []string) (restore, released []string) {
+	if m == nil {
+		return missing, nil
+	}
+	return m.restorableIPs(iface, missing)
+}
+
 // restorableIPs splits addresses missing from iface into the ones this node
 // should put back and the ones it was told to release. Both restore paths go
 // through here, so the policy is one decision rather than two.
@@ -505,6 +521,25 @@ func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string]
 	if cfg == nil {
 		return nil
 	}
+
+	// Read before the config lock is taken. GetActiveIPs takes the member's own
+	// lock, and the discipline here is to hold one lock at a time on a path that
+	// runs every enforce tick (#89).
+	held := member.GetActiveIPs()
+
+	// cfg.Nodes and cfg.Groups are maps, and the join handler writes
+	// s.config.Nodes under s.config.Lock() — this same lock, which these reads
+	// never took. That is defect #87's race one level in: #87 fixed the reads
+	// ClusterCheck and GetLocalNodeUUID make, and this one was out of CI's reach
+	// because it only ran in active-active, which no test in ./tests/unit exercises.
+	// Removing that mode gate made it reachable and `make testrace` went red on the
+	// join test within a run.
+	//
+	// Nothing inside may take this lock again, directly or one call deep: it is a
+	// pulselock.Mutex and it is not reentrant.
+	cfg.Lock()
+	defer cfg.Unlock()
+
 	nodeCfg, ok := cfg.Nodes[nodeID]
 	if !ok || nodeCfg == nil {
 		return nil
@@ -515,7 +550,7 @@ func (m *IPMonitor) deriveExpectedIPs(nodeID string, member *Member) map[string]
 	var assigned map[string]bool
 	if cfg.Pulse.Mode == "active-active" {
 		assigned = make(map[string]bool)
-		for _, ip := range member.GetActiveIPs() {
+		for _, ip := range held {
 			assigned[ip] = true
 		}
 	}
