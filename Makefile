@@ -38,7 +38,7 @@ get:
 # — rpc/*.pb.go is generated rather than committed, so a skew between a
 # developer and CI surfaces as differing generated code.
 tools:
-	 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.7
+	 go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
 	 go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
 cli: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulsectl/bin/pulsectl ./cmd/pulsectl
