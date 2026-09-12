@@ -397,3 +397,60 @@ func TestVIPReconcileSnapshotCarriesOnlyTheNode(t *testing.T) {
 			"else is config captured at schedule time, which is defect #105", n)
 	}
 }
+
+// Regression for docs/TEST-PLAN.md defect #109, and it is the guarantee both
+// #59 and #104 rest on: the local node confirms a release by reading the kernel
+// rather than trusting the return.
+//
+// It never ran. utils.GetCIDR returns (net.IP, *net.IPNet) — the second value is
+// the network, not an error — and the loop tested it as one, so `continue` fired
+// on every address that parsed successfully. Since every candidate is in CIDR
+// form, every candidate was skipped and the result was always empty: a release
+// that left the address up reported as confirmed.
+//
+// Caught on an appliance, by constructing #108's mask mismatch and watching
+// `remove-ip` return rc=0 with the address still on the interface.
+func TestStillHeldLocallyActuallyChecksTheCandidates(t *testing.T) {
+	candidates := []string{"10.0.0.1/24", "10.0.0.2/24", "10.0.0.3/24"}
+
+	t.Run("an address the interface still holds is reported", func(t *testing.T) {
+		got := stillHeldLocally(candidates, func(ip string) bool { return ip == "10.0.0.2" })
+		if !slices.Equal(got, []string{"10.0.0.2/24"}) {
+			t.Fatalf("stillHeld = %v, want the one address that is still up. An empty "+
+				"result here is the defect: it reports every release as confirmed", got)
+		}
+	})
+
+	t.Run("the lookup is asked with the bare address", func(t *testing.T) {
+		// Not "10.0.0.2/24". The mask the config records and the mask the kernel
+		// holds can differ (#108), and for "is this still up" only the address
+		// matters — every inventory lookup in this codebase is keyed that way.
+		var asked []string
+		stillHeldLocally([]string{"10.0.0.2/24"}, func(ip string) bool {
+			asked = append(asked, ip)
+			return false
+		})
+		if !slices.Equal(asked, []string{"10.0.0.2"}) {
+			t.Errorf("looked up %v, want the bare address", asked)
+		}
+	})
+
+	t.Run("a released interface reports nothing", func(t *testing.T) {
+		if got := stillHeldLocally(candidates, func(string) bool { return false }); len(got) != 0 {
+			t.Errorf("stillHeld = %v, want none", got)
+		}
+	})
+
+	t.Run("a bare address is still checked", func(t *testing.T) {
+		got := stillHeldLocally([]string{"10.0.0.9"}, func(ip string) bool { return ip == "10.0.0.9" })
+		if !slices.Equal(got, []string{"10.0.0.9"}) {
+			t.Errorf("stillHeld = %v, want the bare address checked rather than skipped", got)
+		}
+	})
+
+	t.Run("an unparseable entry is skipped, not panicked on", func(t *testing.T) {
+		if got := stillHeldLocally([]string{"not-an-address"}, func(string) bool { return true }); len(got) != 0 {
+			t.Errorf("stillHeld = %v, want the unparseable entry skipped", got)
+		}
+	})
+}
