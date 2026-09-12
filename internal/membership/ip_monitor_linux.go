@@ -607,26 +607,22 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 // anything to decide — so a converged node, where every address is either a
 // configured floating IP or the node's own, runs no subprocesses at all.
 func (m *IPMonitor) reclaimUnownedFloatingIPs(cfg *config.Config, localID string, inventory *network.IPInventory) {
-	nodeCfg, ok := cfg.Nodes[localID]
-	if !ok || nodeCfg == nil || len(nodeCfg.IPGroups) == 0 {
+	// One locked snapshot of everything this pass reads from the config, and the
+	// lock is dropped before any of the slow work below — nmcli is a subprocess
+	// and a bring-down is a syscall, neither of which belongs inside a lock the
+	// join handler needs (#87's race, #89's discipline).
+	managed, groups, protected, ok := m.reclaimInputs(cfg, localID)
+	if !ok {
 		return
 	}
 
-	endpoints := make(map[string]*nodeEndpoint, len(cfg.Nodes))
-	for id, node := range cfg.Nodes {
-		if node != nil {
-			endpoints[id] = &nodeEndpoint{IP: node.IP}
-		}
-	}
-
-	candidates := reclaimCandidates(nodeCfg.IPGroups, cfg.Groups,
-		reclaimProtectedSet(endpoints), inventory.AddressesOn)
+	candidates := reclaimCandidates(managed, groups, protected, inventory.AddressesOn)
 	if len(candidates) == 0 {
 		return
 	}
 
-	ifaces := make([]string, 0, len(nodeCfg.IPGroups))
-	for iface := range nodeCfg.IPGroups {
+	ifaces := make([]string, 0, len(managed))
+	for iface := range managed {
 		ifaces = append(ifaces, iface)
 	}
 	view, err := network.BuildNMView(ifaces)
@@ -692,4 +688,41 @@ func addressWithHeldPrefix(iface, addr string) string {
 		return fmt.Sprintf("%s/%d", addr, ones)
 	}
 	return addr
+}
+
+// reclaimInputs copies what the reclaim pass needs out of the config under the
+// config's own lock — the lock the join handler writes cfg.Nodes under.
+//
+// Copied rather than referenced: the maps returned outlive the critical section,
+// and handing the caller a reference to a live config map is the same race with
+// a longer fuse. It reports false when this node has no interface PulseHA
+// manages, which is also the "nothing to do" answer.
+func (m *IPMonitor) reclaimInputs(cfg *config.Config, localID string) (
+	managed map[string][]string, groups map[string][]string, protected map[string]bool, ok bool) {
+
+	cfg.Lock()
+	defer cfg.Unlock()
+
+	nodeCfg, found := cfg.Nodes[localID]
+	if !found || nodeCfg == nil || len(nodeCfg.IPGroups) == 0 {
+		return nil, nil, nil, false
+	}
+
+	managed = make(map[string][]string, len(nodeCfg.IPGroups))
+	for iface, assigned := range nodeCfg.IPGroups {
+		managed[iface] = append([]string(nil), assigned...)
+	}
+
+	groups = make(map[string][]string, len(cfg.Groups))
+	for name, ips := range cfg.Groups {
+		groups[name] = append([]string(nil), ips...)
+	}
+
+	endpoints := make(map[string]*nodeEndpoint, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if node != nil {
+			endpoints[id] = &nodeEndpoint{IP: node.IP}
+		}
+	}
+	return managed, groups, reclaimProtectedSet(endpoints), true
 }
