@@ -2939,9 +2939,10 @@ func (s *Server) cleanupFloatingIPsDirectly(node *config.Node) {
 	for _, ip := range allFloatingIPs {
 		s.logger.Debug("CLEANUP: Checking IP", "ip", ip)
 
-		// Extract IP without CIDR if needed
+		// Extract IP without CIDR if needed. GetCIDR's second return is the
+		// *network*, not an error (#109): tested as one, this branch never ran.
 		ipOnly := ip
-		if cidr, err := utils.GetCIDR(ip); err == nil && cidr != nil {
+		if cidr, _ := utils.GetCIDR(ip); cidr != nil {
 			ipOnly = cidr.String()
 		}
 
@@ -4782,16 +4783,10 @@ func (s *Server) releaseIPsLocally(ctx context.Context, target ipReleaseTarget) 
 	// about to be deleted along with the group, so the kernel is the authority for
 	// the one node where it can be read — and an address it reports up is exactly
 	// the strand this whole ordering exists to prevent.
-	var stillHeld []string
-	for _, ip := range target.candidates {
-		addr, cerr := utils.GetCIDR(ip)
-		if cerr != nil || addr == nil {
-			continue
-		}
-		if held, _, eerr := inventory.Exists(addr.String()); eerr == nil && held {
-			stillHeld = append(stillHeld, ip)
-		}
-	}
+	stillHeld := stillHeldLocally(target.candidates, func(ip string) bool {
+		held, _, err := inventory.Exists(ip)
+		return err == nil && held
+	})
 	if len(stillHeld) > 0 {
 		return fmt.Sprintf("%d floating IP(s) of this group are still up locally on %s: %s",
 			len(stillHeld), target.iface, strings.Join(stillHeld, ", ")), false
@@ -8480,4 +8475,38 @@ func (s *Server) broadcastConfigAndStates(states map[string]membership.MemberSta
 		_, _ = remoteClient.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payloadBytes})
 		cancel()
 	}
+}
+
+// stillHeldLocally returns the addresses of candidates the interface is still
+// holding, which is the evidence a release actually happened.
+//
+// Extracted from releaseIPsLocally to be testable, because it was silently
+// returning nothing for the life of the feature (docs/TEST-PLAN.md #109).
+// utils.GetCIDR returns (net.IP, *net.IPNet) — the second value is the network,
+// not an error — and the loop tested it as one: `if cerr != nil { continue }`
+// skipped every *successfully parsed* address, so `stillHeld` was always empty
+// and the confirmation #59 and #104 both rest on never ran. Every address the
+// caller asks about is in CIDR form, so it skipped all of them, every time.
+//
+// held is the lookup against a kernel snapshot the caller already has. It is
+// asked with the bare address on purpose: the mask the config records and the
+// mask the interface holds can differ, which is #108, and for "is this address
+// still up" only the address matters.
+func stillHeldLocally(candidates []string, held func(ip string) bool) []string {
+	var stillHeld []string
+	for _, candidate := range candidates {
+		addr, _ := utils.GetCIDR(candidate)
+		if addr == nil {
+			// Not parseable as CIDR; try it as a bare address before giving up.
+			if ip := net.ParseIP(candidate); ip != nil {
+				addr = ip
+			} else {
+				continue
+			}
+		}
+		if held(addr.String()) {
+			stillHeld = append(stillHeld, candidate)
+		}
+	}
+	return stillHeld
 }

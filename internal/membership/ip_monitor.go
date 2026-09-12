@@ -853,7 +853,8 @@ func (m *IPMonitor) cleanupFloatingIPsOnRestart(nodeCfg *config.Node) {
 
 		// Extract IP without CIDR if needed
 		ipOnly := ip
-		if cidr, err := utils.GetCIDR(ip); err == nil && cidr != nil {
+		// GetCIDR's second return is the *network*, not an error (#109).
+		if cidr, _ := utils.GetCIDR(ip); cidr != nil {
 			ipOnly = cidr.String()
 		}
 
