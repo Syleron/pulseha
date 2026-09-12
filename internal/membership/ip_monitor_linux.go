@@ -298,14 +298,28 @@ func (m *IPMonitor) enforceExpectations() {
 	}
 	m.RUnlock()
 
-	// In active-active the cached set is not trustworthy on its own: several code
-	// paths write it, and the one that matters here — a node that was the sole
-	// active-passive Active before a mode switch — keeps the whole group until
-	// something happens to recompute it. That node then re-adds all 201 addresses
-	// every tick and the cluster never converges (docs/TEST-PLAN.md defects #2/#26).
-	// Recomputing from the node's own assignments each tick makes the monitor
-	// self-correcting regardless of which writer last touched the cache.
-	if claim.Status == StatusActive && cfg.Pulse.Mode == "active-active" {
+	// The cached set is not trustworthy on its own in either mode: several code
+	// paths write it, and nothing else recomputes it downward. In active-active the
+	// case that matters is a node that was the sole active-passive Active before a
+	// mode switch — it keeps the whole group until something recomputes it, then
+	// re-adds all 201 addresses every tick and the cluster never converges
+	// (docs/TEST-PLAN.md defects #2/#26).
+	//
+	// The mode gate that used to be here is what made #105 permanent rather than
+	// momentary. On a steady active-passive Active, nothing recomputes this set at
+	// all: RefreshLocalMonitorExpectedIPs fires only on a role transition, and
+	// Add/RemoveExpectedIPs are incremental. So one stale writer — there, a VIP
+	// reconcile acting on a config snapshot older than a `remove-ip` — left an
+	// address expected for the life of the daemon, and the netlink watcher restored
+	// it every time an operator deleted it by hand. deriveExpectedIPs has been
+	// mode-aware since #2/#26 (whole group in active-passive, assigned subset in
+	// active-active), so the derivation was already correct here; only the gate was
+	// wrong.
+	//
+	// Recomputing does not undo a release in flight: the config-derived setters
+	// deliberately leave the released record alone, so an address whose expectation
+	// comes back inside the grace window is still left down by restorableIPs (#60).
+	if claim.Status == StatusActive {
 		expectations = m.deriveExpectedIPs(localID, member)
 		m.UpdateExpectedIPsAll(expectations)
 	}

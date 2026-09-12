@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -338,4 +339,61 @@ func TestMatchGroupIP(t *testing.T) {
 			t.Fatal("want an error: tearing down the wrong one is an outage")
 		}
 	})
+}
+
+// Regression for docs/TEST-PLAN.md defect #105, which is what the field report
+// actually was: the remove worked, and a stale post-load VIP reconcile undid it a
+// second later.
+//
+// Measured on MC-LB-3-node-1 — 23:48:26 `Successfully brought down IP
+// 10.20.70.78/24`, expectations correctly down to one address; 23:48:27 `RPC
+// BringUpIP` puts it straight back and re-adds the expectation. The appliance
+// issues a full RESYNC immediately before each CLI mutation, and that RESYNC is
+// what schedules the pass — so every `remove-ip` lands inside the window of a
+// pass that captured the address list before the removal existed.
+//
+// A pass is a convergence step. It has to read the config when it acts, not when
+// it was scheduled.
+func TestVIPReconcilePlanFollowsTheConfigAtRunTime(t *testing.T) {
+	peer := &releasingPeer{}
+	s := newRemoveIPTestServer(t, startReleasingPeer(t, peer))
+
+	// What the pass would have been handed at schedule time.
+	scheduled, claim := s.vipReconcilePlanNow(removeIPLocal)
+	if !claim {
+		t.Fatal("the local node is Active, so this pass claims")
+	}
+	if !slices.Contains(scheduled[removeIPIface], removeIPTarget) {
+		t.Fatalf("plan = %v, want the address before it is removed", scheduled)
+	}
+
+	if _, err := s.RemoveIPFromGroup(context.Background(), &rpc.RemoveIPFromGroupRequest{
+		GroupName: "group1",
+		Ip:        removeIPTarget,
+	}); err != nil {
+		t.Fatalf("RemoveIPFromGroup: %v", err)
+	}
+
+	// The pass runs after the removal. It must converge on the config that exists
+	// now, not re-place an address nothing references.
+	planned, _ := s.vipReconcilePlanNow(removeIPLocal)
+	if slices.Contains(planned[removeIPIface], removeIPTarget) {
+		t.Errorf("plan = %v, want %s gone: the pass would bring back an address "+
+			"no group configures, and re-add it to the monitor's expectations "+
+			"where nothing in active-passive ever recomputes it downward",
+			planned, removeIPTarget)
+	}
+	if !slices.Contains(planned[removeIPIface], "10.0.0.1/24") {
+		t.Errorf("plan = %v, want the rest of the group still claimed", planned)
+	}
+}
+
+// The scheduler must not carry addresses at all — that is the property the fix
+// rests on, and a field added back to the snapshot would silently restore the
+// defect.
+func TestVIPReconcileSnapshotCarriesOnlyTheNode(t *testing.T) {
+	if n := reflect.TypeOf(vipReconcileSnapshot{}).NumField(); n != 1 {
+		t.Fatalf("vipReconcileSnapshot has %d fields, want only localID: anything "+
+			"else is config captured at schedule time, which is defect #105", n)
+	}
 }

@@ -906,20 +906,16 @@ func (s *Server) loadInitialMembers(cfg *config.Config) error {
 	s.logger.Debugf("Final member list contains %d members", s.memberList.GetMemberCount())
 
 	// After members are loaded, perform one-shot VIP reconcile on local node.
-	// The config half of the decision is taken here, synchronously; see
-	// snapshotVIPGroups for why it cannot wait for the pass.
+	// Only the node is named here: the addresses are read when the pass runs, so
+	// a config mutation landing inside its delay is converged on rather than
+	// undone (docs/TEST-PLAN.md defect #105).
 	//
 	// Scheduled rather than spawned: this function runs on every full ConfigSync,
 	// so a burst of mutations used to put one whole-share bring-up — and one
-	// whole-share announcement — on every peer per mutation (docs/TEST-PLAN.md
-	// defect #65). See vipReconciler.
+	// whole-share announcement — on every peer per mutation (defect #65). See
+	// vipReconciler.
 	if localID, err := cfg.GetLocalNodeUUID(); err == nil {
-		groupIPs, activeActive := s.snapshotVIPGroups(cfg, localID)
-		s.vipReconcileQueue().Schedule(vipReconcileSnapshot{
-			localID:      localID,
-			groupIPs:     groupIPs,
-			activeActive: activeActive,
-		})
+		s.vipReconcileQueue().Schedule(vipReconcileSnapshot{localID: localID})
 	}
 
 	return nil
@@ -927,13 +923,16 @@ func (s *Server) loadInitialMembers(cfg *config.Config) error {
 
 // snapshotVIPGroups captures the config half of the post-load VIP reconcile:
 // whether the cluster is active-active, and every floating IP configured on
-// each of the local node's interfaces.
+// each of the local node's interfaces. Every slice it returns is freshly built,
+// so the caller can drop the lock and keep the result.
 //
-// It is taken synchronously, before the reconcile goroutine sleeps, because
-// ConfigSync also spawns Reconfigure() -> config.Reload(), which unmarshals a
-// freshly read file straight over the live *Config. Touching s.config after the
-// sleep is a data race against that rewrite — the config the reconcile is for
-// is the one loaded here, so read it here.
+// The caller must hold s.Lock() or s.RLock(). It used to be called without one,
+// before the reconcile goroutine slept, because config.Reload() unmarshalled a
+// freshly read file straight over the live *Config and reading s.config after
+// the sleep raced that rewrite. Both halves of that reason are gone: #32 made
+// Reload return a fresh instance and #67 made installing it a pointer swap under
+// the write lock, so the config is now safe to read whenever the lock is held —
+// and reading it late is the point (#105).
 func (s *Server) snapshotVIPGroups(cfg *config.Config, localID string) (map[string][]string, bool) {
 	node := cfg.Nodes[localID]
 	if node == nil {
