@@ -92,6 +92,13 @@ type Local struct {
 	SyslogFacility      string `json:"syslog_facility"` // Syslog facility: LOG_LOCAL0, etc.
 	SyslogTag           string `json:"syslog_tag"`      // Syslog tag
 	Mode                string `json:"mode"`            // active-passive or active-active
+	// NMAddressOwnership inverts how this node decides which addresses are its to
+	// remove: with it set, an address on a PulseHA-managed interface that no
+	// NetworkManager connection profile claims is treated as one PulseHA placed,
+	// and is released when no group configures it. Off by default, and node-local
+	// — it is a statement about how this box's network is managed, which a peer
+	// cannot know and must not overwrite.
+	NMAddressOwnership bool `json:"nm_address_ownership"`
 }
 
 type Node struct {

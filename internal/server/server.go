@@ -5276,6 +5276,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		syslogAddressPreserve := cur.Pulse.SyslogAddress
 		syslogFacilityPreserve := cur.Pulse.SyslogFacility
 		syslogTagPreserve := cur.Pulse.SyslogTag
+		nmOwnershipPreserve := cur.Pulse.NMAddressOwnership
 		// Whether this sync is the one that flips us into active-active decides
 		// whether we have to seed the assignment map below.
 		prevMode := cur.Pulse.Mode
@@ -5318,6 +5319,7 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		newConfig.Pulse.SyslogAddress = syslogAddressPreserve
 		newConfig.Pulse.SyslogFacility = syslogFacilityPreserve
 		newConfig.Pulse.SyslogTag = syslogTagPreserve
+		newConfig.Pulse.NMAddressOwnership = nmOwnershipPreserve
 
 		// Groups: a payload that carries the field is authoritative about it,
 		// including about what is no longer in it (docs/TEST-PLAN.md defect #43).
@@ -5784,6 +5786,10 @@ var settableConfigKeys = map[string]configKeyScope{
 	"syslog_address":    scopeNode,
 	"syslog_facility":   scopeNode,
 	"syslog_tag":        scopeNode,
+	// Node-local for the same reason as the logging keys: it describes how this
+	// box's interfaces are managed, and one appliance in a cluster can have a DHCP
+	// interface where another does not.
+	"nm_address_ownership": scopeNode,
 }
 
 // What UpdateConfig reports back about the reach of a change it applied. The CLI

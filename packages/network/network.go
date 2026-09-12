@@ -23,6 +23,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -93,6 +94,45 @@ func BuildIPInventory() (*IPInventory, error) {
 	}
 
 	return &IPInventory{ipToIface: ipMap}, nil
+}
+
+// AddressesOn returns every address the snapshot holds on iface, bare (no prefix
+// length), in no particular order.
+//
+// The inventory is keyed address -> interface because every other caller asks
+// "where is this address"; this asks the other way, for the one caller that has
+// to reason about addresses it does not already have a list of. Walking the map
+// is cheap next to the netlink dump that filled it, and it keeps that dump to
+// one per pass.
+func (inv *IPInventory) AddressesOn(iface string) []string {
+	if inv == nil {
+		return nil
+	}
+	var addrs []string
+	for key, on := range inv.ipToIface {
+		if on == iface {
+			addrs = append(addrs, addressFromIPKey(key))
+		}
+	}
+	sort.Strings(addrs)
+	return addrs
+}
+
+// addressFromIPKey undoes ipKey's family prefix.
+//
+// The map is keyed "4|10.0.0.1" so that an IPv4 and an IPv6 address cannot
+// collide on their textual form, and that encoding is this type's business and
+// nobody else's. Returning the raw key was a silent no-op on the one caller that
+// reads addresses out rather than looking one up: every key failed net.ParseIP,
+// so every address looked like one that could not be a floating IP, and the
+// reclaim pass found nothing to do on a node that had a strand sitting on it.
+// Caught on an appliance, not by a test, because the test supplied the addresses
+// itself.
+func addressFromIPKey(key string) string {
+	if i := strings.Index(key, "|"); i >= 0 {
+		return key[i+1:]
+	}
+	return key
 }
 
 // Exists checks whether the provided IP (string or CIDR) is present in the inventory and

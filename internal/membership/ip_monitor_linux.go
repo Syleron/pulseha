@@ -3,9 +3,12 @@
 package membership
 
 import (
+	"fmt"
+	"net"
 	"strings"
 	"time"
 
+	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/vishvananda/netlink"
@@ -332,6 +335,17 @@ func (m *IPMonitor) enforceExpectations() {
 		m.logger.Error("ENFORCE: Failed to build IP inventory snapshot", "error", invErr)
 	}
 
+	// Before the role branch, because it is not about the role: an address nothing
+	// accounts for is this node's to clean up whether it is Active or Passive, and
+	// both branches below return without reaching the other's code.
+	//
+	// Skipped outright when the inventory dump failed. Every other pass treats a
+	// failed dump as "assume the worst and act"; this one must not, because acting
+	// blind here means removing addresses chosen from no evidence.
+	if cfg.Pulse.NMAddressOwnership && ipInventory != nil {
+		m.reclaimUnownedFloatingIPs(cfg, localID, ipInventory)
+	}
+
 	// Passive/Unknown/Maintenance: remove all floating IPs; Active: ensure missing are added
 	if claim.Status != StatusActive {
 		m.logger.Info("ENFORCE: Node is not Active, removing floating IPs", "status", StatusToString(claim.Status))
@@ -575,4 +589,107 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 				"count", len(released))
 		}
 	}
+}
+
+// reclaimUnownedFloatingIPs releases addresses this node is holding on a
+// PulseHA-managed interface that neither a floating IP group nor a
+// NetworkManager connection profile accounts for.
+//
+// Off unless pulseha.nm_address_ownership is set on this node. It exists because
+// the allowlist rule PulseHA is otherwise built on — only ever touch an address
+// some group names — cannot recover from its own mistakes: the moment an address
+// leaves the config it falls outside every set any pass computes, which is
+// docs/TEST-PLAN.md #59, #104 and #105 in three different handlers. Ownership by
+// exclusion can recover from all three.
+//
+// The order of work is deliberate. Candidates are computed from the config and
+// the inventory the pass already has, and nmcli is consulted only if that leaves
+// anything to decide — so a converged node, where every address is either a
+// configured floating IP or the node's own, runs no subprocesses at all.
+func (m *IPMonitor) reclaimUnownedFloatingIPs(cfg *config.Config, localID string, inventory *network.IPInventory) {
+	nodeCfg, ok := cfg.Nodes[localID]
+	if !ok || nodeCfg == nil || len(nodeCfg.IPGroups) == 0 {
+		return
+	}
+
+	endpoints := make(map[string]*nodeEndpoint, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if node != nil {
+			endpoints[id] = &nodeEndpoint{IP: node.IP}
+		}
+	}
+
+	candidates := reclaimCandidates(nodeCfg.IPGroups, cfg.Groups,
+		reclaimProtectedSet(endpoints), inventory.AddressesOn)
+	if len(candidates) == 0 {
+		return
+	}
+
+	ifaces := make([]string, 0, len(nodeCfg.IPGroups))
+	for iface := range nodeCfg.IPGroups {
+		ifaces = append(ifaces, iface)
+	}
+	view, err := network.BuildNMView(ifaces)
+	if err != nil {
+		// No NetworkManager to ask means no way to tell a strand from a static
+		// address, so the setting simply does not apply on this host. Warn rather
+		// than stay silent: the operator turned something on that is not running.
+		m.logger.Warn("RECLAIM: nm_address_ownership is set but NetworkManager cannot be queried; "+
+			"no address will be reclaimed", "error", err, "candidates", candidates)
+		return
+	}
+
+	reclaim, skipped := reclaimableIPs(candidates, view)
+	for _, reason := range skipped {
+		m.logger.Debug("RECLAIM: leaving an address alone", "reason", reason)
+	}
+	if len(reclaim) == 0 {
+		return
+	}
+
+	for iface, addrs := range reclaim {
+		for _, addr := range addrs {
+			// Warn, not Info. This removes an address from a live interface on the
+			// strength of an inference, and the line that says so is the one an
+			// operator needs to find if the inference was ever wrong.
+			m.logger.Warn("RECLAIM: releasing an address no group and no NetworkManager "+
+				"profile accounts for", "ip", addr, "iface", iface)
+
+			// A bare address, deliberately: the mask the kernel holds it under is
+			// not knowable from the config here, and #104's EADDRNOTAVAIL is what a
+			// guessed prefix produces.
+			if _, err := network.BringIPdownClassified(iface, addressWithHeldPrefix(iface, addr)); err != nil {
+				m.logger.Error("RECLAIM: failed to release the address", "ip", addr, "iface", iface, "error", err)
+			}
+		}
+	}
+}
+
+// addressWithHeldPrefix returns addr with the prefix length the kernel is
+// actually holding it under on iface, so the delete matches.
+//
+// A delete whose prefix length disagrees with the kernel's is refused with
+// EADDRNOTAVAIL and the address stays up — the misclassification behind #104 —
+// and this caller, unlike every other release path, has no configured entry to
+// take the mask from. It has to ask the kernel. A lookup that fails falls back to
+// the bare address, which netlink takes as a host route and is the one form that
+// cannot be wrong about a mask it does not know.
+func addressWithHeldPrefix(iface, addr string) string {
+	link, err := net.InterfaceByName(iface)
+	if err != nil {
+		return addr
+	}
+	addrs, err := link.Addrs()
+	if err != nil {
+		return addr
+	}
+	for _, a := range addrs {
+		ipNet, ok := a.(*net.IPNet)
+		if !ok || ipNet.IP.String() != addr {
+			continue
+		}
+		ones, _ := ipNet.Mask.Size()
+		return fmt.Sprintf("%s/%d", addr, ones)
+	}
+	return addr
 }

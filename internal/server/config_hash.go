@@ -85,6 +85,7 @@ var locallyPreservedFields = []string{
 	"syslog_address",
 	"syslog_facility",
 	"syslog_tag",
+	"nm_address_ownership",
 }
 
 // canonicalise makes two configs that hold the same thing hash the same thing.
