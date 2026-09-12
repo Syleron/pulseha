@@ -602,18 +602,59 @@ func BringIPup(iface, ip string) error {
 //
 // An address still up after a failed delete is still a failure. That is the line
 // worth reading, and the noise was what would have hidden it.
+//
+// # Why there is no longer an errno fast path (#108)
+//
+// This used to answer EADDRNOTAVAIL as satisfied without consulting anything,
+// because "the kernel has already answered" and the live check is expensive on a
+// path that fires once per address during a release storm. The premise is wrong.
+// `inet_rtm_deladdr` walks the interface's addresses and skips any whose
+// *prefix length* differs from the request's, so a delete of 10.0.0.5/32 against
+// a held 10.0.0.5/24 matches nothing and returns EADDRNOTAVAIL with the address
+// still up. The errno means "nothing matched this exact tuple", which is not the
+// same claim as "the address is gone", and the difference is the one this file
+// exists to report: #104 reached the same mismatch from the config side, where a
+// bare `--ip` was defaulted to /32 against a /24 entry.
+//
+// So the check is always consulted, and the cost objection is answered by making
+// the check cheap rather than by skipping it — BringIPdownClassified now asks the
+// one link instead of building a whole-host inventory. A storm of already-gone
+// addresses pays one AddrList per address rather than one LinkList plus two
+// AddrLists per link, and gets a correct answer for it.
 func AddrDelSatisfied(delErr error, heldByTarget func() bool) bool {
 	if delErr == nil {
 		return true
 	}
-	// errors.Is rather than a bare comparison, for the reason given on
-	// AddrAddSatisfied: netlink may wrap the errno with the kernel's extended-ack
-	// message. unix.EADDRNOTAVAIL is itself a syscall.Errno, so this matches an
-	// errno raised as either type.
-	if errors.Is(delErr, unix.EADDRNOTAVAIL) {
-		return true
+	// With nothing to ask, an unrecognised failure stays a failure. This is also
+	// the EADDRNOTAVAIL case when kernel state cannot be read: a release that may
+	// not have happened must not be reported as one that did.
+	if heldByTarget == nil {
+		return false
 	}
-	return heldByTarget != nil && !heldByTarget()
+	return !heldByTarget()
+}
+
+// addrHeldOnLink returns the address this link is holding that matches ip,
+// whatever prefix length it is held under, or nil when the link holds none.
+//
+// Scoped to one link on purpose. CheckIfIPExists builds an inventory of every
+// link and both families on each call (#64), which is the cost that justified
+// skipping the check at all; this asks the only link whose answer can matter to a
+// delete on that link.
+func addrHeldOnLink(link netlink.Link, ip net.IP) (*netlink.Addr, error) {
+	// unix.AF_UNSPEC rather than netlink.FAMILY_ALL: they are the same value, but
+	// the latter is declared only in the package's Linux build, and this file
+	// compiles on the developer machines too.
+	addrs, err := netlink.AddrList(link, unix.AF_UNSPEC)
+	if err != nil {
+		return nil, err
+	}
+	for i := range addrs {
+		if addrs[i].IP.Equal(ip) {
+			return &addrs[i], nil
+		}
+	}
+	return nil, nil
 }
 
 /*
@@ -645,24 +686,64 @@ func BringIPdownClassified(iface, ip string) (alreadyGone bool, err error) {
 	if parseErr != nil {
 		return false, errors.New("unable to bring IP down because ip address couldn't be parsed")
 	}
-	if delErr := netlink.AddrDel(link, addr); delErr != nil {
-		if AddrDelSatisfied(delErr, func() bool {
-			ipOb, _ := utils.GetCIDR(ip)
-			if ipOb == nil {
-				// Nothing to ask with; leave the failure as a failure.
-				return true
-			}
-			ex, eIface, cerr := CheckIfIPExists(ipOb.String())
-			return cerr == nil && ex && eIface == iface
-		}) {
-			// Nothing to do and nothing wrong: the address had already gone,
-			// which is the state this call was asking for (defect #61).
-			return true, nil
-		}
-		log.Warn("NETWORK: Unable to bring down IP", "ip", ip, "iface", iface, "error", delErr)
+
+	delErr := netlink.AddrDel(link, addr)
+	if delErr == nil {
+		return false, nil
+	}
+
+	// One link-scoped read, reused for both questions below: is the address still
+	// here at all, and if it is, under which prefix length.
+	held, lookupErr := addrHeldOnLink(link, addr.IP)
+	if lookupErr != nil {
+		// A check that cannot see must not turn a failed release into a reported
+		// one. AddrDelSatisfied is given nothing to ask and answers accordingly;
+		// spelled out here so the reason is readable at the call site.
+		log.Warn("NETWORK: could not read the interface's addresses to classify a failed delete",
+			"ip", ip, "iface", iface, "error", lookupErr)
 		return false, errors.New("unable to bring down ip " + ip + " on interface " + iface + ": " + delErr.Error())
 	}
-	return false, nil
+
+	// The address is genuinely gone. Whoever else released it got there first,
+	// which is the state this call was asking for (defect #61).
+	if held == nil {
+		return true, nil
+	}
+
+	// Still here, under a prefix length the request did not match: the kernel
+	// skipped it rather than refusing, which is why the errno lied (#108). Retry
+	// with what the interface actually holds. A floating IP is identified by its
+	// address everywhere else in this codebase — the inventory, the expectation
+	// set, matchGroupIP, the reclaim pass all key on the bare address — so
+	// deleting the address the caller named is what the caller meant.
+	if requested, _ := addr.Mask.Size(); mustRetryWithHeldPrefix(requested, held) {
+		log.Warn("NETWORK: the interface holds this address under a different prefix length; "+
+			"retrying the delete with the one it actually has",
+			"ip", ip, "iface", iface, "held", held.IPNet.String())
+		if retryErr := netlink.AddrDel(link, held); retryErr == nil {
+			return false, nil
+		} else if again, againErr := addrHeldOnLink(link, addr.IP); againErr == nil && again == nil {
+			// Someone released it between the two attempts.
+			return true, nil
+		}
+	}
+
+	log.Warn("NETWORK: Unable to bring down IP", "ip", ip, "iface", iface, "error", delErr)
+	return false, errors.New("unable to bring down ip " + ip + " on interface " + iface + ": " + delErr.Error())
+}
+
+// mustRetryWithHeldPrefix reports whether a failed delete is worth retrying
+// against the prefix length the interface actually holds.
+//
+// Only when the two differ. A delete that failed on an address held under the
+// *same* prefix length failed for some other reason — EPERM, a link going down —
+// and retrying the identical request would do nothing but log twice.
+func mustRetryWithHeldPrefix(requested int, held *netlink.Addr) bool {
+	if held == nil || held.IPNet == nil {
+		return false
+	}
+	actual, _ := held.Mask.Size()
+	return actual != requested
 }
 
 /*
