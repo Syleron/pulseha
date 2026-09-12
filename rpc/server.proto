@@ -437,6 +437,11 @@ message UnassignGroupRequest {
 message UnassignGroupResponse {
     bool success = 1;
     string message = 2;
+    // Warnings carries what the release of the group's addresses could not
+    // confirm. Unassigning succeeds regardless -- the group stays configured, so
+    // its addresses stay accounted for -- but the operator should know whether
+    // convergence was this call's or is now the enforce pass's.
+    repeated string warnings = 3;
 }
 
 // Group Deletion

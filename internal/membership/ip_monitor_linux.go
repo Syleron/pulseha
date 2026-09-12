@@ -487,23 +487,30 @@ func (m *IPMonitor) enforceExpectations() {
 		}
 	}
 
-	// Active nodes in active-active must also give up what is no longer theirs.
-	// The Active branch only ever added, so a node that handed addresses to a
-	// peer kept serving them: after a mode switch the former sole Active sat at
-	// 172 addresses against an expectation of 50, every one of the surplus also
-	// up on its new owner (docs/TEST-PLAN.md defects #2/#26).
+	// An Active node must also give up what is no longer its to hold. The Active
+	// branch only ever added, so a node that handed addresses to a peer kept
+	// serving them: after a mode switch the former sole Active sat at 172
+	// addresses against an expectation of 50, every one of the surplus also up on
+	// its new owner (docs/TEST-PLAN.md defects #2/#26).
 	//
-	// This keys off the expectation set, which in this mode is recomputed from
-	// the node's own assignments at the top of this function. An earlier attempt
-	// at this pass was reverted because that record could not be trusted — a
-	// node listed one address while serving a hundred the coordinator had given
-	// it, so the pass tore down legitimate traffic. What made the record
-	// reliable was fixing its writers: the mode switch now seeds the owner's
-	// assignments on every node, and a busy coordinator is no longer declared
-	// failed and its addresses re-placed behind its back.
-	if cfg.Pulse.Mode == "active-active" {
-		m.releaseUnassignedIPs(localID, expectations)
-	}
+	// This keys off the expectation set, which is recomputed from the config at
+	// the top of this function. An earlier attempt at this pass was reverted
+	// because that record could not be trusted — a node listed one address while
+	// serving a hundred the coordinator had given it, so the pass tore down
+	// legitimate traffic. What made the record reliable was fixing its writers:
+	// the mode switch now seeds the owner's assignments on every node, and a busy
+	// coordinator is no longer declared failed and its addresses re-placed behind
+	// its back.
+	//
+	// The active-active gate that used to be here is #107. surplusFloatingIPs
+	// scans every *configured* group rather than only the assigned ones — that is
+	// #40's fix and the whole reason `group unassign` is recoverable — but in
+	// active-passive nothing ever called it, so an unassigned group's addresses
+	// stayed up on the Active node with no pass able to take them down. The gate's
+	// stated reason was that the expectation set could not be trusted in
+	// active-passive, and since #105 it is derived from the config on every tick
+	// in both modes, which is the same footing active-active stands on.
+	m.releaseUnassignedIPs(localID, expectations)
 
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
 }
@@ -522,7 +529,14 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 	if cfg == nil {
 		return
 	}
-	if localNodeCfg, ok := cfg.Nodes[localID]; !ok || localNodeCfg == nil {
+
+	// Under the config's own lock, and copied: cfg.Nodes and cfg.Groups are maps
+	// the join handler writes under this same lock, and the pass below outlives
+	// the critical section. Reading them bare is #87, and ungating this call is
+	// what would have made it reachable in active-passive — the same way removing
+	// the re-derive's gate did.
+	configured, known := m.configuredGroupsFor(cfg, localID)
+	if !known {
 		return
 	}
 
@@ -558,7 +572,7 @@ func (m *IPMonitor) releaseUnassignedIPs(localID string, expectations map[string
 		return err == nil && exists && foundIface == iface
 	}
 
-	surplus := surplusFloatingIPs(cfg.Groups, expectations, locate)
+	surplus := surplusFloatingIPs(configured, expectations, locate)
 	for iface, ips := range surplus {
 		m.logger.Warn("ENFORCE: releasing floating IPs this node is no longer assigned",
 			"iface", iface, "count", len(ips))
@@ -725,4 +739,26 @@ func (m *IPMonitor) reclaimInputs(cfg *config.Config, localID string) (
 		}
 	}
 	return managed, groups, reclaimProtectedSet(endpoints), true
+}
+
+// configuredGroupsFor copies every configured group under the config's own lock,
+// reporting false when the config has no entry for this node.
+//
+// That case is left alone deliberately and the distinction matters: a node the
+// config does not describe has an empty expectation set for want of
+// configuration, not because it should be serving nothing, and releasing on that
+// basis would tear down live traffic on a cluster mid-sync.
+func (m *IPMonitor) configuredGroupsFor(cfg *config.Config, localID string) (map[string][]string, bool) {
+	cfg.Lock()
+	defer cfg.Unlock()
+
+	if localNodeCfg, ok := cfg.Nodes[localID]; !ok || localNodeCfg == nil {
+		return nil, false
+	}
+
+	groups := make(map[string][]string, len(cfg.Groups))
+	for name, ips := range cfg.Groups {
+		groups[name] = append([]string(nil), ips...)
+	}
+	return groups, true
 }

@@ -4153,9 +4153,75 @@ type DeleteGroupResponse struct {
 	Warnings []string
 }
 
-// UnassignGroupFromNode implements the CLI.UnassignGroupFromNode RPC method
+// UnassignGroupFromNode implements the CLI.UnassignGroupFromNode RPC method.
+//
+// The assignment is dropped first and the addresses are released after, which is
+// the opposite order from RemoveIPFromGroup and DeleteGroup and is deliberate.
+// Releasing while the group is still assigned races the node's own enforce loop:
+// an Active node expects every address of every group mapped to the interface, so
+// its next tick brings back whatever this just took down (docs/TEST-PLAN.md
+// defect #60). Dropping the assignment first is what makes the release stick, and
+// it is the same ordering beginGroupDeletion uses for the same reason.
+//
+// It is also why an unconfirmed release is a warning here rather than a refusal.
+// The group stays *configured*, so its addresses are still referenced by
+// something every pass can compute: configured-but-unassigned is the one state
+// whose release pass is verified live (#58), and a node that misses this explicit
+// release converges on its own. That is exactly what RemoveIPFromGroup and
+// DeleteGroup cannot say, which is why those two refuse to commit over an
+// unconfirmed release and this one does not. Do not "fix" this into a refusal
+// without first making the addresses unreferenced, because then it would need to
+// be one.
+//
+// That guarantee was false in active-passive until #107. `surplusFloatingIPs`
+// scans every configured group rather than only the assigned ones — #40's fix,
+// and the whole reason this state is recoverable — but `releaseUnassignedIPs` was
+// gated on active-active, so nothing ever called it. An unassigned group's
+// addresses stayed up on the Active node indefinitely while this handler reported
+// success, which is #40's operator-visible lie returning at a different site.
 func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGroupRequest) (*rpc.UnassignGroupResponse, error) {
-	s.logger.Infof("Received UnassignGroupFromNode request for group: %s", req.GroupName)
+	s.logger.Infof("Received UnassignGroupFromNode request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	done, targets := s.commitGroupUnassign(req)
+	if done != nil {
+		return done, nil
+	}
+
+	// Outside s.Lock(): releasing on a remote node is a blocking gRPC call, and a
+	// node that cannot answer its own health checks while it holds the lock is a
+	// node that gets elected around (defects #4/#7/#8).
+	var warnings []string
+	if len(targets) > 0 {
+		releaseWarnings, unconfirmed := s.releasePlannedIPs(ctx, targets)
+		warnings = append(warnings, releaseWarnings...)
+		if len(unconfirmed) > 0 {
+			// Said out loud, because the operator should know the convergence is
+			// now the enforce pass's rather than this call's.
+			s.logger.Warn("Unassigned the group, but could not confirm its addresses were released",
+				"group", req.GroupName, "nodes", unconfirmed)
+			warnings = append(warnings, fmt.Sprintf(
+				"could not confirm the group's floating IPs were released on %s; the group is still "+
+					"configured, so each node's release pass takes its share down when it can",
+				strings.Join(unconfirmed, ", ")))
+		}
+	}
+
+	s.logger.Infof("Successfully unassigned group %s from interface %s on node %s", req.GroupName, req.Interface, req.NodeId)
+	return &rpc.UnassignGroupResponse{
+		Success:  true,
+		Message:  fmt.Sprintf("successfully unassigned group %s from interface %s on node %s", req.GroupName, req.Interface, req.NodeId),
+		Warnings: warnings,
+	}, nil
+}
+
+// commitGroupUnassign runs the locked half: validate, plan the release the node
+// owes, then drop the assignment and persist it.
+//
+// The plan has to be taken before the mutation and the release run after it —
+// `expectedIfaceIPs` answers "which of these addresses are mine" from the
+// assignment this is about to remove, so after the write there is nothing left to
+// ask. A non-nil response is the final answer and the caller must return it.
+func (s *Server) commitGroupUnassign(req *rpc.UnassignGroupRequest) (*rpc.UnassignGroupResponse, []ipReleaseTarget) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -4200,6 +4266,8 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 		return &rpc.UnassignGroupResponse{Success: true, Message: fmt.Sprintf("group %s is not assigned to interface %s on node %s", req.GroupName, req.Interface, req.NodeId)}, nil
 	}
 
+	target := s.planGroupUnassignRelease(req.GroupName, req.NodeId, req.Interface)
+
 	// Remove group from slice
 	node.IPGroups[req.Interface] = append(groups[:groupIndex], groups[groupIndex+1:]...)
 
@@ -4238,11 +4306,73 @@ func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGro
 		}
 	}
 
-	s.logger.Infof("Successfully unassigned group %s from interface %s on node %s", req.GroupName, req.Interface, req.NodeId)
-	return &rpc.UnassignGroupResponse{
-		Success: true,
-		Message: fmt.Sprintf("successfully unassigned group %s from interface %s on node %s", req.GroupName, req.Interface, req.NodeId),
-	}, nil
+	return nil, target
+}
+
+// planGroupUnassignRelease returns the release the node owes for one group
+// leaving one of its interfaces.
+//
+// Narrower than planGroupRelease in one way and wider in another. Narrower
+// because it visits a single node and interface: this is not a group leaving the
+// cluster, it is a group leaving one assignment, and the other nodes holding it
+// keep theirs. Wider because the local node is planned even when the record says
+// it holds nothing — the record was append-only until #58, and the local node is
+// the one place a claim about interface state can be checked instead of believed.
+//
+// An address another group still assigned to the same interface also provides is
+// excluded, for planGroupRelease's reason: nothing in the CLI can create that
+// overlap, but config.json is written by the appliance too (#3), and tearing down
+// an address a live group still serves would be an outage.
+//
+// The caller must hold s.Lock(), and must call this before removing the
+// assignment.
+func (s *Server) planGroupUnassignRelease(groupName, nodeID, iface string) []ipReleaseTarget {
+	node := s.config.Nodes[nodeID]
+	if node == nil {
+		return nil
+	}
+
+	retained := make(map[string]bool)
+	for _, g := range node.IPGroups[iface] {
+		if g == groupName {
+			continue
+		}
+		for _, ip := range s.config.Groups[g] {
+			retained[ip] = true
+		}
+	}
+
+	mine := make(map[string]bool)
+	for _, ip := range s.expectedIfaceIPs(nodeID, iface) {
+		mine[ip] = true
+	}
+
+	var ips, candidates []string
+	for _, ip := range s.config.Groups[groupName] {
+		if retained[ip] {
+			continue
+		}
+		candidates = append(candidates, ip)
+		if mine[ip] {
+			ips = append(ips, ip)
+		}
+	}
+
+	local := nodeID == s.config.Pulse.LocalNode
+	if len(ips) == 0 && !(local && len(candidates) > 0) {
+		return nil
+	}
+
+	return []ipReleaseTarget{{
+		nodeID:     nodeID,
+		hostname:   node.Hostname,
+		ip:         node.IP,
+		port:       node.Port,
+		iface:      iface,
+		ips:        ips,
+		candidates: candidates,
+		local:      local,
+	}}
 }
 
 // DeleteGroup implements the CLI.DeleteGroup RPC method.

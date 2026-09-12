@@ -64,3 +64,47 @@ func TestRederivingExpectationsStillHonoursAReleaseInFlight(t *testing.T) {
 		t.Errorf("suppressed = %v, want the released address named", suppressed)
 	}
 }
+
+// The safety-net half of docs/TEST-PLAN.md defect #107.
+//
+// surplusFloatingIPs scans every *configured* group rather than only the ones
+// still assigned to the node — that is #40's fix, and the whole reason
+// configured-but-unassigned is a recoverable state. But releaseUnassignedIPs was
+// gated on active-active, so in active-passive nothing ever called it and an
+// unassigned group's addresses stayed up on the Active node with no pass able to
+// compute them.
+//
+// This pins the computation the ungated call now reaches: the expectation set is
+// derived from the assignments, the group is no longer among them, and its
+// addresses are therefore surplus wherever the node is still holding them.
+func TestAnUnassignedGroupsAddressesAreSurplusInActivePassive(t *testing.T) {
+	group := []string{"10.0.0.1/24", "10.0.0.2/24"}
+	m, nodeID, member := newExpectationsMonitor("active-passive", group, nil)
+
+	// Still assigned: the node expects the whole group, so nothing is surplus.
+	expected := reDeriveExpectations(m, nodeID, member)
+	if !slices.Equal(expected, group) {
+		t.Fatalf("expectations = %v, want the whole group while it is assigned", expected)
+	}
+	held := func(ip string) (string, bool) { return "eth0", true }
+	if surplus := surplusFloatingIPs(m.members.Config().Groups,
+		map[string][]string{"eth0": expected}, held); len(surplus) != 0 {
+		t.Fatalf("surplus = %v while the group is assigned, want none", surplus)
+	}
+
+	// Unassign it. The group stays configured -- that is the state the handler
+	// leaves behind, and the state this pass has to be able to read.
+	cfg := m.members.Config()
+	delete(cfg.Nodes[nodeID].IPGroups, "eth0")
+
+	expected = reDeriveExpectations(m, nodeID, member)
+	if len(expected) != 0 {
+		t.Fatalf("expectations = %v, want none once the group is unassigned", expected)
+	}
+
+	surplus := surplusFloatingIPs(cfg.Groups, m.deriveExpectedIPs(nodeID, member), held)
+	if !slices.Equal(surplus["eth0"], group) {
+		t.Errorf("surplus = %v, want the whole unassigned group %v: with nothing "+
+			"computing it, those addresses stay up forever", surplus["eth0"], group)
+	}
+}
