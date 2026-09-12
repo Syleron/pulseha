@@ -427,6 +427,22 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	return true
 }
 
+// RestorableIPs is restorableIPs for the one restore path outside this package.
+//
+// Server.refreshLocalMonitorExpectedIPs computes its own missing set from the
+// config and places it with a direct BringUpIP rather than through the enforce
+// pass, so it is a third restore path and has to consult the same release record
+// as the other two. Without it the refresh undoes a release that is still
+// mid-commit: an address is released before it leaves the config precisely so a
+// failure cannot strand it, and for that window the config still says the local
+// node should be holding it (defect #60's shape, third caller).
+func (m *IPMonitor) RestorableIPs(iface string, missing []string) (restore, released []string) {
+	if m == nil {
+		return missing, nil
+	}
+	return m.restorableIPs(iface, missing)
+}
+
 // restorableIPs splits addresses missing from iface into the ones this node
 // should put back and the ones it was told to release. Both restore paths go
 // through here, so the policy is one decision rather than two.

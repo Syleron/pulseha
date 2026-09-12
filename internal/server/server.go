@@ -2874,6 +2874,17 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 				s.logger.Warn("REFRESH: skipping unparseable configured addresses",
 					"iface", iface, "addresses", invalid)
 			}
+			// This computes its own missing set and places it directly, so it is a
+			// restore path of its own and owes the release record the same respect
+			// the enforce pass gives it. An address is released *before* it leaves
+			// the config — that ordering is what stops a failed release stranding
+			// it — and for that window the config here still says this node holds
+			// it (defect #60).
+			missing, releasedRecently := s.ipMonitor.RestorableIPs(iface, missing)
+			if len(releasedRecently) > 0 {
+				s.logger.Info("REFRESH: not restoring floating IPs this node was told to release",
+					"iface", iface, "count", len(releasedRecently), "ips", releasedRecently)
+			}
 			if len(missing) > 0 {
 				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(status))
 				_, err := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: missing})
@@ -3774,140 +3785,66 @@ func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string
 	wg.Wait()
 }
 
-// RemoveIPFromGroup implements the CLI.RemoveIPFromGroup RPC method
+// RemoveIPFromGroup implements the CLI.RemoveIPFromGroup RPC method.
+//
+// The address is released before it leaves the config, and it leaves the config
+// only once every node that could be holding it has confirmed the release. That
+// is the ordering DeleteGroup uses and it is here for the same reason.
+//
+// This handler used to do the opposite: bring the address down best effort,
+// record any failure as a warning, and remove it from the group regardless
+// ("Continue anyway, as we want to remove the IP from config"). That is
+// docs/TEST-PLAN.md defect #104: #59 one address at a time, and unlike a group
+// delete it needs no unreachable peer to bite — a single misclassified netlink
+// failure is enough (AddrDelSatisfied reads EADDRNOTAVAIL as "already gone", and
+// a prefix-length mismatch produces exactly that while the address stays up).
+//
+// Once the address is out of every configured group nothing can put it back in
+// any set: surplusFloatingIPs scans only configured groups, and in active-passive
+// nothing releases anything anyway, since enforceExpectations' Active branch only
+// ever adds and releaseUnassignedIPs is gated on active-active. So a release that quietly did not happen was permanent: the
+// address stayed up on the interface, `pulsectl status` still listed it under
+// Active IPs, and no group listed it at all.
+//
+// Going through BringDownIP rather than calling network.BringIPdown directly is
+// the other half of that report. The direct call maintained neither the
+// monitor's expectation set nor member.ActiveIPs, so even a release that worked
+// left the address reported as held for the life of the daemon (defect #58's
+// shape, and exactly what the Active IPs line above was showing).
 func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, error) {
 	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
-	s.Lock()
-	defer s.Unlock()
 
-	if !s.config.ClusterCheck() {
-		return &rpc.RemoveIPFromGroupResponse{Success: false, Message: "no cluster configured"}, nil
+	done, exactIP, targets, warnings := s.beginIPRemoval(req)
+	if done != nil {
+		return done, nil
 	}
 
-	// Check if group exists
-	group, exists := s.config.Groups[req.GroupName]
-	if !exists {
-		return &rpc.RemoveIPFromGroupResponse{
-			Success: false,
-			Message: fmt.Sprintf("group %s does not exist", req.GroupName),
-		}, nil
-	}
+	// Outside s.Lock(): this fans out to every node that could be holding the
+	// address, and a node that cannot answer health checks while it holds the
+	// lock is a node that gets elected around (defects #4/#7/#8). The old handler
+	// made these gRPC calls with the lock held.
+	if len(targets) > 0 {
+		releaseWarnings, unconfirmed := s.releasePlannedIPs(ctx, targets)
+		warnings = append(warnings, releaseWarnings...)
 
-	// Validate IP address and ensure it has a subnet mask
-	ipToUse := req.Ip
-	var warnings []string
-
-	// Check if it's already in CIDR notation
-	if !utils.IsCIDR(req.Ip) {
-		if utils.IsIPv4(req.Ip) {
-			ipToUse = req.Ip + "/32" // Default to single host for IPv4
-			warnings = append(warnings, fmt.Sprintf("No subnet mask provided, using %s", ipToUse))
-		} else if utils.IsIPv6(req.Ip) {
-			ipToUse = req.Ip + "/128" // Default to single host for IPv6
-			warnings = append(warnings, fmt.Sprintf("No subnet mask provided, using %s", ipToUse))
-		} else {
+		if len(unconfirmed) > 0 {
+			// Removing it anyway is the defect. Left configured it is still
+			// accounted for — it stays in the expectation set, the local release
+			// pass can still see it, and a retried remove-ip finishes the job.
+			s.logger.Error("Not removing IP from group: its release could not be confirmed",
+				"group", req.GroupName, "ip", exactIP, "nodes", unconfirmed)
 			return &rpc.RemoveIPFromGroupResponse{
 				Success: false,
-				Message: fmt.Sprintf("invalid IP address: %s", req.Ip),
+				Message: fmt.Sprintf("IP %s was NOT removed from group %s: could not confirm it was "+
+					"released on %s. It stays configured so the cluster still accounts for it; "+
+					"retry once those nodes are reachable",
+					exactIP, req.GroupName, strings.Join(unconfirmed, ", ")),
+				Warnings: warnings,
 			}, nil
 		}
 	}
 
-	// Find and remove IP from group
-	found := false
-	var newIPs []string
-	var foundExactIP string
-	for _, existingIP := range group {
-		if existingIP == ipToUse {
-			found = true
-			foundExactIP = existingIP
-			continue
-		}
-		newIPs = append(newIPs, existingIP)
-	}
-
-	if !found {
-		s.logger.Infof("IP %s not present in group %s; treating as success", ipToUse, req.GroupName)
-		return &rpc.RemoveIPFromGroupResponse{
-			Success: true,
-			Message: fmt.Sprintf("IP %s not found in group %s", ipToUse, req.GroupName),
-		}, nil
-	}
-
-	// Find nodes that have this group assigned and bring down the IP
-	ipBroughtDown := false
-	for nodeID, node := range s.config.Nodes {
-		for iface, groups := range node.IPGroups {
-			for _, g := range groups {
-				if g == req.GroupName {
-					// Check if this is the local node
-					if nodeID == s.config.Pulse.LocalNode {
-						// This is the local node, bring down the IP locally
-						s.logger.Infof("Bringing down IP %s on interface %s", foundExactIP, iface)
-
-						// Check if interface exists
-						exists, _ := network.InterfaceExist(iface)
-						if !exists {
-							warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
-							continue
-						}
-
-						if err := network.BringIPdown(iface, foundExactIP); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring down IP %s on interface %s: %v", foundExactIP, iface, err))
-							// Continue anyway, as we want to remove the IP from config
-						} else {
-							ipBroughtDown = true
-							s.logger.Infof("Successfully brought down IP %s on interface %s", foundExactIP, iface)
-							if s.ipMonitor != nil {
-								s.ipMonitor.RemoveExpectedIPs(iface, []string{foundExactIP})
-							}
-						}
-					} else {
-						// This is a remote node, send RPC to bring down the IP
-						s.logger.Infof("Sending request to bring down IP %s on node %s", foundExactIP, node.Hostname)
-						remoteClient, err := client.New()
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to create client for node %s: %v", node.Hostname, err))
-							continue
-						}
-						defer remoteClient.Close()
-
-						// Connect to remote node
-						if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to connect to node %s: %v", node.Hostname, err))
-							continue
-						}
-
-						// Send request to bring down IP
-						resp, err := remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{
-							Iface: iface,
-							Ips:   []string{foundExactIP},
-						})
-
-						if err != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring down IP %s on node %s: %v", foundExactIP, node.Hostname, err))
-							// Continue anyway, as we want to remove the IP from config
-						} else if !resp.Success {
-							warnings = append(warnings, fmt.Sprintf("Failed to bring down IP %s on node %s: %s", foundExactIP, node.Hostname, resp.Message))
-							// Continue anyway, as we want to remove the IP from config
-						} else {
-							ipBroughtDown = true
-							s.logger.Infof("Successfully brought down IP %s on node %s", foundExactIP, node.Hostname)
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Update group in config - ensure we always use an empty slice instead of null
-	if newIPs == nil {
-		newIPs = make([]string, 0)
-	}
-	s.config.Groups[req.GroupName] = newIPs
-
-	// Save config
-	if err := s.config.Save(); err != nil {
+	if err := s.commitIPRemoval(req.GroupName, exactIP); err != nil {
 		s.logger.Error("Failed to save config", "error", err)
 		return &rpc.RemoveIPFromGroupResponse{
 			Success:  false,
@@ -3915,20 +3852,197 @@ func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGro
 			Warnings: warnings,
 		}, nil
 	}
-	// Broadcast updated config to peers
-	s.markConfigDirty()
 
-	// If we couldn't bring down the IP on any node but it was in the config, add a warning
-	if !ipBroughtDown && len(warnings) > 0 {
-		warnings = append(warnings, "IP was removed from configuration but could not be brought down on any node. You may need to manually remove the IP from interfaces if it's still active.")
-	}
-
-	s.logger.Infof("Successfully removed IP %s from group %s", ipToUse, req.GroupName)
+	s.logger.Infof("Successfully removed IP %s from group %s", exactIP, req.GroupName)
 	return &rpc.RemoveIPFromGroupResponse{
 		Success:  true,
-		Message:  fmt.Sprintf("successfully removed IP %s from group %s", ipToUse, req.GroupName),
+		Message:  fmt.Sprintf("successfully removed IP %s from group %s", exactIP, req.GroupName),
 		Warnings: warnings,
 	}, nil
+}
+
+// beginIPRemoval runs the locked first half of removing an address from a group:
+// it validates the request, resolves which configured entry the operator meant,
+// and plans the release each node still owes. It deliberately writes nothing —
+// see RemoveIPFromGroup for why the release has to come first.
+//
+// A non-nil response is the final answer and the caller must return it.
+func (s *Server) beginIPRemoval(req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, string, []ipReleaseTarget, []string) {
+	s.Lock()
+	defer s.Unlock()
+
+	if !s.config.ClusterCheck() {
+		return &rpc.RemoveIPFromGroupResponse{Success: false, Message: "no cluster configured"}, "", nil, nil
+	}
+
+	group, exists := s.config.Groups[req.GroupName]
+	if !exists {
+		return &rpc.RemoveIPFromGroupResponse{
+			Success: false,
+			Message: fmt.Sprintf("group %s does not exist", req.GroupName),
+		}, "", nil, nil
+	}
+
+	exactIP, warnings, err := matchGroupIP(group, req.Ip)
+	if err != nil {
+		return &rpc.RemoveIPFromGroupResponse{Success: false, Message: err.Error()}, "", nil, nil
+	}
+	if exactIP == "" {
+		// Nothing configured, so nothing to release and nothing to write.
+		s.logger.Infof("IP %s not present in group %s; treating as success", req.Ip, req.GroupName)
+		return &rpc.RemoveIPFromGroupResponse{
+			Success: true,
+			Message: fmt.Sprintf("IP %s not found in group %s", req.Ip, req.GroupName),
+		}, "", nil, nil
+	}
+
+	return nil, exactIP, s.planIPRelease(req.GroupName, exactIP), warnings
+}
+
+// matchGroupIP resolves the address an operator asked to remove to the entry the
+// group actually holds, and warns when the two are written differently.
+//
+// `--ip` is documented as taking an *optional* subnet mask. The old lookup
+// defaulted a bare IPv4 address to /32 and then compared strings, so removing
+// 10.0.0.5 from a group holding 10.0.0.5/24 matched nothing — and the no-match
+// path returns success, so the operator was told the address was gone while it
+// stayed configured and up. A mask the operator does write is still honoured
+// exactly; the fallback fires only when no entry matches as written and the
+// address itself appears once.
+func matchGroupIP(group []string, requested string) (exact string, warnings []string, err error) {
+	if !utils.IsCIDR(requested) && !utils.IsIPv4(requested) && !utils.IsIPv6(requested) {
+		return "", nil, fmt.Errorf("invalid IP address: %s", requested)
+	}
+
+	for _, ip := range group {
+		if ip == requested {
+			return ip, nil, nil
+		}
+	}
+
+	wanted, _, _ := strings.Cut(requested, "/")
+	var matches []string
+	for _, ip := range group {
+		if addr, _, _ := strings.Cut(ip, "/"); addr == wanted {
+			matches = append(matches, ip)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return "", nil, nil
+	case 1:
+		return matches[0], []string{fmt.Sprintf(
+			"%s is configured as %s in this group; removing that entry", requested, matches[0])}, nil
+	default:
+		// Only a hand-written config.json can produce this (defect #3): AddIPToGroup
+		// rejects an address any group already holds. Refusing beats guessing which
+		// of them to tear down.
+		return "", nil, fmt.Errorf("group holds %s under more than one prefix (%s); "+
+			"remove the one you mean by its full CIDR", wanted, strings.Join(matches, ", "))
+	}
+}
+
+// planIPRelease returns, per node and interface, the release one address owes
+// before it can leave groupName.
+//
+// The same shape as planGroupRelease and for the same reasons: a peer is visited
+// only when the record says it holds the address, and the local node is always
+// visited, because it is the one node whose interfaces can be read rather than
+// believed.
+//
+// The caller must hold s.Lock() or s.RLock().
+func (s *Server) planIPRelease(groupName, ip string) []ipReleaseTarget {
+	var targets []ipReleaseTarget
+	for nodeID, node := range s.config.Nodes {
+		if node == nil {
+			continue
+		}
+		for iface, groups := range node.IPGroups {
+			if !slices.Contains(groups, groupName) {
+				continue
+			}
+
+			// An address another still-configured group provides on this same
+			// interface stays up: tearing down an address a live group still
+			// serves would be an outage (see planGroupRelease).
+			retained := false
+			for _, g := range groups {
+				if g != groupName && slices.Contains(s.config.Groups[g], ip) {
+					retained = true
+					break
+				}
+			}
+			if retained {
+				continue
+			}
+
+			local := nodeID == s.config.Pulse.LocalNode
+			var held []string
+			if slices.Contains(s.expectedIfaceIPs(nodeID, iface), ip) {
+				held = []string{ip}
+			}
+			if len(held) == 0 && !local {
+				continue
+			}
+
+			targets = append(targets, ipReleaseTarget{
+				nodeID:     nodeID,
+				hostname:   node.Hostname,
+				ip:         node.IP,
+				port:       node.Port,
+				iface:      iface,
+				ips:        held,
+				candidates: []string{ip},
+				local:      local,
+			})
+		}
+	}
+
+	// Map iteration order is random; a deterministic plan keeps the logs and the
+	// tests readable.
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].nodeID != targets[j].nodeID {
+			return targets[i].nodeID < targets[j].nodeID
+		}
+		return targets[i].iface < targets[j].iface
+	})
+	return targets
+}
+
+// commitIPRemoval drops the address from the group now that its release is
+// confirmed. The entry is re-resolved under the lock because the release ran
+// without it.
+func (s *Server) commitIPRemoval(groupName, exactIP string) error {
+	s.Lock()
+	defer s.Unlock()
+
+	group, exists := s.config.Groups[groupName]
+	if !exists {
+		// The group went away while the release ran, which is the state this was
+		// working towards for this address anyway.
+		return nil
+	}
+
+	// Always a non-nil slice: a group that empties marshals as [] rather than null.
+	updated := make([]string, 0, len(group))
+	for _, ip := range group {
+		if ip != exactIP {
+			updated = append(updated, ip)
+		}
+	}
+	if len(updated) == len(group) {
+		// Something else removed it while the release ran. Nothing to write, and
+		// nothing to broadcast.
+		return nil
+	}
+
+	s.config.Groups[groupName] = updated
+	if err := s.config.Save(); err != nil {
+		return err
+	}
+	// Broadcast updated config to peers
+	s.markConfigDirty()
+	return nil
 }
 
 // AssignGroupToNode implements the CLI.AssignGroupToNode RPC method
@@ -4152,7 +4266,7 @@ func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (
 	// checks while it holds the lock, which is how a busy node gets elected
 	// around (defects #4/#7/#8).
 	if len(targets) > 0 {
-		releaseWarnings, unconfirmed := s.releaseDeletedGroupIPs(ctx, targets)
+		releaseWarnings, unconfirmed := s.releasePlannedIPs(ctx, targets)
 		warnings = append(warnings, releaseWarnings...)
 
 		if len(unconfirmed) > 0 {
@@ -4209,7 +4323,7 @@ func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (
 // The release cannot run from here — it is a fan-out to every node holding the
 // group and this holds s.Lock() — so the plan is snapshotted for the caller.
 // A non-nil response is the final answer and the caller must return it.
-func (s *Server) beginGroupDeletion(req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, []groupReleaseTarget, []string) {
+func (s *Server) beginGroupDeletion(req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, []ipReleaseTarget, []string) {
 	s.Lock()
 	defer s.Unlock()
 
@@ -4298,10 +4412,11 @@ func (s *Server) commitGroupDeletion(groupName string) error {
 	return nil
 }
 
-// groupReleaseTarget is one node's share of a group being deleted, snapshotted
-// under s.Lock() because the release that consumes it runs without the lock and
-// must not walk s.config.Nodes.
-type groupReleaseTarget struct {
+// ipReleaseTarget is one node's share of the addresses a config change is about
+// to drop — a whole group being deleted, or a single address leaving one —
+// snapshotted under s.Lock() because the release that consumes it runs without
+// the lock and must not walk s.config.Nodes.
+type ipReleaseTarget struct {
 	nodeID   string
 	hostname string
 	ip       string
@@ -4336,13 +4451,13 @@ type groupReleaseTarget struct {
 // serves would be an outage.
 //
 // The caller must hold s.Lock() or s.RLock().
-func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
+func (s *Server) planGroupRelease(groupName string) []ipReleaseTarget {
 	groupIPs := s.config.Groups[groupName]
 	if len(groupIPs) == 0 {
 		return nil
 	}
 
-	var targets []groupReleaseTarget
+	var targets []ipReleaseTarget
 	for nodeID, node := range s.config.Nodes {
 		if node == nil {
 			continue
@@ -4383,7 +4498,7 @@ func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
 				continue
 			}
 
-			targets = append(targets, groupReleaseTarget{
+			targets = append(targets, ipReleaseTarget{
 				nodeID:     nodeID,
 				hostname:   node.Hostname,
 				ip:         node.IP,
@@ -4407,11 +4522,12 @@ func (s *Server) planGroupRelease(groupName string) []groupReleaseTarget {
 	return targets
 }
 
-// releaseDeletedGroupIPs brings a deleted group's addresses down on every node
-// holding them, concurrently and outside s.Lock(). It returns a warning per node
-// that reported trouble, and the hostnames whose release could not be confirmed
-// at all — the delete must not proceed over one of those.
-func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupReleaseTarget) (warnings []string, unconfirmed []string) {
+// releasePlannedIPs brings a planned release down on every node holding it,
+// concurrently and outside s.Lock(). It returns a warning per node that reported
+// trouble, and the hostnames whose release could not be confirmed at all — the
+// config change must not proceed over one of those, because an address no
+// configured group references is one no pass can ever compute again.
+func (s *Server) releasePlannedIPs(ctx context.Context, targets []ipReleaseTarget) (warnings []string, unconfirmed []string) {
 	// Sized to the work, not fixed. A flat deadline on a batched bring-down is
 	// defect #57 on the release side: it reports as failed a release that in fact
 	// succeeded, and a false failure here costs the operator the delete. The
@@ -4432,10 +4548,10 @@ func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupRele
 	)
 	for _, target := range targets {
 		wg.Add(1)
-		go func(target groupReleaseTarget) {
+		go func(target ipReleaseTarget) {
 			defer wg.Done()
 
-			warning, confirmed := s.releaseGroupIPsOnTarget(ctx, target)
+			warning, confirmed := s.releaseIPsOnTarget(ctx, target)
 
 			mu.Lock()
 			defer mu.Unlock()
@@ -4454,14 +4570,14 @@ func (s *Server) releaseDeletedGroupIPs(ctx context.Context, targets []groupRele
 	return warnings, unconfirmed
 }
 
-// releaseGroupIPsOnTarget brings one node's share of a deleted group down and
-// reports whether the release can be treated as done.
-func (s *Server) releaseGroupIPsOnTarget(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
-	s.logger.Info("Releasing floating IPs of a group being deleted",
+// releaseIPsOnTarget brings one node's share of a planned release down and
+// reports whether it can be treated as done.
+func (s *Server) releaseIPsOnTarget(ctx context.Context, target ipReleaseTarget) (warning string, confirmed bool) {
+	s.logger.Info("Releasing floating IPs the config is about to stop referencing",
 		"node", target.hostname, "iface", target.iface, "count", len(target.ips))
 
 	if target.local {
-		return s.releaseGroupIPsLocally(ctx, target)
+		return s.releaseIPsLocally(ctx, target)
 	}
 
 	remoteClient, err := client.New()
@@ -4494,11 +4610,13 @@ func (s *Server) releaseGroupIPsOnTarget(ctx context.Context, target groupReleas
 	return "", true
 }
 
-// releaseGroupIPsLocally brings the local node's share down through the same
-// handler a peer would run, so the IP monitor's expectations and the member's
-// assignment list stay honest (defect #58), and then checks the kernel rather
-// than trusting the return — the lesson of #21.
-func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupReleaseTarget) (warning string, confirmed bool) {
+// releaseIPsLocally brings the local node's share down through the same handler
+// a peer would run, so the IP monitor's expectations and the member's assignment
+// list stay honest (defect #58), and then checks the kernel rather than trusting
+// the return — the lesson of #21. That check is the whole point on this node: it
+// is the only place in the cluster where "the release worked" can be verified
+// instead of assumed.
+func (s *Server) releaseIPsLocally(ctx context.Context, target ipReleaseTarget) (warning string, confirmed bool) {
 	// An address cannot be up on an interface the node does not have, so there is
 	// nothing to release and nothing to strand.
 	if exists, _ := network.InterfaceExist(target.iface); !exists {
@@ -4512,9 +4630,11 @@ func (s *Server) releaseGroupIPsLocally(ctx context.Context, target groupRelease
 	}
 
 	// Keep the local assignment list honest whatever the mode: BringDownIP only
-	// maintains it in active-active, and a deleted group's addresses left on the
-	// list are reported as held forever, since nothing can recompute them
-	// downward once the group is gone (defect #58).
+	// maintains it in active-active, and an address left on the list once the
+	// config stops referencing it is reported as held forever, since nothing can
+	// recompute it downward again (defect #58). In active-passive that list is
+	// written once, at promotion, and never recomputed — which is why a removed
+	// floating IP kept appearing under `pulsectl status`'s Active IPs.
 	if member := s.memberList.GetMemberByID(target.nodeID); member != nil {
 		member.RemoveActiveIPs(target.ips)
 	}
@@ -6928,7 +7048,7 @@ func (s *Server) groupIPsByInterfaceForNode(nodeID string, ips []string) (map[st
 // not just logged, since the rebalance loop breaks on it.
 //
 // Bring-down is #52's demotion shape exactly — release and verify, per address —
-// so it reuses that sizing, as `releaseDeletedGroupIPs` already does.
+// so it reuses that sizing, as `releasePlannedIPs` already does.
 //
 // Bring-up needs more than the address work, which is why 5s was too short for a
 // batch that was up in well under a second: the RPC ends in one gratuitous-ARP

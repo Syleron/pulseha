@@ -370,7 +370,7 @@ func TestForceDeleteSpareAnAddressAnotherGroupStillProvides(t *testing.T) {
 // was append-only until defect #58 — so on the one node whose interfaces can
 // actually be read, the plan must not be the last word. The local node is
 // therefore planned even when it is recorded as holding none of the group, so
-// releaseGroupIPsLocally gets to check the kernel; a peer, whose state cannot be
+// releaseIPsLocally gets to check the kernel; a peer, whose state cannot be
 // read at all, is not visited for nothing.
 func TestPlanGroupReleaseAlwaysVisitsTheLocalNode(t *testing.T) {
 	s := newGroupDeleteTestServer(t, "127.0.0.1:49152")

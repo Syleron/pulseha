@@ -82,7 +82,7 @@ func normalizeDownRequest(ips []string) (normalized, invalid []string) {
 // against what the node holds, and it cannot rely on its caller to: deleting a
 // group fans the whole group's address list out to every node that has the
 // interface, because no RPC exposes a peer's interface state to ask with (the
-// same wall #54 hit, and the reason releaseGroupIPsOnTarget documents its
+// same wall #54 hit, and the reason releaseIPsOnTarget documents its
 // peer's per-address failures as invisible). Run 17 caught the consequence —
 // node-4 was sent `RPC BringDownIP for 201 IP(s)` for a group it held none of
 // and produced 201 error lines, which is the noise that would hide a release
