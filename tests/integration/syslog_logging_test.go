@@ -52,17 +52,19 @@ func TestSyslogLoggingSetup(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "Default syslog config (backward compatibility)",
+			// A hand-built Local with no syslog fields, which is what an old
+			// config *used* to be mistaken for. It is not a state the loader can
+			// produce -- New() seeds LogToSyslog true before Load() unmarshals --
+			// so the backward-compatibility question is answered where it belongs,
+			// against the real load path, in TestOldConfigKeepsSyslogOn and
+			// TestExplicitlyDisabledSyslogStaysDisabled. Here it is simply a
+			// zero-valued config, and a zero-valued config asks for no syslog.
+			name: "Zero-valued config asks for nothing",
 			config: &config.Config{
-				Pulse: config.Local{
-					// Old config - no syslog fields set
-					SyslogTag: "", // Empty tag triggers default behavior
-				},
+				Pulse: config.Local{},
 			},
-			expectHook:       true,            // May succeed on macOS
-			expectError:      false,           // May succeed on macOS
-			expectedTag:      "pulseha",       // Default tag
-			expectedFacility: syslog.LOG_INFO, // Default facility
+			expectHook:  false,
+			expectError: false,
 		},
 	}
 
@@ -97,14 +99,13 @@ func TestSyslogLoggingSetup(t *testing.T) {
 func setupSyslogForTest(cfg *config.Config, logger *log.Logger) error {
 	// Replicate the syslog setup logic from main.go setupLogging function
 
-	// Setup syslog logging if enabled (default to true if not explicitly set)
-	logToSyslog := cfg.Pulse.LogToSyslog
-	if cfg.Pulse.SyslogTag == "" {
-		// Old config or missing syslog config - use defaults
-		logToSyslog = true
-	}
-
-	if logToSyslog {
+	// The decision comes from the config, exactly as main.go takes it. This used
+	// to be a second copy of main.go's own re-derivation, which is why it could
+	// not catch #110: the assertion below branches on cfg.Pulse.LogToSyslog while
+	// the copy branched on an overridden value, so a case named "Syslog disabled"
+	// went down the enabled path and passed anyway on any host with a working
+	// syslog.
+	if cfg.Pulse.SyslogEnabled() {
 		// Convert facility string to syslog priority
 		facility := syslog.LOG_INFO
 		switch cfg.Pulse.SyslogFacility {

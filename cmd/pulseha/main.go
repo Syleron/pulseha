@@ -189,14 +189,10 @@ func main() {
 func setupLogging(cfg *config.Config, logger *log.Logger) error {
 	var writers []io.Writer
 
-	// Setup syslog logging if enabled (default to true if not explicitly set)
-	logToSyslog := cfg.Pulse.LogToSyslog
-	if cfg.Pulse.SyslogTag == "" {
-		// Old config or missing syslog config - use defaults
-		logToSyslog = true
-	}
-
-	if logToSyslog {
+	// Setup syslog logging if enabled. The decision is the config's to make and
+	// is made where the distinction between "absent" and "false" still exists --
+	// see Local.SyslogEnabled, and #110 for what re-deriving it here cost.
+	if cfg.Pulse.SyslogEnabled() {
 		// Convert facility string to syslog priority
 		facility := syslog.LOG_INFO
 		switch cfg.Pulse.SyslogFacility {

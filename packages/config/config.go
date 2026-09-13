@@ -110,6 +110,24 @@ type Node struct {
 	Capacity    int                 `json:"capacity,omitempty"` // Max floating IPs this node may host; 0 = unlimited
 }
 
+// SyslogEnabled reports whether this node should send its log to syslog.
+//
+// It returns the field and nothing else, and that is the entire point of it
+// existing. Two separate sites used to re-derive this from a proxy -- "the tag is
+// empty, so this must be an old config, so syslog must be on" -- and both were
+// wrong in the same way: an empty tag is also what a current config looks like
+// when nobody set one, so `log_to_syslog: false` was ignored and an operator who
+// turned syslog off still got syslog (#110).
+//
+// The question those sites were trying to answer is real, but it can only be
+// answered where the JSON is: New() seeds this field true, Load() unmarshals the
+// file over it, and so an absent key keeps the default while a present `false`
+// overwrites it. After that the distinction is gone and any attempt to recover it
+// downstream is a guess. Call this instead of guessing.
+func (l Local) SyslogEnabled() bool {
+	return l.LogToSyslog
+}
+
 // New instantiates and setups up our config object
 func New() (*Config, error) {
 	// Create new config
@@ -324,8 +342,16 @@ func (c *Config) migrateConfig() {
 	// Check if syslog fields are missing and set defaults
 	if c.Pulse.SyslogNetwork == "" && c.Pulse.SyslogAddress == "" &&
 		c.Pulse.SyslogFacility == "" && c.Pulse.SyslogTag == "" {
-		// This looks like an old config, set syslog defaults
-		c.Pulse.LogToSyslog = true
+		// This looks like an old config, so fill in the settings it predates.
+		//
+		// Deliberately not LogToSyslog. Whether an old config wanted syslog is
+		// already answered, and answered correctly, by New() seeding the field
+		// true before Load() unmarshals over it: a file with no `log_to_syslog`
+		// key leaves the seed standing, and a file carrying `false` overwrites
+		// it. That is the only point in the program where "absent" and "false"
+		// are still distinguishable, and by the time this runs they are not.
+		// Setting it here read every all-empty-strings config as an old one and
+		// forced syslog back on over an operator's explicit false (#110).
 		c.Pulse.SyslogNetwork = ""
 		c.Pulse.SyslogAddress = ""
 		c.Pulse.SyslogFacility = "LOG_INFO"
