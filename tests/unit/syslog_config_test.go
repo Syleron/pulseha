@@ -3,6 +3,7 @@ package unit
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -175,4 +176,85 @@ func TestSyslogConfigSerialization(t *testing.T) {
 	assert.Equal(t, cfg.Pulse.SyslogAddress, cfg2.Pulse.SyslogAddress, "SyslogAddress should be preserved")
 	assert.Equal(t, cfg.Pulse.SyslogFacility, cfg2.Pulse.SyslogFacility, "SyslogFacility should be preserved")
 	assert.Equal(t, cfg.Pulse.SyslogTag, cfg2.Pulse.SyslogTag, "SyslogTag should be preserved")
+}
+
+// syslogLoadFixture writes a config file and loads it through the real path,
+// returning what the daemon would hold in memory.
+//
+// PULSEHA_TEST is deliberately *off*. Under it config.Load returns before
+// reading the disk, so a test that leaves it on measures the struct it built
+// itself and nothing about loading — the trap #67 recorded, where inverting a
+// guard killed zero tests because the harness was lying to the config package.
+// Nodes is left empty so clusterCheckLocked is false and validate does not
+// require a local node id.
+func syslogLoadFixture(t *testing.T, pulse string) *config.Config {
+	t.Helper()
+
+	prev := config.CONFIG_LOCATION
+	config.CONFIG_LOCATION = filepath.Join(t.TempDir(), "config.json")
+	t.Cleanup(func() { config.CONFIG_LOCATION = prev })
+
+	body := `{"pulseha":{` + pulse + `},"floating_ip_groups":{},"nodes":{},"plugins":{}}`
+	if err := os.WriteFile(config.CONFIG_LOCATION, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := config.New()
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	return cfg
+}
+
+// The backward-compatibility promise, tested where it is actually kept: a config
+// written before syslog settings existed still logs to syslog.
+//
+// New() seeds LogToSyslog true and Load() unmarshals the file over it, so a key
+// that is not in the file leaves the seed standing. That is the whole mechanism,
+// and it is the only point in the program where "absent" is distinguishable from
+// "false".
+func TestOldConfigKeepsSyslogOn(t *testing.T) {
+	os.Unsetenv("PULSEHA_TEST")
+
+	cfg := syslogLoadFixture(t, `"logging_level":"info","mode":"active-passive"`)
+
+	if !cfg.Pulse.SyslogEnabled() {
+		t.Error("a config predating the syslog settings stopped logging to syslog; " +
+			"that is the upgrade this defaulting exists to survive")
+	}
+	if cfg.Pulse.SyslogTag != "pulseha" || cfg.Pulse.SyslogFacility != "LOG_INFO" {
+		t.Errorf("tag=%q facility=%q, want the defaults filled in",
+			cfg.Pulse.SyslogTag, cfg.Pulse.SyslogFacility)
+	}
+}
+
+// Regression for docs/TEST-PLAN.md defect #110: an explicit false was overridden
+// and the node logged to syslog anyway.
+//
+// The shape matters. Every syslog *string* is left empty, which is exactly what
+// migrateConfig read as "this is an old config" before deciding to turn syslog
+// back on — so an operator who set log_to_syslog false and nothing else got the
+// one config that was guaranteed to ignore them.
+func TestExplicitlyDisabledSyslogStaysDisabled(t *testing.T) {
+	os.Unsetenv("PULSEHA_TEST")
+
+	cfg := syslogLoadFixture(t, `"logging_level":"info","mode":"active-passive","log_to_syslog":false`)
+
+	if cfg.Pulse.SyslogEnabled() {
+		t.Error("log_to_syslog:false was overridden; turning syslog off in the " +
+			"config has to turn syslog off")
+	}
+}
+
+// The same instruction, with a tag set, so the fix is not merely moving which
+// spelling of "off" gets honoured.
+func TestExplicitlyDisabledSyslogStaysDisabledWithATagSet(t *testing.T) {
+	os.Unsetenv("PULSEHA_TEST")
+
+	cfg := syslogLoadFixture(t,
+		`"logging_level":"info","mode":"active-passive","log_to_syslog":false,"syslog_tag":"pulseha"`)
+
+	if cfg.Pulse.SyslogEnabled() {
+		t.Error("log_to_syslog:false was overridden even with a tag set")
+	}
 }
