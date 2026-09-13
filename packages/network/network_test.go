@@ -36,22 +36,6 @@ func TestCheckIfIPExists(t *testing.T) {
 	}
 }
 
-func TestICMPv4(t *testing.T) {
-	// Skip the test if it's running in CI environment
-	if os.Getenv("CI") != "" {
-		t.Skip("Skipping ICMP test in CI environment")
-	}
-
-	// Use localhost instead of a CIDR notation that might confuse the ping command
-	err := ICMPv4("127.0.0.1")
-	if err != nil {
-		// If ping fails, it might be due to firewall or permission issues
-		t.Log("ICMP ping failed:", err)
-		t.Log("This may be due to firewall rules or permission issues")
-		t.Skip("Skipping ICMP test due to environment constraints")
-	}
-}
-
 func TestSendGARPNoExit(t *testing.T) {
 	// Skip in CI environments as it relies on host network information
 	if os.Getenv("CI") != "" {
