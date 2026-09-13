@@ -385,6 +385,7 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 				if m.NodeId == nodeID {
 					fmt.Printf("Successfully joined cluster: %s (%s:%s) [id=%s]\n", m.Hostname, utils.FormatIPv6(m.Ip),
 						m.Port, m.NodeId)
+					printJoinedInMaintenance(m)
 					return nil
 				}
 			}
@@ -401,6 +402,7 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 					if m.NodeId == nodeID {
 						fmt.Printf("Joined cluster (confirmed by %s); local daemon will reflect shortly. Node ID: %s\n",
 							host, nodeID)
+						printJoinedInMaintenance(m)
 						cancel3()
 						return nil
 					}
@@ -692,4 +694,32 @@ func (c *Client) DeleteGroup(groupName string, force bool) error {
 
 	fmt.Printf("%s\n", resp.Message)
 	return nil
+}
+
+// printJoinedInMaintenance explains the state a freshly joined node is actually
+// in, when that state is maintenance.
+//
+// HandleNodeJoin parks every joining node deliberately (94ffa13), so it cannot
+// take floating IPs before an operator has said which ones it should serve. That
+// is the right default, and it was communicated nowhere: `cluster join` reported
+// success, `pulsectl status` then reported the cluster degraded, no README or
+// docs page mentioned the follow-up, and the two facts had to be connected by
+// whoever hit it (#115).
+//
+// Driven off the member's reported status rather than an assumption that joins
+// park nodes. The CLI already holds the member it just confirmed, so this says
+// what is true of that node -- and if the default ever changes the message stops
+// appearing on its own, instead of becoming a confident lie.
+func printJoinedInMaintenance(m *rpc.Member) {
+	if m == nil || m.Status != rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE {
+		return
+	}
+
+	fmt.Printf("\nThis node is in maintenance mode and will not take floating IPs yet.\n")
+	fmt.Printf("`pulsectl status` reports the cluster as degraded until it leaves \u2014 that is\n")
+	fmt.Printf("expected after a join, not a failure.\n\n")
+	fmt.Printf("  1. assign the groups it should serve:\n")
+	fmt.Printf("       pulsectl group assign --group <name> --node-id %s --interface <iface>\n", m.NodeId)
+	fmt.Printf("  2. bring it out of maintenance:\n")
+	fmt.Printf("       pulsectl node maintenance --disable --node-id %s\n", m.NodeId)
 }
