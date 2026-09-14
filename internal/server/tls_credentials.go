@@ -288,7 +288,10 @@ func (s *Server) EnforceIdentityGuard() {
 	s.logger.Error("This node's certificate is not the one the cluster knows it by, and the "+
 		"cluster requires TLS. Peers will refuse everything this node sends except a join, "+
 		"including the config push that would publish the new certificate — so this cannot "+
-		"repair itself. Re-join this node with a token from a healthy member.",
+		"repair itself. It cannot `cluster leave` either, because leaving coordinates with "+
+		"the peers that are refusing it: clear this node's cluster entries from its own "+
+		"config.json and restart it, then re-join with a token from a healthy member. See "+
+		"docs/RUNBOOK-111-verify.md.",
 		"onDisk", certificateFingerprint(onDisk),
 		"clusterExpects", certificateFingerprint(expected))
 

@@ -1065,8 +1065,16 @@ func TestAStaleIdentityIsHeldOutOfPromotion(t *testing.T) {
 		if !rec.contains(marker) {
 			t.Error("nothing said why the node was held back")
 		}
-		if !rec.contains("Re-join this node") {
-			t.Error("the report does not say what to do about it")
+		// The recovery is a local reset and *then* a re-join, measured on the pair:
+		// `cluster leave` fails because leaving coordinates with the peers that are
+		// refusing this node, and `cluster join` then refuses because it is still
+		// in a cluster. A message saying only "re-join" sends an operator into that
+		// loop.
+		for _, want := range []string{"clear this node's cluster entries", "re-join"} {
+			if !rec.contains(want) {
+				t.Errorf("the report does not mention %q; an operator told only to re-join "+
+					"hits `leave first` and then `PermissionDenied` on the leave", want)
+			}
 		}
 	})
 
@@ -1144,4 +1152,38 @@ func TestAStaleIdentityIsHeldOutOfPromotion(t *testing.T) {
 				"maintenance was cleared by a check that has nothing to do with it", got)
 		}
 	})
+}
+
+// A node that has lost its certificate must still be able to start on a cluster
+// that requires TLS — it cannot be given a new one otherwise.
+//
+// Start builds the cluster listener, and on `required` that needs this node's
+// keypair. With the certificate step after the listener, a node whose keypair had
+// gone — a half-written pair, a deleted file, an image restored without it — died
+// with `cluster TLS credentials could not be built` before reaching the code that
+// would have regenerated it, and systemd restarted it into the same wall forever.
+// Found on the live pair by deleting a certificate to watch the promotion guard
+// engage; the node never got far enough to have a guard.
+func TestCertificatesAreEnsuredBeforeTheListenerNeedsThem(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "func (s *Server) Start()")
+	if start < 0 {
+		t.Fatal("Start() not found")
+	}
+	certs := strings.Index(body[start:], "Checking/Generating TLS certificates")
+	listener := strings.Index(body[start:], "startClusterListener(localNode)")
+	if certs < 0 || listener < 0 {
+		t.Fatalf("landmarks not found in Start(): certs=%d listener=%d", certs, listener)
+	}
+	if certs > listener {
+		t.Error("Start() builds the cluster listener before ensuring this node has a " +
+			"certificate. On tls_mode=required the listener cannot be built without one, " +
+			"so a node that has lost its keypair dies before the code that would " +
+			"replace it and never starts again.")
+	}
 }

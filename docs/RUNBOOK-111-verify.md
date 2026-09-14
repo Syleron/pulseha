@@ -291,9 +291,25 @@ a `required` cluster:
 This node's certificate is not the one the cluster knows it by, and the cluster requires TLS
 ```
 
-**The way out is a re-join**, not a config edit: `Join` is the one RPC an unnamed certificate may
-call, and the join records the joiner's certificate. Take a token from a healthy member and
-`pulsectl cluster join` this node back in.
+**The way out is a local reset and then a re-join** — a re-join alone is not enough, and this was
+measured rather than guessed. `pulsectl cluster leave` on the affected node fails with
+`PermissionDenied … is not in the cluster trust set`, because leaving coordinates the removal with
+the peers that are refusing it; and `cluster join` then refuses with `node is already part of a
+cluster; leave first`. So, on the affected node's console:
+
+```bash
+sudo systemctl stop pulseha
+# edit /etc/pulseha/config.json: keep only this node's own entry under "nodes",
+# and set "tls_mode": "permissive" so the join itself can proceed
+sudo systemctl start pulseha
+sudo pulsectl cluster leave                    # now succeeds, local state only
+sudo pulsectl cluster join --address <healthy node>:9083 --token '<full token>' --bind-ip <this node>
+sudo pulsectl node maintenance --disable       # a join always lands in maintenance
+```
+
+Remove it from the healthy node first (`pulsectl node remove --node-id …`) so it is not carrying
+a stale entry. `Join` is the one RPC an unnamed certificate may call, and the join records the
+joiner's certificate, which is what puts it back in the trust set.
 
 The node also takes itself **out of failover promotion** while this is true, so it cannot elect
 itself against a healthy cluster it simply cannot reach. Expect, beside the line above:
