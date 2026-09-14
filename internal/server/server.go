@@ -436,8 +436,22 @@ func (s *Server) Start() error {
 		return fmt.Errorf("failed to get hostname: %v", err)
 	}
 	if os.Getenv("PULSEHA_TEST") != "true" {
-		if err := security.GenerateCertificates(hostname); err != nil {
-			s.logger.Warn("Failed to generate certificates, continuing without TLS", "error", err)
+		// Ensure, not generate: this used to rewrite all four files on every start,
+		// so the node's identity changed each time it came up (#111). Nothing
+		// depends on that identity yet, and nothing can until it stops moving.
+		generated, reason, err := security.EnsureCertificates(hostname)
+		switch {
+		case err != nil:
+			s.logger.Warn("Failed to generate certificates, continuing without TLS",
+				"error", err, "reason", reason)
+		case generated:
+			// Warn rather than Info: replacing this node's identity is a thing an
+			// operator should be able to find the cause of afterwards, and once
+			// ADR-0005's allowlist exists it is the event that makes the config
+			// stale until the new certificate is published.
+			s.logger.Warn("Generated new TLS certificates for this node", "reason", reason)
+		default:
+			s.logger.Debug("TLS certificates on disk are usable; keeping them")
 		}
 	} else {
 		s.logger.Debug("PULSEHA_TEST=true: skipping certificate generation")
@@ -4934,9 +4948,17 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 
 	// Generate certificates for mTLS
 	if os.Getenv("PULSEHA_TEST") != "true" {
-		if err := security.GenerateCertificates(hostname); err != nil {
-			s.logger.Warn("Failed to generate certificates", "error", err)
+		// Ensure, not generate, for the reason given at the other call site (#111):
+		// a certificate that is replaced on every start cannot be an identity.
+		generated, reason, err := security.EnsureCertificates(hostname)
+		switch {
+		case err != nil:
+			s.logger.Warn("Failed to generate certificates", "error", err, "reason", reason)
 			// Continue without TLS for now
+		case generated:
+			s.logger.Warn("Generated new TLS certificates for this node", "reason", reason)
+		default:
+			s.logger.Debug("TLS certificates on disk are usable; keeping them")
 		}
 	} else {
 		s.logger.Debug("PULSEHA_TEST=true: skipping certificate generation in CreateCluster")
