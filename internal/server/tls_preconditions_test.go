@@ -1,3 +1,19 @@
+// PulseHA - HA Cluster Daemon
+// Copyright (C) 2017-2021  Andrew Zak <andrew@linux.com>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 package server
 
 import (
@@ -15,9 +31,13 @@ import (
 	"github.com/syleron/pulseha/packages/config"
 )
 
-// selfSigned mints a certificate the way a node's own generation does, returning
-// its PEM and DER.
-func selfSigned(t *testing.T, cn string) (string, []byte) {
+// selfSigned mints a certificate the way a node's own generation does.
+//
+// A second copy of clustertls's helper rather than something shared. What these
+// tests need from it is only "a certificate the trust set will accept", and a
+// helper reached across a package boundary would tie the precondition tests to
+// the shape of the trust set's tests, which are asking a different question.
+func selfSigned(t *testing.T, cn string) string {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -36,98 +56,15 @@ func selfSigned(t *testing.T, cn string) (string, []byte) {
 	if err != nil {
 		t.Fatalf("cert: %v", err)
 	}
-	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), der
-}
-
-func TestTheTrustSetAcceptsWhatTheConfigNames(t *testing.T) {
-	aPEM, aDER := selfSigned(t, "node-a")
-	bPEM, bDER := selfSigned(t, "node-b")
-
-	set, err := newTrustSet(map[string]*config.Node{
-		"node-a": {Hostname: "node-a", TLSCert: aPEM},
-		"node-b": {Hostname: "node-b", TLSCert: bPEM},
-	})
-	if err != nil {
-		t.Fatalf("newTrustSet: %v", err)
-	}
-
-	for id, der := range map[string][]byte{"node-a": aDER, "node-b": bDER} {
-		got, err := set.verifyPeer([][]byte{der})
-		if err != nil {
-			t.Errorf("%s rejected: %v", id, err)
-		}
-		if got != id {
-			t.Errorf("identified %q, want %q", got, id)
-		}
-	}
-}
-
-// The line the whole design rests on: a certificate the config does not name is
-// refused, however well-formed it is.
-func TestAnUnnamedCertificateIsRefused(t *testing.T) {
-	aPEM, _ := selfSigned(t, "node-a")
-	_, strangerDER := selfSigned(t, "node-a") // same name, different key
-
-	set, err := newTrustSet(map[string]*config.Node{"node-a": {Hostname: "node-a", TLSCert: aPEM}})
-	if err != nil {
-		t.Fatalf("newTrustSet: %v", err)
-	}
-
-	if _, err := set.verifyPeer([][]byte{strangerDER}); err == nil {
-		t.Fatal("a certificate with the right CommonName but the wrong key was accepted; " +
-			"the set names certificates, not names")
-	}
-}
-
-// Only the leaf is consulted. A peer that appends a chain must not be able to
-// talk its way in with something further down it.
-func TestOnlyTheLeafIsConsidered(t *testing.T) {
-	aPEM, aDER := selfSigned(t, "node-a")
-	_, strangerDER := selfSigned(t, "stranger")
-
-	set, _ := newTrustSet(map[string]*config.Node{"node-a": {Hostname: "node-a", TLSCert: aPEM}})
-
-	if _, err := set.verifyPeer([][]byte{strangerDER, aDER}); err == nil {
-		t.Error("a trusted certificate presented behind an untrusted leaf was accepted")
-	}
-	if _, err := set.verifyPeer([][]byte{aDER, strangerDER}); err != nil {
-		t.Errorf("a trusted leaf with trailing chain was rejected: %v", err)
-	}
-}
-
-func TestTheEmptyCases(t *testing.T) {
-	aPEM, _ := selfSigned(t, "node-a")
-	set, _ := newTrustSet(map[string]*config.Node{"node-a": {Hostname: "node-a", TLSCert: aPEM}})
-
-	if _, err := set.verifyPeer(nil); err == nil {
-		t.Error("a peer presenting nothing was accepted")
-	}
-	if _, err := (*trustSet)(nil).verifyPeer([][]byte{{1}}); err == nil {
-		t.Error("a nil trust set accepted a peer")
-	}
-
-	// Nodes that have not published yet contribute nothing, which is the
-	// permissive phase; a set with none at all is refused so the flip cannot
-	// produce a cluster that trusts everybody or nobody by accident.
-	if _, err := newTrustSet(map[string]*config.Node{"node-a": {Hostname: "node-a"}}); err == nil {
-		t.Error("a config naming no certificates produced a usable trust set")
-	}
-}
-
-func TestAMalformedCertificateIsAnError(t *testing.T) {
-	if _, err := newTrustSet(map[string]*config.Node{
-		"node-a": {TLSCert: "-----BEGIN CERTIFICATE-----\nnot der\n-----END CERTIFICATE-----"},
-	}); err == nil || !strings.Contains(err.Error(), "node-a") {
-		t.Errorf("err = %v, want it to name the node whose certificate cannot be read", err)
-	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 // healthy is the shape of a cluster that may be flipped: every node published,
 // every node heard from.
 func healthy(t *testing.T) (map[string]*config.Node, map[string]membership.MemberStatus) {
 	t.Helper()
-	aPEM, _ := selfSigned(t, "node-a")
-	bPEM, _ := selfSigned(t, "node-b")
+	aPEM := selfSigned(t, "node-a")
+	bPEM := selfSigned(t, "node-b")
 	return map[string]*config.Node{
 		"uuid-a": {Hostname: "node-a", TLSCert: aPEM},
 		"uuid-b": {Hostname: "node-b", TLSCert: bPEM},
