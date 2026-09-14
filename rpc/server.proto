@@ -101,6 +101,15 @@ message JoinRequest {
     string node_id = 3;  // Required node ID
     string bind_ip = 4;  // Optional local bind IP
     string bind_port = 5; // Optional local bind port
+    // The joining node's public certificate, PEM encoded. Never a key.
+    //
+    // Carried with the request so the node is in the cluster's trust set the
+    // moment it is in the cluster's config, rather than whenever its own publish
+    // happens to propagate afterwards (#111, ADR-0005 step 3). Empty from a node
+    // running a build that predates this, which is a node that publishes for
+    // itself a moment later -- so the joinee records what it is given and does
+    // not require it.
+    string tls_cert = 6;
 }
 
 message JoinResponse {

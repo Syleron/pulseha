@@ -1164,6 +1164,11 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		Port:        req.BindPort,
 		IPGroups:    make(map[string][]string),
 		Maintenance: true,
+		// Recorded, not required. A joiner running a build that predates this
+		// sends nothing and publishes for itself a moment later, which is exactly
+		// the behaviour step 2 shipped -- so an empty value here is a slower path
+		// to the same place, not a failure to reject (#111 step 3).
+		TLSCert: strings.TrimSpace(req.TlsCert),
 	}
 	s.logger.Debugf("Config updated, releasing config lock...")
 	s.config.Unlock()
@@ -7005,6 +7010,12 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		NodeId:   nodeID,
 		BindIp:   bindIP,
 		BindPort: bindPort,
+		// Carried with the request so this node is in the trust set the moment it
+		// is in the config, rather than whenever its own publish propagates
+		// afterwards (#111 step 3). Best effort: a node with no certificate yet
+		// simply publishes for itself shortly after, which is what happened before
+		// this existed.
+		TlsCert: localCertificatePEM(),
 	}
 	s.logger.Info("INITIATE_JOIN: Sending join request to target",
 		"targetHost", req.TargetHost,
@@ -7668,6 +7679,14 @@ func (s *Server) getPeerClient(peerID string, node *config.Node) (*client.Client
 		return nil, fmt.Errorf("failed to connect to %s:%s: %w", utils.FormatIPv6(node.IP), node.Port, err)
 	}
 
+	// Created on demand rather than assumed. A Server built as a struct literal --
+	// which several call sites and every test in this package do -- has a nil map
+	// here, and assigning into one panics. That panic lands on a goroutine the
+	// join detaches, so nothing recovers it and the daemon dies, which is a hard
+	// way to discover a missing field initialiser.
+	if s.peerClients == nil {
+		s.peerClients = make(map[string]*client.Client)
+	}
 	s.peerClients[peerID] = remoteClient
 	s.logger.Debug("Created new peer connection", "peerID", peerID, "address", node.IP+":"+node.Port)
 	return remoteClient, nil
@@ -8731,17 +8750,11 @@ func localAddrToward(target string) (string, error) {
 // loadInitialMembers, whose own comment records that Start calls it holding the
 // write lock.
 func (s *Server) PublishLocalCertificate() {
-	certPath := filepath.Join(security.CertDir, "pulseha.crt")
-	pemBytes, err := os.ReadFile(certPath)
-	if err != nil {
-		// Not an error worth failing anything over: a node with no certificate
-		// simply has not published, and the trust set tolerates that by design
-		// until the flip to required.
-		s.logger.Debug("No certificate to publish yet", "path", certPath, "error", err)
-		return
-	}
-	cert := strings.TrimSpace(string(pemBytes))
+	// The same reader the join path uses, so there is one answer to "what is this
+	// node's certificate" rather than two that can drift.
+	cert := localCertificatePEM()
 	if cert == "" {
+		s.logger.Debug("No certificate to publish yet", "dir", security.CertDir)
 		return
 	}
 
@@ -8812,4 +8825,19 @@ func (s *Server) PublishLocalCertificate() {
 func certificateFingerprint(pemCert string) string {
 	sum := sha256.Sum256([]byte(pemCert))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// localCertificatePEM returns this node's public certificate, or "" if it has
+// none yet.
+//
+// Deliberately silent about failure. Every caller is describing this node to
+// somebody else, and a node without a certificate is a node that has not
+// published yet -- a state the permissive phase exists to tolerate, not an error
+// to propagate up a join.
+func localCertificatePEM() string {
+	pemBytes, err := os.ReadFile(filepath.Join(security.CertDir, "pulseha.crt"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(pemBytes))
 }
