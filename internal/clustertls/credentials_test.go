@@ -77,23 +77,34 @@ func mintIdentity(t *testing.T, cn string) (dir, certPEM string) {
 	return dir, strings.TrimSpace(string(certBytes))
 }
 
-// credentialsAs builds what the node whose identity lives in dir would serve and
-// offer, given the cluster config it can currently see.
-func credentialsAs(t *testing.T, dir string, snapshot Snapshot) *tls.Config {
+// credentialsAs builds what the node whose identity lives in dir would use,
+// given the cluster config it can currently see.
+func credentialsAs(t *testing.T, dir string, snapshot Snapshot,
+	build func(Snapshot) (*tls.Config, error)) *tls.Config {
 	t.Helper()
 
 	prev := security.CertDir
 	security.CertDir = dir
 	defer func() { security.CertDir = prev }()
 
-	cfg, err := Credentials(snapshot)
+	cfg, err := build(snapshot)
 	if err != nil {
-		t.Fatalf("Credentials: %v", err)
+		t.Fatalf("credentials: %v", err)
 	}
 	if cfg == nil {
-		t.Fatal("Credentials returned no credentials for a cluster that requires TLS")
+		t.Fatal("no credentials for a cluster that requires TLS")
 	}
 	return cfg
+}
+
+func serverAs(t *testing.T, dir string, snapshot Snapshot) *tls.Config {
+	t.Helper()
+	return credentialsAs(t, dir, snapshot, ServerCredentials)
+}
+
+func clientAs(t *testing.T, dir string, snapshot Snapshot) *tls.Config {
+	t.Helper()
+	return credentialsAs(t, dir, snapshot, ClientCredentials)
 }
 
 // requiredConfig is a flipped cluster whose config names the given nodes.
@@ -163,12 +174,17 @@ func TestAPermissiveClusterGetsNoCredentials(t *testing.T) {
 		cfg := &config.Config{Nodes: map[string]*config.Node{}}
 		cfg.Pulse.TLSMode = mode
 
-		got, err := Credentials(snapshotOf(cfg))
-		if err != nil {
-			t.Errorf("tls_mode %q: %v", mode, err)
-		}
-		if got != nil {
-			t.Errorf("tls_mode %q produced credentials; the wire should stay plaintext", mode)
+		for name, build := range map[string]func(Snapshot) (*tls.Config, error){
+			"client": ClientCredentials, "server": ServerCredentials,
+		} {
+			got, err := build(snapshotOf(cfg))
+			if err != nil {
+				t.Errorf("%s, tls_mode %q: %v", name, mode, err)
+			}
+			if got != nil {
+				t.Errorf("%s, tls_mode %q produced credentials; the wire should stay plaintext",
+					name, mode)
+			}
 		}
 	}
 }
@@ -182,7 +198,7 @@ func TestTwoNodesTheConfigNamesCanSpeak(t *testing.T) {
 		"uuid-b": {Hostname: "node-b", TLSCert: bPEM},
 	}))
 
-	sErr, cErr := handshake(t, credentialsAs(t, aDir, cluster), credentialsAs(t, bDir, cluster))
+	sErr, cErr := handshake(t, serverAs(t, aDir, cluster), clientAs(t, bDir, cluster))
 	if sErr != nil || cErr != nil {
 		t.Fatalf("two nodes the config names could not speak: server=%v client=%v", sErr, cErr)
 	}
@@ -207,75 +223,96 @@ func TestAStrangerIsRefusedInBothDirections(t *testing.T) {
 		"uuid-s": {Hostname: "stranger", TLSCert: sPEM},
 	}))
 
-	t.Run("stranger dialling in", func(t *testing.T) {
+	// Dialling out is where the refusal lives. A node never sends a request to a
+	// server the config does not name.
+	t.Run("stranger dialled to", func(t *testing.T) {
 		sErr, cErr := handshake(t,
-			credentialsAs(t, aDir, cluster), credentialsAs(t, sDir, strangerSees))
+			serverAs(t, sDir, strangerSees), clientAs(t, aDir, cluster))
 		if sErr == nil && cErr == nil {
-			t.Fatal("an unnamed client was accepted by the listener")
+			t.Fatal("a client accepted a listener the config does not name")
 		}
 	})
 
-	t.Run("stranger dialled to", func(t *testing.T) {
-		sErr, cErr := handshake(t,
-			credentialsAs(t, sDir, strangerSees), credentialsAs(t, aDir, cluster))
-		if sErr == nil && cErr == nil {
-			t.Fatal("a client accepted a listener the config does not name")
+	// Dialling in, the handshake deliberately succeeds: the listener has to let a
+	// node that is not in the trust set get far enough to ask to join it. What it
+	// must not do is let that connection be anonymous -- the certificate has to be
+	// there for the daemon's interceptor to judge, and TestAnUnnamedPeerMayOnlyJoin
+	// in internal/server is where the judging is tested.
+	t.Run("stranger dialling in reaches the listener, with a name on it", func(t *testing.T) {
+		serverCfg := serverAs(t, aDir, cluster)
+		sErr, cErr := handshake(t, serverCfg, clientAs(t, sDir, strangerSees))
+		if sErr != nil || cErr != nil {
+			t.Fatalf("a node that is not in the trust set could not reach the listener to "+
+				"ask to join it: server=%v client=%v", sErr, cErr)
+		}
+		if serverCfg.ClientAuth != tls.RequireAnyClientCert {
+			t.Errorf("ClientAuth = %v, want RequireAnyClientCert; without a certificate on "+
+				"the connection the interceptor has nothing to authorise and an "+
+				"anonymous caller would reach Join", serverCfg.ClientAuth)
 		}
 	})
 }
 
 // Removal is revocation, and that is only true if the set is re-read at the
-// handshake rather than captured when the listener was built. The same tls.Config
-// object must start refusing a peer the instant the config stops naming it.
+// handshake rather than captured when the credentials were built. The same
+// tls.Config object must start refusing a peer the instant the config stops
+// naming it.
+//
+// Tested on the dialling side, which is where the trust set is consulted now:
+// node-b refuses to talk to node-a from the moment b's own config stops naming
+// it. The inbound half of the same property belongs to the daemon's
+// authorisation interceptor and is tested there.
 func TestRemovingANodeFromTheConfigRevokesIt(t *testing.T) {
 	aDir, aPEM := mintIdentity(t, "node-a")
 	bDir, bPEM := mintIdentity(t, "node-b")
 
+	// What node-b believes about the cluster, which is what decides who it will
+	// talk to. Built into its credentials once and never rebuilt below.
 	live := requiredConfig(map[string]*config.Node{
 		"uuid-a": {Hostname: "node-a", TLSCert: aPEM},
 		"uuid-b": {Hostname: "node-b", TLSCert: bPEM},
 	})
-	// node-a's listener credentials, built once and never rebuilt below.
-	serverCfg := credentialsAs(t, aDir, func() *config.Config { return live })
-	clientCfg := credentialsAs(t, bDir, snapshotOf(requiredConfig(map[string]*config.Node{
+	clientCfg := clientAs(t, bDir, func() *config.Config { return live })
+	serverCfg := serverAs(t, aDir, snapshotOf(requiredConfig(map[string]*config.Node{
 		"uuid-a": {Hostname: "node-a", TLSCert: aPEM},
 		"uuid-b": {Hostname: "node-b", TLSCert: bPEM},
 	})))
 
 	if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr != nil || cErr != nil {
-		t.Fatalf("node-b was refused while the config still named it: server=%v client=%v", sErr, cErr)
+		t.Fatalf("node-a was refused while node-b's config still named it: server=%v client=%v",
+			sErr, cErr)
 	}
 
-	delete(live.Nodes, "uuid-b")
+	delete(live.Nodes, "uuid-a")
 
 	if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr == nil && cErr == nil {
-		t.Fatal("a removed node was still accepted; the trust set was captured " +
-			"when the listener was built rather than read at the handshake")
+		t.Fatal("a removed node was still talked to; the trust set was captured when the " +
+			"credentials were built rather than read at the handshake")
 	}
 }
 
-// The other half of the same property: a node that joins after the listener was
-// built is accepted without the listener being touched.
+// The other half of the same property: a node that joins after the credentials
+// were built is talked to without them being rebuilt.
 func TestANodeThatJoinsAfterwardsIsAccepted(t *testing.T) {
 	aDir, aPEM := mintIdentity(t, "node-a")
 	bDir, bPEM := mintIdentity(t, "node-b")
 
-	live := requiredConfig(map[string]*config.Node{"uuid-a": {Hostname: "node-a", TLSCert: aPEM}})
-	serverCfg := credentialsAs(t, aDir, func() *config.Config { return live })
-	clientCfg := credentialsAs(t, bDir, snapshotOf(requiredConfig(map[string]*config.Node{
+	live := requiredConfig(map[string]*config.Node{"uuid-b": {Hostname: "node-b", TLSCert: bPEM}})
+	clientCfg := clientAs(t, bDir, func() *config.Config { return live })
+	serverCfg := serverAs(t, aDir, snapshotOf(requiredConfig(map[string]*config.Node{
 		"uuid-a": {Hostname: "node-a", TLSCert: aPEM},
 		"uuid-b": {Hostname: "node-b", TLSCert: bPEM},
 	})))
 
 	if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr == nil && cErr == nil {
-		t.Fatal("node-b was accepted before the config named it")
+		t.Fatal("node-a was talked to before node-b's config named it")
 	}
 
-	live.Nodes["uuid-b"] = &config.Node{Hostname: "node-b", TLSCert: bPEM}
+	live.Nodes["uuid-a"] = &config.Node{Hostname: "node-a", TLSCert: aPEM}
 
 	if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr != nil || cErr != nil {
-		t.Fatalf("a node that joined after the listener was built was refused: server=%v client=%v",
-			sErr, cErr)
+		t.Fatalf("a node that joined after the credentials were built was refused: "+
+			"server=%v client=%v", sErr, cErr)
 	}
 }
 
@@ -293,12 +330,16 @@ func TestRequiredWithNothingToOfferIsAnError(t *testing.T) {
 		restore(t, t.TempDir())
 
 		cfg := requiredConfig(map[string]*config.Node{"uuid-a": {Hostname: "node-a", TLSCert: "x"}})
-		got, err := Credentials(snapshotOf(cfg))
-		if err == nil {
-			t.Error("a node with no certificate on disk produced credentials")
-		}
-		if got != nil {
-			t.Error("an error came back with a usable tls.Config beside it")
+		for name, build := range map[string]func(Snapshot) (*tls.Config, error){
+			"client": ClientCredentials, "server": ServerCredentials,
+		} {
+			got, err := build(snapshotOf(cfg))
+			if err == nil {
+				t.Errorf("%s: a node with no certificate on disk produced credentials", name)
+			}
+			if got != nil {
+				t.Errorf("%s: an error came back with a usable tls.Config beside it", name)
+			}
 		}
 	})
 
@@ -307,18 +348,114 @@ func TestRequiredWithNothingToOfferIsAnError(t *testing.T) {
 		restore(t, dir)
 
 		cfg := requiredConfig(map[string]*config.Node{"uuid-a": {Hostname: "node-a"}})
-		if _, err := Credentials(snapshotOf(cfg)); err == nil {
+		if _, err := ServerCredentials(snapshotOf(cfg)); err == nil {
 			t.Error("a cluster whose config names no certificates produced credentials; " +
 				"the listener would have started and refused everybody")
 		}
 	})
 
 	t.Run("no config at all", func(t *testing.T) {
-		if _, err := Credentials(nil); err == nil {
+		if _, err := ClientCredentials(nil); err == nil {
 			t.Error("a nil snapshot produced credentials")
 		}
-		if _, err := Credentials(func() *config.Config { return nil }); err == nil {
+		if _, err := ServerCredentials(func() *config.Config { return nil }); err == nil {
 			t.Error("a snapshot returning nothing produced credentials")
 		}
 	})
+}
+
+// The bootstrap, from the joiner's side. A node that has never spoken to this
+// cluster has no trust set, so it checks the far end against the one fingerprint
+// an operator carried to it in the join token — and against nothing else.
+func TestAJoinerPinsTheCertificateTheTokenNames(t *testing.T) {
+	targetDir, targetPEM := mintIdentity(t, "target")
+	joinerDir, _ := mintIdentity(t, "joiner")
+
+	pin, err := Fingerprint(targetPEM)
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+
+	// The target is in a cluster the joiner is not in, which is the whole point:
+	// its trust set does not name the joiner.
+	serverCfg := serverAs(t, targetDir, snapshotOf(requiredConfig(map[string]*config.Node{
+		"uuid-target": {Hostname: "target", TLSCert: targetPEM},
+	})))
+
+	t.Run("the certificate the token names", func(t *testing.T) {
+		security.CertDir = joinerDir
+		clientCfg, err := PinnedClientCredentials(pin)
+		if err != nil {
+			t.Fatalf("PinnedClientCredentials: %v", err)
+		}
+		if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr != nil || cErr != nil {
+			t.Fatalf("a joiner holding the right fingerprint could not reach the cluster: "+
+				"server=%v client=%v", sErr, cErr)
+		}
+	})
+
+	t.Run("a different certificate", func(t *testing.T) {
+		_, otherPEM := mintIdentity(t, "impostor")
+		otherPin, err := Fingerprint(otherPEM)
+		if err != nil {
+			t.Fatalf("Fingerprint: %v", err)
+		}
+
+		security.CertDir = joinerDir
+		clientCfg, err := PinnedClientCredentials(otherPin)
+		if err != nil {
+			t.Fatalf("PinnedClientCredentials: %v", err)
+		}
+		if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr == nil && cErr == nil {
+			t.Fatal("a joiner talked to a node whose certificate its token does not name; " +
+				"that is the trust-on-first-use the pin exists to remove")
+		}
+	})
+
+	t.Run("a fingerprint that is not one", func(t *testing.T) {
+		security.CertDir = joinerDir
+		for _, bad := range []string{"", "abc", pin + "00", strings.ToUpper(pin) + "x"} {
+			if _, err := PinnedClientCredentials(bad); err == nil {
+				t.Errorf("%q was accepted as a certificate fingerprint", bad)
+			}
+		}
+	})
+
+	// Whitespace and case are how a fingerprint arrives after a human has moved
+	// it — copied out of a terminal, pasted into another one.
+	t.Run("as an operator would have carried it", func(t *testing.T) {
+		security.CertDir = joinerDir
+		clientCfg, err := PinnedClientCredentials("  " + strings.ToUpper(pin) + "\n")
+		if err != nil {
+			t.Fatalf("PinnedClientCredentials: %v", err)
+		}
+		if sErr, cErr := handshake(t, serverCfg, clientCfg); sErr != nil || cErr != nil {
+			t.Fatalf("a fingerprint that had been through a copy and paste was rejected: "+
+				"server=%v client=%v", sErr, cErr)
+		}
+	})
+}
+
+// The fingerprint is over the DER, so reformatting the PEM the config carries it
+// as cannot change a node's identity.
+func TestTheFingerprintSurvivesReformattingThePEM(t *testing.T) {
+	_, certPEM := mintIdentity(t, "node-a")
+
+	want, err := Fingerprint(certPEM)
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+	for _, variant := range []string{certPEM + "\n", "\n\t" + certPEM + "  \n", certPEM + "\r\n"} {
+		got, err := Fingerprint(variant)
+		if err != nil {
+			t.Fatalf("Fingerprint: %v", err)
+		}
+		if got != want {
+			t.Errorf("whitespace around the PEM changed the fingerprint: %s vs %s", got, want)
+		}
+	}
+
+	if _, err := Fingerprint("not a certificate"); err == nil {
+		t.Error("something that is not a certificate produced a fingerprint")
+	}
 }

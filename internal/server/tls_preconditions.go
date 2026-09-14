@@ -174,7 +174,7 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 		// written.
 		probe := &config.Config{Nodes: cfg.Nodes}
 		probe.Pulse.TLSMode = config.TLSModeRequired
-		if _, err := clustertls.Credentials(func() *config.Config { return probe }); err != nil {
+		if _, err := clustertls.ServerCredentials(func() *config.Config { return probe }); err != nil {
 			return refuse("this node cannot serve TLS: %v", err)
 		}
 	}

@@ -56,10 +56,10 @@ func (s *Server) clusterSnapshot() clustertls.Snapshot {
 	}
 }
 
-// peerCredentials is the TLS configuration this node offers to peers and serves
-// to them, or nil while the cluster is permissive and the wire stays plaintext.
+// peerCredentials is the TLS configuration this node offers when it dials a
+// peer, or nil while the cluster is permissive and the wire stays plaintext.
 func (s *Server) peerCredentials() (*tls.Config, error) {
-	return clustertls.Credentials(s.clusterSnapshot())
+	return clustertls.ClientCredentials(s.clusterSnapshot())
 }
 
 // dialPeer opens c against a peer, over TLS when the cluster requires it.
@@ -94,14 +94,19 @@ func (s *Server) dialPeer(c *client.Client, ip, port string) error {
 // stop accepting it. Serving nothing is the one an operator can diagnose, and it
 // fails on this node rather than silently downgrading the cluster.
 func (s *Server) newClusterGRPCServer() (srv *grpc.Server, tlsServed bool, err error) {
-	creds, err := s.peerCredentials()
+	creds, err := clustertls.ServerCredentials(s.clusterSnapshot())
 	if err != nil {
 		return nil, false, fmt.Errorf("cluster TLS credentials could not be built: %w", err)
 	}
 
 	var opts []grpc.ServerOption
 	if creds != nil {
-		opts = append(opts, grpc.Creds(credentials.NewTLS(creds)))
+		// The interceptor goes on with the credentials and only with them. It is
+		// what refuses a certificate the config does not name, which the handshake
+		// no longer does -- see ServerCredentials for why that had to move.
+		opts = append(opts,
+			grpc.Creds(credentials.NewTLS(creds)),
+			grpc.UnaryInterceptor(s.authorisePeer))
 	}
 
 	srv = grpc.NewServer(opts...)
