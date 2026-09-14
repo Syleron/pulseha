@@ -3,11 +3,9 @@ package client
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 	"time"
@@ -15,7 +13,6 @@ import (
 	log "github.com/charmbracelet/log"
 	"github.com/google/uuid"
 	"github.com/syleron/pulseha/packages/config"
-	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
@@ -170,40 +167,31 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 	}
 }
 
-// Connect creates a new client connection with TLS support
-func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
+// Connect creates a new client connection, over TLS when the caller supplies a
+// configuration and in clear when it does not.
+//
+// The caller decides, and passes the decision rather than a flag, because the
+// only place that can build cluster credentials is the one holding the cluster
+// config -- this package has no idea which certificates a cluster trusts. Nil is
+// plaintext, which is every cluster that has not been flipped to `tls_mode:
+// required` (ADR-0005).
+//
+// What was here before took a `tlsEnabled bool` and built the configuration
+// itself, from a CA on disk that nothing distributed, with InsecureSkipVerify
+// set -- so `true` could not work and all 17 call sites passed `false` (#111).
+// It also looked for its files at `CertDir+"pulseha.crt"`, which with no
+// separator is not a path any file has ever been written to: proof that the
+// branch had never once run.
+func (c *Client) Connect(ip string, port string, tlsConfig *tls.Config) error {
 	var err error
 	ip = utils.FormatIPv6(ip)
 	previousConn := c.Connection
 
-	if tlsEnabled {
-		// Load member cert/key
-		peerCert, err := tls.LoadX509KeyPair(
-			security.CertDir+"pulseha.crt",
-			security.CertDir+"pulseha.key",
-		)
-		if err != nil {
-			return fmt.Errorf("could not connect to host: %v", err)
-		}
-		// Load CA
-		caCert, err := ioutil.ReadFile(security.CertDir + "ca.crt")
-		if err != nil {
-			return fmt.Errorf("could not connect to host: %v", err)
-		}
-		caCertPool := x509.NewCertPool()
-		if ok := caCertPool.AppendCertsFromPEM(caCert); !ok {
-			return errors.New("failed to append ca certs")
-		}
-		creds := credentials.NewTLS(&tls.Config{
-			InsecureSkipVerify: true,
-			Certificates:       []tls.Certificate{peerCert},
-			RootCAs:            caCertPool,
-		})
-		c.Connection, err = grpc.NewClient(ip+":"+port, grpc.WithTransportCredentials(creds))
-	} else {
-		// Use insecure connection for non-TLS
-		c.Connection, err = grpc.NewClient(ip+":"+port, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	creds := insecure.NewCredentials()
+	if tlsConfig != nil {
+		creds = credentials.NewTLS(tlsConfig)
 	}
+	c.Connection, err = grpc.NewClient(ip+":"+port, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		log.Error("GRPC client connection error", "error", err)
 		return fmt.Errorf("could not connect to host: %v", err)
@@ -216,7 +204,7 @@ func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
 
 	c.server = rpc.NewServerClient(c.Connection)
 	c.cliClient = rpc.NewCLIClient(c.Connection)
-	log.Debug("Client:Connect() Connection made", "address", ip+":"+port)
+	log.Debug("Client:Connect() Connection made", "address", ip+":"+port, "tls", tlsConfig != nil)
 	return nil
 }
 

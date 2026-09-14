@@ -17,14 +17,18 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/syleron/pulseha/internal/client"
+
 	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/rpc"
 )
 
 // tlsPreconditionsMet reports why this cluster must not be flipped to
@@ -106,4 +110,215 @@ func nodeLabel(id string, n *config.Node) string {
 		return n.Hostname
 	}
 	return id
+}
+
+// applyTLSMode writes tls_mode after checking that the cluster can survive it.
+//
+// The flip travels the plaintext channel it removes, so the ordering here is the
+// safety property and not an implementation detail:
+//
+//  1. refuse an unknown value, so a typo cannot reach the file;
+//  2. refuse `required` unless every node is reachable and published, which is
+//     tlsPreconditionsMet and is the one check that matters;
+//  3. write and stamp it, so what the peers are handed is the real config;
+//  4. push it to every peer over a connection opened explicitly in clear;
+//  5. reconfigure this node, which rebinds its listener on the new terms.
+//
+// Step 5 is last on purpose. This node rebinding first would take its own
+// listener off plaintext while every peer was still speaking it, and it would do
+// so before the change that tells them otherwise had left the building.
+//
+// There is a window between the push and the last peer applying it, during
+// which a node that has flipped cannot reach one that has not. It is bounded by
+// broadcast latency, which is sub-second on the healthy cluster the precondition
+// insists on, against a failover that needs fo_limit (10s by default) of
+// continuous failure -- so the cluster rides through it. That margin is the
+// reason the precondition demands health rather than merely counting
+// certificates.
+func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
+	refuse := func(format string, args ...interface{}) *rpc.UpdateConfigResponse {
+		return &rpc.UpdateConfigResponse{Success: false, Message: fmt.Sprintf(format, args...)}
+	}
+
+	switch value {
+	case config.TLSModePermissive, config.TLSModeRequired:
+	default:
+		return refuse("tls_mode must be %q or %q, not %q",
+			config.TLSModePermissive, config.TLSModeRequired, value)
+	}
+
+	cfg := s.currentConfig()
+	if cfg == nil {
+		return refuse("no cluster configuration to change")
+	}
+	if cfg.Pulse.TLSMode == value {
+		return &rpc.UpdateConfigResponse{
+			Success: true,
+			Message: fmt.Sprintf("cluster is already in tls_mode %s", value),
+		}
+	}
+
+	if value == config.TLSModeRequired {
+		if err := tlsPreconditionsMet(cfg.Nodes, s.memberStatuses()); err != nil {
+			return refuse("%v", err)
+		}
+		// Asked of this node before anything is written, because this node is the
+		// one that will have to serve the credentials and the only one that can
+		// look at its own disk. A peer's certificate being in the config says
+		// nothing about whether this node still holds its own key.
+		//
+		// Against a stand-in config already flipped, so Credentials answers the
+		// question the cluster is about to be in rather than the one it is in.
+		// Built field by field because config.Config carries a mutex and must not
+		// be copied whole; the node map is shared deliberately, being read and not
+		// written.
+		probe := &config.Config{Nodes: cfg.Nodes}
+		probe.Pulse.TLSMode = config.TLSModeRequired
+		if _, err := clustertls.Credentials(func() *config.Config { return probe }); err != nil {
+			return refuse("this node cannot serve TLS: %v", err)
+		}
+	}
+
+	s.Lock()
+	if err := s.config.UpdateValue("tls_mode", value); err != nil {
+		s.Unlock()
+		s.logger.Error("Failed to update tls_mode", "error", err)
+		return refuse("%v", err)
+	}
+	s.Unlock()
+	s.logger.Info("Cluster TLS mode changed", "tls_mode", value)
+	// Stamps a new config version and wakes the broadcaster, which is what keeps
+	// retrying at a peer the push below could not reach. Its own dials are on the
+	// new terms, so they fail against a peer that has not flipped yet and succeed
+	// once it has -- which is the right way round: the broadcaster repairs a peer
+	// that took the change and lost it, and the push is what delivers it first.
+	s.markConfigDirty()
+
+	// Hand it to the peers in clear, before this node's own listener and dials
+	// move onto the new terms.
+	//
+	// Explicitly in clear rather than through dialPeer, and this is the sentence
+	// the whole ordering turns on: the config has just been written, so dialPeer
+	// would now offer TLS to peers that are still plaintext and every one of them
+	// would refuse -- the change would never reach the nodes it is about to cut
+	// off. Plaintext is the only wire the cluster still shares at this instant,
+	// which is exactly what ADR-0005 means by delivering the flip over the channel
+	// it removes.
+	undelivered := s.deliverConfigInClear()
+
+	// Now this node, last. Its listener rebinds on the new terms and its dials
+	// start offering them, which is what the peers above have just been told to
+	// do for themselves.
+	if err := s.Reconfigure(); err != nil {
+		s.logger.Error("Failed to apply the new TLS mode locally", "error", err)
+		return refuse("tls_mode %s was recorded and sent to the peers but this node could not "+
+			"apply it: %v", value, err)
+	}
+
+	if len(undelivered) > 0 {
+		// Reported rather than rolled back, and the asymmetry is deliberate. This
+		// node and the peers that took it are consistent; a peer that did not is
+		// isolated and needs an operator, which is ADR-0005's accepted consequence
+		// and the reason the precondition demands unanimity beforehand. A revert
+		// would have to reach the peers that already flipped, over a wire they
+		// have stopped accepting in clear, so it would replace one divergence with
+		// a worse one.
+		sort.Strings(undelivered)
+		s.logger.Error("Some nodes were not told about the TLS mode change",
+			"tls_mode", value, "nodes", strings.Join(undelivered, ", "))
+		return &rpc.UpdateConfigResponse{
+			Success: true,
+			Message: fmt.Sprintf("%s, except %s — %s did not accept the change and will be "+
+				"unreachable until it does; check it before relying on this cluster",
+				configScopeClusterMessage, strings.Join(undelivered, ", "),
+				pluralNodes(len(undelivered))),
+		}
+	}
+
+	return &rpc.UpdateConfigResponse{Success: true, Message: configScopeClusterMessage}
+}
+
+// memberStatuses is what every node in the member list currently claims about
+// itself, keyed the way the config's node map is.
+func (s *Server) memberStatuses() map[string]membership.MemberStatus {
+	statuses := map[string]membership.MemberStatus{}
+	if s.memberList == nil {
+		return statuses
+	}
+	for id, m := range s.memberList.MembersSnapshot() {
+		if m == nil {
+			continue
+		}
+		statuses[id] = m.GetStatus()
+	}
+	return statuses
+}
+
+// deliverConfigInClear pushes this node's current config to every peer over a
+// plaintext connection opened for the purpose, and names the ones that did not
+// take it.
+//
+// Only the TLS flip has any business calling this. Every other broadcast goes
+// through the broadcaster, which dials on whatever terms the cluster is on; this
+// exists for the one change that alters those terms, where the config on this
+// node no longer describes the wire the peers are still listening on.
+//
+// The connections are opened and closed here rather than taken from the pool.
+// The pool is keyed by peer and is about to be refilled with TLS connections by
+// Reconfigure, and leaving a plaintext entry in it would outlive the moment it
+// was correct for.
+func (s *Server) deliverConfigInClear() []string {
+	s.Lock()
+	localID, _ := s.config.GetLocalNodeUUID()
+	payload, buildErr := buildFullConfigPayload(
+		s.config, s.memberStatuses(), s.clusterEpoch, s.leaderID, localID, s.loadConfigStamp())
+	peers := make(map[string]*config.Node, len(s.config.Nodes))
+	for id, node := range s.config.Nodes {
+		if id != localID && node != nil {
+			peers[id] = node
+		}
+	}
+	s.Unlock()
+
+	if buildErr != nil {
+		s.logger.Error("Failed to build the config payload for the TLS mode change", "error", buildErr)
+		undelivered := make([]string, 0, len(peers))
+		for id, node := range peers {
+			undelivered = append(undelivered, nodeLabel(id, node))
+		}
+		return undelivered
+	}
+
+	var undelivered []string
+	for id, node := range peers {
+		c, err := client.New()
+		if err != nil {
+			undelivered = append(undelivered, nodeLabel(id, node))
+			continue
+		}
+		if err := c.Connect(node.IP, node.Port, nil); err != nil {
+			s.logger.Error("Could not reach a peer to tell it about the TLS mode change",
+				"node", nodeLabel(id, node), "error", err)
+			undelivered = append(undelivered, nodeLabel(id, node))
+			c.Close()
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), configSyncTimeoutFor(len(payload)))
+		resp, err := c.Server().ConfigSync(ctx, &rpc.ConfigSyncRequest{Config: payload})
+		cancel()
+		c.Close()
+		if err != nil || resp == nil || !resp.Success {
+			s.logger.Error("A peer did not accept the TLS mode change",
+				"node", nodeLabel(id, node), "error", err)
+			undelivered = append(undelivered, nodeLabel(id, node))
+		}
+	}
+	return undelivered
+}
+
+func pluralNodes(n int) string {
+	if n == 1 {
+		return "that node"
+	}
+	return "those nodes"
 }

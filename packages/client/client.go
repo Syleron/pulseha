@@ -18,6 +18,7 @@ package client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"strings"
@@ -115,9 +116,11 @@ func (c *Client) GetProtoFuncList() map[string]interface{} {
 	}
 }
 
-// Connect creates a new client connection and request hostname for TLS verification.
-func (c *Client) Connect(ip string, port string, tlsEnabled bool) error {
-	return c.Client.Connect(ip, port, tlsEnabled)
+// Connect creates a new client connection, over TLS when the caller supplies a
+// configuration. See internal/client.Connect for why the decision is the
+// caller's to make.
+func (c *Client) Connect(ip string, port string, tlsConfig *tls.Config) error {
+	return c.Client.Connect(ip, port, tlsConfig)
 }
 
 // GetLocalNode returns the local node configuration
@@ -210,7 +213,7 @@ func (c *Client) JoinCluster(address, token, bindIP, bindPort string) error {
 	}
 
 	// Connect to the target node
-	if err := c.Connect(host, port, false); err != nil {
+	if err := c.Connect(host, port, nil); err != nil {
 		return fmt.Errorf("failed to connect to target node: %v", err)
 	}
 

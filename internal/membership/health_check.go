@@ -14,6 +14,7 @@ import (
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/internal/ipam"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
@@ -2171,7 +2172,13 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 	}
 	defer remoteClient.Close()
 
-	if err := remoteClient.Connect(member.IP, member.Port, false); err != nil {
+	creds, err := clustertls.Credentials(func() *config.Config { return cfg })
+	if err != nil {
+		h.logger.Warnf("checkClusterMembership: failed to build TLS credentials for %s: %v",
+			member.Hostname, err)
+		return membershipUnverified
+	}
+	if err := remoteClient.Connect(member.IP, member.Port, creds); err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to connect to %s (%s:%s): %v",
 			member.Hostname, member.IP, member.Port, err)
 		return membershipUnverified

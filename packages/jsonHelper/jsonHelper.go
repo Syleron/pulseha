@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 )
 
 var (
@@ -37,7 +38,13 @@ func SetStructFieldByTag(tag string, value string, taggedStruct interface{}) err
 
 	for i := 0; i < v.NumField(); i++ {
 		field := fieldType.Field(i)
-		if field.Tag.Get("json") == tag {
+		// The name only. A json tag is a name followed by options, and comparing
+		// the whole string made a field settable or not according to whether
+		// anyone had put `,omitempty` on it -- which is a statement about how the
+		// field is written out, and nothing to do with whether an operator may
+		// set it. `tls_mode` was the first key to carry one and reported itself
+		// as an invalid config key (#111).
+		if tagName(field.Tag.Get("json")) == tag {
 			err := setField(v.Field(i), value)
 			if err != nil {
 				return ErrInvalidConfigValue
@@ -46,6 +53,14 @@ func SetStructFieldByTag(tag string, value string, taggedStruct interface{}) err
 		}
 	}
 	return ErrInvalidConfigKey
+}
+
+// tagName is the part of a json struct tag before its first option.
+func tagName(tag string) string {
+	if comma := strings.Index(tag, ","); comma >= 0 {
+		return tag[:comma]
+	}
+	return tag
 }
 
 /**

@@ -186,7 +186,7 @@ func newConfigSetCmd() *cobra.Command {
 		Long: `Set a configuration value.
 
 Cluster-wide keys are applied to every node:
-  mode, hcs_interval, fos_interval, fo_limit, auto_failback
+  mode, tls_mode, hcs_interval, fos_interval, fo_limit, auto_failback
 
 The timing keys (hcs_interval, fos_interval, fo_limit) are read when the health
 checker starts, so a change to one of them takes effect on the next restart of
@@ -206,6 +206,25 @@ released once no group configures it. It has no effect on an interface whose NM
 profile is DHCP, unreadable or absent: ownership there cannot be established, and
 the node falls back to the default behaviour rather than guess about the address
 it is reachable on.
+
+tls_mode decides whether inter-node traffic is encrypted and the peers on it are
+checked against the cluster's own list of certificates. It takes one of two
+values:
+
+  permissive  the default, and what an upgraded cluster stays on. Each node
+              publishes its certificate and the cluster accumulates the set
+              while nothing depends on it. The wire is in clear.
+  required    listeners serve credentials, and a node refuses any peer whose
+              certificate the cluster config does not name.
+
+Setting it to required is refused unless every node is reachable and has
+published a certificate, because the change is delivered over the plaintext
+channel it removes and a node that misses it is cut off from the cluster. Any
+node that does not take the change is named in the reply — go to it before
+relying on the cluster.
+
+A node cannot currently join a cluster that is already on required. Add every
+node while permissive, then set it.
 
 The reach of each change is reported back on success.`,
 		Args: cobra.ExactArgs(2),

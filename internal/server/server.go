@@ -170,6 +170,10 @@ type Server struct {
 	quorumManager *quorum.QuorumManager
 	quorumHandler *quorum.RPCHandler
 	grpcServer    *grpc.Server
+	// grpcServerTLS is what grpcServer above was built with, so the listener's
+	// record says what it is actually serving rather than what the config said
+	// some time later. The two are set and cleared together.
+	grpcServerTLS bool
 	cliServer     *grpc.Server
 	rpc.UnimplementedCLIServer
 	rpc.UnimplementedServerServer
@@ -250,14 +254,21 @@ type Server struct {
 	propagationMu pulselock.Mutex
 	unpropagated  *unpropagatedConfig
 
-	// clusterListenSrv/clusterListenAddr record what the cluster gRPC listener is
-	// currently serving, so Reconfigure can tell a config-only change from one
-	// that actually moves the bind address (defect #31). Guarded by their own
-	// mutex because the serving goroutine clears them when Serve returns, off any
-	// path that holds s.RWMutex.
+	// clusterListenSrv/clusterListenAddr/clusterListenTLS record what the cluster
+	// gRPC listener is currently serving, so Reconfigure can tell a config-only
+	// change from one that actually changes what the listener is (defect #31).
+	// Guarded by their own mutex because the serving goroutine clears them when
+	// Serve returns, off any path that holds s.RWMutex.
+	//
+	// The address used to be the whole of it, because the listener was built with
+	// no credentials and no options and so an unchanged address meant there was
+	// nothing to re-apply. `tls_mode` breaks that: the flip to `required` changes
+	// the listener without moving it, and a listener left alone through it would
+	// go on serving plaintext to peers that had stopped speaking it (#111 step 4).
 	clusterListenMu   pulselock.Mutex
 	clusterListenSrv  *grpc.Server
 	clusterListenAddr string
+	clusterListenTLS  bool
 
 	// onAsyncReconfigure, when non-nil, is called once the Reconfigure that a
 	// full ConfigSync spawns has returned. A test seam, nil in production.
@@ -505,12 +516,17 @@ func (s *Server) Start() error {
 func (s *Server) startClusterListener(localNode config.Node) error {
 	s.logger.Debugf("Starting cluster RPC server on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
 
-	// Create gRPC server if needed
+	// Create gRPC server if needed, with the cluster's credentials on it when the
+	// cluster requires them.
+	tlsServed := false
 	if s.grpcServer == nil {
-		s.grpcServer = grpc.NewServer()
-		rpc.RegisterServerServer(s.grpcServer, s)
-		// Also register CLI RPCs on the cluster listener to support remote operations like Join
-		rpc.RegisterCLIServer(s.grpcServer, s)
+		srv, served, err := s.newClusterGRPCServer()
+		if err != nil {
+			return err
+		}
+		s.grpcServer, s.grpcServerTLS, tlsServed = srv, served, served
+	} else {
+		tlsServed = s.grpcServerTLS
 	}
 
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
@@ -543,7 +559,7 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	// Capture the gRPC server pointer locally so a concurrent Reconfigure()
 	// swapping s.grpcServer doesn't race with this goroutine's read.
 	grpcSrv := s.grpcServer
-	s.setClusterListener(grpcSrv, address)
+	s.setClusterListener(grpcSrv, address, tlsServed)
 	go func() {
 		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
 		if err := grpcSrv.Serve(listener); err != nil {
@@ -560,19 +576,21 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	return nil
 }
 
-// setClusterListener records the address a gRPC server instance is serving.
-func (s *Server) setClusterListener(srv *grpc.Server, address string) {
+// setClusterListener records what a gRPC server instance is serving.
+func (s *Server) setClusterListener(srv *grpc.Server, address string, tlsServed bool) {
 	s.clusterListenMu.Lock()
 	defer s.clusterListenMu.Unlock()
-	s.clusterListenSrv, s.clusterListenAddr = srv, address
+	s.clusterListenSrv, s.clusterListenAddr, s.clusterListenTLS = srv, address, tlsServed
 }
 
-// clusterListenerServing reports whether a live listener is already serving
-// address, which is Reconfigure's licence to leave it alone.
-func (s *Server) clusterListenerServing(address string) bool {
+// clusterListenerServing reports whether a live listener is already serving this
+// address on these terms, which is Reconfigure's licence to leave it alone.
+func (s *Server) clusterListenerServing(address string, tlsRequired bool) bool {
 	s.clusterListenMu.Lock()
 	defer s.clusterListenMu.Unlock()
-	return s.clusterListenSrv != nil && s.clusterListenAddr == address
+	return s.clusterListenSrv != nil &&
+		s.clusterListenAddr == address &&
+		s.clusterListenTLS == tlsRequired
 }
 
 // clearClusterListener forgets the record if srv is still the serving instance.
@@ -580,7 +598,7 @@ func (s *Server) clearClusterListener(srv *grpc.Server) {
 	s.clusterListenMu.Lock()
 	defer s.clusterListenMu.Unlock()
 	if s.clusterListenSrv == srv {
-		s.clusterListenSrv, s.clusterListenAddr = nil, ""
+		s.clusterListenSrv, s.clusterListenAddr, s.clusterListenTLS = nil, "", false
 	}
 }
 
@@ -735,7 +753,7 @@ func (s *Server) Stop() {
 	s.Lock()
 	oldSrv = s.grpcServer
 	oldCli = s.cliServer
-	s.grpcServer = nil
+	s.grpcServer, s.grpcServerTLS = nil, false
 	s.cliServer = nil
 	s.Unlock()
 	if oldSrv != nil {
@@ -1305,7 +1323,7 @@ func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*r
 			continue
 		}
 		defer remoteClient.Close()
-		if err := remoteClient.Connect(p.ip, p.port, false); err != nil {
+		if err := s.dialPeer(remoteClient, p.ip, p.port); err != nil {
 			continue
 		}
 		pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1333,7 +1351,7 @@ func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*r
 	// Stop cluster gRPC; keep CLI alive
 	if s.grpcServer != nil {
 		s.grpcServer.GracefulStop()
-		s.grpcServer = nil
+		s.grpcServer, s.grpcServerTLS = nil, false
 	}
 	if s.healthCheck != nil {
 		s.healthCheck.Stop()
@@ -1577,7 +1595,7 @@ func (s *Server) Leave(ctx context.Context, req *rpc.LeaveRequest) (*rpc.LeaveRe
 					lastErr = err
 					continue
 				}
-				if err := remoteClient.Connect(peer.ip, peer.port, false); err != nil {
+				if err := s.dialPeer(remoteClient, peer.ip, peer.port); err != nil {
 					s.logger.Warn("Failed to connect to coordinator", "peer", peer.id, "error", err)
 					remoteClient.Close()
 					lastErr = err
@@ -1672,7 +1690,7 @@ func (s *Server) Leave(ctx context.Context, req *rpc.LeaveRequest) (*rpc.LeaveRe
 		// Stop the cluster (inter-node) gRPC server only; keep CLI server alive for further config
 		if s.grpcServer != nil {
 			s.grpcServer.GracefulStop()
-			s.grpcServer = nil
+			s.grpcServer, s.grpcServerTLS = nil, false
 		}
 
 		return &rpc.LeaveResponse{
@@ -1833,7 +1851,7 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 	}
 	defer remoteClient.Close()
 
-	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 		// Only a malformed target reaches here — grpc.NewClient does not dial — so this is a
 		// local fault, not evidence about the peer.
 		return false, false, fmt.Errorf("failed to create connection to %s: %w", nodeID, err)
@@ -2165,7 +2183,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		}
 		defer remoteClient.Close()
 
-		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 			s.logger.Error("PROMOTE_ASYNC: Failed to connect to target node", "error", err)
 			_ = s.broadcastNextEpoch(originalStates)
 			return
@@ -2332,7 +2350,7 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 			return &rpc.MakePassiveResponse{Success: false, Message: "Failed to create client: " + err.Error()}, nil
 		}
 		defer remoteClient.Close()
-		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 			return &rpc.MakePassiveResponse{Success: false, Message: "Failed to connect to target node: " + err.Error()}, nil
 		}
 		// Derived from the caller's context so a caller with a deadline — the
@@ -2555,7 +2573,7 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 			continue
 		}
 
-		if err := remoteClient.Connect(peer.ip, peer.port, false); err != nil {
+		if err := s.dialPeer(remoteClient, peer.ip, peer.port); err != nil {
 			s.logger.Warn("Failed to connect to peer", "peer", peer.id, "error", err)
 			remoteClient.Close()
 			failedNodes = append(failedNodes, peer.id)
@@ -2703,7 +2721,7 @@ func (s *Server) Reconfigure() error {
 	}
 	s.logger.Infof("Updated local node configuration: IP=%s, Port=%s", localNode.IP, localNode.Port)
 
-	// Rebind the cluster listener only when the bind address actually moved.
+	// Rebind the cluster listener only when what it is serving actually changed.
 	//
 	// Almost every Reconfigure comes from a ConfigSync that changed the config and
 	// nothing else — a group gained an address, a peer changed status — and for
@@ -2715,33 +2733,33 @@ func (s *Server) Reconfigure() error {
 	// receiver, which is what refused 56 of 60 peer bring-up RPCs on whitecrane in
 	// run 23 and what starved the config broadcast's own retries into defect #43.
 	//
-	// The address is the whole of the listener's configuration here — the gRPC
-	// server is built with no credentials and no options — so an unchanged address
-	// means there is genuinely nothing to re-apply.
+	// The address used to be the whole of the listener's configuration, because the
+	// gRPC server was built with no credentials and no options. `tls_mode` adds
+	// the second thing that can change without the address moving, and it is the
+	// one that must not be missed: a listener left alone across the flip goes on
+	// serving plaintext to peers that have already stopped speaking it, and the
+	// node drops out of the cluster it just told to encrypt (ADR-0005, #111).
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
-	if s.clusterListenerServing(address) {
-		s.logger.Debug("Cluster bind address unchanged; keeping the listener serving",
-			"address", address)
+	tlsRequired := newConfig.Pulse.TLSRequired()
+	if s.clusterListenerServing(address, tlsRequired) {
+		s.logger.Debug("Cluster listener unchanged; keeping it serving",
+			"address", address, "tls", tlsRequired)
 	} else {
 		// Swap out old cluster gRPC server pointer quickly under lock, then stop outside lock
 		var oldSrv *grpc.Server
 		s.Lock()
 		oldSrv = s.grpcServer
-		s.grpcServer = nil
+		s.grpcServer, s.grpcServerTLS = nil, false
 		s.Unlock()
 		if oldSrv != nil {
 			s.logger.Debug("Stopping existing gRPC server...")
 			oldSrv.GracefulStop()
 		}
 
-		// Create new gRPC server instance and assign pointer under a short lock
-		newSrv := grpc.NewServer()
-		rpc.RegisterServerServer(newSrv, s)
-		// Also register CLI service on the cluster listener for remote operations (e.g., join)
-		rpc.RegisterCLIServer(newSrv, s)
-		s.Lock()
-		s.grpcServer = newSrv
-		s.Unlock()
+		// The replacement instance is startClusterListener's to build. It was
+		// built here as well as there until the flip gave the instance a property
+		// -- whether it carries credentials -- that the listener's record has to
+		// agree with; two construction sites meant two chances to disagree.
 
 		s.logger.Debugf("Starting cluster listener on %s:%s...", utils.FormatIPv6(localNode.IP), localNode.Port)
 		if err := s.startClusterListener(localNode); err != nil {
@@ -3048,7 +3066,7 @@ func (s *Server) BroadcastVoteRequest(sessionID string, voteType, subject, descr
 		}
 
 		// Connect to the remote node
-		if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+		if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 			broadcastErrors = append(broadcastErrors, fmt.Sprintf("node %s: connection failed: %v", nodeID, err))
 			remoteClient.Close()
 			continue
@@ -3817,7 +3835,7 @@ func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string
 			}
 			defer remoteClient.Close()
 
-			if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+			if err := s.dialPeer(remoteClient, target.ip, target.port); err != nil {
 				s.logger.Warn("Failed to connect to peer to bring up new group IPs",
 					"count", len(ips), "node", target.hostname, "error", err)
 				return
@@ -4773,7 +4791,7 @@ func (s *Server) releaseIPsOnTarget(ctx context.Context, target ipReleaseTarget)
 	}
 	defer remoteClient.Close()
 
-	if err := remoteClient.Connect(target.ip, target.port, false); err != nil {
+	if err := s.dialPeer(remoteClient, target.ip, target.port); err != nil {
 		return fmt.Sprintf("failed to connect to node %s to release its floating IPs: %v", target.hostname, err), false
 	}
 
@@ -6010,6 +6028,11 @@ var settableConfigKeys = map[string]configKeyScope{
 	// box's interfaces are managed, and one appliance in a cluster can have a DHCP
 	// interface where another does not.
 	"nm_address_ownership": scopeNode,
+	// Cluster-scoped and then some: a node that ends up on a different tls_mode
+	// from its peers cannot talk to them at all. UpdateConfig gates it on
+	// tlsPreconditionsMet before it is written, which is the whole of ADR-0005's
+	// migration safety.
+	"tls_mode": scopeCluster,
 }
 
 // What UpdateConfig reports back about the reach of a change it applied. The CLI
@@ -6045,6 +6068,13 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 	//
 	// Delegated before the lock below is taken: SetMode takes s.Lock() itself and
 	// the lock is not reentrant.
+	// The flip to TLS is refused unless every node can survive it. See
+	// applyTLSMode -- gated before the lock below for the same reason `mode` is,
+	// since it reads the member list and reconfigures this node afterwards.
+	if req.Key == "tls_mode" {
+		return s.applyTLSMode(req.Value), nil
+	}
+
 	if req.Key == "mode" {
 		resp, err := s.SetMode(ctx, &rpc.SetModeRequest{Mode: req.Value})
 		if err != nil {
@@ -6157,7 +6187,7 @@ func (s *Server) setMaintenanceRemote(ctx context.Context, targetID string, enab
 	}
 	defer remoteClient.Close()
 
-	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 		return &rpc.SetMaintenanceResponse{Success: false, Message: "failed to connect to target node: " + err.Error()}, nil
 	}
 
@@ -6540,7 +6570,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 					continue
 				}
 				defer remoteClient.Close()
-				if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+				if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 					s.logger.Warn("Resync: failed to connect to peer", "peer", id, "error", err)
 					continue
 				}
@@ -6943,7 +6973,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		return &rpc.InitiateJoinResponse{Success: false, Message: "failed to create client: " + err.Error()}, nil
 	}
 	defer remoteClient.Close()
-	if err := remoteClient.Connect(req.TargetHost, targetPort, false); err != nil {
+	if err := s.dialPeer(remoteClient, req.TargetHost, targetPort); err != nil {
 		return &rpc.InitiateJoinResponse{Success: false, Message: "failed to connect to target: " + err.Error()}, nil
 	}
 
@@ -7496,7 +7526,7 @@ func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
 		return err
 	}
 	defer remoteClient.Close()
-	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
@@ -7516,7 +7546,7 @@ func (s *Server) bringIPsOnNodeDown(nodeID, iface string, ips []string) error {
 		return err
 	}
 	defer remoteClient.Close()
-	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), membership.DemotionTimeoutFor(len(ips)))
@@ -7674,7 +7704,7 @@ func (s *Server) getPeerClient(peerID string, node *config.Node) (*client.Client
 		return nil, fmt.Errorf("failed to create client: %w", err)
 	}
 
-	if err := remoteClient.Connect(node.IP, node.Port, false); err != nil {
+	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
 		remoteClient.Close()
 		return nil, fmt.Errorf("failed to connect to %s:%s: %w", utils.FormatIPv6(node.IP), node.Port, err)
 	}

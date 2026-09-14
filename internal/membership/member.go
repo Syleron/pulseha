@@ -5,6 +5,7 @@ import (
 	"time"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
@@ -163,8 +164,18 @@ func (m *Member) initializeClient() error {
 		return fmt.Errorf("failed to create client: %v", err)
 	}
 
-	// Connect to the member
-	if err := c.Connect(node.IP, node.Port, false); err != nil {
+	// Connect to the member, over TLS once the cluster requires it.
+	//
+	// Built from the config this member holds rather than passed in: the member
+	// list is handed a fresh config pointer on every reconfigure, so this reads
+	// the mode and the trust set the cluster is on now. A failure here is a
+	// failure to connect and is returned as one -- a cluster that requires TLS
+	// must not be reached in clear because the credentials would not assemble.
+	creds, err := clustertls.Credentials(func() *config.Config { return m.config })
+	if err != nil {
+		return fmt.Errorf("failed to build TLS credentials for member %s: %v", m.Hostname, err)
+	}
+	if err := c.Connect(node.IP, node.Port, creds); err != nil {
 		return fmt.Errorf("failed to connect to member %s: %v", m.Hostname, err)
 	}
 
