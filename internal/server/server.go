@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -1034,7 +1037,9 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 
 		// Set the cluster token
 		s.config.Pulse.ClusterToken = uuid.New().String()
-		s.logger.Debugf("Generated cluster token: %s", s.config.Pulse.ClusterToken)
+		// Not the token itself (#113). `pulsectl cluster token` is how an operator
+		// reads it; a log line is how everyone else does.
+		s.logger.Debug("Generated cluster token", "fingerprint", tokenFingerprint(s.config.Pulse.ClusterToken))
 
 		// Save the config
 		if err := s.config.Save(); err != nil {
@@ -1056,9 +1061,18 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	if os.Getenv("PULSEHA_TEST") != "true" {
 		s.logger.Debugf("Validating cluster token for join...")
 		clusterToken := s.config.Pulse.ClusterToken // Direct read - config token shouldn't change during join
-		s.logger.Debugf("Expected token: %s, Received token: %s", clusterToken, req.Token)
 
-		if req.Token != clusterToken {
+		// Fingerprints, not tokens (#113). This line is the reason an operator
+		// turns debug on -- a join that will not authenticate -- so it is exactly
+		// the line that used to write the cluster's shared secret to the journal,
+		// and through syslog to wherever that is forwarded. The fingerprints still
+		// answer the question it was asked for: same or not the same, and if not,
+		// which side changed.
+		s.logger.Debug("Comparing cluster join token",
+			"expected", tokenFingerprint(clusterToken),
+			"received", tokenFingerprint(req.Token))
+
+		if !tokensEqual(req.Token, clusterToken) {
 			s.logger.Warn("Invalid cluster join token received")
 			return &rpc.JoinResponse{
 				Success: false,
@@ -2330,9 +2344,16 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 	localToken := s.config.Pulse.ClusterToken
 
 	// Validate cluster membership token when provided
-	if req.ClusterToken != "" && req.ClusterToken != localToken {
-		s.logger.Warnf("HealthCheck cluster token mismatch from node %s (expected %s, got %s)",
-			req.NodeId, localToken, req.ClusterToken)
+	if req.ClusterToken != "" && !tokensEqual(req.ClusterToken, localToken) {
+		// Warn level, and a real mismatch repeats every health-check tick, so this
+		// wrote both tokens to the journal over and over for as long as the
+		// condition lasted (#113). Constant-time now as well: this one is
+		// reachable by an unauthenticated peer at whatever rate it likes, which
+		// makes it the better timing oracle of the two.
+		s.logger.Warn("HealthCheck cluster token mismatch",
+			"node", req.NodeId,
+			"expected", tokenFingerprint(localToken),
+			"got", tokenFingerprint(req.ClusterToken))
 		return &rpc.HealthCheckResponse{
 			Success:      false,
 			Message:      "cluster token mismatch",
@@ -4916,7 +4937,10 @@ func (s *Server) CreateCluster(ctx context.Context, req *rpc.CreateClusterReques
 	// Generate a cluster token for other nodes to join
 	clusterToken := uuid.New().String()
 	s.config.Pulse.ClusterToken = clusterToken
-	s.logger.Infof("Generated cluster token: %s", clusterToken)
+	// Info level, so this one reached the journal on every cluster creation
+	// without anyone turning anything on (#113). `pulsectl cluster token` is how
+	// an operator reads the token.
+	s.logger.Info("Generated cluster token", "fingerprint", tokenFingerprint(clusterToken))
 
 	// Add the node to config using generated ID
 	s.config.Nodes[nodeID] = &config.Node{
@@ -8509,4 +8533,43 @@ func stillHeldLocally(candidates []string, held func(ip string) bool) []string {
 		}
 	}
 	return stillHeld
+}
+
+// tokensEqual compares a presented cluster token against the configured one in
+// constant time.
+//
+// `!=` on two strings returns as soon as it finds a difference, so how long a
+// comparison takes says how much of the token was right. That is a remote oracle
+// on a secret an attacker can otherwise only guess whole, and the standard
+// library has the fix in one call.
+//
+// Surrounding whitespace is trimmed first. Operators move this string by hand,
+// through terminals and ticket systems and chat, and a trailing newline is not a
+// wrong token -- it is a right token that arrived with punctuation. The trimming
+// is deliberately all that is forgiven: PR #201 also proposed folding case and
+// stripping a "Bearer " prefix, and neither is a paste artifact. Case folding in
+// particular throws away entropy from the secret to save an operator from a
+// mistake they have not been observed making.
+func tokensEqual(presented, configured string) bool {
+	a := strings.TrimSpace(presented)
+	b := strings.TrimSpace(configured)
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
+
+// tokenFingerprint returns a short, stable, non-reversible label for a token, so
+// two of them can be compared in a log without either being in it.
+//
+// Truncated to 12 hex characters: enough that two different tokens will not share
+// one in any cluster, short enough to read, and useless for recovering the token
+// even against an attacker who can grind SHA-256, because the input is a UUID
+// rather than anything guessable. An empty token gets a name of its own, since
+// "the joiner sent nothing" and "the joiner sent the wrong thing" are different
+// problems and the operator reading this line is trying to tell them apart.
+func tokenFingerprint(token string) string {
+	trimmed := strings.TrimSpace(token)
+	if trimmed == "" {
+		return "<empty>"
+	}
+	sum := sha256.Sum256([]byte(trimmed))
+	return hex.EncodeToString(sum[:])[:12]
 }
