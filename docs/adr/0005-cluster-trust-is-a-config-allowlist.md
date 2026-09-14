@@ -6,7 +6,11 @@ A peer is trusted because the config names it, not because something signed it. 
 cluster means having your certificate added to that set; being removed from a cluster means
 having it dropped.
 
-**Status: proposed. None of it is built, and what exists today is worse than nothing.**
+**Status: accepted, and being built. Steps 1, 2 and 3a have landed (#255, #256, #257) and the
+cluster is still plaintext — that is the permissive phase working as intended, not a stall. The
+ordering below was corrected once, from building it; see the bootstrap section.** What existed
+before any of this was worse than nothing, and that description still applies to the listener,
+which serves no credentials yet.
 
 ## What is actually there now
 
@@ -73,6 +77,21 @@ because the first use is already authenticated by something a human moved.
 This also inverts the current exposure in a way worth stating: today the token is the thing
 protected by nothing. Afterwards, the token is what protects everything else.
 
+**Corrected 2026-09-14, from building it.** The paragraph above puts the fingerprint in the token
+as its own step, ahead of the listener credentials. That order does not work, and the reason is
+one sentence long: **there is no handshake to pin until the listener serves TLS.** Over a
+plaintext join a fingerprint carried in the token is an integrity check — it catches a stale or
+wrong-cluster config — and it is *not* authentication, because an attacker able to sit in the
+path does not need to forge a certificate, only to relay one. Landing it early would put a
+security-shaped mechanism in place that does not yet provide the security its name implies,
+which is the failure this whole document exists to stop repeating.
+
+So the pinning moves to sit with the credentials, and the two arrive together or not at all. What
+*is* separable, and landed first as step 3a, is the joining node handing over its **own**
+certificate with the request: that needs no handshake, it only needs somewhere to record the
+answer, and it removes the gap where a node is in the cluster's config before it is in the
+cluster's trust set.
+
 ## Migration, which is where a live cluster gets broken
 
 A TLS-only node cannot talk to a plaintext peer, and an HA cluster is upgraded one node at a
@@ -101,7 +120,14 @@ plane, added to smooth a transition that happens once.
 
 - **`GenerateCertificates` must become idempotent before anything else here is built.** A
   certificate that changes on restart cannot be in an allowlist. This is the smallest piece and
-  the one everything else waits on.
+  the one everything else waits on. *(Done, #255 — and the ordering held: step 2 was tested once
+  without it and the certificates churned on every restart.)*
+- **The order this lands in, corrected once by contact with the code.** 1: the certificate stops
+  moving. 2: the trust set accumulates under plaintext, depending on nothing. 3a: the joiner's
+  certificate travels with the join. Then 3b and 4 **together** — listener credentials, client
+  verification against the trust set, the token's fingerprint pinned at the handshake, and the
+  cluster-scoped flip to `required`. The move of 3b is explained above; the shape of the rest is
+  unchanged.
 - **The config grows a field that is not configuration.** A node's certificate is state the node
   publishes about itself, living in the same structure as the operator's settings. `ConfigSync`
   preserves node-local fields already, and this is the first that is node-*owned* rather than
