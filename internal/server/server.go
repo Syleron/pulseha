@@ -1006,6 +1006,23 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	s.logger.Debugf("Join request details - NodeID: %s, BindIP: %s, BindPort: %s, Token provided: %v",
 		req.NodeId, req.BindIp, req.BindPort, req.Token != "")
 
+	// A member with no address is a member nobody can reach, and recording one
+	// puts it in every peer's config by propagation (#114). The joining node
+	// resolves its own address before it asks, so an empty value here means a
+	// caller that skipped that path -- refuse rather than record it.
+	//
+	// Validated before anything is touched, deliberately. The write site is past a
+	// member-list insertion and a config lock, and refusing there would leave the
+	// member behind: a request that cannot be honoured should be rejected while
+	// rejecting it still costs nothing.
+	if strings.TrimSpace(req.BindIp) == "" {
+		s.logger.Warn("Refusing join with no bind address", "hostname", req.Hostname)
+		return &rpc.JoinResponse{
+			Success: false,
+			Message: "join request carried no bind address; the joining node must supply one",
+		}, nil
+	}
+
 	// Serialize with CreateCluster and InitiateJoin to prevent a TOCTOU race
 	// where the tokenless first-node branch below (or two concurrent tokenless
 	// Joins) both observe an empty member list and both initialize the cluster.
@@ -6881,30 +6898,70 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 	if nodeID == "" {
 		nodeID = s.config.GenerateNodeID()
 	}
+	// Default to the port the cluster is demonstrably reachable on, not a
+	// constant (#114, second half).
+	//
+	// This was hardcoded to 8080 while targetPort came from the operator, so
+	// `cluster join --address host:9083` with no --bind-port produced a node that
+	// listened on 8080 and was recorded as listening on 8080 -- self-consistent,
+	// and unreachable on any appliance whose firewall opens the port the cluster
+	// actually uses. Measured on the lab pair: the nftables ruleset permits 9083
+	// with `comment "ID-pulseha"` and nothing on 8080, so the joined node sat at
+	// `Status: Unknown` while the config on both sides agreed about an address
+	// nobody could connect to.
+	//
+	// The target's port is the better default for the same reason the route's
+	// local address is the better bind address: it is a fact about a connection
+	// that just succeeded, rather than a constant that happens to be written down.
 	bindPort := req.BindPort
 	if bindPort == "" {
-		bindPort = "8080"
+		bindPort = targetPort
 	}
 
-	// Preflight: if a bind IP is provided, verify we can bind to bind_ip:bind_port locally
-	if req.BindIp != "" {
-		if err := s.preflightBind(req.BindIp, bindPort); err != nil {
-			return &rpc.InitiateJoinResponse{Success: false, Message: "bind preflight failed: " + err.Error()}, nil
+	// Resolve the address this node will be known by, and refuse to join without
+	// one (#114).
+	//
+	// An omitted --bind-ip used to be sent through as an empty string, and the
+	// guard below only ran when it was non-empty -- so the one case with no
+	// address to check was the one case that was not checked. The joinee wrote
+	// `bind_address: ""` into its config, propagated it to every peer, and
+	// reported the join a success: `pulsectl status` then showed the new member as
+	// `Address: :8080  Status: Unknown` and the cluster degraded, with nothing
+	// connecting that to the join that had just claimed to work.
+	bindIP := req.BindIp
+	if bindIP == "" {
+		derived, err := localAddrToward(net.JoinHostPort(req.TargetHost, targetPort))
+		if err != nil {
+			return &rpc.InitiateJoinResponse{
+				Success: false,
+				Message: "no bind address given and none could be determined from the route to " +
+					req.TargetHost + " (" + err.Error() + "); pass --bind-ip",
+			}, nil
 		}
+		bindIP = derived
+		s.logger.Info("INITIATE_JOIN: no bind address given; using the local address that reaches the cluster",
+			"bindIP", bindIP, "target", req.TargetHost)
+	}
+
+	// Preflight: verify we can actually bind bind_ip:bind_port locally. Now
+	// unconditional -- a derived address is a good guess rather than a fact, and
+	// this is the check that turns it into one.
+	if err := s.preflightBind(bindIP, bindPort); err != nil {
+		return &rpc.InitiateJoinResponse{Success: false, Message: "bind preflight failed: " + err.Error()}, nil
 	}
 
 	joinReq := &rpc.JoinRequest{
 		Hostname: hostname,
 		Token:    req.Token,
 		NodeId:   nodeID,
-		BindIp:   req.BindIp,
+		BindIp:   bindIP,
 		BindPort: bindPort,
 	}
 	s.logger.Info("INITIATE_JOIN: Sending join request to target",
 		"targetHost", req.TargetHost,
 		"targetPort", targetPort,
 		"nodeID", nodeID,
-		"bindIP", req.BindIp,
+		"bindIP", bindIP,
 		"bindPort", bindPort)
 
 	// Bound the outbound Join RPC so a hung target cannot hold clusterInitMu
@@ -8572,4 +8629,32 @@ func tokenFingerprint(token string) string {
 	}
 	sum := sha256.Sum256([]byte(trimmed))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+// localAddrToward returns the local address this node uses to reach target.
+//
+// The right default for a bind address, because it is the one answer that cannot
+// disagree with reality: peers reach this node over the path it reaches them, so
+// the near end of a connection to the cluster is the address the cluster should
+// record. Reading a route table or picking the first non-loopback interface both
+// guess; this asks the kernel what it actually did.
+//
+// The connection is opened and dropped immediately -- only its local end is
+// wanted. A node that cannot reach the target at all fails here, which is the
+// right moment to fail: it could not have joined anyway.
+func localAddrToward(target string) (string, error) {
+	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	host, _, err := net.SplitHostPort(conn.LocalAddr().String())
+	if err != nil {
+		return "", err
+	}
+	if host == "" {
+		return "", fmt.Errorf("local address of the connection to the cluster was empty")
+	}
+	return host, nil
 }
