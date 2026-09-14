@@ -33,7 +33,6 @@ import (
 	"time"
 
 	"github.com/syleron/pulseha/packages/config"
-	"github.com/syleron/pulseha/packages/security"
 )
 
 // mintIdentity writes a fresh keypair into its own directory, laid out the way
@@ -80,14 +79,10 @@ func mintIdentity(t *testing.T, cn string) (dir, certPEM string) {
 // credentialsAs builds what the node whose identity lives in dir would use,
 // given the cluster config it can currently see.
 func credentialsAs(t *testing.T, dir string, snapshot Snapshot,
-	build func(Snapshot) (*tls.Config, error)) *tls.Config {
+	build func(string, Snapshot) (*tls.Config, error)) *tls.Config {
 	t.Helper()
 
-	prev := security.CertDir
-	security.CertDir = dir
-	defer func() { security.CertDir = prev }()
-
-	cfg, err := build(snapshot)
+	cfg, err := build(dir, snapshot)
 	if err != nil {
 		t.Fatalf("credentials: %v", err)
 	}
@@ -174,10 +169,10 @@ func TestAPermissiveClusterGetsNoCredentials(t *testing.T) {
 		cfg := &config.Config{Nodes: map[string]*config.Node{}}
 		cfg.Pulse.TLSMode = mode
 
-		for name, build := range map[string]func(Snapshot) (*tls.Config, error){
+		for name, build := range map[string]func(string, Snapshot) (*tls.Config, error){
 			"client": ClientCredentials, "server": ServerCredentials,
 		} {
-			got, err := build(snapshotOf(cfg))
+			got, err := build("", snapshotOf(cfg))
 			if err != nil {
 				t.Errorf("%s, tls_mode %q: %v", name, mode, err)
 			}
@@ -319,21 +314,14 @@ func TestANodeThatJoinsAfterwardsIsAccepted(t *testing.T) {
 // A cluster that asks for TLS and cannot produce it must say so, not quietly
 // hand back the nil that means plaintext.
 func TestRequiredWithNothingToOfferIsAnError(t *testing.T) {
-	restore := func(t *testing.T, dir string) {
-		t.Helper()
-		prev := security.CertDir
-		security.CertDir = dir
-		t.Cleanup(func() { security.CertDir = prev })
-	}
-
 	t.Run("no identity on disk", func(t *testing.T) {
-		restore(t, t.TempDir())
+		dir := t.TempDir()
 
 		cfg := requiredConfig(map[string]*config.Node{"uuid-a": {Hostname: "node-a", TLSCert: "x"}})
-		for name, build := range map[string]func(Snapshot) (*tls.Config, error){
+		for name, build := range map[string]func(string, Snapshot) (*tls.Config, error){
 			"client": ClientCredentials, "server": ServerCredentials,
 		} {
-			got, err := build(snapshotOf(cfg))
+			got, err := build(dir, snapshotOf(cfg))
 			if err == nil {
 				t.Errorf("%s: a node with no certificate on disk produced credentials", name)
 			}
@@ -345,20 +333,19 @@ func TestRequiredWithNothingToOfferIsAnError(t *testing.T) {
 
 	t.Run("a config naming no certificates", func(t *testing.T) {
 		dir, _ := mintIdentity(t, "node-a")
-		restore(t, dir)
 
 		cfg := requiredConfig(map[string]*config.Node{"uuid-a": {Hostname: "node-a"}})
-		if _, err := ServerCredentials(snapshotOf(cfg)); err == nil {
+		if _, err := ServerCredentials(dir, snapshotOf(cfg)); err == nil {
 			t.Error("a cluster whose config names no certificates produced credentials; " +
 				"the listener would have started and refused everybody")
 		}
 	})
 
 	t.Run("no config at all", func(t *testing.T) {
-		if _, err := ClientCredentials(nil); err == nil {
+		if _, err := ClientCredentials("", nil); err == nil {
 			t.Error("a nil snapshot produced credentials")
 		}
-		if _, err := ServerCredentials(func() *config.Config { return nil }); err == nil {
+		if _, err := ServerCredentials("", func() *config.Config { return nil }); err == nil {
 			t.Error("a snapshot returning nothing produced credentials")
 		}
 	})
@@ -383,8 +370,7 @@ func TestAJoinerPinsTheCertificateTheTokenNames(t *testing.T) {
 	})))
 
 	t.Run("the certificate the token names", func(t *testing.T) {
-		security.CertDir = joinerDir
-		clientCfg, err := PinnedClientCredentials(pin)
+		clientCfg, err := PinnedClientCredentials(joinerDir, pin)
 		if err != nil {
 			t.Fatalf("PinnedClientCredentials: %v", err)
 		}
@@ -401,8 +387,7 @@ func TestAJoinerPinsTheCertificateTheTokenNames(t *testing.T) {
 			t.Fatalf("Fingerprint: %v", err)
 		}
 
-		security.CertDir = joinerDir
-		clientCfg, err := PinnedClientCredentials(otherPin)
+		clientCfg, err := PinnedClientCredentials(joinerDir, otherPin)
 		if err != nil {
 			t.Fatalf("PinnedClientCredentials: %v", err)
 		}
@@ -413,9 +398,8 @@ func TestAJoinerPinsTheCertificateTheTokenNames(t *testing.T) {
 	})
 
 	t.Run("a fingerprint that is not one", func(t *testing.T) {
-		security.CertDir = joinerDir
 		for _, bad := range []string{"", "abc", pin + "00", strings.ToUpper(pin) + "x"} {
-			if _, err := PinnedClientCredentials(bad); err == nil {
+			if _, err := PinnedClientCredentials(joinerDir, bad); err == nil {
 				t.Errorf("%q was accepted as a certificate fingerprint", bad)
 			}
 		}
@@ -424,8 +408,7 @@ func TestAJoinerPinsTheCertificateTheTokenNames(t *testing.T) {
 	// Whitespace and case are how a fingerprint arrives after a human has moved
 	// it — copied out of a terminal, pasted into another one.
 	t.Run("as an operator would have carried it", func(t *testing.T) {
-		security.CertDir = joinerDir
-		clientCfg, err := PinnedClientCredentials("  " + strings.ToUpper(pin) + "\n")
+		clientCfg, err := PinnedClientCredentials(joinerDir, "  "+strings.ToUpper(pin)+"\n")
 		if err != nil {
 			t.Fatalf("PinnedClientCredentials: %v", err)
 		}

@@ -418,7 +418,7 @@ func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
 
 	dialPinned := func(t *testing.T, fingerprint string) *client.Client {
 		t.Helper()
-		creds, err := clustertls.PinnedClientCredentials(fingerprint)
+		creds, err := clustertls.PinnedClientCredentials("", fingerprint)
 		if err != nil {
 			t.Fatalf("PinnedClientCredentials: %v", err)
 		}
@@ -444,7 +444,7 @@ func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
 			BindIp:   "127.0.0.1",
 			BindPort: "9083",
 			Token:    secret,
-			TlsCert:  localCertificatePEM(),
+			TlsCert:  clustertls.CertificatePEM(""),
 		})
 		if err != nil {
 			t.Fatalf("a node holding the cluster's own token could not join it: %v", err)
@@ -473,7 +473,7 @@ func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
 			t.Fatalf("Fingerprint: %v", err)
 		}
 
-		creds, err := clustertls.PinnedClientCredentials(wrongPin)
+		creds, err := clustertls.PinnedClientCredentials("", wrongPin)
 		if err != nil {
 			t.Fatalf("PinnedClientCredentials: %v", err)
 		}
@@ -576,10 +576,10 @@ func TestTheTokenRPCHandsOutAUsableToken(t *testing.T) {
 
 // startTLSRecordingPeer is a recordingPeer that serves the cluster's credentials,
 // which is what every peer looks like once the cluster is on `required`.
-func startTLSRecordingPeer(t *testing.T, snapshot func() *config.Config) (*recordingPeer, string) {
+func startTLSRecordingPeer(t *testing.T, certDir string, snapshot func() *config.Config) (*recordingPeer, string) {
 	t.Helper()
 
-	creds, err := clustertls.ServerCredentials(snapshot)
+	creds, err := clustertls.ServerCredentials(certDir, snapshot)
 	if err != nil {
 		t.Fatalf("ServerCredentials: %v", err)
 	}
@@ -623,12 +623,7 @@ func TestTheFlipBackIsDeliveredOnTheTermsThePeersAreStillOn(t *testing.T) {
 	s.memberList.UpdateConfig(s.config)
 
 	peerView := func() *config.Config { return s.config }
-	peer, addr := func() (*recordingPeer, string) {
-		prev := security.CertDir
-		security.CertDir = peerDir
-		defer func() { security.CertDir = prev }()
-		return startTLSRecordingPeer(t, peerView)
-	}()
+	peer, addr := startTLSRecordingPeer(t, peerDir, peerView)
 
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {

@@ -3,6 +3,7 @@ package membership
 import (
 	"fmt"
 	"sort"
+	"sync/atomic"
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/ipam"
@@ -17,6 +18,36 @@ type MemberList struct {
 	config    *config.Config
 	logger    *log.Logger
 	ipMonitor *IPMonitor
+	// certDir is where this cluster's local node keeps its own certificate and
+	// key. Empty means the process-wide default, which is what the daemon runs
+	// with; the integration harness sets one per node, because its nodes are all
+	// Servers in one process and a shared directory means a shared identity --
+	// which makes TLS between them untestable (#111).
+	//
+	// Atomic rather than guarded by this list's lock, and that is not a
+	// micro-optimisation. initializeClient reads it, and that runs under paths
+	// that already hold the write lock -- AddActiveIPs → BringUpIPs is one -- so a
+	// read lock here can never be granted and the daemon wedges. The integration
+	// suite found it on the first run, which the unit suite could not: nothing
+	// there drives a member all the way to dialling.
+	certDir atomic.Pointer[string]
+}
+
+// SetCertDir points this node's TLS identity at a directory other than the
+// process-wide one. Called before the member list is used.
+func (m *MemberList) SetCertDir(dir string) {
+	m.certDir.Store(&dir)
+}
+
+// CertDir is where this node's own certificate and key live, "" meaning the
+// process-wide default.
+//
+// Takes no lock, deliberately -- see the field.
+func (m *MemberList) CertDir() string {
+	if dir := m.certDir.Load(); dir != nil {
+		return *dir
+	}
+	return ""
 }
 
 // NewMemberList creates a new member list

@@ -96,7 +96,7 @@ func TestAMistypedFingerprintIsNotTreatedAsAbsent(t *testing.T) {
 			t.Errorf("ParseJoinToken(%q) reported no pin, so the join would go out in "+
 				"clear against a cluster the operator asked to pin", damaged)
 		}
-		if _, err := PinnedClientCredentials(fingerprint); err == nil {
+		if _, err := PinnedClientCredentials("", fingerprint); err == nil {
 			t.Errorf("ParseJoinToken(%q) produced %q, which was accepted as a fingerprint",
 				damaged, fingerprint)
 		}

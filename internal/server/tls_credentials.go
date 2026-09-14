@@ -28,7 +28,6 @@ import (
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/packages/config"
-	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/rpc"
 )
 
@@ -69,7 +68,7 @@ func (s *Server) clusterSnapshot() clustertls.Snapshot {
 // peerCredentials is the TLS configuration this node offers when it dials a
 // peer, or nil while the cluster is permissive and the wire stays plaintext.
 func (s *Server) peerCredentials() (*tls.Config, error) {
-	return clustertls.ClientCredentials(s.clusterSnapshot())
+	return clustertls.ClientCredentials(s.certDir, s.clusterSnapshot())
 }
 
 // dialPeer opens c against a peer, over TLS when the cluster requires it.
@@ -112,7 +111,7 @@ func (s *Server) dialPeer(c *client.Client, ip, port string) error {
 // stop accepting it. Serving nothing is the one an operator can diagnose, and it
 // fails on this node rather than silently downgrading the cluster.
 func (s *Server) newClusterGRPCServer() (srv *grpc.Server, tlsServed bool, err error) {
-	creds, err := clustertls.ServerCredentials(s.clusterSnapshot())
+	creds, err := clustertls.ServerCredentials(s.certDir, s.clusterSnapshot())
 	if err != nil {
 		return nil, false, fmt.Errorf("cluster TLS credentials could not be built: %w", err)
 	}
@@ -163,14 +162,14 @@ func (s *Server) presentableTokenLocked(cfg *config.Config, secret string) strin
 		return secret
 	}
 
-	fingerprint, err := clustertls.Fingerprint(localCertificatePEM())
+	fingerprint, err := clustertls.Fingerprint(s.localCertificatePEM())
 	if err != nil {
 		// The cluster requires TLS and this node cannot say what its own
 		// certificate is, so it cannot hand out a token that would work. Better an
 		// unusable token than one that silently drops the pin and produces a
 		// plaintext join against a listener that will refuse it anyway.
 		s.logger.Error("Cannot add this node's fingerprint to the join token",
-			"error", err, "dir", security.CertDir)
+			"error", err, "dir", clustertls.CertDirOr(s.certDir))
 		return secret
 	}
 	return clustertls.FormatJoinToken(secret, fingerprint)
@@ -274,7 +273,7 @@ func (s *Server) ReportStaleIdentity() {
 		return
 	}
 
-	onDisk := localCertificatePEM()
+	onDisk := s.localCertificatePEM()
 	if onDisk == "" || onDisk == strings.TrimSpace(node.TLSCert) {
 		return
 	}
@@ -285,4 +284,22 @@ func (s *Server) ReportStaleIdentity() {
 		"repair itself. Re-join this node with a token from a healthy member.",
 		"onDisk", certificateFingerprint(onDisk),
 		"clusterExpects", certificateFingerprint(node.TLSCert))
+}
+
+// SetCertDir points this node's TLS identity at a directory other than the
+// process-wide one, and tells the member list to use it too.
+//
+// For a process that runs more than one node, which in practice means the
+// integration harness: its nodes are Servers in one process, and a shared
+// certificate directory means a shared identity, which makes TLS between them
+// untestable — every node would present the same certificate and the trust set
+// could not tell them apart. The daemon never calls this and runs on
+// security.CertDir.
+//
+// Call before Start.
+func (s *Server) SetCertDir(dir string) {
+	s.certDir = dir
+	if s.memberList != nil {
+		s.memberList.SetCertDir(dir)
+	}
 }

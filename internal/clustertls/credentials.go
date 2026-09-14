@@ -22,6 +22,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -58,8 +59,8 @@ type Snapshot func() *config.Config
 // asked for TLS and it could not be assembled, which callers must treat as fatal
 // to the connection rather than falling back -- a fallback here would answer
 // "TLS is required" with plaintext.
-func ClientCredentials(snapshot Snapshot) (*tls.Config, error) {
-	cfg, keypair, err := identityFor(snapshot)
+func ClientCredentials(certDir string, snapshot Snapshot) (*tls.Config, error) {
+	cfg, keypair, err := identityFor(certDir, snapshot)
 	if err != nil || cfg == nil {
 		return nil, err
 	}
@@ -104,8 +105,8 @@ func ClientCredentials(snapshot Snapshot) (*tls.Config, error) {
 // CA pool to chain to, which is the design this cluster deliberately does not
 // have, and it would reject every peer. Any is what puts a certificate in the
 // connection for the interceptor to identify.
-func ServerCredentials(snapshot Snapshot) (*tls.Config, error) {
-	cfg, keypair, err := identityFor(snapshot)
+func ServerCredentials(certDir string, snapshot Snapshot) (*tls.Config, error) {
+	cfg, keypair, err := identityFor(certDir, snapshot)
 	if err != nil || cfg == nil {
 		return nil, err
 	}
@@ -130,14 +131,14 @@ func ServerCredentials(snapshot Snapshot) (*tls.Config, error) {
 //
 // The fingerprint is the SHA-256 of the certificate's DER bytes, lowercase hex,
 // which is what Fingerprint produces and what the token carries.
-func PinnedClientCredentials(fingerprint string) (*tls.Config, error) {
+func PinnedClientCredentials(certDir, fingerprint string) (*tls.Config, error) {
 	pin := strings.ToLower(strings.TrimSpace(fingerprint))
 	if len(pin) != sha256HexLen {
 		return nil, fmt.Errorf("a certificate fingerprint is %d hex characters, not %d",
 			sha256HexLen, len(pin))
 	}
 
-	keypair, err := localKeypair()
+	keypair, err := LocalKeypair(certDir)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +186,7 @@ const sha256HexLen = sha256.Size * 2
 // identityFor answers the two questions both credential builders start with:
 // does this cluster require TLS, and can this node produce the identity it would
 // need. A nil config with a nil error is the permissive phase.
-func identityFor(snapshot Snapshot) (*config.Config, *tls.Certificate, error) {
+func identityFor(certDir string, snapshot Snapshot) (*config.Config, *tls.Certificate, error) {
 	if snapshot == nil {
 		return nil, nil, errors.New("no config to read the TLS mode from")
 	}
@@ -197,7 +198,7 @@ func identityFor(snapshot Snapshot) (*config.Config, *tls.Certificate, error) {
 		return nil, nil, nil
 	}
 
-	keypair, err := localKeypair()
+	keypair, err := LocalKeypair(certDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -212,19 +213,51 @@ func identityFor(snapshot Snapshot) (*config.Config, *tls.Certificate, error) {
 	return cfg, keypair, nil
 }
 
-// localKeypair reads this node's own identity. Read at build time rather than per
-// handshake: step 1 of #111 made it stable across restarts, so there is nothing
-// to re-read for.
-func localKeypair() (*tls.Certificate, error) {
+// LocalKeypair reads the node identity stored in dir. Read at build time rather
+// than per handshake: step 1 of #111 made it stable across restarts, so there is
+// nothing to re-read for.
+//
+// The directory is a parameter rather than security.CertDir read directly, and
+// that is not only tidiness. It is the difference between a process being one
+// node and a process being able to be several, which is what the integration
+// harness is -- every node it runs is a Server in the same process, so a package
+// global here means they all share one identity and TLS between them cannot be
+// exercised at all. An empty dir falls back to security.CertDir, which is what
+// the daemon passes and what every existing caller gets.
+func LocalKeypair(dir string) (*tls.Certificate, error) {
+	dir = CertDirOr(dir)
 	keypair, err := tls.LoadX509KeyPair(
-		filepath.Join(security.CertDir, "pulseha.crt"),
-		filepath.Join(security.CertDir, "pulseha.key"),
+		filepath.Join(dir, "pulseha.crt"),
+		filepath.Join(dir, "pulseha.key"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("this node's certificate and key could not be loaded from %s: %w",
-			security.CertDir, err)
+			dir, err)
 	}
 	return &keypair, nil
+}
+
+// CertDirOr resolves a node's certificate directory, defaulting to the process-wide
+// one the daemon uses.
+func CertDirOr(dir string) string {
+	if strings.TrimSpace(dir) == "" {
+		return security.CertDir
+	}
+	return dir
+}
+
+// CertificatePEM returns the public certificate stored in dir, or "" if there is
+// none.
+//
+// Deliberately silent about failure. Every caller is describing a node to somebody
+// else, and a node without a certificate is one that has not published yet -- a
+// state the permissive phase exists to tolerate, not an error to propagate.
+func CertificatePEM(dir string) string {
+	pemBytes, err := os.ReadFile(filepath.Join(CertDirOr(dir), "pulseha.crt"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(pemBytes))
 }
 
 // verifyAgainst is the dialling end's check: the certificate presented must be

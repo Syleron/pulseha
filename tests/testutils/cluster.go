@@ -38,6 +38,11 @@ type TestNode struct {
 	Logger   *log.Logger
 	Status   membership.MemberStatus
 	Cluster  *TestCluster
+	// CertDir is this node's own TLS identity. Every node in a test cluster is a
+	// Server in this one process, so the process-wide security.CertDir would give
+	// them all the same certificate and the cluster's trust set could not tell
+	// them apart -- which is to say TLS could not be tested here at all (#111).
+	CertDir string
 }
 
 // TestCluster represents a test cluster environment
@@ -251,6 +256,9 @@ func (n *TestNode) Start() error {
 	n.Server = server.NewServer(nodeCfg, n.Logger, memberList, healthChecker)
 	if n.Server == nil {
 		return fmt.Errorf("failed to create server instance")
+	}
+	if n.CertDir != "" {
+		n.Server.SetCertDir(n.CertDir)
 	}
 
 	// Store the config in the node (no need to save to disk for tests)

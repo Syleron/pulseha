@@ -176,7 +176,13 @@ type Server struct {
 	// record says what it is actually serving rather than what the config said
 	// some time later. The two are set and cleared together.
 	grpcServerTLS bool
-	cliServer     *grpc.Server
+	// certDir is where this node's own certificate and key live. Empty means the
+	// process-wide security.CertDir, which is what the daemon runs with; the
+	// integration harness gives each of its in-process nodes its own, because
+	// otherwise every node in a test cluster shares one identity and TLS between
+	// them cannot be exercised at all.
+	certDir   string
+	cliServer *grpc.Server
 	rpc.UnimplementedCLIServer
 	rpc.UnimplementedServerServer
 	// Convergence state
@@ -7044,7 +7050,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 	// like security and is not.
 	var joinCreds *tls.Config
 	if pinned {
-		joinCreds, err = clustertls.PinnedClientCredentials(pin)
+		joinCreds, err = clustertls.PinnedClientCredentials(s.certDir, pin)
 		if err != nil {
 			return &rpc.InitiateJoinResponse{
 				Success: false,
@@ -7130,7 +7136,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// afterwards (#111 step 3). Best effort: a node with no certificate yet
 		// simply publishes for itself shortly after, which is what happened before
 		// this existed.
-		TlsCert: localCertificatePEM(),
+		TlsCert: s.localCertificatePEM(),
 	}
 	s.logger.Info("INITIATE_JOIN: Sending join request to target",
 		"targetHost", req.TargetHost,
@@ -8868,9 +8874,9 @@ func localAddrToward(target string) (string, error) {
 func (s *Server) PublishLocalCertificate() {
 	// The same reader the join path uses, so there is one answer to "what is this
 	// node's certificate" rather than two that can drift.
-	cert := localCertificatePEM()
+	cert := s.localCertificatePEM()
 	if cert == "" {
-		s.logger.Debug("No certificate to publish yet", "dir", security.CertDir)
+		s.logger.Debug("No certificate to publish yet", "dir", clustertls.CertDirOr(s.certDir))
 		return
 	}
 
@@ -8950,10 +8956,6 @@ func certificateFingerprint(pemCert string) string {
 // somebody else, and a node without a certificate is a node that has not
 // published yet -- a state the permissive phase exists to tolerate, not an error
 // to propagate up a join.
-func localCertificatePEM() string {
-	pemBytes, err := os.ReadFile(filepath.Join(security.CertDir, "pulseha.crt"))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(pemBytes))
+func (s *Server) localCertificatePEM() string {
+	return clustertls.CertificatePEM(s.certDir)
 }

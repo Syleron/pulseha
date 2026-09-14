@@ -44,7 +44,7 @@ import (
 func serveWithAuthorisation(t *testing.T, s *Server) string {
 	t.Helper()
 
-	creds, err := clustertls.ServerCredentials(s.clusterSnapshot())
+	creds, err := clustertls.ServerCredentials(s.certDir, s.clusterSnapshot())
 	if err != nil {
 		t.Fatalf("ServerCredentials: %v", err)
 	}
@@ -73,10 +73,7 @@ func serveWithAuthorisation(t *testing.T, s *Server) string {
 func dialAs(t *testing.T, dir string, cfg *config.Config, addr string) *client.Client {
 	t.Helper()
 
-	prev := security.CertDir
-	security.CertDir = dir
-	creds, err := clustertls.ClientCredentials(func() *config.Config { return cfg })
-	security.CertDir = prev
+	creds, err := clustertls.ClientCredentials(dir, func() *config.Config { return cfg })
 	if err != nil {
 		t.Fatalf("ClientCredentials: %v", err)
 	}

@@ -2172,7 +2172,7 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 	}
 	defer remoteClient.Close()
 
-	creds, err := clustertls.ClientCredentials(func() *config.Config { return cfg })
+	creds, err := clustertls.ClientCredentials(h.members.CertDir(), func() *config.Config { return cfg })
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to build TLS credentials for %s: %v",
 			member.Hostname, err)

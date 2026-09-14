@@ -171,7 +171,7 @@ func (m *Member) initializeClient() error {
 	// the mode and the trust set the cluster is on now. A failure here is a
 	// failure to connect and is returned as one -- a cluster that requires TLS
 	// must not be reached in clear because the credentials would not assemble.
-	creds, err := clustertls.ClientCredentials(func() *config.Config { return m.config })
+	creds, err := clustertls.ClientCredentials(m.certDir(), func() *config.Config { return m.config })
 	if err != nil {
 		return fmt.Errorf("failed to build TLS credentials for member %s: %v", m.Hostname, err)
 	}
@@ -806,6 +806,15 @@ func StatusToString(status MemberStatus) string {
 	default:
 		return fmt.Sprintf("Unknown(%d)", status)
 	}
+}
+
+// certDir is where this node's own certificate and key live, asked of the member
+// list so that a process running several nodes gives each one its own.
+func (m *Member) certDir() string {
+	if m.memberList == nil {
+		return ""
+	}
+	return m.memberList.CertDir()
 }
 
 // dropClient closes this member's cached client and forgets it, so the next

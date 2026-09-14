@@ -176,7 +176,7 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 		// written.
 		probe := &config.Config{Nodes: cfg.Nodes}
 		probe.Pulse.TLSMode = config.TLSModeRequired
-		if _, err := clustertls.ServerCredentials(func() *config.Config { return probe }); err != nil {
+		if _, err := clustertls.ServerCredentials(s.certDir, func() *config.Config { return probe }); err != nil {
 			return refuse("this node cannot serve TLS: %v", err)
 		}
 	}
@@ -194,7 +194,7 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 	// sentence: deliver a change on the terms in force before it. Going to
 	// `required` that is nil, which is plaintext, which is what ADR-0005 means by
 	// delivering the flip over the channel it removes.
-	deliverWith, err := clustertls.ClientCredentials(s.clusterSnapshot())
+	deliverWith, err := clustertls.ClientCredentials(s.certDir, s.clusterSnapshot())
 	if err != nil {
 		// Refused rather than changed unilaterally, in both directions. This node
 		// cannot reach its peers on the terms they are on, so a change made here
