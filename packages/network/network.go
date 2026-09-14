@@ -17,7 +17,6 @@
 package network
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -746,66 +745,19 @@ func mustRetryWithHeldPrefix(requested int, held *netlink.Addr) bool {
 	return actual != requested
 }
 
-/*
-*
-Perform a curl request to a web host.
-This only returns a boolean based off the http status code received by the request.
-*/
-func Curl(httpRequestURL string) bool {
-	output, err := utils.Execute("curl", "-s", "-o", "/dev/null", "-w", "\"%{http_code}\"", httpRequestURL)
-	if err != nil {
-		//log.Error("Http Curl request failed.")
-		return false
-	}
-	if output == "\"200\"" {
-		return true
-	} else {
-		return false
-	}
-}
-
-/**
- * Performs an ICMP ping to check if a host is reachable
- * Handles both plain IPs and CIDR notation
- */
-func ICMPv4(Ipv4Addr string) error {
-	// If the IP is in CIDR notation, extract just the IP part
-	if strings.Contains(Ipv4Addr, "/") {
-		ipPart, _, err := net.ParseCIDR(Ipv4Addr)
-		if err != nil {
-			log.Error("Failed to parse CIDR address: ", Ipv4Addr)
-			return err
-		}
-		Ipv4Addr = ipPart.String()
-	}
-
-	cmds := "ping -c 1 -W 1 " + Ipv4Addr + " &> /dev/null ; echo $?"
-	cmd := exec.Command("bash", "-c", cmds)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	err := cmd.Run()
-	if err != nil {
-		log.Error("ICMP request failed: ", Ipv4Addr)
-		return err
-	}
-	if !strings.Contains(out.String(), "0") {
-		log.Error("ICMP request failed: ", Ipv4Addr, " ", out.String())
-		return errors.New("failed to reach host")
-	}
-	return nil
-}
-
-/*
-*
-Function to perform an arp scan on the network. This will allow us to see which IP's are available.
-*/
-func ArpScan(addrWSubnet string) string {
-	output, err := utils.Execute("arp-scan", addrWSubnet)
-	if err != nil {
-		return err.Error()
-	}
-	return output
-}
+// Curl, ICMPv4 and ArpScan are gone (#112), for IPv6NDP's reason one paragraph
+// down: all three had zero callers, in a package whose every other export is on a
+// hot path. They are recorded here rather than silently dropped because ICMPv4 is
+// worth knowing about — it built `ping -c 1 -W 1 ` + addr + ` &> /dev/null` and
+// handed it to `bash -c`, in a daemon that runs as root. Nothing could reach it,
+// so nothing could exploit it, but it is the shape a reviewer should never find
+// twice; if a liveness probe is wanted here again, x/net/icmp needs no shell and
+// utils.Execute already runs a program without one.
+//
+// PRs #195 and #196 proposed refactoring ICMPv4 instead. Both were the same
+// change filed twice and 703 commits behind by the time they were read, and the
+// reachability question neither had asked turned a 118-file refactor into a
+// deletion.
 
 // IPv6NDP is gone (defect #66). It was the intended IPv6 announcer and had never
 // been called by anything: it took no target address and omitted ndptool's `send`
