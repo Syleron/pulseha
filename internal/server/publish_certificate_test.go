@@ -191,3 +191,76 @@ func marshalConfigWithCerts(t *testing.T, s *Server, certs map[string]string) []
 	}
 	return b
 }
+
+// #111 step 3: a joining node's certificate travels with the join, so the node
+// is in the trust set the moment it is in the config rather than whenever its own
+// publish happens to propagate afterwards.
+func TestAJoinRecordsTheJoinersCertificate(t *testing.T) {
+	withCertFile(t, "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----\n")
+	s := newRemoveIPTestServer(t)
+
+	const joinerCert = "-----BEGIN CERTIFICATE-----\njoiner\n-----END CERTIFICATE-----"
+	resp, err := s.HandleNodeJoin(context.Background(), &rpc.JoinRequest{
+		Hostname: "MC-LB-3-node-2",
+		NodeId:   "joiner",
+		BindIp:   "10.20.70.22",
+		BindPort: "9083",
+		Token:    "irrelevant",
+		TlsCert:  joinerCert + "\n",
+	})
+	if err != nil {
+		t.Fatalf("HandleNodeJoin: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("join refused: %s", resp.Message)
+	}
+
+	s.RLock()
+	got := s.config.Nodes["joiner"].TLSCert
+	s.RUnlock()
+	if got != joinerCert {
+		t.Errorf("recorded %q, want the joiner's certificate trimmed", got)
+	}
+}
+
+// Recorded, not required. A joiner on an older build sends nothing and publishes
+// for itself a moment later — which is exactly what step 2 shipped, so an empty
+// value is a slower path to the same place rather than something to reject.
+func TestAJoinWithNoCertificateIsStillAccepted(t *testing.T) {
+	withCertFile(t, "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----\n")
+	s := newRemoveIPTestServer(t)
+
+	resp, err := s.HandleNodeJoin(context.Background(), &rpc.JoinRequest{
+		Hostname: "MC-LB-3-node-2",
+		NodeId:   "older-joiner",
+		BindIp:   "10.20.70.22",
+		BindPort: "9083",
+		Token:    "irrelevant",
+	})
+	if err != nil {
+		t.Fatalf("HandleNodeJoin: %v", err)
+	}
+	if !resp.Success {
+		t.Errorf("a joiner without a certificate was refused: %s", resp.Message)
+	}
+	s.RLock()
+	got := s.config.Nodes["older-joiner"].TLSCert
+	s.RUnlock()
+	if got != "" {
+		t.Errorf("recorded %q for a joiner that sent nothing", got)
+	}
+}
+
+// One reader for "what is this node's certificate", so the join path and the
+// publish path cannot drift apart.
+func TestLocalCertificatePEMIsTrimmedAndSilent(t *testing.T) {
+	withCertFile(t, "  -----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----\n\n")
+	if got := localCertificatePEM(); got != "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----" {
+		t.Errorf("localCertificatePEM = %q, want it trimmed", got)
+	}
+
+	withCertFile(t, "")
+	if got := localCertificatePEM(); got != "" {
+		t.Errorf("localCertificatePEM = %q with no file, want empty rather than an error", got)
+	}
+}
