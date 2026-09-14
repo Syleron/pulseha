@@ -99,7 +99,33 @@ type Local struct {
 	// — it is a statement about how this box's network is managed, which a peer
 	// cannot know and must not overwrite.
 	NMAddressOwnership bool `json:"nm_address_ownership"`
+	// TLSMode is how much the cluster requires of inter-node TLS, and it is
+	// cluster-scoped: every node has to agree, because a node that requires TLS
+	// cannot talk to one that does not serve it.
+	//
+	// Two values, and the empty string is one of them. `permissive` -- absent, or
+	// anything that is not `required` -- is the phase where each node publishes
+	// its certificate and the trust set accumulates while nothing depends on it,
+	// and the wire stays plaintext. `required` is the flip: listeners serve
+	// credentials and clients refuse a peer the config does not name.
+	//
+	// Defaulting to permissive rather than required is the migration (ADR-0005):
+	// an existing cluster upgrades its binaries one node at a time and must keep
+	// talking throughout, so a node coming up on a new build has to behave exactly
+	// as the old one did until an operator says otherwise. It is also why this is
+	// a string rather than a bool -- the third state this will want is
+	// `permissive` meaning "serve TLS, accept plaintext", and a bool would have to
+	// be replaced to say it.
+	TLSMode string `json:"tls_mode,omitempty"`
 }
+
+// The two values TLSMode takes. Named here, beside the field, so the daemon's
+// validation and the reader below cannot drift into disagreeing about the
+// spelling of the word that decides whether a cluster is encrypted.
+const (
+	TLSModePermissive = "permissive"
+	TLSModeRequired   = "required"
+)
 
 type Node struct {
 	Hostname    string              `json:"hostname"`
@@ -140,6 +166,27 @@ type Node struct {
 // downstream is a guess. Call this instead of guessing.
 func (l Local) SyslogEnabled() bool {
 	return l.LogToSyslog
+}
+
+// TLSRequired reports whether inter-node traffic must be TLS with peers verified
+// against the cluster's trust set.
+//
+// The same shape as SyslogEnabled above and for the same reason: everything that
+// needs the answer must read it from one place. This one carries an extra trap,
+// which is that the safe default is the *falsy* one. An unset `tls_mode` is a
+// cluster that has not been flipped yet, and a reader that treated "not
+// permissive" as "must be required" would take every pre-flip cluster off the
+// air on upgrade. So the test is for the one value that means yes, and every
+// other string -- empty, `permissive`, a typo -- is no.
+//
+// A typo therefore fails open, which is deliberate and is not the exposure it
+// looks like: the value only ever arrives through UpdateConfig, which refuses
+// anything but the two names, so a typo cannot reach a config the daemon wrote.
+// One hand-edited into the file leaves the cluster exactly as it was rather than
+// severing it, and the alternative -- refusing to start -- turns a spelling
+// mistake into an outage.
+func (l Local) TLSRequired() bool {
+	return l.TLSMode == TLSModeRequired
 }
 
 // New instantiates and setups up our config object
