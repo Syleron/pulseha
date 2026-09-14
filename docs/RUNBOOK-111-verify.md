@@ -295,9 +295,16 @@ This node's certificate is not the one the cluster knows it by, and the cluster 
 call, and the join records the joiner's certificate. Take a token from a healthy member and
 `pulsectl cluster join` this node back in.
 
-Note the report is a report. Whether a node in this state should refuse to start, or take itself
-out of promotion so it cannot cause the split above, is an open decision — see the note in
-`TEST-PLAN.md` TC-3.
+The node also takes itself **out of failover promotion** while this is true, so it cannot elect
+itself against a healthy cluster it simply cannot reach. Expect, beside the line above:
+
+```
+Holding this node out of failover promotion until its certificate is back in the cluster's trust set
+```
+
+`pulsectl status` will show it as `Maintenance` and the cluster as `degraded`, which is the guard
+working rather than a second fault. It releases itself after a successful re-join — no
+`maintenance --disable` needed, and an operator's own maintenance is never cleared by it.
 
 ## 10. If it passes
 

@@ -181,8 +181,11 @@ type Server struct {
 	// integration harness gives each of its in-process nodes its own, because
 	// otherwise every node in a test cluster shares one identity and TLS between
 	// them cannot be exercised at all.
-	certDir   string
-	cliServer *grpc.Server
+	certDir string
+	// identityGuardHeld records that EnforceIdentityGuard is what put this node
+	// into maintenance, so releasing it cannot undo an operator's own.
+	identityGuardHeld bool
+	cliServer         *grpc.Server
 	rpc.UnimplementedCLIServer
 	rpc.UnimplementedServerServer
 	// Convergence state
@@ -7197,7 +7200,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// Without this the certificate would not reach the cluster until the next
 		// restart -- correct eventually, and a surprising gap to leave between
 		// joining and appearing in the trust set (#111).
-		s.ReportStaleIdentity()
+		s.EnforceIdentityGuard()
 		s.PublishLocalCertificate()
 	} else {
 		s.logger.Warn("INITIATE_JOIN: No cluster config received from target, using minimal local update")
