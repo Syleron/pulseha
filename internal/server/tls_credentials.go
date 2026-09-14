@@ -27,6 +27,7 @@ import (
 
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/clustertls"
+	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/rpc"
 )
@@ -231,59 +232,142 @@ func (s *Server) dropPeerConnectionsOnTermsChange(tlsRequired bool) {
 		"pooled", len(stale), "tls", tlsRequired)
 }
 
-// ReportStaleIdentity names the one state a cluster on `required` cannot repair
-// by itself: this node's certificate on disk is not the one the cluster's config
-// says is its.
+// EnforceIdentityGuard keeps this node out of failover promotion while the
+// cluster knows it by a certificate it no longer holds.
 //
-// It happens when EnsureCertificates regenerates — an expiry, the 30-day renewal
-// window, a hostname change, a half-written pair, clock skew — and on a permissive
-// cluster it is nothing at all, because the publish that follows propagates the
-// new one. On a `required` cluster the publish cannot land, and the asymmetry is
-// worth stating precisely because it is not obvious:
+// The state: EnsureCertificates regenerated — an expiry, the 30-day renewal
+// window, a hostname change, clock skew — and on a `required` cluster the new
+// certificate is in nobody's trust set. The failure is asymmetric in a way that
+// is not obvious from either side:
 //
-//   - peers can still reach this node. Their certificates are in *its* trust set,
-//     so its interceptor authorises them and their config pushes work;
+//   - peers can still reach this node. Their certificates are in *its* trust
+//     set, so its interceptor authorises them and their config pushes work;
 //   - this node cannot reach them. It presents a certificate none of their trust
 //     sets name, so their interceptors refuse everything it sends except Join —
-//     including the very ConfigSync that would publish its new certificate.
+//     including the ConfigSync that would publish the new certificate.
 //
-// So it cannot announce itself out of the hole, and its own health checks of its
-// peers fail while theirs of it succeed. In active-passive that is the shape that
-// ends with this node deciding its peer is gone and promoting itself, against a
-// peer that is fine and thinks the same of nobody — which is the duplicate-address
-// outcome of defects #2 and #26, reached from a new direction.
+// So it cannot announce its way out, and **its health checks of its peers fail
+// while theirs of it succeed**. That asymmetry is the danger: this node concludes
+// its peers are gone and elects itself, against a cluster that is fine and has
+// not missed it. In active-passive that is two nodes holding the same addresses,
+// which is #2/#26 reached from a direction neither of them came from.
 //
-// The way out is a re-join: `Join` is the one RPC an unnamed certificate may call,
-// and HandleNodeJoin records the joiner's certificate, so a join with a valid
-// token puts this node back in the trust set. That is what the message says to do.
+// Maintenance is the lever because it already means exactly this — up, reachable,
+// and excluded from promotion (selectBestCandidate skips it and says so). The
+// node stays diagnosable rather than being taken off the air, which is why this
+// is not "refuse to start".
 //
-// Reporting only. Whether a node in this state should refuse to start, or take
-// itself out of promotion, is a behavioural decision that has not been made.
-func (s *Server) ReportStaleIdentity() {
-	cfg := s.clusterSnapshot()()
-	if cfg == nil || !cfg.Pulse.TLSRequired() {
-		return
-	}
-	localID, err := cfg.GetLocalNodeUUID()
-	if err != nil {
-		return
-	}
-	node, ok := cfg.Nodes[localID]
-	if !ok || node == nil || strings.TrimSpace(node.TLSCert) == "" {
-		return
-	}
-
-	onDisk := s.localCertificatePEM()
-	if onDisk == "" || onDisk == strings.TrimSpace(node.TLSCert) {
+// Three things it deliberately does differently from the operator's maintenance
+// path, and each would break it:
+//
+//   - **It cannot be refused.** setMaintenanceLocal declines when no other node
+//     would remain available, which is right for an operator taking a node down
+//     and exactly wrong here: refusing would leave this node able to promote
+//     itself, which is the one thing being prevented.
+//   - **It does not demote over RPC.** That path calls MakePassive on peers
+//     first. This node cannot reach peers — that is the condition — so the call
+//     would fail and abort the guard.
+//   - **It is not persisted.** The condition is re-derived at every start and
+//     after every join, so the guard lives exactly as long as the thing it
+//     guards against. Writing `maintenance: true` into the config would risk a
+//     node stuck in maintenance after a re-join had already fixed it, which is a
+//     new failure mode rather than a fix, and the write could not propagate
+//     anyway.
+//
+// What it does not claim: if this node is *already* Active and holding addresses
+// when its identity goes stale, it is in a worse state than this guard addresses
+// and the addresses are not taken off it here. The realistic moment for this is
+// startup, before any promotion has happened.
+func (s *Server) EnforceIdentityGuard() {
+	onDisk, expected, stale := s.identityIsStale()
+	if !stale {
+		s.releaseIdentityGuard()
 		return
 	}
 
 	s.logger.Error("This node's certificate is not the one the cluster knows it by, and the "+
 		"cluster requires TLS. Peers will refuse everything this node sends except a join, "+
 		"including the config push that would publish the new certificate — so this cannot "+
-		"repair itself. Re-join this node with a token from a healthy member.",
+		"repair itself. It cannot `cluster leave` either, because leaving coordinates with "+
+		"the peers that are refusing it: clear this node's cluster entries from its own "+
+		"config.json and restart it, then re-join with a token from a healthy member. See "+
+		"docs/RUNBOOK-111-verify.md.",
 		"onDisk", certificateFingerprint(onDisk),
-		"clusterExpects", certificateFingerprint(node.TLSCert))
+		"clusterExpects", certificateFingerprint(expected))
+
+	localID, err := s.currentConfig().GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	member := s.memberList.GetMemberByID(localID)
+	if member == nil {
+		s.logger.Error("Cannot hold this node out of promotion: it is not in its own member list")
+		return
+	}
+	if member.GetStatus() == membership.StatusMaintenance {
+		s.identityGuardHeld = true
+		return
+	}
+
+	member.SetStatus(membership.StatusMaintenance)
+	s.identityGuardHeld = true
+	s.logger.Error("Holding this node out of failover promotion until its certificate is back " +
+		"in the cluster's trust set. It would otherwise fail its own health checks of peers " +
+		"that are fine, elect itself, and take addresses a healthy node is already serving.")
+}
+
+// releaseIdentityGuard returns the node to passive, but only if this guard is
+// what put it in maintenance.
+//
+// The flag is the whole of it: an operator who deliberately put this node into
+// maintenance must not have it undone by a certificate check that happens to be
+// satisfied.
+func (s *Server) releaseIdentityGuard() {
+	if !s.identityGuardHeld {
+		return
+	}
+	s.identityGuardHeld = false
+
+	localID, err := s.currentConfig().GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	if member := s.memberList.GetMemberByID(localID); member != nil &&
+		member.GetStatus() == membership.StatusMaintenance {
+		member.SetStatus(membership.StatusPassive)
+		s.logger.Info("This node's certificate is in the cluster's trust set again; " +
+			"it is eligible for promotion once more")
+	}
+}
+
+// identityIsStale reports whether the cluster knows this node by a certificate it
+// no longer holds, returning both so a caller can name them.
+//
+// False on a permissive cluster, where a regeneration publishes its way out on
+// the next broadcast and there is nothing to guard against; false for a node that
+// has never published, which has no identity the cluster knows to differ from.
+func (s *Server) identityIsStale() (onDisk, expected string, stale bool) {
+	cfg := s.clusterSnapshot()()
+	if cfg == nil || !cfg.Pulse.TLSRequired() {
+		return "", "", false
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return "", "", false
+	}
+	node, ok := cfg.Nodes[localID]
+	if !ok || node == nil {
+		return "", "", false
+	}
+	expected = strings.TrimSpace(node.TLSCert)
+	if expected == "" {
+		return "", "", false
+	}
+	onDisk = s.localCertificatePEM()
+	if onDisk == "" {
+		return "", "", false
+	}
+	return onDisk, expected, onDisk != expected
 }
 
 // SetCertDir points this node's TLS identity at a directory other than the

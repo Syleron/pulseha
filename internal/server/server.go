@@ -181,8 +181,11 @@ type Server struct {
 	// integration harness gives each of its in-process nodes its own, because
 	// otherwise every node in a test cluster shares one identity and TLS between
 	// them cannot be exercised at all.
-	certDir   string
-	cliServer *grpc.Server
+	certDir string
+	// identityGuardHeld records that EnforceIdentityGuard is what put this node
+	// into maintenance, so releasing it cannot undo an operator's own.
+	identityGuardHeld bool
+	cliServer         *grpc.Server
 	rpc.UnimplementedCLIServer
 	rpc.UnimplementedServerServer
 	// Convergence state
@@ -442,18 +445,18 @@ func (s *Server) Start() error {
 		}
 	}()
 
-	// Attempt to start cluster server ONLY if configuration is present
-	var localNode config.Node
-	localNode, err = s.config.GetLocalNodeForBinding()
-	if err == nil {
-		if err := s.startClusterListener(localNode); err != nil {
-			return err
-		}
-	} else {
-		s.logger.Info("No cluster binding configuration found; cluster RPC server not started.", "cli_socket", s.cliSocketPath)
-	}
-
-	// Generate certificates if they don't exist
+	// Certificates before the listener, and the order is load-bearing.
+	//
+	// On a cluster that requires TLS the listener cannot be built without this
+	// node's keypair, so a node that has lost it -- a half-written pair, a deleted
+	// file, an image restored without it -- died here with `cluster TLS credentials
+	// could not be built`, *before reaching the code below that would have given it
+	// a new one*, and systemd restarted it into the same wall forever. Found on the
+	// live pair by deleting a certificate to see what the guard did, which is not
+	// what it did: the node never got far enough to have a guard.
+	//
+	// Generating first costs nothing on an ordinary start -- EnsureCertificates
+	// reads what is on disk and returns without writing.
 	s.logger.Debug("Checking/Generating TLS certificates...")
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -479,6 +482,17 @@ func (s *Server) Start() error {
 		}
 	} else {
 		s.logger.Debug("PULSEHA_TEST=true: skipping certificate generation")
+	}
+
+	// Attempt to start cluster server ONLY if configuration is present
+	var localNode config.Node
+	localNode, err = s.config.GetLocalNodeForBinding()
+	if err == nil {
+		if err := s.startClusterListener(localNode); err != nil {
+			return err
+		}
+	} else {
+		s.logger.Info("No cluster binding configuration found; cluster RPC server not started.", "cli_socket", s.cliSocketPath)
 	}
 
 	// Set server reference in health checker
@@ -7197,7 +7211,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// Without this the certificate would not reach the cluster until the next
 		// restart -- correct eventually, and a surprising gap to leave between
 		// joining and appearing in the trust set (#111).
-		s.ReportStaleIdentity()
+		s.EnforceIdentityGuard()
 		s.PublishLocalCertificate()
 	} else {
 		s.logger.Warn("INITIATE_JOIN: No cluster config received from target, using minimal local update")

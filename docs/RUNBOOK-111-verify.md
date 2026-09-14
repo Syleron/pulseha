@@ -291,13 +291,36 @@ a `required` cluster:
 This node's certificate is not the one the cluster knows it by, and the cluster requires TLS
 ```
 
-**The way out is a re-join**, not a config edit: `Join` is the one RPC an unnamed certificate may
-call, and the join records the joiner's certificate. Take a token from a healthy member and
-`pulsectl cluster join` this node back in.
+**The way out is a local reset and then a re-join** — a re-join alone is not enough, and this was
+measured rather than guessed. `pulsectl cluster leave` on the affected node fails with
+`PermissionDenied … is not in the cluster trust set`, because leaving coordinates the removal with
+the peers that are refusing it; and `cluster join` then refuses with `node is already part of a
+cluster; leave first`. So, on the affected node's console:
 
-Note the report is a report. Whether a node in this state should refuse to start, or take itself
-out of promotion so it cannot cause the split above, is an open decision — see the note in
-`TEST-PLAN.md` TC-3.
+```bash
+sudo systemctl stop pulseha
+# edit /etc/pulseha/config.json: keep only this node's own entry under "nodes",
+# and set "tls_mode": "permissive" so the join itself can proceed
+sudo systemctl start pulseha
+sudo pulsectl cluster leave                    # now succeeds, local state only
+sudo pulsectl cluster join --address <healthy node>:9083 --token '<full token>' --bind-ip <this node>
+sudo pulsectl node maintenance --disable       # a join always lands in maintenance
+```
+
+Remove it from the healthy node first (`pulsectl node remove --node-id …`) so it is not carrying
+a stale entry. `Join` is the one RPC an unnamed certificate may call, and the join records the
+joiner's certificate, which is what puts it back in the trust set.
+
+The node also takes itself **out of failover promotion** while this is true, so it cannot elect
+itself against a healthy cluster it simply cannot reach. Expect, beside the line above:
+
+```
+Holding this node out of failover promotion until its certificate is back in the cluster's trust set
+```
+
+`pulsectl status` will show it as `Maintenance` and the cluster as `degraded`, which is the guard
+working rather than a second fault. It releases itself after a successful re-join — no
+`maintenance --disable` needed, and an operator's own maintenance is never cleared by it.
 
 ## 10. If it passes
 

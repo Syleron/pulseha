@@ -1017,17 +1017,17 @@ func (r *recordingLogger) contains(substr string) bool {
 	return false
 }
 
-// A node whose certificate was regenerated while the cluster requires TLS is in
-// the one state the cluster cannot repair by itself, and nothing said so.
+// A node whose certificate was regenerated while the cluster requires TLS must
+// not be able to promote itself.
 //
 // Peers can still reach it — their certificates are in its trust set — but it
-// cannot reach them, because it now presents one none of theirs name. That
-// includes the ConfigSync that would publish its new certificate, so it cannot
-// announce itself out of the hole; and its own health checks fail while its
-// peers' succeed, which in active-passive is the shape that ends in a
-// self-promotion against a peer that is fine (#2/#26, from a new direction).
-func TestAStaleIdentityIsReportedOnARequiredCluster(t *testing.T) {
-	setup := func(t *testing.T, mode, published string) *recordingLogger {
+// cannot reach them, because it now presents one none of theirs name. So its
+// health checks of its peers fail while its peers' of it succeed, and it
+// concludes they are gone and elects itself, against a cluster that is fine and
+// has not missed it. In active-passive that is two nodes holding the same
+// addresses: #2/#26 from a direction neither came from.
+func TestAStaleIdentityIsHeldOutOfPromotion(t *testing.T) {
+	setup := func(t *testing.T, mode, published string) (*Server, *recordingLogger) {
 		t.Helper()
 		rec := &recordingLogger{}
 		s := newPropagationTestServer(t)
@@ -1041,45 +1041,149 @@ func TestAStaleIdentityIsReportedOnARequiredCluster(t *testing.T) {
 		s.config.Pulse.TLSMode = mode
 		s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = published
 		s.memberList.UpdateConfig(s.config)
+		// Passive and eligible, which is what a node is just after startup.
+		s.memberList.GetMemberByID(s.config.Pulse.LocalNode).SetStatus(membership.StatusPassive)
+		return s, rec
+	}
 
-		s.ReportStaleIdentity()
-		return rec
+	localStatus := func(s *Server) membership.MemberStatus {
+		return s.memberList.GetMemberByID(s.config.Pulse.LocalNode).GetStatus()
 	}
 
 	const marker = "not the one the cluster knows it by"
 
 	t.Run("regenerated while the cluster requires TLS", func(t *testing.T) {
-		// The config names a certificate this node no longer holds.
 		stale := mintIdentityInto(t, t.TempDir(), "local-node")
-		rec := setup(t, config.TLSModeRequired, stale)
-		if !rec.contains(marker) {
-			t.Error("a node that the cluster no longer knows by its certificate said nothing; " +
-				"it cannot publish its way out, and it will fail its own health checks " +
-				"while its peers pass theirs")
+		s, rec := setup(t, config.TLSModeRequired, stale)
+
+		s.EnforceIdentityGuard()
+
+		if got := localStatus(s); got != membership.StatusMaintenance {
+			t.Errorf("local status = %v, want Maintenance; this node can still be elected "+
+				"while it cannot reach the peers it would be taking over from", got)
 		}
-		if !rec.contains("Re-join this node") {
-			t.Error("the report does not say what to do about it")
+		if !rec.contains(marker) {
+			t.Error("nothing said why the node was held back")
+		}
+		// The recovery is a local reset and *then* a re-join, measured on the pair:
+		// `cluster leave` fails because leaving coordinates with the peers that are
+		// refusing this node, and `cluster join` then refuses because it is still
+		// in a cluster. A message saying only "re-join" sends an operator into that
+		// loop.
+		for _, want := range []string{"clear this node's cluster entries", "re-join"} {
+			if !rec.contains(want) {
+				t.Errorf("the report does not mention %q; an operator told only to re-join "+
+					"hits `leave first` and then `PermissionDenied` on the leave", want)
+			}
 		}
 	})
 
 	t.Run("the same certificate", func(t *testing.T) {
-		if rec := setup(t, config.TLSModeRequired, "onDisk"); rec.contains(marker) {
-			t.Error("a node holding exactly the certificate the cluster names was reported")
+		s, rec := setup(t, config.TLSModeRequired, "onDisk")
+		s.EnforceIdentityGuard()
+		if got := localStatus(s); got != membership.StatusPassive {
+			t.Errorf("local status = %v, want Passive; a node holding exactly the "+
+				"certificate the cluster names was taken out of promotion", got)
+		}
+		if rec.contains(marker) {
+			t.Error("a node holding the right certificate was reported")
 		}
 	})
 
 	t.Run("permissive, where it repairs itself", func(t *testing.T) {
 		stale := mintIdentityInto(t, t.TempDir(), "local-node")
-		if rec := setup(t, config.TLSModePermissive, stale); rec.contains(marker) {
-			t.Error("a permissive cluster was warned about a regeneration it publishes " +
-				"its way out of on the next broadcast")
+		s, rec := setup(t, config.TLSModePermissive, stale)
+		s.EnforceIdentityGuard()
+		if got := localStatus(s); got != membership.StatusPassive {
+			t.Errorf("local status = %v, want Passive; a permissive cluster publishes its "+
+				"way out of a regeneration on the next broadcast", got)
+		}
+		if rec.contains(marker) {
+			t.Error("a permissive cluster was warned about a regeneration it recovers from")
 		}
 	})
 
 	t.Run("never published", func(t *testing.T) {
-		if rec := setup(t, config.TLSModeRequired, ""); rec.contains(marker) {
-			t.Error("a node with nothing published yet was reported as stale; it has no " +
-				"identity the cluster knows to differ from")
+		s, rec := setup(t, config.TLSModeRequired, "")
+		s.EnforceIdentityGuard()
+		if got := localStatus(s); got != membership.StatusPassive {
+			t.Errorf("local status = %v, want Passive; a node with nothing published has no "+
+				"identity the cluster knows to differ from", got)
+		}
+		if rec.contains(marker) {
+			t.Error("a node with nothing published was reported as stale")
 		}
 	})
+
+	// A re-join puts the certificate back in the config, and the guard has to let
+	// go on its own — otherwise fixing the problem leaves the node in maintenance
+	// with nothing saying why.
+	t.Run("released once the certificate is back in the trust set", func(t *testing.T) {
+		stale := mintIdentityInto(t, t.TempDir(), "local-node")
+		s, _ := setup(t, config.TLSModeRequired, stale)
+		s.EnforceIdentityGuard()
+		if localStatus(s) != membership.StatusMaintenance {
+			t.Fatal("precondition: the guard did not engage")
+		}
+
+		// What a re-join produces: the cluster now names what is on disk.
+		s.Lock()
+		s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = s.localCertificatePEM()
+		s.Unlock()
+		s.memberList.UpdateConfig(s.config)
+
+		s.EnforceIdentityGuard()
+		if got := localStatus(s); got != membership.StatusPassive {
+			t.Errorf("local status = %v, want Passive; the node was repaired and is still "+
+				"being held out of promotion", got)
+		}
+	})
+
+	// An operator who put this node into maintenance deliberately must not have it
+	// undone by a certificate check that happens to pass.
+	t.Run("does not release maintenance it did not set", func(t *testing.T) {
+		s, _ := setup(t, config.TLSModeRequired, "onDisk")
+		s.memberList.GetMemberByID(s.config.Pulse.LocalNode).SetStatus(membership.StatusMaintenance)
+
+		s.EnforceIdentityGuard()
+
+		if got := localStatus(s); got != membership.StatusMaintenance {
+			t.Errorf("local status = %v, want Maintenance kept; an operator's own "+
+				"maintenance was cleared by a check that has nothing to do with it", got)
+		}
+	})
+}
+
+// A node that has lost its certificate must still be able to start on a cluster
+// that requires TLS — it cannot be given a new one otherwise.
+//
+// Start builds the cluster listener, and on `required` that needs this node's
+// keypair. With the certificate step after the listener, a node whose keypair had
+// gone — a half-written pair, a deleted file, an image restored without it — died
+// with `cluster TLS credentials could not be built` before reaching the code that
+// would have regenerated it, and systemd restarted it into the same wall forever.
+// Found on the live pair by deleting a certificate to watch the promotion guard
+// engage; the node never got far enough to have a guard.
+func TestCertificatesAreEnsuredBeforeTheListenerNeedsThem(t *testing.T) {
+	src, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	body := string(src)
+
+	start := strings.Index(body, "func (s *Server) Start()")
+	if start < 0 {
+		t.Fatal("Start() not found")
+	}
+	certs := strings.Index(body[start:], "Checking/Generating TLS certificates")
+	listener := strings.Index(body[start:], "startClusterListener(localNode)")
+	if certs < 0 || listener < 0 {
+		t.Fatalf("landmarks not found in Start(): certs=%d listener=%d", certs, listener)
+	}
+	if certs > listener {
+		t.Error("Start() builds the cluster listener before ensuring this node has a " +
+			"certificate. On tls_mode=required the listener cannot be built without one, " +
+			"so a node that has lost its keypair dies before the code that would " +
+			"replace it and never starts again.")
+	}
 }
