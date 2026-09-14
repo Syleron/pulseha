@@ -6,13 +6,14 @@ A peer is trusted because the config names it, not because something signed it. 
 cluster means having your certificate added to that set; being removed from a cluster means
 having it dropped.
 
-**Status: accepted, and built. Steps 1, 2 and 3a landed first (#255, #256, #257) and are
-verified live. Steps 3b and 4 — the listener credentials, the client's trust-set check, the
-token's pinned fingerprint and the cluster-scoped flip to `required` — are built and **not yet
-verified live**, which for this design is the only verification that counts. A cluster left on
-the default `permissive` is still plaintext, which is the migration working as intended, not a
-stall. The ordering below was corrected twice, both times from building it; see the bootstrap
-section.** What existed
+**Status: accepted, built, and verified live. Steps 1, 2 and 3a landed first (#255, #256, #257).
+Steps 3b and 4 — the listener credentials, the client's trust-set check, the token's pinned
+fingerprint and the cluster-scoped flip to `required` — were verified on the MC-LB-3 pair on
+2026-09-14: the flip across a running cluster with no failover, a join into a cluster that
+already required TLS, both bootstrap negatives refused, and removal revoking without a listener
+restart. See `docs/TEST-PLAN.md` TC-3 and `docs/RUNBOOK-111-verify.md`. A cluster left on the
+default `permissive` is still plaintext, which is the migration working as intended, not a stall.
+The ordering below was corrected twice, both times from building it; see the bootstrap section.** What existed
 before any of this was worse than nothing, and that description applied to the listener until
 step 4; the paragraphs below describing it as serving no credentials are kept as the record of
 what was found.
@@ -214,4 +215,8 @@ plane, added to smooth a transition that happens once.
 - **Verification needs two nodes.** Every defect in `#104`-`#110` that mattered was caught
   against a real daemon, and three of them were invisible to the test suite. A handshake, a
   join carrying a pinned fingerprint, and a `permissive`→`required` flip on a live cluster
-  cannot be demonstrated on one appliance, and should not be claimed without them.
+  cannot be demonstrated on one appliance, and should not be claimed without them. *Done
+  2026-09-14 on the MC-LB-3 pair.* The prediction held in an unexpected way: the live run found
+  **no new defects**, because the three that would have broken it — the delivery ordering, the
+  connection caches, and the flip back — had already been found by writing the commit messages,
+  the ADR and the runbook. Prose caught what the suite could not, and the pair confirmed it.

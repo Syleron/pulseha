@@ -1,7 +1,25 @@
 # Runbook — verify #111 (cluster TLS) live on the MC-LB-3 pair
 
-Verifies the `cluster-tls-required` branch: ADR-0005 steps 3b and 4. Written 2026-09-14,
-**not yet executed**.
+Verifies the `cluster-tls-required` branch: ADR-0005 steps 3b and 4. Written 2026-09-14.
+
+> **EXECUTED 2026-09-14 — PASS.** See `TEST-PLAN.md` TC-3 for the evidence. Five things this
+> runbook got wrong, kept here so the next run does not repeat them:
+> 1. **There is no `tcpdump` on the appliance.** Use `openssl s_client -connect <ip>:9083`
+>    instead, which is a sharper control anyway: before the flip it returns
+>    `no peer certificate available` with no cipher, and after it completes a TLS 1.3 handshake
+>    presenting exactly that node's own certificate, which a capture would not tell you.
+>    `Verify return code: 21` is correct — there is no CA, which is the design.
+> 2. **The certificates are at `/root/.pulseha/certs/`**, not `~/.pulseha/certs` for the SSH
+>    user. The daemon runs as root; the config is at `/etc/pulseha/config.json`, which is a
+>    different directory, and §3 said so but guessed the wrong home.
+> 3. **Do not remove a node while the cluster is `required` and then flip back.** The removed
+>    node never receives the flip back — it is no longer in the config — so it is stranded on
+>    `required` and cannot even `cluster leave`, failing with
+>    `tls: first record does not look like a TLS handshake`. §9's console recovery fixes it and
+>    was exercised doing exactly this. Do §8 last, or re-join before flipping back.
+> 4. **A join lands the node in maintenance.** Finish with `pulsectl node maintenance --disable`
+>    or the cluster reads `degraded` and nothing is wrong.
+> 5. Each join mints a **new node UUID**, so `--node-id` values from before a re-join are stale.
 
 **Read this first.** Everything in #111 above step 3a is built and tested and **none of it is
 verified live**. Three of the defects in `#104`-`#110` were invisible to the test suite, and the
