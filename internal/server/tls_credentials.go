@@ -194,3 +194,39 @@ func payloadNamesTLSMode(raw map[string]json.RawMessage) bool {
 	_, named := fields["tls_mode"]
 	return named
 }
+
+// dropPeerConnectionsOnTermsChange closes every cached peer connection when the
+// terms it was dialled on are no longer the cluster's, so the next use re-dials.
+//
+// A no-op unless the terms actually changed, which is what makes it safe to call
+// on every reconfigure: almost every one of those is an ordinary config change,
+// and tearing down working connections for one of those is the cost defect #31
+// was about.
+//
+// Both caches, because there are two and they are reached by different code. The
+// server's pool carries the config and cluster-state broadcasts; each Member's
+// client carries the floating-IP RPCs. Missing either leaves half the cluster's
+// traffic on a transport the far end has stopped accepting.
+func (s *Server) dropPeerConnectionsOnTermsChange(tlsRequired bool) {
+	s.clientMutex.Lock()
+	if s.peerClientsTLS == tlsRequired {
+		s.clientMutex.Unlock()
+		return
+	}
+	stale := s.peerClients
+	s.peerClients = make(map[string]*client.Client)
+	s.peerClientsTLS = tlsRequired
+	s.clientMutex.Unlock()
+
+	for peerID, c := range stale {
+		if c != nil {
+			c.Close()
+		}
+		s.logger.Debug("Dropped a peer connection dialled on the previous terms", "peerID", peerID)
+	}
+	if s.memberList != nil {
+		s.memberList.DropClients()
+	}
+	s.logger.Info("Dropped cached peer connections after a TLS mode change",
+		"pooled", len(stale), "tls", tlsRequired)
+}

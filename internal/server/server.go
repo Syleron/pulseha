@@ -188,6 +188,11 @@ type Server struct {
 	// Connection pool for peer clients
 	peerClients map[string]*client.Client
 	clientMutex pulselock.RWMutex
+	// peerClientsTLS is the terms every connection in peerClients was dialled on.
+	// Without it a cached connection outlives the mode that produced it, because a
+	// gRPC ClientConn is non-nil whether or not the transport behind it works --
+	// see dropPeerConnectionsOnTermsChange.
+	peerClientsTLS bool
 	// Unix socket path used by the CLI gRPC server
 	cliSocketPath string
 	// reconfigureMu serializes Reconfigure() so concurrent callers (such as
@@ -2748,6 +2753,20 @@ func (s *Server) Reconfigure() error {
 	// node drops out of the cluster it just told to encrypt (ADR-0005, #111).
 	address := fmt.Sprintf("%s:%s", utils.FormatIPv6(localNode.IP), localNode.Port)
 	tlsRequired := newConfig.Pulse.TLSRequired()
+
+	// Outbound connections first, and this has to happen whether or not the
+	// listener below is rebound.
+	//
+	// Both peer-connection caches hand back whatever they hold: the server's pool
+	// reuses an entry while its ClientConn is non-nil, and a Member reuses its
+	// client while it is non-nil. A gRPC ClientConn is non-nil whether or not the
+	// transport behind it works, so neither cache notices that the terms changed --
+	// every pooled connection would stay plaintext against peers that had just
+	// stopped accepting it, for the life of the daemon. The listeners would rebind,
+	// the log lines would all be right, and the config broadcaster, the cluster
+	// state broadcaster and every floating-IP RPC would quietly stop working until
+	// a restart.
+	s.dropPeerConnectionsOnTermsChange(tlsRequired)
 	if s.clusterListenerServing(address, tlsRequired) {
 		s.logger.Debug("Cluster listener unchanged; keeping it serving",
 			"address", address, "tls", tlsRequired)

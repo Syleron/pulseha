@@ -807,3 +807,24 @@ func StatusToString(status MemberStatus) string {
 		return fmt.Sprintf("Unknown(%d)", status)
 	}
 }
+
+// dropClient closes this member's cached client and forgets it, so the next
+// operation dials again.
+//
+// initializeClient returns early whenever m.Client is non-nil, which makes the
+// client permanent once made: it is never re-dialled and never revalidated. That
+// is fine while the terms of the connection cannot change, and it stopped being
+// fine when tls_mode arrived. See MemberList.DropClients.
+func (m *Member) dropClient() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Client == nil {
+		return
+	}
+	if m.Client.Connection != nil {
+		m.Client.Connection.Close()
+	}
+	m.Client = nil
+	m.logger.Debug(fmt.Sprintf("Dropped the cached client for member %s", m.Hostname))
+}

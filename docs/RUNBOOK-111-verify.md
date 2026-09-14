@@ -120,6 +120,11 @@ Then, within `fo_limit` (10s by default), confirm **nothing failed over**:
 
 - `pulsectl status` on both: same roles as §0, same floating-IP distribution.
 - No `marked unreachable`, no promotion, no `redistribut` lines in either journal.
+- **Watch for a full `fo_limit` and then some.** The failure this most resembles is
+  slow: cached connections that survived the flip keep failing, each node stops
+  hearing the other, and on a two-node cluster that is the tiebreak path. A clean
+  first ten seconds is not a pass — leave it settling for several minutes and
+  re-check `pulsectl status` on both.
 
 A failover here is a **fail**, not a wobble: the whole precondition argument is that the window
 between the push and the last node applying it is far inside the failover margin.
@@ -140,6 +145,14 @@ tshark -r /tmp/post-tls.pcap -Y 'tls.handshake.type == 1' -T fields -e tls.hands
 **Both halves are needed.** An empty grep alone proves nothing if the capture caught no traffic —
 check the packet count is non-trivial and that `ConfigSync` was readable in §2's capture on the
 same filter.
+
+On node-1's journal at the moment of the flip, expect the cached connections to be
+thrown away — without this the broadcasts keep using plaintext connections made
+before the flip and nothing ever replaces them:
+
+```
+Dropped cached peer connections after a TLS mode change   pooled=1 tls=true
+```
 
 Also confirm peers are actually being dialled on the new terms:
 

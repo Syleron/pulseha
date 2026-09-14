@@ -887,3 +887,110 @@ func TestPermissiveIsWrittenAsAWord(t *testing.T) {
 			got, config.TLSModePermissive)
 	}
 }
+
+// A connection cached before the flip must not be handed out after it.
+//
+// Both caches reuse whatever they hold — the server's pool while its ClientConn is
+// non-nil, a Member's client while it is non-nil — and a gRPC ClientConn is
+// non-nil whether or not the transport behind it works. So neither notices that
+// the cluster changed terms underneath it. Left alone, every cached connection
+// stays plaintext against peers that have just stopped accepting it, for the life
+// of the daemon: the listeners rebind, every log line reads correctly, and the
+// config broadcast, the cluster-state broadcast and every floating-IP RPC quietly
+// stop working until a restart.
+func TestCachedPeerConnectionsDoNotSurviveTheFlip(t *testing.T) {
+	_, addr := startRecordingPeer(t)
+	s := newPropagationTestServer(t, addr)
+	localPEM := installNodeIdentity(t, "local-node")
+	publishCertificates(t, s, localPEM)
+	stopListenerOnCleanup(t, s)
+
+	var peerID string
+	var node *config.Node
+	for id, n := range s.config.Nodes {
+		if id != s.config.Pulse.LocalNode {
+			peerID, node = id, n
+		}
+	}
+	if peerID == "" {
+		t.Fatal("no peer in the test config")
+	}
+
+	// Pooled the way the config broadcaster pools it, while the cluster is
+	// plaintext.
+	pooled, err := s.getPeerClient(peerID, node)
+	if err != nil {
+		t.Fatalf("getPeerClient: %v", err)
+	}
+	// And a member client, which is the other cache and is reached by different
+	// code — the floating-IP RPCs rather than the broadcasts.
+	member := s.memberList.GetMemberByID(peerID)
+	if member == nil {
+		t.Fatalf("no member for %s", peerID)
+	}
+	if err := member.BringUpIPs(nil); err != nil {
+		t.Logf("BringUpIPs (only here to make the member dial): %v", err)
+	}
+	memberHadClient := member.Client != nil
+
+	s.Lock()
+	s.config.Pulse.TLSMode = config.TLSModeRequired
+	if err := s.config.Save(); err != nil {
+		s.Unlock()
+		t.Fatalf("Save: %v", err)
+	}
+	s.Unlock()
+	s.memberList.UpdateConfig(s.config)
+
+	if err := s.Reconfigure(); err != nil {
+		t.Fatalf("Reconfigure: %v", err)
+	}
+
+	s.clientMutex.RLock()
+	still, held := s.peerClients[peerID]
+	s.clientMutex.RUnlock()
+	if held && still == pooled {
+		t.Error("the plaintext connection pooled before the flip is still what " +
+			"getPeerClient hands out; the config and cluster-state broadcasts would " +
+			"keep using it against a peer that has stopped accepting plaintext, and " +
+			"nothing ever replaces it")
+	}
+
+	if memberHadClient && member.Client != nil {
+		t.Error("the member's cached client survived the flip; initializeClient returns " +
+			"early whenever it is non-nil, so the floating-IP RPCs would never re-dial")
+	}
+}
+
+// The same call on an ordinary config change must leave the connections alone.
+// Tearing down working connections for every sync is defect #31's cost, paid on
+// the hot path.
+func TestAnOrdinaryReconfigureKeepsItsPeerConnections(t *testing.T) {
+	_, addr := startRecordingPeer(t)
+	s := newPropagationTestServer(t, addr)
+	stopListenerOnCleanup(t, s)
+
+	var peerID string
+	var node *config.Node
+	for id, n := range s.config.Nodes {
+		if id != s.config.Pulse.LocalNode {
+			peerID, node = id, n
+		}
+	}
+	pooled, err := s.getPeerClient(peerID, node)
+	if err != nil {
+		t.Fatalf("getPeerClient: %v", err)
+	}
+
+	if err := s.Reconfigure(); err != nil {
+		t.Fatalf("Reconfigure: %v", err)
+	}
+
+	s.clientMutex.RLock()
+	still, held := s.peerClients[peerID]
+	s.clientMutex.RUnlock()
+	if !held || still != pooled {
+		t.Error("a reconfigure that changed nothing about the terms dropped the peer " +
+			"connections; every ConfigSync causes one of these")
+	}
+}
