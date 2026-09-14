@@ -348,10 +348,12 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 		nodeID = uuid.New().String()
 	}
 
-	// Default bind port if not provided
-	if bindPort == "" {
-		bindPort = "8080"
-	}
+	// No default here. The daemon defaults an omitted bind port to the port the
+	// cluster was reached on, which it knows and this does not -- filling in 8080
+	// first shadowed that entirely, so `--address host:9083` with no --bind-port
+	// produced a node listening on a port the appliance firewall does not open
+	// (#114). A default applied by the layer that cannot know the right answer is
+	// the same mistake as #110's, one flow over.
 
 	// Ask local daemon to initiate join with target via dedicated RPC
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
