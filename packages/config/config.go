@@ -108,6 +108,20 @@ type Node struct {
 	IPGroups    map[string][]string `json:"group_assignments"`
 	Maintenance bool                `json:"maintenance,omitempty"`
 	Capacity    int                 `json:"capacity,omitempty"` // Max floating IPs this node may host; 0 = unlimited
+	// TLSCert is this node's public certificate, PEM encoded, as the node itself
+	// published it. Never a private key.
+	//
+	// The first field here that is node-*owned* rather than node-local, and the
+	// distinction matters to ConfigSync (ADR-0005, #111). Every other field is
+	// cluster state that any node may correct: a peer can tell this node that its
+	// group assignments changed. Nobody but a node can say what its certificate
+	// is, so a sync adopts every other node's and never its own -- otherwise a
+	// peer holding a pre-regeneration copy would hand this node back an identity
+	// it no longer has.
+	//
+	// Empty until the node publishes, which is what the permissive phase is for:
+	// the trust set accumulates while nothing depends on it.
+	TLSCert string `json:"tls_cert,omitempty"`
 }
 
 // SyslogEnabled reports whether this node should send its log to syslog.
