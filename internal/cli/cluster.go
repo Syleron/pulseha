@@ -121,9 +121,16 @@ func newClusterTokenCmd() *cobra.Command {
 		Use:   "token",
 		Short: "Display or regenerate cluster join token",
 		Long: `Display the current cluster join token or generate a new one.
-		
+
 By default, displays the current token. Use --regenerate to create a new token
-and sync it across all cluster members.`,
+and sync it across all cluster members.
+
+Once the cluster is on tls_mode=required the token also carries the fingerprint
+of this node's certificate, as "<secret>.<fingerprint>". That half is what lets
+the joining node verify it is talking to this cluster and not to something
+imitating it, so the token has to be copied whole — a truncated one is refused
+rather than quietly falling back to an unverified join. Take the token from the
+node the new one will be pointed at, since it names that node's certificate.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client, err := client.New()
 			if err != nil {

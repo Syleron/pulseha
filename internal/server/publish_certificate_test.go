@@ -254,13 +254,17 @@ func TestAJoinWithNoCertificateIsStillAccepted(t *testing.T) {
 // One reader for "what is this node's certificate", so the join path and the
 // publish path cannot drift apart.
 func TestLocalCertificatePEMIsTrimmedAndSilent(t *testing.T) {
+	// Reads the process-wide directory, which is what a daemon runs with; a
+	// Server with its own certDir reads that instead.
+	s := &Server{}
+
 	withCertFile(t, "  -----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----\n\n")
-	if got := localCertificatePEM(); got != "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----" {
+	if got := s.localCertificatePEM(); got != "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----" {
 		t.Errorf("localCertificatePEM = %q, want it trimmed", got)
 	}
 
 	withCertFile(t, "")
-	if got := localCertificatePEM(); got != "" {
+	if got := s.localCertificatePEM(); got != "" {
 		t.Errorf("localCertificatePEM = %q with no file, want empty rather than an error", got)
 	}
 }

@@ -38,6 +38,11 @@ type TestNode struct {
 	Logger   *log.Logger
 	Status   membership.MemberStatus
 	Cluster  *TestCluster
+	// CertDir is this node's own TLS identity. Every node in a test cluster is a
+	// Server in this one process, so the process-wide security.CertDir would give
+	// them all the same certificate and the cluster's trust set could not tell
+	// them apart -- which is to say TLS could not be tested here at all (#111).
+	CertDir string
 }
 
 // TestCluster represents a test cluster environment
@@ -252,6 +257,9 @@ func (n *TestNode) Start() error {
 	if n.Server == nil {
 		return fmt.Errorf("failed to create server instance")
 	}
+	if n.CertDir != "" {
+		n.Server.SetCertDir(n.CertDir)
+	}
 
 	// Store the config in the node (no need to save to disk for tests)
 	n.Config = nodeCfg
@@ -321,7 +329,7 @@ func (n *TestNode) Join(targetNode *TestNode) error {
 
 	// Connect to target node with timeout
 	n.Logger.Infof("Connecting to target node %s at %s:%s", targetNode.Hostname, utils.FormatIPv6(targetNode.IP), targetNode.Port)
-	if err := cli.Connect(targetNode.IP, targetNode.Port, false); err != nil {
+	if err := cli.Connect(targetNode.IP, targetNode.Port, nil); err != nil {
 		return fmt.Errorf("failed to connect to target node: %v", err)
 	}
 
@@ -365,7 +373,7 @@ func (n *TestNode) Join(targetNode *TestNode) error {
 		localClient, err := client.New()
 		if err == nil {
 			defer localClient.Close()
-			if err := localClient.Connect(n.IP, n.Port, false); err == nil {
+			if err := localClient.Connect(n.IP, n.Port, nil); err == nil {
 				ctx2, cancel2 := context.WithTimeout(context.Background(), 3*time.Second)
 				_, _ = localClient.Server().ConfigSync(ctx2, &rpc.ConfigSyncRequest{Config: resp.ClusterConfig})
 				cancel2()
@@ -539,7 +547,7 @@ func (n *TestNode) callDaemon() (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create client: %v", err)
 	}
-	if err := c.Connect(n.IP, n.Port, false); err != nil {
+	if err := c.Connect(n.IP, n.Port, nil); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("failed to connect to own daemon: %v", err)
 	}
@@ -749,7 +757,7 @@ func (n *TestNode) Leave() error {
 	defer c.Close()
 
 	// Connect to the local node
-	err = c.Connect(n.IP, n.Port, false)
+	err = c.Connect(n.IP, n.Port, nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to local node: %v", err)
 	}
@@ -786,7 +794,7 @@ func (n *TestNode) PromoteNode(hostname string, ips []string) error {
 	defer c.Close()
 
 	// Connect to the local node
-	err = c.Connect(n.IP, n.Port, false)
+	err = c.Connect(n.IP, n.Port, nil)
 	if err != nil {
 		return fmt.Errorf("failed to connect to local node: %v", err)
 	}

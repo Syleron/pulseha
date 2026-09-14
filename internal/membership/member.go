@@ -5,6 +5,7 @@ import (
 	"time"
 
 	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/packages/client"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/network"
@@ -163,8 +164,18 @@ func (m *Member) initializeClient() error {
 		return fmt.Errorf("failed to create client: %v", err)
 	}
 
-	// Connect to the member
-	if err := c.Connect(node.IP, node.Port, false); err != nil {
+	// Connect to the member, over TLS once the cluster requires it.
+	//
+	// Built from the config this member holds rather than passed in: the member
+	// list is handed a fresh config pointer on every reconfigure, so this reads
+	// the mode and the trust set the cluster is on now. A failure here is a
+	// failure to connect and is returned as one -- a cluster that requires TLS
+	// must not be reached in clear because the credentials would not assemble.
+	creds, err := clustertls.ClientCredentials(m.certDir(), func() *config.Config { return m.config })
+	if err != nil {
+		return fmt.Errorf("failed to build TLS credentials for member %s: %v", m.Hostname, err)
+	}
+	if err := c.Connect(node.IP, node.Port, creds); err != nil {
 		return fmt.Errorf("failed to connect to member %s: %v", m.Hostname, err)
 	}
 
@@ -795,4 +806,34 @@ func StatusToString(status MemberStatus) string {
 	default:
 		return fmt.Sprintf("Unknown(%d)", status)
 	}
+}
+
+// certDir is where this node's own certificate and key live, asked of the member
+// list so that a process running several nodes gives each one its own.
+func (m *Member) certDir() string {
+	if m.memberList == nil {
+		return ""
+	}
+	return m.memberList.CertDir()
+}
+
+// dropClient closes this member's cached client and forgets it, so the next
+// operation dials again.
+//
+// initializeClient returns early whenever m.Client is non-nil, which makes the
+// client permanent once made: it is never re-dialled and never revalidated. That
+// is fine while the terms of the connection cannot change, and it stopped being
+// fine when tls_mode arrived. See MemberList.DropClients.
+func (m *Member) dropClient() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.Client == nil {
+		return
+	}
+	if m.Client.Connection != nil {
+		m.Client.Connection.Close()
+	}
+	m.Client = nil
+	m.logger.Debug(fmt.Sprintf("Dropped the cached client for member %s", m.Hostname))
 }

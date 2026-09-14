@@ -6,11 +6,17 @@ A peer is trusted because the config names it, not because something signed it. 
 cluster means having your certificate added to that set; being removed from a cluster means
 having it dropped.
 
-**Status: accepted, and being built. Steps 1, 2 and 3a have landed (#255, #256, #257) and the
-cluster is still plaintext — that is the permissive phase working as intended, not a stall. The
-ordering below was corrected once, from building it; see the bootstrap section.** What existed
-before any of this was worse than nothing, and that description still applies to the listener,
-which serves no credentials yet.
+**Status: accepted, built, and verified live. Steps 1, 2 and 3a landed first (#255, #256, #257).
+Steps 3b and 4 — the listener credentials, the client's trust-set check, the token's pinned
+fingerprint and the cluster-scoped flip to `required` — were verified on the MC-LB-3 pair on
+2026-09-14: the flip across a running cluster with no failover, a join into a cluster that
+already required TLS, both bootstrap negatives refused, and removal revoking without a listener
+restart. See `docs/TEST-PLAN.md` TC-3 and `docs/RUNBOOK-111-verify.md`. A cluster left on the
+default `permissive` is still plaintext, which is the migration working as intended, not a stall.
+The ordering below was corrected twice, both times from building it; see the bootstrap section.** What existed
+before any of this was worse than nothing, and that description applied to the listener until
+step 4; the paragraphs below describing it as serving no credentials are kept as the record of
+what was found.
 
 ## What is actually there now
 
@@ -92,6 +98,25 @@ certificate with the request: that needs no handshake, it only needs somewhere t
 answer, and it removes the gap where a node is in the cluster's config before it is in the
 cluster's trust set.
 
+**What building it added, which the paragraphs above missed entirely.** Pinning the joinee's
+certificate is only half the bootstrap, and it is the easier half. The other half is that **the
+cluster has to let an unknown certificate in far enough to ask** — a joiner is by definition not
+in the trust set of the cluster it is joining, so a listener that refused an unnamed certificate
+at the handshake made such a cluster one nobody could ever join. That is not something the token
+can fix from the outside.
+
+The answer is that the two ends stop being symmetric, and the refusal moves one layer up. The
+dialling end verifies in full: a node never sends a request to a server the config does not name.
+The listening end demands a certificate and verifies nothing at the handshake, and an
+**authorisation interceptor** then checks that certificate against the trust set on every call,
+letting an unnamed one reach `Join` and nothing else — still gated by the token. Encryption comes
+from the handshake; authorisation is a separate question, asked where the answer depends on what
+is being asked for. The handshake cannot make that distinction, because it does not yet know.
+
+This is a weakening of "the listener refuses any peer the config does not name" only in wording.
+An unnamed peer can complete a handshake and then do exactly one thing, and that one thing needs
+a secret a human carried. The alternative was a cluster that could be created and never grown.
+
 ## Migration, which is where a live cluster gets broken
 
 A TLS-only node cannot talk to a plaintext peer, and an HA cluster is upgraded one node at a
@@ -112,6 +137,47 @@ plaintext channel it is about to remove, so a node that misses it becomes unreac
 failed over. Requiring unanimity before starting is how that is avoided, and `#103` is the
 record of what config divergence costs when a node is left behind.
 
+**The ordering inside phase 2, learned from building it.** The change is written and stamped,
+then pushed to every peer over a connection opened *on the terms in force before it*, and only
+then applied to this node. Handing it to the peers on the cluster's new terms cannot work and is
+the trap worth naming: the config has already been written, so the ordinary dial would offer the
+new terms to peers that are all still on the old ones, every one of them would refuse, and the
+message would never reach the nodes it is about to cut off.
+
+"Before it" rather than "in clear", and the difference is not pedantry. Written as *in clear* it
+is right going to `required` and catastrophic coming back: the peers are still serving TLS, so a
+plaintext push is refused by all of them, this node then reconfigures to plaintext, and the two
+halves each speak a protocol the other has stopped accepting, in both directions, with nothing
+left to repair either side. The credentials to deliver with are therefore captured before the
+change is written, which makes both directions one sentence. This was found by writing the
+verification runbook -- the flip back is the direction nobody thinks to test, and the suite did
+not.
+
+There is still a window between the push and the last peer applying it, during which a flipped
+node cannot reach an unflipped one. It is bounded by broadcast latency — sub-second on the
+healthy cluster the precondition insists on — against a failover that needs `fo_limit` (10s by
+default) of continuous failure, so the cluster rides through it. That margin is why the
+precondition demands health and not merely a count of certificates.
+
+**A peer on a binary from before `tls_mode` is worse than a peer that is severed, and this had
+to be guarded rather than documented.** Such a binary unmarshals a config into a struct with no
+such field and marshals it back without one, so every re-broadcast it makes deletes the key — and
+the coordinator re-broadcasts once a minute. Read as permissive, that is not one node cut off,
+which is the visible and accepted cost of a mixed cluster; it is the whole cluster quietly undoing
+the operator's change on a timer, over a wire it has just been told to encrypt.
+
+So **an absent key means the sender has no opinion**, and the receiver keeps what it has. Only a
+key that is present and says `permissive` is a flip back. That works because permissive is written
+as the word and never as the empty string, which keeps `omitempty` — and keeping it matters: a
+cluster that has never been flipped emits no key at all, so its config hashes identically on an
+old binary and a new one, which is the whole of a rolling upgrade window.
+
+A peer that does not take the push is **reported, not rolled back**. This node and the peers that
+did take it are consistent; the one that did not is isolated and needs an operator, which is this
+document's accepted consequence. A revert would have to reach the peers that have already
+flipped, over a wire they have stopped accepting in clear, and would replace one divergence with
+a worse one.
+
 Deliberately not proposed: sniffing the first bytes of a connection to serve TLS and plaintext
 on one port. It works, and it is a byte-level demultiplexer in front of a cluster's control
 plane, added to smooth a transition that happens once.
@@ -127,17 +193,30 @@ plane, added to smooth a transition that happens once.
   certificate travels with the join. Then 3b and 4 **together** — listener credentials, client
   verification against the trust set, the token's fingerprint pinned at the handshake, and the
   cluster-scoped flip to `required`. The move of 3b is explained above; the shape of the rest is
-  unchanged.
+  unchanged. *Amended again, from building them:* 4 landed one commit ahead of 3b, and for that
+  commit a node could not join a cluster that was already `required` — which is what the missing
+  half costs, stated plainly rather than discovered later. Both are in now.
 - **The config grows a field that is not configuration.** A node's certificate is state the node
   publishes about itself, living in the same structure as the operator's settings. `ConfigSync`
   preserves node-local fields already, and this is the first that is node-*owned* rather than
   node-local — a distinction that does not exist today and will need one.
-- **`InsecureSkipVerify` goes, and does not come back.** It is what makes the current code look
-  finished. Encryption without identity would satisfy a scanner and stop no attacker.
+- **`InsecureSkipVerify` goes, and does not come back** — meaning encryption without identity
+  goes. It is what makes the current code look finished, and it would satisfy a scanner and stop
+  no attacker. *Amended from building it (step 4):* the flag itself is set, paired in the same
+  `tls.Config` with a `VerifyPeerCertificate` that requires the peer's certificate to be one the
+  config names, byte for byte. What the flag switches off is the question "did an authority vouch
+  for this name", asked of a cluster that has no authority and dials by address; what replaces it
+  is stricter than what it disables. The flag alone remains the defect. The pair is the design,
+  and the code says so at the line so that a future reader grepping for the flag finds the reason
+  rather than the bug.
 - **Certificate rotation is a config update**, with the same propagation guarantees and the same
   failure modes as any other. It is not solved by this document, and a 10-year self-signed
   certificate defers rather than answers it.
 - **Verification needs two nodes.** Every defect in `#104`-`#110` that mattered was caught
   against a real daemon, and three of them were invisible to the test suite. A handshake, a
   join carrying a pinned fingerprint, and a `permissive`→`required` flip on a live cluster
-  cannot be demonstrated on one appliance, and should not be claimed without them.
+  cannot be demonstrated on one appliance, and should not be claimed without them. *Done
+  2026-09-14 on the MC-LB-3 pair.* The prediction held in an unexpected way: the live run found
+  **no new defects**, because the three that would have broken it — the delivery ordering, the
+  connection caches, and the flip back — had already been found by writing the commit messages,
+  the ADR and the runbook. Prose caught what the suite could not, and the pair confirmed it.

@@ -121,6 +121,7 @@ func main() {
 	// other until an unrelated mutation carried it.
 	go func() {
 		time.Sleep(2 * time.Second)
+		srv.ReportStaleIdentity()
 		srv.PublishLocalCertificate()
 	}()
 
