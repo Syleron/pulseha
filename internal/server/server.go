@@ -5453,6 +5453,33 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 		}
 
+		// This node's own certificate is never adopted from a peer (#111,
+		// ADR-0005).
+		//
+		// Every other field of a node entry is cluster state that a peer may
+		// legitimately correct -- it can tell this node its group assignments
+		// changed. A certificate is not: nobody but a node can say what its
+		// identity is, and a peer's copy is only ever as fresh as the last
+		// broadcast it saw. Adopting it would let a sync carrying a
+		// pre-regeneration copy hand this node back an identity it no longer has,
+		// and the node would then present one certificate while the cluster's
+		// trust set named another.
+		//
+		// Kept whatever its value, empty included: an empty local certificate
+		// means this node has not published yet, which is a fact about this node
+		// that a peer cannot know better.
+		if prevLocalID != "" {
+			if mine, ok := cur.Nodes[prevLocalID]; ok && mine != nil {
+				if incoming, ok := newConfig.Nodes[prevLocalID]; ok && incoming != nil {
+					if incoming.TLSCert != mine.TLSCert {
+						s.logger.Debug("CONFIG_SYNC: keeping this node's own certificate over the sender's copy",
+							"sender", senderID)
+					}
+					incoming.TLSCert = mine.TLSCert
+				}
+			}
+		}
+
 		// Preserve local-specific settings before applying cluster config
 		// These should not be overwritten by a remote ConfigSync
 		localIDPreserve := cur.Pulse.LocalNode
@@ -7033,6 +7060,12 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		s.logger.Info("INITIATE_JOIN: Config sync completed",
 			"success", syncResp.Success,
 			"message", syncResp.Message)
+
+		// The node's own entry exists now, so it has somewhere to publish into.
+		// Without this the certificate would not reach the cluster until the next
+		// restart -- correct eventually, and a surprising gap to leave between
+		// joining and appearing in the trust set (#111).
+		s.PublishLocalCertificate()
 	} else {
 		s.logger.Warn("INITIATE_JOIN: No cluster config received from target, using minimal local update")
 		// Minimal local update: seed nodes so Reconfigure can bind and health checks can start
@@ -8679,4 +8712,104 @@ func localAddrToward(target string) (string, error) {
 		return "", fmt.Errorf("local address of the connection to the cluster was empty")
 	}
 	return host, nil
+}
+
+// PublishLocalCertificate records this node's public certificate in its own
+// config entry, so the cluster accumulates the trust set ADR-0005 is built on.
+//
+// The permissive phase of #111: the certificates propagate by the ordinary
+// ConfigSync path and nothing depends on them yet, so this is safe to land and
+// safe to sit in for as long as an estate needs before anything is switched on.
+//
+// Idempotent by comparison, which is what makes it safe to call from several
+// places and on every start. A write here is a config save and a cluster-wide
+// broadcast, so doing it unconditionally would put one of each on every restart
+// of every node; after the first publish the stored value matches the file and
+// this returns having read one file.
+//
+// Takes s.Lock() itself, so no caller may hold it. That rules out
+// loadInitialMembers, whose own comment records that Start calls it holding the
+// write lock.
+func (s *Server) PublishLocalCertificate() {
+	certPath := filepath.Join(security.CertDir, "pulseha.crt")
+	pemBytes, err := os.ReadFile(certPath)
+	if err != nil {
+		// Not an error worth failing anything over: a node with no certificate
+		// simply has not published, and the trust set tolerates that by design
+		// until the flip to required.
+		s.logger.Debug("No certificate to publish yet", "path", certPath, "error", err)
+		return
+	}
+	cert := strings.TrimSpace(string(pemBytes))
+	if cert == "" {
+		return
+	}
+
+	s.Lock()
+	if !s.config.ClusterCheck() {
+		// Not in a cluster, so there is no entry to publish into and nobody to
+		// publish to. The next start after a create or join does it.
+		s.Unlock()
+		return
+	}
+	localID, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		s.Unlock()
+		return
+	}
+	node, ok := s.config.Nodes[localID]
+	if !ok || node == nil {
+		s.Unlock()
+		return
+	}
+	if node.TLSCert == cert {
+		s.Unlock()
+		// Already recorded here, which says nothing about whether the peers ever
+		// received it. The publish is idempotent by design -- a write is a version
+		// bump and a cluster-wide broadcast, and doing that on every restart of
+		// every node is not acceptable -- but "nothing to write" and "everyone has
+		// it" are different claims, and only the first is knowable from here.
+		//
+		// Measured on the lab pair: both nodes published at boot and neither
+		// reached the other, because the broadcast a publish requests can be lost
+		// at startup; node-1 converged only when an unrelated `group add-ip`
+		// carried its config, and node-2 stayed unseen until a mutation of its
+		// own. A re-send costs one RPC per peer, claims no new generation, and a
+		// peer already holding this version ignores it.
+		s.RequestConfigReconcile()
+		return
+	}
+
+	first := node.TLSCert == ""
+	node.TLSCert = cert
+	if err := s.config.Save(); err != nil {
+		s.Unlock()
+		s.logger.Error("Failed to save config after publishing this node's certificate", "error", err)
+		return
+	}
+	s.markConfigDirty()
+	s.Unlock()
+
+	if first {
+		s.logger.Info("Published this node's certificate to the cluster config",
+			"fingerprint", certificateFingerprint(cert))
+	} else {
+		// A changed certificate means the identity moved -- a regeneration, which
+		// EnsureCertificates only does for a stated reason. Worth a Warn: once the
+		// flip to required has happened, this is the moment a peer's trust set is
+		// stale until the broadcast lands.
+		s.logger.Warn("This node's certificate changed; republished to the cluster config",
+			"fingerprint", certificateFingerprint(cert))
+	}
+}
+
+// certificateFingerprint is a short label for a certificate, for logs that want
+// to say which one without printing it.
+//
+// A certificate is public, so this is readability rather than secrecy -- the
+// opposite of tokenFingerprint's reason (#113), and worth saying so since the two
+// look alike.
+func certificateFingerprint(pemCert string) string {
+	sum := sha256.Sum256([]byte(pemCert))
+	return hex.EncodeToString(sum[:])[:12]
 }

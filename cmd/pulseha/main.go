@@ -109,6 +109,21 @@ func main() {
 		logger.Fatal("Failed to start server", "error", err)
 	}
 
+	// After Start, not inside it: publishing takes the server write lock and Start
+	// holds it for its whole body. Idempotent, so this is a file read on every
+	// start but the first (#111, ADR-0005's permissive phase).
+	//
+	// Deferred a moment rather than run in the same breath as Start, for
+	// vipReconcileDelay's reason one layer over: the listeners and the config
+	// broadcaster are still coming up, and a publish that lands before the
+	// broadcaster is consuming records the certificate locally and tells nobody.
+	// Measured on the lab pair -- both nodes published at boot and neither saw the
+	// other until an unrelated mutation carried it.
+	go func() {
+		time.Sleep(2 * time.Second)
+		srv.PublishLocalCertificate()
+	}()
+
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGUSR2)
