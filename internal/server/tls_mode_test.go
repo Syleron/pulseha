@@ -30,9 +30,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/internal/membership"
@@ -993,4 +995,96 @@ func TestAnOrdinaryReconfigureKeepsItsPeerConnections(t *testing.T) {
 		t.Error("a reconfigure that changed nothing about the terms dropped the peer " +
 			"connections; every ConfigSync causes one of these")
 	}
+}
+
+// recordingLogger captures what the daemon said, so a test can assert on a
+// report whose only effect is the saying of it.
+type recordingLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (r *recordingLogger) Write(p []byte) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lines = append(r.lines, string(p))
+	return len(p), nil
+}
+
+func (r *recordingLogger) contains(substr string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, l := range r.lines {
+		if strings.Contains(l, substr) {
+			return true
+		}
+	}
+	return false
+}
+
+// A node whose certificate was regenerated while the cluster requires TLS is in
+// the one state the cluster cannot repair by itself, and nothing said so.
+//
+// Peers can still reach it — their certificates are in its trust set — but it
+// cannot reach them, because it now presents one none of theirs name. That
+// includes the ConfigSync that would publish its new certificate, so it cannot
+// announce itself out of the hole; and its own health checks fail while its
+// peers' succeed, which in active-passive is the shape that ends in a
+// self-promotion against a peer that is fine (#2/#26, from a new direction).
+func TestAStaleIdentityIsReportedOnARequiredCluster(t *testing.T) {
+	setup := func(t *testing.T, mode, published string) *recordingLogger {
+		t.Helper()
+		rec := &recordingLogger{}
+		s := newPropagationTestServer(t)
+		s.logger = log.New(rec)
+		s.logger.SetLevel(log.DebugLevel)
+
+		onDisk := installNodeIdentity(t, "local-node")
+		if published == "onDisk" {
+			published = onDisk
+		}
+		s.config.Pulse.TLSMode = mode
+		s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = published
+		s.memberList.UpdateConfig(s.config)
+
+		s.ReportStaleIdentity()
+		return rec
+	}
+
+	const marker = "not the one the cluster knows it by"
+
+	t.Run("regenerated while the cluster requires TLS", func(t *testing.T) {
+		// The config names a certificate this node no longer holds.
+		stale := mintIdentityInto(t, t.TempDir(), "local-node")
+		rec := setup(t, config.TLSModeRequired, stale)
+		if !rec.contains(marker) {
+			t.Error("a node that the cluster no longer knows by its certificate said nothing; " +
+				"it cannot publish its way out, and it will fail its own health checks " +
+				"while its peers pass theirs")
+		}
+		if !rec.contains("Re-join this node") {
+			t.Error("the report does not say what to do about it")
+		}
+	})
+
+	t.Run("the same certificate", func(t *testing.T) {
+		if rec := setup(t, config.TLSModeRequired, "onDisk"); rec.contains(marker) {
+			t.Error("a node holding exactly the certificate the cluster names was reported")
+		}
+	})
+
+	t.Run("permissive, where it repairs itself", func(t *testing.T) {
+		stale := mintIdentityInto(t, t.TempDir(), "local-node")
+		if rec := setup(t, config.TLSModePermissive, stale); rec.contains(marker) {
+			t.Error("a permissive cluster was warned about a regeneration it publishes " +
+				"its way out of on the next broadcast")
+		}
+	})
+
+	t.Run("never published", func(t *testing.T) {
+		if rec := setup(t, config.TLSModeRequired, ""); rec.contains(marker) {
+			t.Error("a node with nothing published yet was reported as stale; it has no " +
+				"identity the cluster knows to differ from")
+		}
+	})
 }

@@ -250,10 +250,36 @@ Do this on **every** node, then bring them up one at a time. A hand-edited `tls_
 neither name reads as permissive rather than refusing to start — that is deliberate, so a typo
 during recovery leaves the cluster talking rather than dead.
 
-Certificates are **not** the thing to delete during recovery. `EnsureCertificates` regenerates
-only what it cannot use, and a regenerated certificate is a *new identity* that every peer's
-trust set no longer names — it turns one unreachable node into one that can never be reached
-until it publishes and the config propagates, which it cannot do while it is unreachable.
+Certificates are **not** the thing to delete during recovery, and the reason is sharper than
+"it makes things worse". `EnsureCertificates` regenerates only what it cannot use, and a
+regenerated certificate is a *new identity* that no peer's trust set names. On a cluster that
+requires TLS that is asymmetric, and the asymmetry is the trap:
+
+- peers can still reach the node — their certificates are in **its** trust set, so its
+  interceptor authorises them;
+- the node cannot reach them — it presents a certificate none of **their** trust sets name, so
+  their interceptors refuse everything it sends **except `Join`**, including the `ConfigSync`
+  that would publish its new certificate.
+
+So it cannot announce itself out of the hole, and its own health checks of its peers fail while
+theirs of it succeed. In active-passive that is the shape that ends with it deciding its peer is
+gone and promoting itself — the duplicate-address outcome of defects #2/#26, reached from a new
+direction.
+
+The daemon reports this at startup, and it is worth grepping for after any restart of a node on
+a `required` cluster:
+
+```
+This node's certificate is not the one the cluster knows it by, and the cluster requires TLS
+```
+
+**The way out is a re-join**, not a config edit: `Join` is the one RPC an unnamed certificate may
+call, and the join records the joiner's certificate. Take a token from a healthy member and
+`pulsectl cluster join` this node back in.
+
+Note the report is a report. Whether a node in this state should refuse to start, or take itself
+out of promotion so it cannot cause the split above, is an open decision — see the note in
+`TEST-PLAN.md` TC-3.
 
 ## 10. If it passes
 

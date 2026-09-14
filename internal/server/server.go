@@ -7191,6 +7191,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// Without this the certificate would not reach the cluster until the next
 		// restart -- correct eventually, and a surprising gap to leave between
 		// joining and appearing in the trust set (#111).
+		s.ReportStaleIdentity()
 		s.PublishLocalCertificate()
 	} else {
 		s.logger.Warn("INITIATE_JOIN: No cluster config received from target, using minimal local update")

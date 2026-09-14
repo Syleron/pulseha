@@ -20,6 +20,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -229,4 +230,59 @@ func (s *Server) dropPeerConnectionsOnTermsChange(tlsRequired bool) {
 	}
 	s.logger.Info("Dropped cached peer connections after a TLS mode change",
 		"pooled", len(stale), "tls", tlsRequired)
+}
+
+// ReportStaleIdentity names the one state a cluster on `required` cannot repair
+// by itself: this node's certificate on disk is not the one the cluster's config
+// says is its.
+//
+// It happens when EnsureCertificates regenerates — an expiry, the 30-day renewal
+// window, a hostname change, a half-written pair, clock skew — and on a permissive
+// cluster it is nothing at all, because the publish that follows propagates the
+// new one. On a `required` cluster the publish cannot land, and the asymmetry is
+// worth stating precisely because it is not obvious:
+//
+//   - peers can still reach this node. Their certificates are in *its* trust set,
+//     so its interceptor authorises them and their config pushes work;
+//   - this node cannot reach them. It presents a certificate none of their trust
+//     sets name, so their interceptors refuse everything it sends except Join —
+//     including the very ConfigSync that would publish its new certificate.
+//
+// So it cannot announce itself out of the hole, and its own health checks of its
+// peers fail while theirs of it succeed. In active-passive that is the shape that
+// ends with this node deciding its peer is gone and promoting itself, against a
+// peer that is fine and thinks the same of nobody — which is the duplicate-address
+// outcome of defects #2 and #26, reached from a new direction.
+//
+// The way out is a re-join: `Join` is the one RPC an unnamed certificate may call,
+// and HandleNodeJoin records the joiner's certificate, so a join with a valid
+// token puts this node back in the trust set. That is what the message says to do.
+//
+// Reporting only. Whether a node in this state should refuse to start, or take
+// itself out of promotion, is a behavioural decision that has not been made.
+func (s *Server) ReportStaleIdentity() {
+	cfg := s.clusterSnapshot()()
+	if cfg == nil || !cfg.Pulse.TLSRequired() {
+		return
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return
+	}
+	node, ok := cfg.Nodes[localID]
+	if !ok || node == nil || strings.TrimSpace(node.TLSCert) == "" {
+		return
+	}
+
+	onDisk := localCertificatePEM()
+	if onDisk == "" || onDisk == strings.TrimSpace(node.TLSCert) {
+		return
+	}
+
+	s.logger.Error("This node's certificate is not the one the cluster knows it by, and the "+
+		"cluster requires TLS. Peers will refuse everything this node sends except a join, "+
+		"including the config push that would publish the new certificate — so this cannot "+
+		"repair itself. Re-join this node with a token from a healthy member.",
+		"onDisk", certificateFingerprint(onDisk),
+		"clusterExpects", certificateFingerprint(node.TLSCert))
 }
