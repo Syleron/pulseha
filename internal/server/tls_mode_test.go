@@ -22,7 +22,9 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -660,5 +662,102 @@ func TestTheFlipBackIsDeliveredOnTheTermsThePeersAreStillOn(t *testing.T) {
 	}
 	if strings.Contains(resp.Message, "except") {
 		t.Errorf("message = %q, want no peer reported as missed", resp.Message)
+	}
+}
+
+// The receiving half of the flip, which is the half that runs on every node
+// except the one the operator typed on.
+//
+// A node learns the cluster requires TLS from an ordinary ConfigSync, and has to
+// do two things with it: adopt the value rather than preserve its own, and rebind
+// its listener. Neither was covered — the propagation tests all check what a peer
+// was *sent*, and `tls_mode` sits in the same struct as the node-local logging
+// keys that ConfigSync deliberately does not adopt. A `tls_mode` that ended up on
+// that preserve list would look exactly like a working flip on the node that
+// issued it, and leave every other node plaintext.
+func TestANodeLearnsTheFlipFromAnOrdinaryConfigSync(t *testing.T) {
+	s := newPropagationTestServer(t)
+	localPEM := installNodeIdentity(t, "local-node")
+	localID := s.config.Pulse.LocalNode
+	s.config.Nodes[localID].TLSCert = localPEM
+	s.config.Nodes[localID].IP, s.config.Nodes[localID].Port = "127.0.0.1", "0"
+	// Node-local settings this node must keep through the same sync, so the test
+	// can tell "adopted everything" from "adopted the right thing".
+	s.config.Pulse.LoggingLevel = "debug"
+	if err := s.config.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	s.memberList.UpdateConfig(s.config)
+	stopListenerOnCleanup(t, s)
+
+	// A listener already up and serving plaintext, which is what a node looks like
+	// when the flip reaches it. Without this the test proves much less than it
+	// appears to: Reconfigure only consults the TLS term when a listener is
+	// already serving the same address, so a node with nothing bound rebinds
+	// anyway and would pass whatever that term said.
+	localNode, err := s.config.GetLocalNode()
+	if err != nil {
+		t.Fatalf("GetLocalNode: %v", err)
+	}
+	if err := s.startClusterListener(localNode); err != nil {
+		t.Fatalf("startClusterListener: %v", err)
+	}
+	if s.grpcServerTLS {
+		t.Fatal("the listener was already serving TLS before the sync")
+	}
+	s.RLock()
+	boundAddr := fmt.Sprintf("%s:%s", s.config.Nodes[localID].IP, s.config.Nodes[localID].Port)
+	s.RUnlock()
+	if !s.clusterListenerServing(boundAddr, false) {
+		t.Fatalf("no plaintext listener is recorded as serving %s, so the rebind this "+
+			"test is about cannot be observed", boundAddr)
+	}
+
+	// What a peer that has just been flipped sends: the cluster config with
+	// tls_mode set, and its own idea of the node-local keys.
+	payload := func() []byte {
+		s.Lock()
+		defer s.Unlock()
+		clone := &config.Config{
+			Pulse:   s.config.Pulse,
+			Groups:  s.config.Groups,
+			Plugins: s.config.Plugins,
+			Nodes:   map[string]*config.Node{},
+		}
+		clone.Pulse.TLSMode = config.TLSModeRequired
+		clone.Pulse.LoggingLevel = "error" // the sender's, which must not be adopted
+		for id, n := range s.config.Nodes {
+			copied := *n
+			clone.Nodes[id] = &copied
+		}
+		b, err := json.Marshal(clone)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}()
+
+	resp, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload})
+	if err != nil {
+		t.Fatalf("ConfigSync: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("ConfigSync refused: %s", resp.Message)
+	}
+	s.awaitAsyncReconfigures()
+
+	if got := s.currentConfig().Pulse.TLSMode; got != config.TLSModeRequired {
+		t.Fatalf("tls_mode = %q after the sync, want %q; a node that does not adopt it "+
+			"stays plaintext while the rest of the cluster encrypts, and is cut off",
+			got, config.TLSModeRequired)
+	}
+	if got := s.currentConfig().Pulse.LoggingLevel; got != "debug" {
+		t.Errorf("logging_level = %q, want this node's own %q kept; adopting the whole "+
+			"pulseha section is not the same as adopting the cluster-scoped part of it",
+			got, "debug")
+	}
+	if !s.grpcServerTLS {
+		t.Error("the node adopted tls_mode=required and its listener is still serving " +
+			"plaintext; the rebind is what the flip actually is on a receiving node")
 	}
 }
