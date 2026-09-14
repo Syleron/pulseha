@@ -249,8 +249,17 @@ gRPC` lines with their `tls=` values and timestamps, the before/after `strings` 
 join's two log lines, and the exact refusal messages from §6 and §8. A run that reports "TLS
 works" without the lines is not a verified run.
 
-**And state what it does not cover.** This is a two-node pair on one build. Not covered: a mixed
-build during a rolling upgrade (a node on an older binary has no `tls_mode` key and stays
-plaintext — it will be severed by a flip, which is why the ADR says upgrade the binaries first
-and flip second, and that ordering is itself untested); clusters larger than two; certificate
-expiry and rotation, which ADR-0005 explicitly defers.
+**And state what it does not cover.** This is a two-node pair on one build. Not covered:
+
+- **A mixed build during a rolling upgrade.** A node on an older binary has no `tls_mode` key,
+  stays plaintext, and is severed by a flip — which is why the procedure is upgrade every binary
+  first and flip second. It no longer *un-flips* the cluster, which it would have: such a binary
+  deletes the key from every config it re-broadcasts, and an absent key is now read as "the sender
+  has no opinion" rather than as permissive. That guard is tested and is itself unverified live.
+  If you want to exercise it, deploy the old binary to node-2 after §4 and confirm node-1 stays on
+  `required` across several of the coordinator's once-a-minute re-broadcasts, logging
+  `incoming config does not mention tls_mode; keeping this node's`.
+- **Clusters larger than two.** The flip's delivery loop is per peer and the window it opens
+  scales with the slowest one.
+- **Certificate expiry and rotation**, which ADR-0005 explicitly defers. A ten-year self-signed
+  certificate postpones the question rather than answering it.

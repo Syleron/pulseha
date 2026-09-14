@@ -158,6 +158,19 @@ healthy cluster the precondition insists on — against a failover that needs `f
 default) of continuous failure, so the cluster rides through it. That margin is why the
 precondition demands health and not merely a count of certificates.
 
+**A peer on a binary from before `tls_mode` is worse than a peer that is severed, and this had
+to be guarded rather than documented.** Such a binary unmarshals a config into a struct with no
+such field and marshals it back without one, so every re-broadcast it makes deletes the key — and
+the coordinator re-broadcasts once a minute. Read as permissive, that is not one node cut off,
+which is the visible and accepted cost of a mixed cluster; it is the whole cluster quietly undoing
+the operator's change on a timer, over a wire it has just been told to encrypt.
+
+So **an absent key means the sender has no opinion**, and the receiver keeps what it has. Only a
+key that is present and says `permissive` is a flip back. That works because permissive is written
+as the word and never as the empty string, which keeps `omitempty` — and keeping it matters: a
+cluster that has never been flipped emits no key at all, so its config hashes identically on an
+old binary and a new one, which is the whole of a rolling upgrade window.
+
 A peer that does not take the push is **reported, not rolled back**. This node and the peers that
 did take it are consistent; the one that did not is isolated and needs an operator, which is this
 document's accepted consequence. A revert would have to reach the peers that have already

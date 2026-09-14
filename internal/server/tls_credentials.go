@@ -18,6 +18,7 @@ package server
 
 import (
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 
 	"google.golang.org/grpc"
@@ -172,4 +173,24 @@ func (s *Server) presentableTokenLocked(cfg *config.Config, secret string) strin
 		return secret
 	}
 	return clustertls.FormatJoinToken(secret, fingerprint)
+}
+
+// payloadNamesTLSMode reports whether a ConfigSync payload's `pulseha` section
+// carries a tls_mode key at all, as distinct from carrying an empty one.
+//
+// Asked of the raw JSON because the struct cannot answer it: an absent key and
+// an empty string both unmarshal to "", and the difference between them is the
+// difference between "a peer that does not know about tls_mode re-broadcast this"
+// and "a peer told me the cluster is permissive". See the caller.
+func payloadNamesTLSMode(raw map[string]json.RawMessage) bool {
+	pulse, ok := raw["pulseha"]
+	if !ok {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(pulse, &fields); err != nil {
+		return false
+	}
+	_, named := fields["tls_mode"]
+	return named
 }

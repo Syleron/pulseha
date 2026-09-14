@@ -761,3 +761,129 @@ func TestANodeLearnsTheFlipFromAnOrdinaryConfigSync(t *testing.T) {
 			"plaintext; the rebind is what the flip actually is on a receiving node")
 	}
 }
+
+// A binary from before tls_mode existed silently deletes the key from every
+// config it re-broadcasts, and the coordinator re-broadcasts once a minute.
+//
+// Read as permissive, that is not one node severed — which is the documented and
+// detectable cost of running a mixed cluster — but the whole cluster quietly
+// undoing the operator's change, on a timer, over a wire it has just been told to
+// encrypt. So an absent key means the sender has no opinion and this node keeps
+// its own; only a key that is present and says `permissive` is a flip back.
+func TestAPayloadThatDoesNotMentionTLSModeDoesNotUnflipTheCluster(t *testing.T) {
+	// What an older binary marshals: every field it knows, and nothing it does not.
+	type oldLocal struct {
+		HealthCheckInterval int    `json:"hcs_interval"`
+		FailOverInterval    int    `json:"fos_interval"`
+		FailOverLimit       int    `json:"fo_limit"`
+		LocalNode           string `json:"local_node"`
+		Mode                string `json:"mode"`
+	}
+
+	newServer := func(t *testing.T) *Server {
+		t.Helper()
+		s := newPropagationTestServer(t)
+		localPEM := installNodeIdentity(t, "local-node")
+		s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = localPEM
+		s.config.Pulse.TLSMode = config.TLSModeRequired
+		if err := s.config.Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		s.memberList.UpdateConfig(s.config)
+		stopListenerOnCleanup(t, s)
+		return s
+	}
+
+	payload := func(t *testing.T, s *Server, pulse interface{}) []byte {
+		t.Helper()
+		nodes := map[string]*config.Node{}
+		s.RLock()
+		for id, n := range s.config.Nodes {
+			copied := *n
+			nodes[id] = &copied
+		}
+		s.RUnlock()
+		b, err := json.Marshal(map[string]interface{}{"pulseha": pulse, "nodes": nodes})
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return b
+	}
+
+	t.Run("an older binary's re-broadcast", func(t *testing.T) {
+		s := newServer(t)
+		body := payload(t, s, oldLocal{
+			HealthCheckInterval: 1000, FailOverInterval: 5000, FailOverLimit: 10000,
+			LocalNode: s.config.Pulse.LocalNode, Mode: "active-active",
+		})
+
+		resp, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: body})
+		if err != nil {
+			t.Fatalf("ConfigSync: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("ConfigSync refused: %s", resp.Message)
+		}
+		s.awaitAsyncReconfigures()
+
+		if got := s.currentConfig().Pulse.TLSMode; got != config.TLSModeRequired {
+			t.Errorf("tls_mode = %q after a payload that never mentioned it, want %q kept; "+
+				"a peer that cannot say the word must not be able to unsay it",
+				got, config.TLSModeRequired)
+		}
+	})
+
+	t.Run("a real flip back, which says the word", func(t *testing.T) {
+		s := newServer(t)
+		pulse := map[string]interface{}{
+			"hcs_interval": 1000, "fos_interval": 5000, "fo_limit": 10000,
+			"local_node": s.config.Pulse.LocalNode, "mode": "active-active",
+			"tls_mode": config.TLSModePermissive,
+		}
+		body := payload(t, s, pulse)
+
+		resp, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: body})
+		if err != nil {
+			t.Fatalf("ConfigSync: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("ConfigSync refused: %s", resp.Message)
+		}
+		s.awaitAsyncReconfigures()
+
+		if got := s.currentConfig().Pulse.TLSMode; got != config.TLSModePermissive {
+			t.Errorf("tls_mode = %q, want %q; guarding against the absent key must not "+
+				"also block a cluster that is deliberately going back to plaintext", got,
+				config.TLSModePermissive)
+		}
+	})
+}
+
+// permissive is written as the word and never as the empty string, which is what
+// makes "absent" and "deliberately permissive" distinguishable above.
+func TestPermissiveIsWrittenAsAWord(t *testing.T) {
+	s := newPropagationTestServer(t)
+	localPEM := installNodeIdentity(t, "local-node")
+	s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = localPEM
+	s.config.Pulse.TLSMode = config.TLSModeRequired
+	s.memberList.UpdateConfig(s.config)
+	stopListenerOnCleanup(t, s)
+
+	resp, err := s.UpdateConfig(context.Background(), &rpc.UpdateConfigRequest{
+		Key:   "tls_mode",
+		Value: config.TLSModePermissive,
+	})
+	if err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("UpdateConfig refused: %s", resp.Message)
+	}
+
+	if got := s.currentConfig().Pulse.TLSMode; got != config.TLSModePermissive {
+		t.Fatalf("tls_mode = %q, want the literal %q. An empty value is omitted from the "+
+			"JSON, and a flip back that emits no key is indistinguishable from an old "+
+			"binary's re-broadcast -- so it would be ignored by every peer",
+			got, config.TLSModePermissive)
+	}
+}

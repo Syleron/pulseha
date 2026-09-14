@@ -5554,6 +5554,33 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}, nil
 		}
 
+		// A payload whose `pulseha` section does not mention tls_mode has no opinion
+		// about it, and this node keeps its own.
+		//
+		// Absence is not permissive, and treating it as permissive is how a mixed
+		// cluster tears itself apart. A binary from before tls_mode existed
+		// unmarshals a config into a struct that has no such field and marshals it
+		// back out without one -- so every re-broadcast it makes, and the
+		// coordinator makes one a minute, silently deletes the key. Read as
+		// permissive, that takes every node that receives it back to plaintext: not
+		// one node severed, which is the documented cost of a mixed cluster, but the
+		// whole cluster quietly undoing the operator's change on a timer.
+		//
+		// It works because permissive is written as the word and never as the empty
+		// string (see applyTLSMode), so a genuine flip back is a key that is present
+		// and says "permissive", which is distinguishable from a key that is not
+		// there at all. `omitempty` stays for the same reason it was chosen: a
+		// cluster that has never been flipped emits no key, so its config hashes the
+		// same on an old binary as on a new one, which is the whole of a rolling
+		// upgrade window.
+		if !payloadNamesTLSMode(raw) {
+			if newConfig.Pulse.TLSMode != cur.Pulse.TLSMode {
+				s.logger.Warn("CONFIG_SYNC: incoming config does not mention tls_mode; keeping this node's",
+					"kept", cur.Pulse.TLSMode)
+			}
+			newConfig.Pulse.TLSMode = cur.Pulse.TLSMode
+		}
+
 		// Apply preserved local-specific settings onto the incoming config
 		newConfig.Pulse.LocalNode = localIDPreserve
 		newConfig.Pulse.LoggingLevel = loggingLevelPreserve

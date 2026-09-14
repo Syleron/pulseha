@@ -196,7 +196,20 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 	// delivering the flip over the channel it removes.
 	deliverWith, err := clustertls.ClientCredentials(s.clusterSnapshot())
 	if err != nil {
-		return refuse("cannot reach the peers to tell them: %v", err)
+		// Refused rather than changed unilaterally, in both directions. This node
+		// cannot reach its peers on the terms they are on, so a change made here
+		// would be a change only here -- and a cluster split across tls_mode is
+		// exactly what this function exists to prevent.
+		//
+		// Coming back to permissive that can feel like the wrong call, since
+		// plaintext is where the operator is trying to get to. It is not: the peers
+		// are still on `required` and cannot be told, so this node would arrive
+		// there alone. The way out of that state is the console, per
+		// docs/RUNBOOK-111-verify.md -- on every node, not one.
+		return refuse("cannot reach the peers on the terms the cluster is currently on, so "+
+			"tls_mode has been left at %q (%v); if the cluster is stuck, set tls_mode on "+
+			"each node's config.json from its console and restart them one at a time",
+			cfg.Pulse.TLSMode, err)
 	}
 
 	s.Lock()
