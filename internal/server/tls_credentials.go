@@ -85,7 +85,15 @@ func (s *Server) dialPeer(c *client.Client, ip, port string) error {
 			"address", ip+":"+port, "error", err)
 		return err
 	}
-	return c.Connect(ip, port, creds)
+	if err := c.Connect(ip, port, creds); err != nil {
+		return err
+	}
+	// On the daemon's logger, which honours logging_level, because internal/client's
+	// does not and a dial nobody can observe cannot be verified on an appliance
+	// (#61). Debug because peers are dialled often; the listener's own line is
+	// Info and is the one to look for first.
+	s.logger.Debug("Connected to peer", "address", ip+":"+port, "tls", creds != nil)
+	return nil
 }
 
 // newClusterGRPCServer builds the inter-node gRPC server, with the cluster's TLS

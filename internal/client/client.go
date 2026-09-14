@@ -204,7 +204,11 @@ func (c *Client) Connect(ip string, port string, tlsConfig *tls.Config) error {
 
 	c.server = rpc.NewServerClient(c.Connection)
 	c.cliClient = rpc.NewCLIClient(c.Connection)
-	log.Debug("Client:Connect() Connection made", "address", ip+":"+port, "tls", tlsConfig != nil)
+	// This package's logger is charmbracelet's default one, which nothing calls
+	// SetLevel on, so this line cannot reach the journal at any logging_level.
+	// Deliberately not the place to record whether a dial was encrypted -- see
+	// Server.dialPeer, which has the daemon's logger (#61).
+	log.Debug("Client:Connect() Connection made", "address", ip+":"+port)
 	return nil
 }
 

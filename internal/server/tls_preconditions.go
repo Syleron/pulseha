@@ -23,6 +23,8 @@ import (
 	"sort"
 	"strings"
 
+	"crypto/tls"
+
 	"github.com/syleron/pulseha/internal/client"
 
 	"github.com/syleron/pulseha/internal/clustertls"
@@ -179,6 +181,24 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 		}
 	}
 
+	// The terms the cluster is on *now*, captured before the change is written.
+	//
+	// This is the whole delivery rule in one line, and getting it as "always in
+	// clear" was wrong in the direction nobody tests: going back to `permissive`,
+	// the peers are still serving TLS, so a plaintext push is refused by every one
+	// of them, and this node then reconfigures to plaintext and can never reach
+	// them again. Each half of the pair would be talking a protocol the other had
+	// stopped accepting, in both directions, permanently.
+	//
+	// Building it from the pre-change config makes both directions the same
+	// sentence: deliver a change on the terms in force before it. Going to
+	// `required` that is nil, which is plaintext, which is what ADR-0005 means by
+	// delivering the flip over the channel it removes.
+	deliverWith, err := clustertls.ClientCredentials(s.clusterSnapshot())
+	if err != nil {
+		return refuse("cannot reach the peers to tell them: %v", err)
+	}
+
 	s.Lock()
 	if err := s.config.UpdateValue("tls_mode", value); err != nil {
 		s.Unlock()
@@ -194,17 +214,15 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 	// that took the change and lost it, and the push is what delivers it first.
 	s.markConfigDirty()
 
-	// Hand it to the peers in clear, before this node's own listener and dials
-	// move onto the new terms.
+	// Hand it to the peers on the old terms, before this node's own listener and
+	// dials move onto the new ones.
 	//
-	// Explicitly in clear rather than through dialPeer, and this is the sentence
-	// the whole ordering turns on: the config has just been written, so dialPeer
-	// would now offer TLS to peers that are still plaintext and every one of them
-	// would refuse -- the change would never reach the nodes it is about to cut
-	// off. Plaintext is the only wire the cluster still shares at this instant,
-	// which is exactly what ADR-0005 means by delivering the flip over the channel
-	// it removes.
-	undelivered := s.deliverConfigInClear()
+	// Explicitly on the captured credentials rather than through dialPeer, and
+	// this is the sentence the whole ordering turns on: the config has just been
+	// written, so dialPeer would offer the *new* terms to peers that are all still
+	// on the old ones, and every one of them would refuse -- the change would
+	// never reach the nodes it is about to cut off.
+	undelivered := s.deliverConfigWith(deliverWith)
 
 	// Now this node, last. Its listener rebinds on the new terms and its dials
 	// start offering them, which is what the peers above have just been told to
@@ -254,9 +272,9 @@ func (s *Server) memberStatuses() map[string]membership.MemberStatus {
 	return statuses
 }
 
-// deliverConfigInClear pushes this node's current config to every peer over a
-// plaintext connection opened for the purpose, and names the ones that did not
-// take it.
+// deliverConfigWith pushes this node's current config to every peer over a
+// connection opened for the purpose on the given terms, and names the ones that
+// did not take it. Nil credentials are plaintext.
 //
 // Only the TLS flip has any business calling this. Every other broadcast goes
 // through the broadcaster, which dials on whatever terms the cluster is on; this
@@ -267,7 +285,7 @@ func (s *Server) memberStatuses() map[string]membership.MemberStatus {
 // The pool is keyed by peer and is about to be refilled with TLS connections by
 // Reconfigure, and leaving a plaintext entry in it would outlive the moment it
 // was correct for.
-func (s *Server) deliverConfigInClear() []string {
+func (s *Server) deliverConfigWith(creds *tls.Config) []string {
 	// Read before the server lock is taken, not from inside it. Asking the member
 	// list for the statuses takes its lock and then each member's, and holding the
 	// server's write lock across a call into another subsystem is the shape that
@@ -304,7 +322,7 @@ func (s *Server) deliverConfigInClear() []string {
 			undelivered = append(undelivered, nodeLabel(id, node))
 			continue
 		}
-		if err := c.Connect(node.IP, node.Port, nil); err != nil {
+		if err := c.Connect(node.IP, node.Port, creds); err != nil {
 			s.logger.Error("Could not reach a peer to tell it about the TLS mode change",
 				"node", nodeLabel(id, node), "error", err)
 			undelivered = append(undelivered, nodeLabel(id, node))

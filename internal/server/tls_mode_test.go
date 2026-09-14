@@ -33,10 +33,12 @@ import (
 
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/clustertls"
+	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 )
 
 // installNodeIdentity mints a keypair and points security.CertDir at it for the
@@ -566,4 +568,97 @@ func TestTheTokenRPCHandsOutAUsableToken(t *testing.T) {
 			t.Fatalf("Token refused: %s", resp.Message)
 		}
 	})
+}
+
+// startTLSRecordingPeer is a recordingPeer that serves the cluster's credentials,
+// which is what every peer looks like once the cluster is on `required`.
+func startTLSRecordingPeer(t *testing.T, snapshot func() *config.Config) (*recordingPeer, string) {
+	t.Helper()
+
+	creds, err := clustertls.ServerCredentials(snapshot)
+	if err != nil {
+		t.Fatalf("ServerCredentials: %v", err)
+	}
+	if creds == nil {
+		t.Fatal("no server credentials for a cluster that requires TLS")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	peer := &recordingPeer{}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(creds)))
+	rpc.RegisterServerServer(srv, peer)
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(srv.Stop)
+
+	return peer, ln.Addr().String()
+}
+
+// Going back to permissive has to be delivered over TLS, because that is what
+// the peers are still serving.
+//
+// The direction nobody thinks to test, and the one that severs a cluster
+// permanently if it is wrong: a plaintext push is refused by every peer still on
+// `required`, this node then reconfigures to plaintext, and the two halves are
+// each talking a protocol the other has stopped accepting, in both directions,
+// with no path left to repair it.
+func TestTheFlipBackIsDeliveredOnTheTermsThePeersAreStillOn(t *testing.T) {
+	s := newPropagationTestServer(t)
+	localPEM := installNodeIdentity(t, "local-node")
+	localID := s.config.Pulse.LocalNode
+	s.config.Nodes[localID].TLSCert = localPEM
+	s.config.Pulse.TLSMode = config.TLSModeRequired
+
+	// A peer serving TLS, the way one looks after the cluster has been flipped.
+	// It shares this node's view of the cluster, so it has to be in it.
+	peerDir := t.TempDir()
+	peerPEM := mintIdentityInto(t, peerDir, "peer-0")
+	s.config.Nodes["peer-0"] = &config.Node{Hostname: "peer-0", TLSCert: peerPEM}
+	s.memberList.UpdateConfig(s.config)
+
+	peerView := func() *config.Config { return s.config }
+	peer, addr := func() (*recordingPeer, string) {
+		prev := security.CertDir
+		security.CertDir = peerDir
+		defer func() { security.CertDir = prev }()
+		return startTLSRecordingPeer(t, peerView)
+	}()
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	s.config.Nodes["peer-0"].IP, s.config.Nodes["peer-0"].Port = host, port
+	if err := s.config.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := s.memberList.AddMemberQuiet("peer-0"); err != nil {
+		t.Fatalf("AddMemberQuiet: %v", err)
+	}
+	s.memberList.GetMemberByID("peer-0").SetStatus(membership.StatusPassive)
+	s.memberList.UpdateConfig(s.config)
+	stopListenerOnCleanup(t, s)
+
+	resp, err := s.UpdateConfig(context.Background(), &rpc.UpdateConfigRequest{
+		Key:   "tls_mode",
+		Value: config.TLSModePermissive,
+	})
+	if err != nil {
+		t.Fatalf("UpdateConfig: %v", err)
+	}
+	if !resp.Success {
+		t.Fatalf("the flip back was refused: %s", resp.Message)
+	}
+
+	if ok, seen := awaitPulseValue(t, peer, "tls_mode", config.TLSModePermissive, 10*time.Second); !ok {
+		t.Fatalf("a peer still serving TLS was never told the cluster had gone back to "+
+			"plaintext (last value seen: %v). It would keep refusing this node's "+
+			"plaintext dials while this node refuses its TLS ones, with no way left "+
+			"to repair either side", seen)
+	}
+	if strings.Contains(resp.Message, "except") {
+		t.Errorf("message = %q, want no peer reported as missed", resp.Message)
+	}
 }

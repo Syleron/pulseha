@@ -137,11 +137,20 @@ failed over. Requiring unanimity before starting is how that is avoided, and `#1
 record of what config divergence costs when a node is left behind.
 
 **The ordering inside phase 2, learned from building it.** The change is written and stamped,
-then pushed to every peer over a connection opened *explicitly in clear*, and only then applied
-to this node. Handing it to the peers on the cluster's new terms cannot work and is the trap
-worth naming: the config has already been written, so the ordinary dial would offer TLS to peers
-that are still plaintext, every one of them would refuse, and the message would never reach the
-nodes it is about to cut off. A test with a plaintext peer catches it; nothing else does.
+then pushed to every peer over a connection opened *on the terms in force before it*, and only
+then applied to this node. Handing it to the peers on the cluster's new terms cannot work and is
+the trap worth naming: the config has already been written, so the ordinary dial would offer the
+new terms to peers that are all still on the old ones, every one of them would refuse, and the
+message would never reach the nodes it is about to cut off.
+
+"Before it" rather than "in clear", and the difference is not pedantry. Written as *in clear* it
+is right going to `required` and catastrophic coming back: the peers are still serving TLS, so a
+plaintext push is refused by all of them, this node then reconfigures to plaintext, and the two
+halves each speak a protocol the other has stopped accepting, in both directions, with nothing
+left to repair either side. The credentials to deliver with are therefore captured before the
+change is written, which makes both directions one sentence. This was found by writing the
+verification runbook -- the flip back is the direction nobody thinks to test, and the suite did
+not.
 
 There is still a window between the push and the last peer applying it, during which a flipped
 node cannot reach an unflipped one. It is bounded by broadcast latency — sub-second on the

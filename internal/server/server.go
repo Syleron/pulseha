@@ -563,7 +563,12 @@ func (s *Server) startClusterListener(localNode config.Node) error {
 	grpcSrv := s.grpcServer
 	s.setClusterListener(grpcSrv, address, tlsServed)
 	go func() {
-		s.logger.Debug("Serving cluster gRPC", "addr", listener.Addr().String())
+		// Info rather than Debug, and carrying the terms: this is the one line that
+		// says what the cluster listener is actually serving, it fires once per
+		// bind rather than per connection, and a flip to `required` that cannot be
+		// observed on the appliance cannot be verified there either (#61's lesson,
+		// #111's need).
+		s.logger.Info("Serving cluster gRPC", "addr", listener.Addr().String(), "tls", tlsServed)
 		if err := grpcSrv.Serve(listener); err != nil {
 			s.logger.Error("Cluster gRPC server failed", "error", err)
 		}
