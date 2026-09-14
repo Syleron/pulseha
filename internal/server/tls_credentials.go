@@ -44,6 +44,13 @@ import (
 // which is a Server built as a struct literal -- several tests in this package
 // do that, and the join path found the last place that assumed they do not
 // (#111 step 3a).
+//
+// **That fallback takes s.RLock(), so this must never be called from a path that
+// already holds the server's write lock.** It is not reentrant, and the read
+// would wait behind a write that is its own. The Token RPC did exactly that and
+// nothing caught it, because nothing in the suite called Token -- see
+// presentableTokenLocked. A caller that holds the lock has the config already and
+// should pass it.
 func (s *Server) clusterSnapshot() clustertls.Snapshot {
 	return func() *config.Config {
 		if s.memberList != nil {
@@ -118,9 +125,17 @@ func (s *Server) newClusterGRPCServer() (srv *grpc.Server, tlsServed bool, err e
 	return srv, creds != nil, nil
 }
 
-// presentableToken is the join token as an operator carries it, which is the
-// stored secret plus this node's certificate fingerprint once the cluster
+// presentableTokenLocked is the join token as an operator carries it, which is
+// the stored secret plus this node's certificate fingerprint once the cluster
 // requires TLS.
+//
+// Takes the config rather than reading it, and the xLocked name says why: its
+// only caller is the Token RPC, which holds s.Lock() across the whole of itself.
+// Reaching for clusterSnapshot here was a deadlock — the member-list read that
+// usually satisfies it falls back to s.RLock(), and a read lock taken while this
+// goroutine holds the write lock can never be granted. Found by probing the path
+// rather than by running it: nothing calls Token in the suite, so nothing would
+// have.
 //
 // The stored token is left a bare secret on purpose. It is the shared value both
 // ends compare, it is compared byte for byte, and a cluster mid-upgrade has peers
@@ -133,8 +148,7 @@ func (s *Server) newClusterGRPCServer() (srv *grpc.Server, tlsServed bool, err e
 // Permissive returns the bare secret, because there is no handshake to pin and a
 // token that appeared to pin one would claim a guarantee it cannot make -- which
 // is the mistake ADR-0005 corrected its own ordering to avoid.
-func (s *Server) presentableToken(secret string) string {
-	cfg := s.clusterSnapshot()()
+func (s *Server) presentableTokenLocked(cfg *config.Config, secret string) string {
 	if cfg == nil || !cfg.Pulse.TLSRequired() {
 		return secret
 	}

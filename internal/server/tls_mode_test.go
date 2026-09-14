@@ -354,7 +354,7 @@ func TestTheJoinTokenCarriesTheFingerprintOnlyWhenItMeansSomething(t *testing.T)
 
 	// Permissive: there is no handshake to pin, so the token must not look as
 	// though it pins one.
-	if got := s.presentableToken("a-secret"); got != "a-secret" {
+	if got := s.presentableTokenLocked(s.config, "a-secret"); got != "a-secret" {
 		t.Errorf("permissive token = %q, want the bare secret; a pin that cannot be "+
 			"checked is a claim the token cannot back", got)
 	}
@@ -362,7 +362,7 @@ func TestTheJoinTokenCarriesTheFingerprintOnlyWhenItMeansSomething(t *testing.T)
 	s.config.Pulse.TLSMode = config.TLSModeRequired
 	s.memberList.UpdateConfig(s.config)
 
-	secret, fingerprint, pinned := clustertls.ParseJoinToken(s.presentableToken("a-secret"))
+	secret, fingerprint, pinned := clustertls.ParseJoinToken(s.presentableTokenLocked(s.config, "a-secret"))
 	if !pinned {
 		t.Fatal("a cluster that requires TLS issued a token with no fingerprint; a joiner " +
 			"holding it has nothing to check the cluster against")
@@ -401,7 +401,7 @@ func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
 
 	// Captured while security.CertDir still points at the target, because this is
 	// the one thing that is read off its disk.
-	token := target.presentableToken(target.config.Pulse.ClusterToken)
+	token := target.presentableTokenLocked(target.config, target.config.Pulse.ClusterToken)
 	secret, pin, pinned := clustertls.ParseJoinToken(token)
 	if !pinned {
 		t.Fatalf("token %q carries no fingerprint for the joiner to pin", token)
@@ -486,6 +486,84 @@ func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
 		}); err == nil {
 			t.Fatal("a node joined a cluster whose certificate its token does not name; " +
 				"that is the trust-on-first-use the pin exists to remove")
+		}
+	})
+}
+
+// The Token RPC, driven as the CLI drives it.
+//
+// It had no test at all, which is how it came to hold s.Lock() across a helper
+// that reached for a read lock — an unconditional deadlock on the one command an
+// operator runs before every join, and one nothing in the suite would have hit.
+// Driving the RPC rather than the helper is the point: the lock is the RPC's, so
+// a test that called past it would pass against a daemon that wedged.
+func TestTheTokenRPCHandsOutAUsableToken(t *testing.T) {
+	s := newPropagationTestServer(t)
+	localPEM := installNodeIdentity(t, "local-node")
+	s.config.Pulse.ClusterToken = "the-shared-secret"
+	s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = localPEM
+	s.memberList.UpdateConfig(s.config)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	t.Run("permissive", func(t *testing.T) {
+		resp, err := s.Token(ctx, &rpc.TokenRequest{})
+		if err != nil {
+			t.Fatalf("Token: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("Token refused: %s", resp.Message)
+		}
+		if resp.Token != "the-shared-secret" {
+			t.Errorf("token = %q, want the bare secret", resp.Token)
+		}
+	})
+
+	t.Run("required", func(t *testing.T) {
+		s.Lock()
+		s.config.Pulse.TLSMode = config.TLSModeRequired
+		s.Unlock()
+		s.memberList.UpdateConfig(s.config)
+
+		resp, err := s.Token(ctx, &rpc.TokenRequest{})
+		if err != nil {
+			t.Fatalf("Token: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("Token refused: %s", resp.Message)
+		}
+		secret, fingerprint, pinned := clustertls.ParseJoinToken(resp.Token)
+		if !pinned {
+			t.Fatal("a cluster requiring TLS handed out a token with nothing to pin")
+		}
+		if secret != "the-shared-secret" {
+			t.Errorf("secret = %q, want it carried through untouched", secret)
+		}
+		want, err := clustertls.Fingerprint(localPEM)
+		if err != nil {
+			t.Fatalf("Fingerprint: %v", err)
+		}
+		if fingerprint != want {
+			t.Errorf("fingerprint = %q, want this node's own", fingerprint)
+		}
+	})
+
+	// The shape that found the deadlock: a Server with no member list, which is
+	// what several call sites and most of this package's tests build, and which
+	// #111 step 3a already caught one panic on.
+	t.Run("with no member list", func(t *testing.T) {
+		bare := newPropagationTestServer(t)
+		bare.config.Pulse.ClusterToken = "another-secret"
+		bare.config.Pulse.TLSMode = config.TLSModeRequired
+		bare.memberList = nil
+
+		resp, err := bare.Token(ctx, &rpc.TokenRequest{})
+		if err != nil {
+			t.Fatalf("Token: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("Token refused: %s", resp.Message)
 		}
 	})
 }

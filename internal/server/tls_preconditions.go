@@ -268,10 +268,18 @@ func (s *Server) memberStatuses() map[string]membership.MemberStatus {
 // Reconfigure, and leaving a plaintext entry in it would outlive the moment it
 // was correct for.
 func (s *Server) deliverConfigInClear() []string {
+	// Read before the server lock is taken, not from inside it. Asking the member
+	// list for the statuses takes its lock and then each member's, and holding the
+	// server's write lock across a call into another subsystem is the shape that
+	// deadlocked startup once already (internal/membership's
+	// TestIsRunningDoesNotBlockOnAPassInFlight). broadcastConfigAndStates is
+	// handed its states from outside for the same reason.
+	statuses := s.memberStatuses()
+
 	s.Lock()
 	localID, _ := s.config.GetLocalNodeUUID()
 	payload, buildErr := buildFullConfigPayload(
-		s.config, s.memberStatuses(), s.clusterEpoch, s.leaderID, localID, s.loadConfigStamp())
+		s.config, statuses, s.clusterEpoch, s.leaderID, localID, s.loadConfigStamp())
 	peers := make(map[string]*config.Node, len(s.config.Nodes))
 	for id, node := range s.config.Nodes {
 		if id != localID && node != nil {

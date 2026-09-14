@@ -5179,7 +5179,7 @@ func (s *Server) Token(ctx context.Context, req *rpc.TokenRequest) (*rpc.TokenRe
 		return &rpc.TokenResponse{
 			Success: true,
 			Message: "current cluster token",
-			Token:   s.presentableToken(currentToken),
+			Token:   s.presentableTokenLocked(s.config, currentToken),
 		}, nil
 	}
 
@@ -5230,7 +5230,7 @@ func (s *Server) Token(ctx context.Context, req *rpc.TokenRequest) (*rpc.TokenRe
 	return &rpc.TokenResponse{
 		Success: true,
 		Message: "new cluster token generated",
-		Token:   s.presentableToken(newToken),
+		Token:   s.presentableTokenLocked(s.config, newToken),
 	}, nil
 }
 
