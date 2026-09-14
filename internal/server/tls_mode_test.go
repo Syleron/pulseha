@@ -24,20 +24,30 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/packages/config"
 	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
 )
 
-// installNodeIdentity writes a keypair where this node's certificate lives and
-// returns the PEM its config entry would carry.
+// installNodeIdentity mints a keypair and points security.CertDir at it for the
+// rest of the test, so this process looks like the node that owns it.
+//
+// It writes a package-level variable, which nothing in production ever does —
+// only tests move the certificate directory. That makes it safe in production
+// and a hazard here: a detached goroutine from an earlier case (a join spawns
+// one) is still reading it, and the race detector is right to say so. Where a
+// test only needs a certificate and not an identity, use mintIdentityInto, which
+// touches nothing shared.
 func installNodeIdentity(t *testing.T, cn string) string {
 	t.Helper()
 
@@ -45,6 +55,14 @@ func installNodeIdentity(t *testing.T, cn string) string {
 	prev := security.CertDir
 	security.CertDir = dir
 	t.Cleanup(func() { security.CertDir = prev })
+
+	return mintIdentityInto(t, dir, cn)
+}
+
+// mintIdentityInto writes a keypair into dir, laid out the way security.CertDir
+// is, and returns the PEM a config entry would carry. It changes nothing shared.
+func mintIdentityInto(t *testing.T, dir, cn string) string {
+	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -105,23 +123,12 @@ func publishCertificates(t *testing.T, s *Server, localPEM string) {
 			node.TLSCert = localPEM
 			continue
 		}
-		node.TLSCert = installNodeIdentityPEMOnly(t, id)
+		node.TLSCert = mintIdentityInto(t, t.TempDir(), id)
 	}
 	if err := s.config.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	s.memberList.UpdateConfig(s.config)
-}
-
-// installNodeIdentityPEMOnly mints a certificate for a peer without touching the
-// certificate directory — a peer's key never lives on this node.
-func installNodeIdentityPEMOnly(t *testing.T, cn string) string {
-	t.Helper()
-
-	prev := security.CertDir
-	pemOut := installNodeIdentity(t, cn)
-	security.CertDir = prev
-	return pemOut
 }
 
 // The flip must not be reachable by a typo. A value that is neither of the two
@@ -334,4 +341,151 @@ func TestTheListenerRecordDistinguishesAModeChangeFromNoChange(t *testing.T) {
 	if s.clusterListenerServing("127.0.0.1:8080", false) {
 		t.Error("a TLS listener was left serving across the flip back to permissive")
 	}
+}
+
+// The token an operator carries names this node's certificate once the cluster
+// requires TLS, and does not pretend to before then.
+func TestTheJoinTokenCarriesTheFingerprintOnlyWhenItMeansSomething(t *testing.T) {
+	s := newPropagationTestServer(t)
+	localPEM := installNodeIdentity(t, "local-node")
+	s.config.Pulse.ClusterToken = "a-secret"
+	s.config.Nodes[s.config.Pulse.LocalNode].TLSCert = localPEM
+	s.memberList.UpdateConfig(s.config)
+
+	// Permissive: there is no handshake to pin, so the token must not look as
+	// though it pins one.
+	if got := s.presentableToken("a-secret"); got != "a-secret" {
+		t.Errorf("permissive token = %q, want the bare secret; a pin that cannot be "+
+			"checked is a claim the token cannot back", got)
+	}
+
+	s.config.Pulse.TLSMode = config.TLSModeRequired
+	s.memberList.UpdateConfig(s.config)
+
+	secret, fingerprint, pinned := clustertls.ParseJoinToken(s.presentableToken("a-secret"))
+	if !pinned {
+		t.Fatal("a cluster that requires TLS issued a token with no fingerprint; a joiner " +
+			"holding it has nothing to check the cluster against")
+	}
+	if secret != "a-secret" {
+		t.Errorf("secret = %q, want it carried through untouched", secret)
+	}
+	want, err := clustertls.Fingerprint(localPEM)
+	if err != nil {
+		t.Fatalf("Fingerprint: %v", err)
+	}
+	if fingerprint != want {
+		t.Errorf("fingerprint = %q, want this node's own %q", fingerprint, want)
+	}
+}
+
+// The bootstrap, end to end: a node with no cluster and no trust set reaches one
+// that requires TLS and asks to join it, holding nothing but the token.
+//
+// Driven against a real TLS listener with the real interceptor in front of it,
+// because every piece of this passed on its own while joining such a cluster was
+// impossible. The handshake has to accept an unnamed certificate, the interceptor
+// has to let it through to Join and nowhere else, and the joiner has to be
+// verifying the far end against the token's fingerprint — all three at once, or
+// there is no way into the cluster.
+func TestANodeJoinsAClusterThatRequiresTLS(t *testing.T) {
+	target, _, _ := authorisationTestServer(t)
+	target.config.Pulse.ClusterToken = "the-shared-secret"
+	target.memberList.UpdateConfig(target.config)
+
+	addr := serveWithAuthorisation(t, target)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+
+	// Captured while security.CertDir still points at the target, because this is
+	// the one thing that is read off its disk.
+	token := target.presentableToken(target.config.Pulse.ClusterToken)
+	secret, pin, pinned := clustertls.ParseJoinToken(token)
+	if !pinned {
+		t.Fatalf("token %q carries no fingerprint for the joiner to pin", token)
+	}
+
+	// The joining node, with its own identity and no cluster at all.
+	installNodeIdentity(t, "joiner")
+
+	dialPinned := func(t *testing.T, fingerprint string) *client.Client {
+		t.Helper()
+		creds, err := clustertls.PinnedClientCredentials(fingerprint)
+		if err != nil {
+			t.Fatalf("PinnedClientCredentials: %v", err)
+		}
+		c, err := client.New()
+		if err != nil {
+			t.Fatalf("client.New: %v", err)
+		}
+		if err := c.Connect(host, port, creds); err != nil {
+			t.Fatalf("Connect: %v", err)
+		}
+		t.Cleanup(c.Close)
+		return c
+	}
+
+	t.Run("with the token the cluster issued", func(t *testing.T) {
+		c := dialPinned(t, pin)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		resp, err := c.CLI().Join(ctx, &rpc.JoinRequest{
+			Hostname: "joiner",
+			NodeId:   "uuid-joiner",
+			BindIp:   "127.0.0.1",
+			BindPort: "9083",
+			Token:    secret,
+			TlsCert:  localCertificatePEM(),
+		})
+		if err != nil {
+			t.Fatalf("a node holding the cluster's own token could not join it: %v", err)
+		}
+		if !resp.Success {
+			t.Fatalf("join refused: %s", resp.Message)
+		}
+
+		// And it is in the trust set the moment it is in the config, which is what
+		// step 3a bought and what makes the next connection an ordinary one.
+		target.RLock()
+		recorded := target.config.Nodes["uuid-joiner"]
+		target.RUnlock()
+		if recorded == nil || recorded.TLSCert == "" {
+			t.Error("the joiner is in the cluster config with no certificate against it, " +
+				"so nothing it does next will be authorised")
+		}
+	})
+
+	t.Run("with a token naming a different certificate", func(t *testing.T) {
+		// Minted without moving security.CertDir: the successful join above left a
+		// broadcast goroutine of its own running, and it reads that global.
+		otherPEM := mintIdentityInto(t, t.TempDir(), "impostor")
+		wrongPin, err := clustertls.Fingerprint(otherPEM)
+		if err != nil {
+			t.Fatalf("Fingerprint: %v", err)
+		}
+
+		creds, err := clustertls.PinnedClientCredentials(wrongPin)
+		if err != nil {
+			t.Fatalf("PinnedClientCredentials: %v", err)
+		}
+		c, err := client.New()
+		if err != nil {
+			t.Fatalf("client.New: %v", err)
+		}
+		defer c.Close()
+		if err := c.Connect(host, port, creds); err != nil {
+			return // refused at the dial, which is the earliest it can be
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := c.CLI().Join(ctx, &rpc.JoinRequest{
+			Hostname: "impostor", NodeId: "uuid-impostor", Token: secret,
+		}); err == nil {
+			t.Fatal("a node joined a cluster whose certificate its token does not name; " +
+				"that is the trust-on-first-use the pin exists to remove")
+		}
+	})
 }

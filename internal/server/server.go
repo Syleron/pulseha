@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -23,6 +24,7 @@ import (
 	log "github.com/charmbracelet/log"
 	"github.com/google/uuid"
 	"github.com/syleron/pulseha/internal/client"
+	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
@@ -5177,7 +5179,7 @@ func (s *Server) Token(ctx context.Context, req *rpc.TokenRequest) (*rpc.TokenRe
 		return &rpc.TokenResponse{
 			Success: true,
 			Message: "current cluster token",
-			Token:   currentToken,
+			Token:   s.presentableToken(currentToken),
 		}, nil
 	}
 
@@ -5228,7 +5230,7 @@ func (s *Server) Token(ctx context.Context, req *rpc.TokenRequest) (*rpc.TokenRe
 	return &rpc.TokenResponse{
 		Success: true,
 		Message: "new cluster token generated",
-		Token:   newToken,
+		Token:   s.presentableToken(newToken),
 	}, nil
 }
 
@@ -6968,12 +6970,41 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		targetPort = "8080"
 	}
 
+	// The token carries two things: the secret the cluster will check this node
+	// against, and -- once that cluster requires TLS -- the fingerprint of the
+	// certificate it will present. Only the secret is sent onward; the fingerprint
+	// is spent here, on the connection.
+	joinSecret, pin, pinned := clustertls.ParseJoinToken(req.Token)
+
 	remoteClient, err := client.New()
 	if err != nil {
 		return &rpc.InitiateJoinResponse{Success: false, Message: "failed to create client: " + err.Error()}, nil
 	}
 	defer remoteClient.Close()
-	if err := s.dialPeer(remoteClient, req.TargetHost, targetPort); err != nil {
+
+	// Dialled on the token's terms and not on this node's, because this node has
+	// no opinion worth having: it is not in the cluster, so it has no trust set,
+	// and its own tls_mode describes a cluster of one. The token is the only thing
+	// here that came from the cluster being joined, and it came by hand.
+	//
+	// A token with no fingerprint is a plaintext join, which is what a permissive
+	// cluster issues and what every join did before this. Deliberately not "TLS
+	// without a pin" -- that would be encryption to whoever answered, which looks
+	// like security and is not.
+	var joinCreds *tls.Config
+	if pinned {
+		joinCreds, err = clustertls.PinnedClientCredentials(pin)
+		if err != nil {
+			return &rpc.InitiateJoinResponse{
+				Success: false,
+				Message: "the join token does not carry a usable certificate fingerprint (" +
+					err.Error() + "); check it was copied whole",
+			}, nil
+		}
+		s.logger.Info("INITIATE_JOIN: the token pins the cluster's certificate",
+			"fingerprint", pin[:12], "target", req.TargetHost)
+	}
+	if err := remoteClient.Connect(req.TargetHost, targetPort, joinCreds); err != nil {
 		return &rpc.InitiateJoinResponse{Success: false, Message: "failed to connect to target: " + err.Error()}, nil
 	}
 
@@ -7036,7 +7067,10 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 
 	joinReq := &rpc.JoinRequest{
 		Hostname: hostname,
-		Token:    req.Token,
+		// The secret half only. The stored cluster token is a bare secret and is
+		// compared byte for byte, so a fingerprint left on the end would not match
+		// on any node, including one running an older binary.
+		Token:    joinSecret,
 		NodeId:   nodeID,
 		BindIp:   bindIP,
 		BindPort: bindPort,

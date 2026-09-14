@@ -6,12 +6,13 @@ A peer is trusted because the config names it, not because something signed it. 
 cluster means having your certificate added to that set; being removed from a cluster means
 having it dropped.
 
-**Status: accepted, and being built. Steps 1, 2 and 3a have landed (#255, #256, #257). Step 4 —
-the `tls_mode` key, the credentials, the listener and the client side — is built and not yet
-verified live; step 3b, the token's pinned fingerprint, has not been built, and until it is a
-node cannot join a cluster that is already `required`. A cluster left on the default
-`permissive` is still plaintext, which is the migration working as intended, not a stall. The
-ordering below was corrected once, from building it; see the bootstrap section.** What existed
+**Status: accepted, and built. Steps 1, 2 and 3a landed first (#255, #256, #257) and are
+verified live. Steps 3b and 4 — the listener credentials, the client's trust-set check, the
+token's pinned fingerprint and the cluster-scoped flip to `required` — are built and **not yet
+verified live**, which for this design is the only verification that counts. A cluster left on
+the default `permissive` is still plaintext, which is the migration working as intended, not a
+stall. The ordering below was corrected twice, both times from building it; see the bootstrap
+section.** What existed
 before any of this was worse than nothing, and that description applied to the listener until
 step 4; the paragraphs below describing it as serving no credentials are kept as the record of
 what was found.
@@ -96,6 +97,25 @@ certificate with the request: that needs no handshake, it only needs somewhere t
 answer, and it removes the gap where a node is in the cluster's config before it is in the
 cluster's trust set.
 
+**What building it added, which the paragraphs above missed entirely.** Pinning the joinee's
+certificate is only half the bootstrap, and it is the easier half. The other half is that **the
+cluster has to let an unknown certificate in far enough to ask** — a joiner is by definition not
+in the trust set of the cluster it is joining, so a listener that refused an unnamed certificate
+at the handshake made such a cluster one nobody could ever join. That is not something the token
+can fix from the outside.
+
+The answer is that the two ends stop being symmetric, and the refusal moves one layer up. The
+dialling end verifies in full: a node never sends a request to a server the config does not name.
+The listening end demands a certificate and verifies nothing at the handshake, and an
+**authorisation interceptor** then checks that certificate against the trust set on every call,
+letting an unnamed one reach `Join` and nothing else — still gated by the token. Encryption comes
+from the handshake; authorisation is a separate question, asked where the answer depends on what
+is being asked for. The handshake cannot make that distinction, because it does not yet know.
+
+This is a weakening of "the listener refuses any peer the config does not name" only in wording.
+An unnamed peer can complete a handshake and then do exactly one thing, and that one thing needs
+a secret a human carried. The alternative was a cluster that could be created and never grown.
+
 ## Migration, which is where a live cluster gets broken
 
 A TLS-only node cannot talk to a plaintext peer, and an HA cluster is upgraded one node at a
@@ -150,13 +170,9 @@ plane, added to smooth a transition that happens once.
   certificate travels with the join. Then 3b and 4 **together** — listener credentials, client
   verification against the trust set, the token's fingerprint pinned at the handshake, and the
   cluster-scoped flip to `required`. The move of 3b is explained above; the shape of the rest is
-  unchanged. *Amended again, from building step 4:* they did not in fact arrive together. Step 4
-  is built and 3b is not, and the consequence is precise and must not be forgotten — **a node
-  cannot join a cluster that is already `required`**, because the joiner is not in the target's
-  trust set and has no way to verify the target's certificate. The listener refusing an unknown
-  joiner is the design doing its job rather than a hole in it; what is missing is the pinned
-  fingerprint that lets a joiner through the door on a human's authority. Until 3b lands, the
-  supported order is: add every node while `permissive`, then flip.
+  unchanged. *Amended again, from building them:* 4 landed one commit ahead of 3b, and for that
+  commit a node could not join a cluster that was already `required` — which is what the missing
+  half costs, stated plainly rather than discovered later. Both are in now.
 - **The config grows a field that is not configuration.** A node's certificate is state the node
   publishes about itself, living in the same structure as the operator's settings. `ConfigSync`
   preserves node-local fields already, and this is the first that is node-*owned* rather than

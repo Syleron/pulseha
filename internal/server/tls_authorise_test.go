@@ -110,12 +110,10 @@ func authorisationTestServer(t *testing.T) (s *Server, strangerDir string, stran
 	}
 	s.memberList.UpdateConfig(s.config)
 
-	strangerDir, strangerPEM := func() (string, string) {
-		prev := security.CertDir
-		defer func() { security.CertDir = prev }()
-		p := installNodeIdentity(t, "stranger")
-		return security.CertDir, p
-	}()
+	// Minted into its own directory rather than by moving security.CertDir, which
+	// nothing in production moves and which other goroutines here are reading.
+	strangerDir = t.TempDir()
+	strangerPEM := mintIdentityInto(t, strangerDir, "stranger")
 
 	// What the stranger believes: a cluster containing the target and itself. It
 	// has to name the target or it would refuse to dial at all, and the question

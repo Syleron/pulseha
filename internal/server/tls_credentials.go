@@ -26,6 +26,7 @@ import (
 	"github.com/syleron/pulseha/internal/client"
 	"github.com/syleron/pulseha/internal/clustertls"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/packages/security"
 	"github.com/syleron/pulseha/rpc"
 )
 
@@ -115,4 +116,38 @@ func (s *Server) newClusterGRPCServer() (srv *grpc.Server, tlsServed bool, err e
 	// operations like Join reach it.
 	rpc.RegisterCLIServer(srv, s)
 	return srv, creds != nil, nil
+}
+
+// presentableToken is the join token as an operator carries it, which is the
+// stored secret plus this node's certificate fingerprint once the cluster
+// requires TLS.
+//
+// The stored token is left a bare secret on purpose. It is the shared value both
+// ends compare, it is compared byte for byte, and a cluster mid-upgrade has peers
+// that would not know to strip a suffix -- so the fingerprint is added on the way
+// out and never written down. That also means it is always this node's own
+// fingerprint and always current: it is read from disk at the moment the operator
+// asks, rather than recovered from a config entry that a peer may have a stale
+// copy of.
+//
+// Permissive returns the bare secret, because there is no handshake to pin and a
+// token that appeared to pin one would claim a guarantee it cannot make -- which
+// is the mistake ADR-0005 corrected its own ordering to avoid.
+func (s *Server) presentableToken(secret string) string {
+	cfg := s.clusterSnapshot()()
+	if cfg == nil || !cfg.Pulse.TLSRequired() {
+		return secret
+	}
+
+	fingerprint, err := clustertls.Fingerprint(localCertificatePEM())
+	if err != nil {
+		// The cluster requires TLS and this node cannot say what its own
+		// certificate is, so it cannot hand out a token that would work. Better an
+		// unusable token than one that silently drops the pin and produces a
+		// plaintext join against a listener that will refuse it anyway.
+		s.logger.Error("Cannot add this node's fingerprint to the join token",
+			"error", err, "dir", security.CertDir)
+		return secret
+	}
+	return clustertls.FormatJoinToken(secret, fingerprint)
 }

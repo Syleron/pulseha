@@ -223,8 +223,11 @@ channel it removes and a node that misses it is cut off from the cluster. Any
 node that does not take the change is named in the reply — go to it before
 relying on the cluster.
 
-A node cannot currently join a cluster that is already on required. Add every
-node while permissive, then set it.
+A node joining a cluster on required needs the token from the node it is
+pointed at: on required, "pulsectl cluster token" includes that node's
+certificate fingerprint, which is what the joining node checks the cluster
+against before it sends anything. Copy it whole — a truncated token is refused
+rather than quietly falling back to an unverified join.
 
 The reach of each change is reported back on success.`,
 		Args: cobra.ExactArgs(2),
