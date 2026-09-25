@@ -1825,6 +1825,10 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 		}, nil
 	}
 
+	if !req.GetForceDemote() && !s.hasConfiguredPromotionMajority() {
+		return &rpc.PromoteResponse{Success: false, Message: "promotion requires a configured majority"}, nil
+	}
+
 	// All validation passed - kick off async promotion
 	s.logger.Info("PROMOTE: Validation passed, starting asynchronous promotion",
 		"target_node", req.NodeId,
@@ -1940,9 +1944,8 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 	dialAddr := net.JoinHostPort(utils.SanitizeIPv6(node.IP), node.Port)
 	probe, dialErr := net.DialTimeout("tcp", dialAddr, transportProbeTimeout)
 	if dialErr != nil {
-		// Nothing is listening, or nothing can reach it. Either way no daemon is holding those
-		// addresses. This is also what a network partition looks like from here, which is why
-		// the caller still requires quorum before acting on it.
+		// A failed TCP probe establishes only unreachability, not released addresses.
+		// A partitioned daemon may still serve the client network.
 		return false, true, fmt.Errorf("no daemon reachable at %s: %w", dialAddr, dialErr)
 	}
 	_ = probe.Close()
@@ -1981,25 +1984,37 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 // to accept a connection.
 const transportProbeTimeout = 3 * time.Second
 
-// canPromoteWithoutConfirmedRelease decides whether a promotion may claim the floating IPs
-// when the previous Active is unreachable and its release could not be confirmed.
-//
-//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
-//   - peerStillAlive: the peer could not be proven down — it may be wedged but running, and
-//     still own every floating IP. Nothing overrides this, including forceDemote.
-//   - haveQuorum: this node is on the majority side. A minority must never claim addresses it
-//     cannot prove were released, or both sides of a partition serve the same IPs.
-//
-// forceDemote deliberately does NOT override a live peer. It cannot serve as an operator escape
-// here because HealthChecker.tryForcePromote sets it on every promotion the automatic election
-// drives, so honouring it disabled this check for precisely the case it exists to catch — an
-// election promoting over an Active wedged by SetMode (docs/TEST-PLAN.md TC-6). The operator
-// escape for a permanently wedged Active is to stop its daemon, which makes it provably down.
+// hasConfiguredPromotionMajority uses configured membership, never a quorum
+// manager count that a caller may have shrunk to the currently reachable peers.
+// This is an additional admission check, not a substitute for an election vote
+// or proof that an unreachable incumbent released its addresses.
+func (s *Server) hasConfiguredPromotionMajority() bool {
+	cfg, err := s.voteConfig()
+	if err != nil || s.memberList == nil || cfg.Nodes[cfg.Pulse.LocalNode] == nil {
+		return false
+	}
+	ids := votingMembers(cfg)
+	if len(ids) < 3 {
+		return len(ids) > 0 // ADR-0002: configured one/two-node availability policy.
+	}
+	reachable := 0
+	for _, id := range ids {
+		if m := s.memberList.GetMemberByID(id); m != nil && m.GetStatus() != membership.StatusUnknown {
+			reachable++
+		}
+	}
+	return reachable >= len(ids)/2+1
+}
+
+// canPromoteWithoutConfirmedRelease retains the operator recovery override.
+// Automatic elections never set forceDemote. A reachable but unresponsive
+// incumbent blocks both paths. An unreachable incumbent can still own its IPs:
+// this majority check does not replace witness/lease fencing (END-2631).
 func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
 	if peerStillAlive {
 		return false
 	}
-	// The peer is provably down: promote from the majority side, or when explicitly forced.
+	// The peer is unreachable: require a majority or explicit operator override.
 	return haveQuorum || forceDemote
 }
 
@@ -2043,6 +2058,10 @@ func (s *Server) restoreMemberStates(originalStates map[string]membership.Member
 // performPromotionAsync executes the promotion operation asynchronously
 // This prevents frontend timeouts on long-running IP failover operations
 func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceDemote bool) {
+	if !forceDemote && !s.hasConfiguredPromotionMajority() {
+		s.logger.Warn("PROMOTE_ASYNC: No configured majority; refusing promotion")
+		return
+	}
 	startTime := time.Now()
 	s.logger.Info("PROMOTE_ASYNC: Starting asynchronous promotion",
 		"target_node", targetNodeID,
@@ -2166,13 +2185,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				continue
 			}
 
-			// Only a transport-level failure proves nothing is holding those addresses. A wedged
-			// peer that accepted the connection but never answered is alive and still owns every
-			// floating IP, so quorum cannot make claiming them safe.
+			// A transport failure is evidence of unreachability only. A reachable
+			// but wedged peer blocks takeover even when a majority is available.
 			stillAlive := !provablyDown
 			// Otherwise the peer is genuinely unreachable. Promote only from the majority side:
 			// a minority must never claim addresses it cannot prove were released.
-			haveQuorum := s.quorumManager != nil && s.quorumManager.HasQuorum(reachableCount)
+			haveQuorum := s.hasConfiguredPromotionMajority()
 
 			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote) {
 				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",

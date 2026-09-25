@@ -80,3 +80,36 @@ Recovery regressions exercise split acceptances, lost acknowledgements after a
 majority accepts, full acceptor restart, concurrent proposers, stale accepts,
 credential rotation, corrupt/unwritable state, and phase/version mismatch. A
 prepare promise alone never contributes to the session's YES count.
+
+## Automatic promotion (END-2694)
+
+Automatic active-passive elections, including emergency fallback, require a
+successful node-status vote before requesting promotion in a configured cluster
+of three or more. The configured electorate does not shrink when members become
+Unknown or are missing from the runtime member list. Missing voting support,
+refusal, unavailable peers, and failed promotion requests leave the candidate
+Passive; there is no direct status-write fallback. Reachability recovery also
+restores a Passive candidate instead of authorizing ownership itself.
+
+The election sends `ForceDemote: false`. The force flag remains an explicit
+operator recovery option. The Promote admission path and asynchronous worker
+also check a configured majority, independently of the quorum manager's mutable
+node count. An accepted asynchronous request does not mean placement completed.
+
+Configured one/two-node clusters retain ADR-0002's availability policy without
+using the operator override. This exception never applies to two survivors of a
+larger configured cluster.
+
+This requires the explicit peer-voting protocol from PR #262; deploy that change
+first (or deploy both together). Legacy peers cannot provide the required votes.
+
+### Remaining safety boundary
+
+This closes automatic minority promotion, not all split-brain scenarios. A TCP
+failure does not establish that the incumbent stopped serving its client network.
+A majority can still promote while an isolated existing Active retains addresses.
+Witness/self-fencing (END-2631), durable epochs (END-2699), verified transfer
+outcomes (END-2695), and stale-operation cancellation (END-2698) remain necessary
+before claiming single ownership under arbitrary partitions. Live Linux tests
+must partition the cluster network while retaining client connectivity and
+inspect actual addresses for both Active-isolated and Passive-isolated cases.
