@@ -2,6 +2,7 @@ package membership
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -2467,18 +2468,6 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 
 		h.logger.Infof("Started voting session %s for node status change", sessionID)
 
-		// Get our own node ID to cast our vote
-		localNodeID, err := h.localNodeID()
-		if err != nil {
-			h.logger.Errorf("Failed to get local node ID: %v", err)
-		} else {
-			// Cast our own vote (we initiated it, so we vote yes)
-			err = quorumManager.CastVote(sessionID, localNodeID, quorum.VoteDecisionYes)
-			if err != nil {
-				h.logger.Errorf("Failed to cast our own vote: %v", err)
-			}
-		}
-
 		// Broadcast the vote request to other nodes so they can participate
 		h.logger.Infof("Broadcasting vote request to cluster nodes...")
 		if err := h.server.BroadcastVoteRequest(sessionID, "node_status", subject, description, 30); err != nil {
@@ -2585,7 +2574,10 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 		ipList = fmt.Sprintf("%v and %d more", ips[:5], len(ips)-5)
 	}
 
-	subject := fmt.Sprintf("redistribute-%d-ips", len(ips))
+	orderedIPs := append([]string(nil), ips...)
+	sort.Strings(orderedIPs)
+	encodedIPs, _ := json.Marshal(orderedIPs)
+	subject := string(encodedIPs)
 	description := fmt.Sprintf("Redistribute %d IPs: %s", len(ips), ipList)
 
 	// Initiate the vote through the quorum manager
@@ -2602,18 +2594,6 @@ func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
 	}
 
 	h.logger.Infof("Started voting session %s for IP redistribution", sessionID)
-
-	// Get our own node ID to cast our vote
-	localNodeID, err := h.localNodeID()
-	if err != nil {
-		h.logger.Errorf("Failed to get local node ID: %v", err)
-	} else {
-		// Cast our own vote (we initiated it, so we vote yes)
-		err = quorumManager.CastVote(sessionID, localNodeID, quorum.VoteDecisionYes)
-		if err != nil {
-			h.logger.Errorf("Failed to cast our own vote: %v", err)
-		}
-	}
 
 	// Broadcast the vote request to other nodes so they can participate —
 	// without this the session only ever holds the initiator's vote and can

@@ -135,6 +135,10 @@ func callerAddr(ctx context.Context) string {
 
 // Server represents the PulseHA server
 type Server struct {
+	voteMu        pulselock.Mutex
+	voteEpoch     int64
+	voteDecisions map[string]string
+
 	pulselock.RWMutex
 	config      *config.Config
 	logger      *log.Logger
@@ -345,7 +349,7 @@ func (s *Server) awaitConfigRepairs() {
 // NewServer creates a new PulseHA server instance
 func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.MemberList, healthCheck *membership.HealthChecker) *Server {
 	// Create the quorum manager
-	quorumMgr := quorum.NewQuorumManager(cfg, logger)
+	quorumMgr := quorum.NewQuorumManagerWithSource(memberList.Config, logger)
 
 	// Create the quorum RPC handler
 	quorumHandler := quorum.NewRPCHandler(quorumMgr, logger)
@@ -3088,75 +3092,6 @@ func (s *Server) cleanupFloatingIPsDirectly(node *config.Node) {
 	s.logger.Debug("CLEANUP: Direct floating IP cleanup complete")
 }
 
-// BroadcastVoteRequest broadcasts a voting session request to all cluster nodes
-func (s *Server) BroadcastVoteRequest(sessionID string, voteType, subject, description string, timeoutSeconds int64) error {
-	localID, err := s.config.GetLocalNodeUUID()
-	if err != nil {
-		return fmt.Errorf("failed to get local node ID: %v", err)
-	}
-
-	// Get all cluster nodes
-	var broadcastErrors []string
-	successCount := 0
-
-	for nodeID, node := range s.config.Nodes {
-		if nodeID == localID {
-			continue // Skip local node - we already started the session locally
-		}
-
-		// Create client connection
-		remoteClient, err := client.New()
-		if err != nil {
-			broadcastErrors = append(broadcastErrors, fmt.Sprintf("node %s: failed to create client: %v", nodeID, err))
-			continue
-		}
-
-		// Connect to the remote node
-		if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
-			broadcastErrors = append(broadcastErrors, fmt.Sprintf("node %s: connection failed: %v", nodeID, err))
-			remoteClient.Close()
-			continue
-		}
-
-		// Ask the remote node to create its own local voting session with the same ID
-		// This approach ensures each node has its own local session but they coordinate votes
-		// Create the same local voting session on the remote node's quorum manager
-		go func(nodeID string, node *config.Node, rc *client.Client) {
-			defer rc.Close()
-
-			// First, try to cast a vote on our local session using their node ID
-			// This simulates them voting on our session
-			if s.quorumManager != nil {
-				err := s.quorumManager.CastVote(sessionID, nodeID, quorum.VoteDecisionYes)
-				if err != nil {
-					s.logger.Debugf("Could not register remote vote from %s: %v", nodeID, err)
-				} else {
-					s.logger.Debugf("Registered vote from remote node %s", nodeID)
-				}
-			}
-		}(nodeID, node, remoteClient)
-
-		successCount++
-		s.logger.Debugf("Successfully initiated vote process for node %s", nodeID)
-		// Note: remoteClient.Close() is now handled by the goroutine's defer statement
-	}
-
-	// Log results
-	if len(broadcastErrors) > 0 {
-		s.logger.Warnf("Vote broadcast had %d errors: %v", len(broadcastErrors), broadcastErrors)
-	}
-
-	s.logger.Infof("Vote broadcast completed: %d successes out of %d total nodes", successCount, len(s.config.Nodes)-1)
-
-	// Return success if we got at least one response, or if it's a single-node cluster
-	totalPeers := len(s.config.Nodes) - 1
-	if totalPeers == 0 || successCount > 0 {
-		return nil
-	}
-
-	return fmt.Errorf("failed to broadcast vote request to any nodes: %v", broadcastErrors)
-}
-
 // pendingIPWork is a node whose floating IPs still have to be released or brought
 // up. Both are synchronous network operations — a gRPC call for a remote node, an
 // address-by-address bring-up locally — so the work is deferred until the server
@@ -5291,15 +5226,10 @@ func (s *Server) StartVotingSession(ctx context.Context, req *rpc.StartVotingSes
 	return s.quorumHandler.StartVotingSession(ctx, req)
 }
 
-// CastVote delegates to the quorum handler
+// CastVote no longer accepts unsolicited remote ballots. RequestVote returns
+// a decision to the initiator, which records it after checking the responder.
 func (s *Server) CastVote(ctx context.Context, req *rpc.CastVoteRequest) (*rpc.CastVoteResponse, error) {
-	if s.quorumHandler == nil {
-		return &rpc.CastVoteResponse{
-			Success: false,
-			Message: "Quorum voting is not available",
-		}, fmt.Errorf("quorum handler is not initialized")
-	}
-	return s.quorumHandler.CastVote(ctx, req)
+	return nil, status.Error(codes.PermissionDenied, "unsolicited ballots are disabled; use RequestVote")
 }
 
 // GetVotingResult delegates to the quorum handler
