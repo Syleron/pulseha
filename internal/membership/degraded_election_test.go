@@ -111,3 +111,76 @@ func TestConfiguredPairRetainsAvailabilityPolicy(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomaticPromotionConsumesRecoveredCandidate(t *testing.T) {
+	a := newAATestMember("a", "a", StatusPassive, nil)
+	b := newAATestMember("b", "b", StatusPassive, nil)
+	c := newAATestMember("c", "c", StatusUnknown, nil)
+	h, stub := newAPTestChecker("a", a, b, c)
+	stub.quorum = quorum.NewQuorumManager(h.members.Config(), h.logger)
+	stub.vote = func(id string) error {
+		if err := stub.quorum.RecoverProposal(id, "b"); err != nil {
+			return err
+		}
+		_ = stub.quorum.CastVote(id, "a", quorum.VoteDecisionYes)
+		return stub.quorum.CastVote(id, "b", quorum.VoteDecisionYes)
+	}
+	if !h.tryAutomaticPromotion(a) {
+		t.Fatal("recovered candidate was not promoted")
+	}
+	if len(stub.promotions) != 1 || stub.promotions[0].NodeId != "b" || stub.promotions[0].ForceDemote {
+		t.Fatalf("did not consume recovered candidate: %+v", stub.promotions)
+	}
+}
+
+func TestAutomaticPromotionRejectsDecisionInvalidatedDuringVote(t *testing.T) {
+	for _, change := range []string{"epoch", "electorate", "active appeared", "candidate maintenance"} {
+		t.Run(change, func(t *testing.T) {
+			a := newAATestMember("a", "a", StatusPassive, nil)
+			b := newAATestMember("b", "b", StatusPassive, nil)
+			c := newAATestMember("c", "c", StatusUnknown, nil)
+			h, stub := newAPTestChecker("a", a, b, c)
+			stub.quorum = quorum.NewQuorumManager(h.members.Config(), h.logger)
+			stub.vote = func(id string) error {
+				_ = stub.quorum.CastVote(id, "a", quorum.VoteDecisionYes)
+				_ = stub.quorum.CastVote(id, "b", quorum.VoteDecisionYes)
+				switch change {
+				case "epoch":
+					stub.epoch++
+				case "electorate":
+					h.members.Config().Nodes["d"] = &config.Node{Hostname: "d"}
+				case "active appeared":
+					b.SetStatus(StatusActive)
+				case "candidate maintenance":
+					a.SetStatus(StatusMaintenance)
+				}
+				return nil
+			}
+			if h.tryAutomaticPromotion(a) || len(stub.promotions) != 0 {
+				t.Fatal("stale authorization reached promotion")
+			}
+		})
+	}
+}
+
+func TestRedistributionConsumesOnlyRecoveredOrphans(t *testing.T) {
+	a := newAATestMember("a", "a", StatusActive, nil)
+	b := newAATestMember("b", "b", StatusActive, nil)
+	c := newAATestMember("c", "c", StatusUnknown, nil)
+	h, stub := newAPTestChecker("a", a, b, c)
+	stub.quorum = quorum.NewQuorumManager(h.members.Config(), h.logger)
+	stub.vote = func(id string) error {
+		if err := stub.quorum.RecoverProposal(id, `["10.0.0.1/24"]`); err != nil {
+			return err
+		}
+		_ = stub.quorum.CastVote(id, "a", quorum.VoteDecisionYes)
+		return stub.quorum.CastVote(id, "b", quorum.VoteDecisionYes)
+	}
+	approved, ok := h.approvedRedistribution([]string{"10.0.0.1/24", "10.0.0.2/24"})
+	if !ok || len(approved) != 1 || approved[0] != "10.0.0.1/24" {
+		t.Fatalf("applied requested instead of recovered addresses: %v %v", approved, ok)
+	}
+	if _, ok = h.approvedRedistribution([]string{"10.0.0.2/24"}); ok {
+		t.Fatal("recovered address was not an orphan")
+	}
+}

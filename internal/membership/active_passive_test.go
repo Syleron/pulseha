@@ -85,6 +85,11 @@ func (s *stubServer) RequestConfigReconcile() { s.configReconciles++ }
 
 func (s *stubServer) BroadcastVoteRequest(sessionID string, voteType, subject, description string,
 	timeoutSeconds int64) error {
+	if s.quorum != nil {
+		if err := s.quorum.BindSessionEpoch(sessionID, s.epoch+1); err != nil {
+			return err
+		}
+	}
 	if s.vote != nil {
 		return s.vote(sessionID)
 	}
