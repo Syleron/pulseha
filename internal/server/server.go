@@ -385,8 +385,23 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 
 // Start initializes and starts the server components
 func (s *Server) Start() error {
+	// Restore promises before opening listeners or starting address writers.
+	// Keep disk I/O outside the server lock: voting takes voteMu independently.
+	cfg, err := s.voteConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Nodes[cfg.Pulse.LocalNode] != nil {
+		s.voteMu.Lock()
+		err = s.loadVotesLocked(cfg)
+		s.voteMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("restore durable votes: %w", err)
+		}
+	}
 	s.Lock()
 	defer s.Unlock()
+	s.clusterEpoch = max(s.clusterEpoch, s.voteEpochFloor.Load())
 
 	// Verify config is loaded
 	s.logger.Debug("Verifying server configuration...")
@@ -7616,7 +7631,7 @@ func (s *Server) GetLeaderID() string {
 func (s *Server) convergenceMetadata() (epoch int64, leaderID string) {
 	s.RLock()
 	defer s.RUnlock()
-	return s.clusterEpoch, s.leaderID
+	return max(s.clusterEpoch, s.voteEpochFloor.Load()), s.leaderID
 }
 
 // broadcastNextEpoch publishes memberStates at one past the current epoch,
@@ -7680,7 +7695,8 @@ func (s *Server) adoptConvergenceMetadata(epoch int64, leaderID string, atLeast 
 // both. Non-reentrancy causing copy-paste rather than a deadlock is the quieter
 // half of the same problem (docs/adr/0003, END-2339).
 func (s *Server) adoptConvergenceMetadataLocked(epoch int64, leaderID string, atLeast bool) bool {
-	if epoch < s.clusterEpoch || (epoch == s.clusterEpoch && !atLeast) {
+	currentEpoch := max(s.clusterEpoch, s.voteEpochFloor.Load())
+	if epoch < currentEpoch || (epoch == currentEpoch && !atLeast) {
 		return false
 	}
 	s.clusterEpoch = epoch

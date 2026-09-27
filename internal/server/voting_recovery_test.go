@@ -249,3 +249,31 @@ func TestCredentialRotationDoesNotForgetAcceptedVote(t *testing.T) {
 		t.Fatalf("credential rotation forgot acceptance: %v %v", resp, err)
 	}
 }
+
+func TestRestartEpochFloorAppliesToConvergence(t *testing.T) {
+	s := newVotingServer(t, "a")
+	s.clusterEpoch = 9
+	r := nodeProposal(s, "a", 1)
+	r.Epoch = 10
+	r.Phase = "prepare"
+	resp, err := s.RequestVote(context.Background(), r)
+	if err != nil || !resp.Granted {
+		t.Fatal(resp, err)
+	}
+	next := newVotingServer(t, "a")
+	next.voteStatePath = s.voteStatePath
+	epoch, err := next.votingEpoch(next.config)
+	if err != nil || epoch != 10 {
+		t.Fatalf("lost epoch after restart: %d %v", epoch, err)
+	}
+	held, _ := next.convergenceMetadata()
+	if held != 9 {
+		t.Fatalf("broadcast would advance from stale raw epoch %d", held)
+	}
+	if next.adoptConvergenceMetadata(1, "b", true) {
+		t.Fatal("accepted metadata older than durable floor")
+	}
+	if !next.adoptConvergenceMetadata(10, "a", false) {
+		t.Fatal("recovered decision could not advance convergence")
+	}
+}
