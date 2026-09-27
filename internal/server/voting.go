@@ -13,7 +13,6 @@ import (
 	"github.com/syleron/pulseha/internal/membership"
 	"github.com/syleron/pulseha/internal/quorum"
 	"github.com/syleron/pulseha/packages/config"
-	"github.com/syleron/pulseha/packages/pulselock"
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -92,7 +91,7 @@ func (s *Server) RequestVote(ctx context.Context, req *rpc.RequestVoteRequest) (
 }
 
 func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rpc.RequestVoteResponse {
-	resp := &rpc.RequestVoteResponse{SessionId: req.SessionId, VoterId: cfg.Pulse.LocalNode, Epoch: req.Epoch}
+	resp := &rpc.RequestVoteResponse{SessionId: req.SessionId, VoterId: cfg.Pulse.LocalNode, Epoch: req.Epoch, ProtocolVersion: 2, Phase: req.Phase, Ballot: req.Ballot}
 	deny := func(reason string) *rpc.RequestVoteResponse { resp.Reason = reason; return resp }
 	ids := votingMembers(cfg)
 	if req.SessionId == "" || len(ids) < 3 || !slices.Equal(ids, req.MemberIds) || !slices.Contains(ids, cfg.Pulse.LocalNode) || !slices.Contains(ids, req.InitiatorId) {
@@ -101,11 +100,17 @@ func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rp
 	if !time.Now().Before(time.UnixMilli(req.ExpiresAtUnixMilli)) {
 		return deny("proposal expired")
 	}
-	// Epochs order observations here; this is not a durable consensus log or a
-	// fencing lease. Keep the vote guard separate from cluster-state adoption.
-	if req.Epoch != s.GetClusterEpoch()+1 {
+	if req.Ballot == 0 || (req.Phase != "prepare" && req.Phase != "accept") {
+		return deny("v2 prepare/accept ballot required")
+	}
+	epoch, err := s.votingEpoch(cfg)
+	if err != nil {
+		return deny("durable vote state unavailable: " + err.Error())
+	}
+	if req.Epoch != epoch {
 		return deny("proposal epoch does not follow this node's cluster epoch")
 	}
+
 	if s.memberList == nil {
 		return deny("membership unavailable")
 	}
@@ -119,69 +124,96 @@ func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rp
 	if local == nil || local.GetStatus() == membership.StatusUnknown {
 		return deny("local member is not ready to vote")
 	}
-	switch quorum.VoteType(req.VoteType) {
-	case quorum.VoteTypeNodeStatus:
-		candidate := members[req.Subject]
-		if candidate == nil || candidate.GetStatus() != membership.StatusPassive {
-			return deny("candidate is not eligible")
-		}
-		for id, m := range members {
-			if id != req.Subject && m.GetStatus() == membership.StatusActive {
-				return deny("an active node is still known")
-			}
-		}
-	case quorum.VoteTypeIPRedistribution:
-		var ips []string
-		if json.Unmarshal([]byte(req.Subject), &ips) != nil || len(ips) == 0 {
-			return deny("proposal must name the addresses to redistribute")
-		}
-		known := make(map[string]bool)
-		for _, group := range cfg.Groups {
-			for _, ip := range group {
-				known[ip] = true
-			}
-		}
-		wanted := make(map[string]bool)
-		for _, ip := range ips {
-			if !known[ip] {
-				return deny("proposal contains an unconfigured address")
-			}
-			wanted[ip] = true
-		}
-		grace := time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
-		for _, m := range members {
-			health := m.GetHealthStatus()
-			if health.Status == membership.StatusUnknown && time.Since(health.LastResponse) > grace {
-				continue
-			}
-			for _, ip := range health.ActiveIPs {
-				if wanted[ip] {
-					return deny("a member still claims a proposed address")
-				}
-			}
-		}
-	default:
-		// No remotely evaluable config-change proposal exists yet. Never approve an
-		// arbitrary description as authority to change membership/configuration.
+	if req.VoteType != string(quorum.VoteTypeNodeStatus) && req.VoteType != string(quorum.VoteTypeIPRedistribution) {
 		return deny("unsupported proposal type")
 	}
-	// Serialize conflicting grants in one epoch, including this node's own
-	// proposal. The guard is intentionally in-memory, like clusterEpoch; durable
-	// epoch recovery and fencing remain separate ownership work.
+	if req.Phase == "accept" {
+		switch quorum.VoteType(req.VoteType) {
+		case quorum.VoteTypeNodeStatus:
+			candidate := members[req.Subject]
+			if candidate == nil || candidate.GetStatus() != membership.StatusPassive {
+				return deny("candidate is not eligible")
+			}
+			for id, m := range members {
+				if id != req.Subject && m.GetStatus() == membership.StatusActive {
+					return deny("an active node is still known")
+				}
+			}
+		case quorum.VoteTypeIPRedistribution:
+			var ips []string
+			if json.Unmarshal([]byte(req.Subject), &ips) != nil || len(ips) == 0 {
+				return deny("proposal must name the addresses to redistribute")
+			}
+			known := make(map[string]bool)
+			for _, group := range cfg.Groups {
+				for _, ip := range group {
+					known[ip] = true
+				}
+			}
+			wanted := make(map[string]bool)
+			for _, ip := range ips {
+				if !known[ip] {
+					return deny("proposal contains an unconfigured address")
+				}
+				wanted[ip] = true
+			}
+			grace := time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
+			for _, m := range members {
+				health := m.GetHealthStatus()
+				if health.Status == membership.StatusUnknown && time.Since(health.LastResponse) > grace {
+					continue
+				}
+				for _, ip := range health.ActiveIPs {
+					if wanted[ip] {
+						return deny("a member still claims a proposed address")
+					}
+				}
+			}
+		default:
+			// No remotely evaluable config-change proposal exists yet. Never approve an
+			// arbitrary description as authority to change membership/configuration.
+			return deny("unsupported proposal type")
+		}
+	}
+	// No server/config locks are held across disk I/O. Serialize the durable
+	// promise and acceptance before replying, including our own local ballot.
 	s.voteMu.Lock()
 	defer s.voteMu.Unlock()
-	if req.Epoch < s.voteEpoch {
-		return deny("proposal is older than a prior vote")
+	if err := s.loadVotesLocked(cfg); err != nil {
+		return deny(err.Error())
 	}
-	if req.Epoch > s.voteEpoch {
-		s.voteEpoch = req.Epoch
-		s.voteDecisions = make(map[string]string)
+	if req.Epoch != s.GetClusterEpoch()+1 {
+		return deny("cluster epoch changed during voting")
 	}
-	key := req.VoteType
-	if previous, ok := s.voteDecisions[key]; ok && previous != req.Subject {
-		return deny("already granted a conflicting proposal in this epoch")
+	if err := s.voteSlotLocked(req.Epoch, ids); err != nil {
+		return deny(err.Error())
 	}
-	s.voteDecisions[key] = req.Subject
+	slot := s.voteState.Slots[req.VoteType]
+	fill := func() {
+		resp.PromisedBallot, resp.PromisedBy = slot.Promise.Number, slot.Promise.Node
+		resp.AcceptedBallot, resp.AcceptedBy, resp.AcceptedSubject = slot.Accepted.Number, slot.Accepted.Node, slot.Subject
+	}
+	fill()
+	ballot := voteBallot{req.Ballot, req.InitiatorId}
+	if ballot.less(slot.Promise) {
+		return deny("ballot was superseded")
+	}
+	if req.Phase == "prepare" {
+		slot.Promise = ballot
+	} else {
+		if ballot != slot.Promise {
+			return deny("prepare required before acceptance")
+		}
+		if slot.Accepted == ballot && slot.Subject != req.Subject {
+			return deny("ballot already accepted another proposal")
+		}
+		slot.Accepted, slot.Subject = ballot, req.Subject
+	}
+	s.voteState.Slots[req.VoteType] = slot
+	if err := s.persistVotesLocked(); err != nil {
+		return deny("cannot persist vote: " + err.Error())
+	}
+	fill()
 	resp.Granted = true
 	return resp
 }
@@ -213,8 +245,8 @@ func (s *Server) BroadcastVoteRequest(sessionID, voteType, subject, description 
 	deadline := session.EndTime
 	// Bound each round as well as the full session. Constructing a client does
 	// not connect; the actual RPC must have a deadline for dead/blackholed peers.
-	roundTimeout := 3 * time.Second
-	if timeoutSeconds < 3 {
+	roundTimeout := 6 * time.Second
+	if timeoutSeconds < 6 {
 		roundTimeout = time.Duration(timeoutSeconds) * time.Second
 	}
 	roundDeadline := time.Now().Add(roundTimeout)
@@ -223,75 +255,147 @@ func (s *Server) BroadcastVoteRequest(sessionID, voteType, subject, description 
 	}
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
-	epoch := s.GetClusterEpoch() + 1
+	// One proposer round per daemon at a time. Remote proposers are ordered
+	// by (counter, node ID), so concurrent counters do not identify one ballot.
+	s.voteRoundMu.Lock()
+	defer s.voteRoundMu.Unlock()
+	epoch, err := s.votingEpoch(cfg)
+	if err != nil {
+		return err
+	}
 	if err := s.quorumManager.BindSessionEpoch(sessionID, epoch); err != nil {
+		return err
+	}
+	ballot, err := s.nextVoteBallot(cfg)
+	if err != nil {
 		return err
 	}
 	req := &rpc.RequestVoteRequest{SessionId: sessionID, InitiatorId: cfg.Pulse.LocalNode,
 		VoteType: voteType, Subject: subject, Description: description, MemberIds: session.MemberIDs,
-		Epoch: epoch, ExpiresAtUnixMilli: session.EndTime.UnixMilli(), ClusterToken: cfg.Pulse.ClusterToken}
-	local := s.decideVote(cfg, req)
-	if !local.Granted {
-		return fmt.Errorf("local vote refused: %s", local.Reason)
-	}
-	if err := s.quorumManager.CastVote(sessionID, cfg.Pulse.LocalNode, quorum.VoteDecisionYes); err != nil {
-		return err
-	}
-
-	var wg sync.WaitGroup
-	var mu pulselock.Mutex
-	responses := 0
-	for _, id := range session.MemberIDs {
-		if id == cfg.Pulse.LocalNode {
+		Epoch: epoch, ExpiresAtUnixMilli: session.EndTime.UnixMilli(), ClusterToken: cfg.Pulse.ClusterToken,
+		Phase: "prepare", Ballot: ballot}
+	promises := s.collectVotePhase(ctx, cfg, req)
+	granted := 0
+	var highest voteBallot
+	recovered := subject
+	var observed uint64
+	for _, response := range promises {
+		observed = max(observed, response.PromisedBallot)
+		if !response.Granted {
 			continue
 		}
-		node := cfg.Nodes[id]
+		granted++
+		accepted := voteBallot{response.AcceptedBallot, response.AcceptedBy}
+		if accepted.Number > 0 && highest.less(accepted) {
+			highest, recovered = accepted, response.AcceptedSubject
+		}
+	}
+	if err := s.observeVoteBallot(cfg, observed); err != nil {
+		return err
+	}
+	if granted < len(session.MemberIDs)/2+1 {
+		return fmt.Errorf("prepare did not obtain a configured majority")
+	}
+	if err := s.quorumManager.RecoverProposal(sessionID, recovered); err != nil {
+		return err
+	}
+	req.Phase, req.Subject = "accept", recovered
+	responses := s.collectVotePhase(ctx, cfg, req)
+	for id, response := range responses {
+		decision := quorum.VoteDecisionNo
+		if response.Granted && response.AcceptedSubject == recovered && response.AcceptedBallot == ballot && response.AcceptedBy == cfg.Pulse.LocalNode {
+			decision = quorum.VoteDecisionYes
+		}
+		_ = s.quorumManager.CastVote(sessionID, id, decision)
+	}
+	result, err := s.quorumManager.GetVotingSession(sessionID)
+	if err != nil {
+		return err
+	}
+	if result.Result == nil || !result.Result.Passed {
+		return fmt.Errorf("accept did not obtain a configured majority")
+	}
+	return nil
+}
+
+// collectVotePhase counts only authenticated replies to this exact phase and
+// ballot. Prepare responses are promises, never votes in the session result.
+func (s *Server) collectVotePhase(ctx context.Context, cfg *config.Config, req *rpc.RequestVoteRequest) map[string]*rpc.RequestVoteResponse {
+	phaseCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	ctx = phaseCtx
+	responses := make(map[string]*rpc.RequestVoteResponse)
+	var wg sync.WaitGroup
+	type reply struct {
+		id       string
+		response *rpc.RequestVoteResponse
+	}
+	replies := make(chan reply, len(req.MemberIds))
+	for _, id := range req.MemberIds {
 		wg.Add(1)
-		go func(id string, node *config.Node) {
+		go func(id string) {
 			defer wg.Done()
-			c, err := client.New()
-			if err != nil {
+			var resp *rpc.RequestVoteResponse
+			if ctx.Err() != nil {
 				return
 			}
-			defer c.Close()
-			creds, err := clustertls.ClientCredentials(s.certDir, func() *config.Config { return cfg })
-			if err != nil {
+			if id == cfg.Pulse.LocalNode {
+				resp = s.decideVote(cfg, req)
+			} else {
+				node := cfg.Nodes[id]
+				c, err := client.New()
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				creds, err := clustertls.ClientCredentials(s.certDir, func() *config.Config { return cfg })
+				if err != nil {
+					return
+				}
+				if err := c.Connect(node.IP, node.Port, creds); err != nil {
+					return
+				}
+				var remote peer.Peer
+				resp, err = c.Server().RequestVote(ctx, req, grpc.Peer(&remote))
+				if err != nil {
+					return
+				}
+				if cfg.Pulse.TLSRequired() {
+					if err := verifyVoter(peer.NewContext(ctx, &remote), cfg, id, ""); err != nil {
+						return
+					}
+				}
+			}
+			if resp == nil || resp.ProtocolVersion != 2 || resp.SessionId != req.SessionId || resp.VoterId != id || resp.Epoch != req.Epoch || resp.Phase != req.Phase || resp.Ballot != req.Ballot {
 				return
 			}
-			if err := c.Connect(node.IP, node.Port, creds); err != nil {
-				return
-			}
-			var remote peer.Peer
-			resp, err := c.Server().RequestVote(ctx, req, grpc.Peer(&remote))
-			if err != nil {
-				s.logger.Debug("Peer did not vote", "node", id, "error", err)
-				return
-			}
-			if resp == nil || resp.SessionId != req.SessionId || resp.VoterId != id || resp.Epoch != req.Epoch {
-				return
-			}
-			if cfg.Pulse.TLSRequired() {
-				if err := verifyVoter(peer.NewContext(ctx, &remote), cfg, id, ""); err != nil {
+			if resp.Granted {
+				if resp.PromisedBallot != req.Ballot || resp.PromisedBy != req.InitiatorId {
+					return
+				}
+				accepted := voteBallot{resp.AcceptedBallot, resp.AcceptedBy}
+				if (voteBallot{req.Ballot, req.InitiatorId}).less(accepted) {
+					return
+				}
+				if accepted.Number > 0 && (resp.AcceptedSubject == "" || !slices.Contains(req.MemberIds, accepted.Node)) {
 					return
 				}
 			}
-			s.logger.Debug("Peer returned a vote", "node", id, "session", sessionID, "granted", resp.Granted, "reason", resp.Reason)
-			decision := quorum.VoteDecisionNo
-			if resp.Granted {
-				decision = quorum.VoteDecisionYes
-			}
-			if err := s.quorumManager.CastVote(sessionID, id, decision); err != nil {
-				s.logger.Debug("Peer vote not recorded", "node", id, "error", err)
-				return
-			}
-			mu.Lock()
-			responses++
-			mu.Unlock()
-		}(id, node)
+			replies <- reply{id, resp}
+		}(id)
 	}
-	wg.Wait()
-	if responses == 0 {
-		return fmt.Errorf("no peer votes received")
+	go func() { wg.Wait(); close(replies) }()
+	grants := 0
+	for reply := range replies {
+		responses[reply.id] = reply.response
+		if reply.response.Granted {
+			grants++
+		}
+		// Do not wait on dead peers once a majority has replied. Join workers
+		// before the caller changes phase or consumes any shared state.
+		if grants >= len(req.MemberIds)/2+1 {
+			cancel()
+		}
 	}
-	return nil
+	return responses
 }

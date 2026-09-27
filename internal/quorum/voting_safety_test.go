@@ -102,3 +102,24 @@ func TestSessionEpochCannotChangeOnRetry(t *testing.T) {
 		t.Fatal("snapshot mutated electorate")
 	}
 }
+
+func TestRecoveredProposalCannotReuseExistingVotes(t *testing.T) {
+	q := newQuorumManager(t, 3)
+	id, err := q.StartVotingSession(VoteTypeNodeStatus, "node-a", "elect", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.RecoverProposal(id, "node-b"); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.CastVote(id, "node-a", VoteDecisionYes); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.RecoverProposal(id, "node-c"); err == nil {
+		t.Fatal("mixed ballots for different proposals")
+	}
+	session, _ := q.GetVotingSession(id)
+	if session.Subject != "node-b" {
+		t.Fatal("recovered subject changed after a vote")
+	}
+}

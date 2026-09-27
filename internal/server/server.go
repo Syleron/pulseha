@@ -135,9 +135,12 @@ func callerAddr(ctx context.Context) string {
 
 // Server represents the PulseHA server
 type Server struct {
-	voteMu        pulselock.Mutex
-	voteEpoch     int64
-	voteDecisions map[string]string
+	voteMu         pulselock.Mutex
+	voteState      *persistentVotes
+	voteStatePath  string
+	voteStateErr   error
+	voteEpochFloor atomic.Int64
+	voteRoundMu    pulselock.Mutex
 
 	pulselock.RWMutex
 	config      *config.Config
@@ -7595,7 +7598,7 @@ func (s *Server) bringIPsOnNodeDown(nodeID, iface string, ips []string) error {
 func (s *Server) GetClusterEpoch() int64 {
 	s.RLock()
 	defer s.RUnlock()
-	return s.clusterEpoch
+	return max(s.clusterEpoch, s.voteEpochFloor.Load())
 }
 
 // GetLeaderID returns the current leader ID

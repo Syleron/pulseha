@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,7 +37,9 @@ func newVotingServer(t *testing.T, local string) *Server {
 		}
 		ml.GetMemberByID(id).SetStatus(membership.StatusPassive)
 	}
-	return NewServer(cfg, logger, ml, membership.NewHealthChecker(ml, logger))
+	s := NewServer(cfg, logger, ml, membership.NewHealthChecker(ml, logger))
+	s.voteStatePath = filepath.Join(t.TempDir(), "votes.json")
+	return s
 }
 
 func serveVoter(t *testing.T, impl rpc.ServerServer) string {
@@ -102,7 +105,7 @@ func TestBroadcastVoteRequiresRealPeerDecision(t *testing.T) {
 				if session.Result != nil && session.Result.Passed {
 					t.Fatal("passed without peer approval")
 				}
-				if len(session.Votes) != 1 && !tc.reject {
+				if len(session.Votes) != 0 && !tc.reject {
 					t.Fatalf("manufactured peer votes: %v", session.Votes)
 				}
 				if tc.reject && session.Votes["b"].Decision != quorum.VoteDecisionNo {
@@ -128,7 +131,7 @@ func (v *invalidVoter) RequestVote(ctx context.Context, r *rpc.RequestVoteReques
 	case "empty":
 		return &rpc.RequestVoteResponse{}, nil
 	}
-	resp := &rpc.RequestVoteResponse{SessionId: r.SessionId, VoterId: "b", Epoch: r.Epoch, Granted: true}
+	resp := &rpc.RequestVoteResponse{SessionId: r.SessionId, VoterId: "b", Epoch: r.Epoch, Granted: true, ProtocolVersion: 2, Phase: r.Phase, Ballot: r.Ballot}
 	switch v.mode {
 	case "identity":
 		resp.VoterId = "c"
@@ -136,12 +139,14 @@ func (v *invalidVoter) RequestVote(ctx context.Context, r *rpc.RequestVoteReques
 		resp.SessionId = "other"
 	case "epoch":
 		resp.Epoch++
+	case "v1":
+		resp.ProtocolVersion = 0
 	}
 	return resp, nil
 }
 
 func TestInvalidPeerResponsesCannotSupplyVotes(t *testing.T) {
-	for _, mode := range []string{"hang", "legacy", "empty", "identity", "session", "epoch"} {
+	for _, mode := range []string{"hang", "legacy", "empty", "identity", "session", "epoch", "v1"} {
 		t.Run(mode, func(t *testing.T) {
 			s := newVotingServer(t, "a")
 			setVoterAddress(t, s, "b", serveVoter(t, &invalidVoter{mode: mode}))
@@ -154,7 +159,7 @@ func TestInvalidPeerResponsesCannotSupplyVotes(t *testing.T) {
 				t.Fatal("request deadline not enforced")
 			}
 			session, _ := s.quorumManager.GetVotingSession(id)
-			if len(session.Votes) != 1 {
+			if len(session.Votes) != 0 {
 				t.Fatalf("invalid peer counted: %v", session.Votes)
 			}
 		})
@@ -162,7 +167,17 @@ func TestInvalidPeerResponsesCannotSupplyVotes(t *testing.T) {
 }
 
 func voteRequest(s *Server) *rpc.RequestVoteRequest {
-	return &rpc.RequestVoteRequest{SessionId: "proposal", InitiatorId: "a", VoteType: "ip_redistribution", Subject: orphanProposal, MemberIds: []string{"a", "b", "c"}, Epoch: 1, ExpiresAtUnixMilli: time.Now().Add(time.Second).UnixMilli(), ClusterToken: s.config.Pulse.ClusterToken}
+	return &rpc.RequestVoteRequest{SessionId: "proposal", InitiatorId: "a", VoteType: "ip_redistribution", Subject: orphanProposal, MemberIds: []string{"a", "b", "c"}, Epoch: 1, ExpiresAtUnixMilli: time.Now().Add(time.Second).UnixMilli(), ClusterToken: s.config.Pulse.ClusterToken, Phase: "accept", Ballot: 1}
+}
+
+func preparedTestVote(s *Server, r *rpc.RequestVoteRequest) (*rpc.RequestVoteResponse, error) {
+	p := *r
+	p.Phase = "prepare"
+	resp, err := s.RequestVote(context.Background(), &p)
+	if err != nil || !resp.Granted {
+		return resp, err
+	}
+	return s.RequestVote(context.Background(), r)
 }
 
 func TestRequestVoteValidatesProposalAndConflicts(t *testing.T) {
@@ -182,7 +197,7 @@ func TestRequestVoteValidatesProposalAndConflicts(t *testing.T) {
 			s := newVotingServer(t, "b")
 			r := voteRequest(s)
 			tc.change(r)
-			resp, err := s.RequestVote(context.Background(), r)
+			resp, err := preparedTestVote(s, r)
 			if err == nil && resp.Granted {
 				t.Fatal("invalid proposal granted")
 			}
@@ -190,17 +205,17 @@ func TestRequestVoteValidatesProposalAndConflicts(t *testing.T) {
 	}
 	s := newVotingServer(t, "b")
 	r := voteRequest(s)
-	resp, err := s.RequestVote(context.Background(), r)
+	resp, err := preparedTestVote(s, r)
 	if err != nil || !resp.Granted {
 		t.Fatalf("valid proposal: %v %v", resp, err)
 	}
 	r.SessionId = "retry"
-	resp, err = s.RequestVote(context.Background(), r)
+	resp, err = preparedTestVote(s, r)
 	if err != nil || !resp.Granted {
 		t.Fatal("identical retry refused")
 	}
 	r.Subject = `["10.0.0.2/32"]`
-	resp, err = s.RequestVote(context.Background(), r)
+	resp, err = preparedTestVote(s, r)
 	if err != nil || resp.Granted {
 		t.Fatal("conflicting same-epoch grant")
 	}
@@ -212,7 +227,7 @@ func TestVotingAuthentication(t *testing.T) {
 		r := voteRequest(s)
 		r.InitiatorId = id
 		r.ClusterToken = "wrong"
-		if _, err := s.RequestVote(context.Background(), r); status.Code(err) != codes.PermissionDenied {
+		if _, err := preparedTestVote(s, r); status.Code(err) != codes.PermissionDenied {
 			t.Fatalf("unauthenticated request: %v", err)
 		}
 	}
@@ -282,7 +297,7 @@ func TestVotingTLSBindsBothPeerIdentities(t *testing.T) {
 	id = startVote(t, a2, time.Second)
 	_ = a2.BroadcastVoteRequest(id, "ip_redistribution", orphanProposal, "redistribute orphan", 1)
 	session, _ = a2.quorumManager.GetVotingSession(id)
-	if len(session.Votes) != 1 {
+	if len(session.Votes) != 0 {
 		t.Fatalf("one peer impersonated another: %v", session.Votes)
 	}
 }
@@ -297,7 +312,7 @@ func TestConcurrentConflictingProposalsReceiveOnlyOneGrant(t *testing.T) {
 			r.Subject = subject
 			r.SessionId = subject
 			<-ready
-			resp, err := s.RequestVote(context.Background(), r)
+			resp, err := preparedTestVote(s, r)
 			results <- err == nil && resp.Granted
 		}(subject)
 	}
@@ -319,12 +334,12 @@ func TestNodeStatusVoteRejectsKnownActive(t *testing.T) {
 	r.VoteType = "node_status"
 	r.Subject = "a"
 	s.memberList.GetMemberByID("c").SetStatus(membership.StatusActive)
-	resp, err := s.RequestVote(context.Background(), r)
+	resp, err := preparedTestVote(s, r)
 	if err != nil || resp.Granted {
 		t.Fatalf("granted over known Active: %v %v", resp, err)
 	}
 	s.memberList.GetMemberByID("c").SetStatus(membership.StatusUnknown)
-	resp, err = s.RequestVote(context.Background(), r)
+	resp, err = preparedTestVote(s, r)
 	if err != nil || !resp.Granted {
 		t.Fatalf("eligible candidate denied: %v %v", resp, err)
 	}

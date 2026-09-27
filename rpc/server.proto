@@ -612,6 +612,9 @@ message RequestVoteRequest {
     int64 epoch = 7;
     int64 expires_at_unix_milli = 8;
     string cluster_token = 9;
+    // v2: prepare promises a ballot; accept records the recovered proposal.
+    string phase = 10;
+    uint64 ballot = 11;
 }
 message RequestVoteResponse {
     string session_id = 1;
@@ -619,4 +622,12 @@ message RequestVoteResponse {
     int64 epoch = 3;
     bool granted = 4;
     string reason = 5;
+    uint32 protocol_version = 6;
+    string phase = 7;
+    uint64 ballot = 8;
+    uint64 promised_ballot = 9;
+    string promised_by = 10;
+    uint64 accepted_ballot = 11;
+    string accepted_by = 12;
+    string accepted_subject = 13;
 }

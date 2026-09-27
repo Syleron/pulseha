@@ -208,6 +208,20 @@ func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, de
 	return sessionID, nil
 }
 
+// RecoverProposal records the value carried forward by a prepare majority.
+// It must happen before any accept votes are counted. Callers must consume this
+// subject, not assume their original request was chosen.
+func (q *QuorumManager) RecoverProposal(id, subject string) error {
+	q.Lock()
+	defer q.Unlock()
+	session := q.activeSessions[id]
+	if session == nil || !time.Now().Before(session.EndTime) || len(session.Votes) != 0 || subject == "" {
+		return fmt.Errorf("session cannot recover a proposal")
+	}
+	session.Subject = subject
+	return nil
+}
+
 // BindSessionEpoch prevents retries from combining ballots for different epochs.
 func (q *QuorumManager) BindSessionEpoch(sessionID string, epoch int64) error {
 	q.Lock()
