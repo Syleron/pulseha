@@ -2,6 +2,7 @@ package quorum
 
 import (
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
@@ -50,6 +51,8 @@ type Vote struct {
 
 // VotingSession represents an active or completed voting session
 type VotingSession struct {
+	Epoch       int64                // Bound on the first broadcast; never changes on retry.
+	MemberIDs   []string             // Fixed electorate for this session.
 	ID          string               // Unique ID for this voting session
 	Type        VoteType             // Type of vote
 	Subject     string               // What is being voted on (node ID, IP, etc.)
@@ -64,6 +67,7 @@ type VotingSession struct {
 func (s *VotingSession) Copy() *VotingSession {
 	// Obtain a struct copy via dereferencing.
 	sessionCopy := *s
+	sessionCopy.MemberIDs = slices.Clone(s.MemberIDs)
 	if s.Result != nil {
 		// Deep copy the Result as this is a pointer type.
 		sessionCopy.Result = s.Result.Copy()
@@ -110,7 +114,7 @@ type CompactSessionHistory struct {
 // QuorumManager handles quorum-based voting for cluster decisions
 type QuorumManager struct {
 	pulselock.RWMutex
-	config         *config.Config
+	configSource   func() *config.Config
 	logger         *log.Logger
 	activeSessions map[string]*VotingSession
 	sessionHistory map[string]*VotingSession // Keep recent full sessions for debugging
@@ -123,8 +127,14 @@ type QuorumManager struct {
 
 // NewQuorumManager creates a new quorum manager instance
 func NewQuorumManager(cfg *config.Config, logger *log.Logger) *QuorumManager {
+	return NewQuorumManagerWithSource(func() *config.Config { return cfg }, logger)
+}
+
+// NewQuorumManagerWithSource reads the current config when a session starts.
+func NewQuorumManagerWithSource(source func() *config.Config, logger *log.Logger) *QuorumManager {
+	cfg := source()
 	return &QuorumManager{
-		config:         cfg,
+		configSource:   source,
 		logger:         logger,
 		activeSessions: make(map[string]*VotingSession),
 		sessionHistory: make(map[string]*VotingSession),
@@ -147,11 +157,32 @@ func (q *QuorumManager) UpdateNodeCount(count int) {
 // StartVotingSession creates a new voting session and returns its ID
 func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, description string,
 	timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return "", fmt.Errorf("voting timeout must be positive")
+	}
+	switch voteType {
+	case VoteTypeNodeStatus, VoteTypeIPRedistribution, VoteTypeConfigChange:
+	default:
+		return "", fmt.Errorf("invalid vote type")
+	}
+	cfg := q.configSource()
+	if cfg == nil {
+		return "", fmt.Errorf("no cluster configuration")
+	}
+	cfg.Lock()
+	members := make([]string, 0, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if id != "" && node != nil {
+			members = append(members, id)
+		}
+	}
+	cfg.Unlock()
+	slices.Sort(members)
 	q.Lock()
 	defer q.Unlock()
 
 	// Require at least 3 nodes to start a voting session
-	if q.nodeCount < 3 {
+	if len(members) < 3 {
 		return "", fmt.Errorf("quorum voting requires at least 3 nodes")
 	}
 
@@ -160,6 +191,7 @@ func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, de
 
 	// Create the voting session
 	session := &VotingSession{
+		MemberIDs:   members,
 		ID:          sessionID,
 		Type:        voteType,
 		Subject:     subject,
@@ -174,6 +206,38 @@ func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, de
 
 	q.logger.Infof("Started voting session %s for %s: %s", sessionID, voteType, description)
 	return sessionID, nil
+}
+
+// RecoverProposal records the value carried forward by a prepare majority.
+// It must happen before any accept votes are counted. Callers must consume this
+// subject, not assume their original request was chosen.
+func (q *QuorumManager) RecoverProposal(id, subject string) error {
+	q.Lock()
+	defer q.Unlock()
+	session := q.activeSessions[id]
+	if session == nil || !time.Now().Before(session.EndTime) || len(session.Votes) != 0 || subject == "" {
+		return fmt.Errorf("session cannot recover a proposal")
+	}
+	session.Subject = subject
+	return nil
+}
+
+// BindSessionEpoch prevents retries from combining ballots for different epochs.
+func (q *QuorumManager) BindSessionEpoch(sessionID string, epoch int64) error {
+	q.Lock()
+	defer q.Unlock()
+	session := q.activeSessions[sessionID]
+	if session == nil || !time.Now().Before(session.EndTime) {
+		return fmt.Errorf("voting session is not active")
+	}
+	if epoch <= 0 {
+		return fmt.Errorf("invalid proposal epoch")
+	}
+	if session.Epoch != 0 && session.Epoch != epoch {
+		return fmt.Errorf("voting session belongs to a different epoch")
+	}
+	session.Epoch = epoch
+	return nil
 }
 
 // CastVote records a vote for a specific voting session
@@ -192,6 +256,24 @@ func (q *QuorumManager) CastVote(sessionID string, voterID string, decision Vote
 		return fmt.Errorf("voting session %s has already concluded", sessionID)
 	}
 
+	if !time.Now().Before(session.EndTime) {
+		q.concludeVotingSessionLocked(sessionID)
+		return fmt.Errorf("voting session %s has expired", sessionID)
+	}
+	if !slices.Contains(session.MemberIDs, voterID) {
+		return fmt.Errorf("voter %s is not in the session electorate", voterID)
+	}
+	switch decision {
+	case VoteDecisionYes, VoteDecisionNo, VoteDecisionAbstain:
+	default:
+		return fmt.Errorf("invalid vote decision")
+	}
+	if previous, ok := session.Votes[voterID]; ok {
+		if previous.Decision == decision {
+			return nil
+		}
+		return fmt.Errorf("voter %s already voted", voterID)
+	}
 	// Record the vote
 	session.Votes[voterID] = Vote{
 		VoterID:   voterID,
@@ -289,7 +371,7 @@ func (q *QuorumManager) hasQuorumLocked(voteCount int) bool {
 // 3. Enough NO votes to fail
 func (q *QuorumManager) canConcludeVoting(session *VotingSession) bool {
 	// If all nodes have voted, we can conclude
-	if len(session.Votes) >= q.nodeCount {
+	if len(session.Votes) >= len(session.MemberIDs) {
 		return true
 	}
 
@@ -306,13 +388,13 @@ func (q *QuorumManager) canConcludeVoting(session *VotingSession) bool {
 	}
 
 	// If we have enough YES votes to guarantee passage
-	if q.hasQuorumLocked(yesCount) {
+	if yesCount >= len(session.MemberIDs)/2+1 {
 		return true
 	}
 
 	// If we have enough NO votes to guarantee failure
-	remainingPossibleYes := q.nodeCount - len(session.Votes)
-	minVotes := (q.nodeCount / 2) + 1
+	remainingPossibleYes := len(session.MemberIDs) - len(session.Votes)
+	minVotes := len(session.MemberIDs)/2 + 1
 	if yesCount+remainingPossibleYes < minVotes {
 		return true
 	}
@@ -354,13 +436,13 @@ func (q *QuorumManager) concludeVotingSessionLocked(sessionID string) {
 	}
 
 	totalVotes := len(session.Votes)
-	quorumMet := q.hasQuorumLocked(totalVotes)
+	quorumMet := totalVotes >= len(session.MemberIDs)/2+1
 
 	// Determine if the vote passed
 	// A vote passes if:
 	// 1. Quorum was met, and
-	// 2. More YES votes than NO votes
-	passed := quorumMet && yesCount > noCount
+	// 2. An affirmative majority of the fixed electorate
+	passed := yesCount >= len(session.MemberIDs)/2+1
 
 	// Create the result
 	session.Result = &VotingSessionResult{

@@ -25,7 +25,7 @@ func newQuorumManager(t *testing.T, nodes int) *QuorumManager {
 
 	cfg := &config.Config{Nodes: map[string]*config.Node{}}
 	for i := 0; i < nodes; i++ {
-		id := string(rune('a' + i))
+		id := "node-" + string(rune('a'+i))
 		cfg.Nodes[id] = &config.Node{Hostname: id}
 	}
 	return NewQuorumManager(cfg, log.New(io.Discard))

@@ -87,6 +87,7 @@ service Server {
     rpc Remove(RemoveRequest) returns (RemoveResponse) {}
     rpc CoordinateRemoval(CoordinateRemovalRequest) returns (CoordinateRemovalResponse) {}
     // Quorum voting methods
+    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse) {}
     rpc StartVotingSession(StartVotingSessionRequest) returns (StartVotingSessionResponse) {}
     rpc CastVote(CastVoteRequest) returns (CastVoteResponse) {}
     rpc GetVotingResult(GetVotingResultRequest) returns (GetVotingResultResponse) {}
@@ -599,4 +600,34 @@ message InitiateJoinRequest {
 message InitiateJoinResponse {
     bool success = 1;
     string message = 2;
+}
+// Explicit peer decision. Older servers return Unimplemented and cannot vote.
+message RequestVoteRequest {
+    string session_id = 1;
+    string initiator_id = 2;
+    string vote_type = 3;
+    string subject = 4;
+    string description = 5;
+    repeated string member_ids = 6;
+    int64 epoch = 7;
+    int64 expires_at_unix_milli = 8;
+    string cluster_token = 9;
+    // v2: prepare promises a ballot; accept records the recovered proposal.
+    string phase = 10;
+    uint64 ballot = 11;
+}
+message RequestVoteResponse {
+    string session_id = 1;
+    string voter_id = 2;
+    int64 epoch = 3;
+    bool granted = 4;
+    string reason = 5;
+    uint32 protocol_version = 6;
+    string phase = 7;
+    uint64 ballot = 8;
+    uint64 promised_ballot = 9;
+    string promised_by = 10;
+    uint64 accepted_ballot = 11;
+    string accepted_by = 12;
+    string accepted_subject = 13;
 }

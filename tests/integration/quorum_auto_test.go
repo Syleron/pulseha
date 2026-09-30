@@ -35,7 +35,7 @@ func TestQuorumAutoManagement(t *testing.T) {
 
 	// With 2 nodes, quorum voting should be unavailable
 	logger := log.New(os.Stdout)
-	tqm := testutils.NewTestQuorumManager(node1.Config, logger)
+	tqm := testutils.NewTestQuorumManager(node1.Server.GetMemberList().Config(), logger)
 	_, err = tqm.StartTestVotingSession(quorum.VoteTypeNodeStatus, "subj", "desc", 3*time.Second)
 	require.Error(t, err, "Quorum voting should be unavailable with <3 nodes")
 
@@ -46,12 +46,9 @@ func TestQuorumAutoManagement(t *testing.T) {
 	require.NoError(t, node3.Join(node1))
 	time.Sleep(1 * time.Second)
 
-	// The manager samples len(cfg.Nodes) once, at construction, so it still believes
-	// the cluster is the two nodes it was built against. UpdateNodeCount is what the
-	// daemon calls on a membership change and is what this test is really asserting
-	// about — that quorum availability tracks the node count rather than the count
-	// that happened to be current when the manager was made.
-	tqm.UpdateNodeCount(3)
+	// Voting needs the actual current electorate, not just a numeric count.
+	// Join may replace the daemon config; use its current snapshot for the new session.
+	tqm = testutils.NewTestQuorumManager(node1.Server.GetMemberList().Config(), logger)
 
 	// Now quorum voting is available; majority should pass (2 of 3)
 	_, err = tqm.StartTestVotingSession(quorum.VoteTypeNodeStatus, "subj2", "desc2", 10*time.Second)
@@ -77,7 +74,7 @@ func TestQuorumVoting(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	logger := log.New(os.Stdout)
-	tqm := testutils.NewTestQuorumManager(n1.Config, logger)
+	tqm := testutils.NewTestQuorumManager(n1.Server.GetMemberList().Config(), logger)
 	sid, err := tqm.StartTestVotingSession(quorum.VoteTypeNodeStatus, "test", "desc", 10*time.Second)
 	require.NoError(t, err)
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1543,10 +1544,12 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 
 	// Quorum-gate redistribution the same way partial IP failures are, so a
 	// minority partition can't grab IPs the majority side still serves.
-	if len(members) >= 3 && !h.initiateIPRedistributionVote(orphaned) {
+	approved, ok := h.approvedRedistribution(orphaned)
+	if !ok {
 		h.logger.Warn("ACTIVE_CHECK: quorum vote failed, not redistributing orphaned IPs")
 		return false
 	}
+	orphaned = approved
 
 	h.logger.Warnf("ACTIVE_CHECK: redistributing %d orphaned floating IP(s)", len(orphaned))
 	if err := h.members.RedistributeIPs(orphaned); err != nil {
@@ -1831,7 +1834,8 @@ func (h *HealthChecker) electNewActiveNode() {
 	h.logger.Infof("ELECTION: Selected candidate: %s", bestCandidate.Hostname)
 
 	// Step 3: Try voting first, then promote directly if voting fails
-	if h.attemptVotingElection(bestCandidate) {
+	if votedCandidate, voted := h.votedElectionCandidate(bestCandidate); voted {
+		bestCandidate = votedCandidate
 		h.logger.Info("ELECTION: Voting election succeeded, promoting candidate")
 		if h.tryForcePromote(bestCandidate) {
 			return
@@ -2467,18 +2471,6 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 
 		h.logger.Infof("Started voting session %s for node status change", sessionID)
 
-		// Get our own node ID to cast our vote
-		localNodeID, err := h.localNodeID()
-		if err != nil {
-			h.logger.Errorf("Failed to get local node ID: %v", err)
-		} else {
-			// Cast our own vote (we initiated it, so we vote yes)
-			err = quorumManager.CastVote(sessionID, localNodeID, quorum.VoteDecisionYes)
-			if err != nil {
-				h.logger.Errorf("Failed to cast our own vote: %v", err)
-			}
-		}
-
 		// Broadcast the vote request to other nodes so they can participate
 		h.logger.Infof("Broadcasting vote request to cluster nodes...")
 		if err := h.server.BroadcastVoteRequest(sessionID, "node_status", subject, description, 30); err != nil {
@@ -2505,7 +2497,7 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 					session.Result.TotalVotes)
 
 				voteCompleted = true
-				if session.Result.Passed && session.Result.QuorumMet {
+				if session.Subject == nodeID && session.Result.Passed && session.Result.QuorumMet {
 					return true // Vote passed
 				}
 				break // Vote failed or didn't meet quorum
@@ -2547,108 +2539,19 @@ func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberSt
 	return false // Block promotion to prevent split-brain scenarios
 }
 
-// initiateIPRedistributionVote initiates a quorum vote for IP redistribution
-// Returns true if the vote passes or if quorum voting is not applicable
+// initiateIPRedistributionVote is the exact-proposal compatibility helper.
+// Execution uses approvedRedistribution and consumes the recovered address set.
 func (h *HealthChecker) initiateIPRedistributionVote(ips []string) bool {
-	h.logger.Infof("Initiating vote for redistribution of %d IPs", len(ips))
-
-	// Check cluster size to determine if voting is needed
-	clusterSize := len(h.members.MembersSnapshot())
-	if clusterSize < 3 {
-		h.logger.Debugf("Cluster has only %d nodes, voting not required for IP redistribution", clusterSize)
-		return true
+	approved, ok := h.approvedRedistribution(ips)
+	if !ok || len(approved) != len(ips) {
+		return false
 	}
-
-	// Get the server instance from the context
-	if h.server == nil {
-		h.logger.Warn("Server reference not available, cannot initiate vote")
-		return true // Default to allowing the change if we can't vote
-	}
-
-	// Get the quorum manager
-	quorumManager := h.server.GetQuorumManager()
-	if quorumManager == nil {
-		h.logger.Warn("Quorum manager not available, cannot initiate vote")
-		return true // Default to allowing the change if quorum manager is not available
-	}
-
-	// Refresh the quorum manager's node count — it is seeded at daemon startup
-	// and goes stale as nodes join, which would make StartVotingSession refuse
-	// with "requires at least 3 nodes" on a healthy 3+ node cluster.
-	quorumManager.UpdateNodeCount(clusterSize)
-
-	// Create a descriptive subject and description for the vote
-	ipList := ""
-	if len(ips) <= 5 {
-		ipList = fmt.Sprintf("%v", ips)
-	} else {
-		ipList = fmt.Sprintf("%v and %d more", ips[:5], len(ips)-5)
-	}
-
-	subject := fmt.Sprintf("redistribute-%d-ips", len(ips))
-	description := fmt.Sprintf("Redistribute %d IPs: %s", len(ips), ipList)
-
-	// Initiate the vote through the quorum manager
-	sessionID, err := quorumManager.StartVotingSession(
-		quorum.VoteTypeIPRedistribution,
-		subject,
-		description,
-		30*time.Second, // 30 second timeout for votes
-	)
-
-	if err != nil {
-		h.logger.Errorf("Failed to start IP redistribution voting session: %v", err)
-		return false // Block redistribution if we can't establish proper voting
-	}
-
-	h.logger.Infof("Started voting session %s for IP redistribution", sessionID)
-
-	// Get our own node ID to cast our vote
-	localNodeID, err := h.localNodeID()
-	if err != nil {
-		h.logger.Errorf("Failed to get local node ID: %v", err)
-	} else {
-		// Cast our own vote (we initiated it, so we vote yes)
-		err = quorumManager.CastVote(sessionID, localNodeID, quorum.VoteDecisionYes)
-		if err != nil {
-			h.logger.Errorf("Failed to cast our own vote: %v", err)
+	for _, ip := range ips {
+		if !slices.Contains(approved, ip) {
+			return false
 		}
 	}
-
-	// Broadcast the vote request to other nodes so they can participate —
-	// without this the session only ever holds the initiator's vote and can
-	// never reach quorum, permanently blocking redistribution.
-	h.logger.Info("Broadcasting IP redistribution vote request to cluster nodes...")
-	if err := h.server.BroadcastVoteRequest(sessionID, "ip_redistribution", subject, description, 30); err != nil {
-		h.logger.Warnf("Failed to broadcast vote request: %v", err)
-		// Continue anyway - maybe some nodes are offline but others might still vote
-	}
-
-	// Wait for the vote to complete
-	// In a production implementation, this would be asynchronous with callbacks
-	// For simplicity, we'll use a polling approach here
-	for i := 0; i < 30; i++ { // Poll for up to 30 seconds
-		time.Sleep(1 * time.Second)
-
-		session, err := quorumManager.GetVotingSession(sessionID)
-		if err != nil {
-			h.logger.Errorf("Failed to get voting session: %v", err)
-			continue
-		}
-
-		// Check if the vote has completed
-		if session.Result != nil {
-			h.logger.Infof("Vote completed: passed=%v, quorum=%v, yes=%d, no=%d, total=%d",
-				session.Result.Passed, session.Result.QuorumMet,
-				session.Result.YesCount, session.Result.NoCount,
-				session.Result.TotalVotes)
-
-			return session.Result.Passed
-		}
-	}
-
-	h.logger.Warn("IP redistribution vote timed out, blocking redistribution to maintain consistency")
-	return false // Block redistribution if voting fails to maintain cluster consistency
+	return true
 }
 
 // calculateElectionBackoff returns a deterministic delay to prevent simultaneous elections
