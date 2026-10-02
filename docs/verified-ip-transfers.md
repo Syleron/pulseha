@@ -59,7 +59,7 @@ RPC to replace its existing asynchronous acceptance response.
   release/acquisition, malformed receipts, invalid plans and idempotent retry.
 - Tests that failed inventory reads cannot delete configured addresses or produce
   a partial snapshot, and that self-promotion stops on demotion refusal.
-- Opt-in Linux kernel test using disposable veth interfaces: real RPC release,
+- Linux kernel test using disposable veth interfaces (explicitly enabled in CI): real RPC release,
   acquisition, wrong-interface refusal, repeated acquisition and final release.
   It uses a shared isolated network namespace and disables background monitor
   reconciliation; it is not the multi-node partition/fencing acceptance test.
@@ -68,3 +68,8 @@ Run the kernel test only in an isolated container with NET_ADMIN, NET_RAW and
 arping installed. Cross-compile the internal/server test binary for that
 container's architecture, then run it with `PULSEHA_TRANSFER_KERNEL_TEST=1` and
 `-test.run '^TestIPTransferKernel$'`. The test creates and removes its own links.
+
+The ordinary active-active integration fixture checks configuration and healthy
+rebalance eligibility. It runs without NET_ADMIN, and its GetActiveIPs helper can
+fall back to configuration, so it is not used as proof of acquired addresses.
+The dedicated container test in CI supplies that kernel-level evidence instead.
