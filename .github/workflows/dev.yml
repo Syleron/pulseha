@@ -61,3 +61,13 @@ jobs:
     # Linux, so these actually execute here.
     - name: Integration tests
       run: make quiet-integration-test
+
+    # The ordinary integration fixture shares a namespace and has no NET_ADMIN.
+    # Verify actual address effects separately, on disposable links in a container.
+    - name: Verified IP transfers (isolated kernel)
+      run: |
+        CGO_ENABLED=0 go test -c -o /tmp/pulseha-kernel.test ./internal/server
+        docker run --rm --cap-add NET_ADMIN --cap-add NET_RAW \
+          -e PULSEHA_TRANSFER_KERNEL_TEST=1 \
+          -v /tmp/pulseha-kernel.test:/transfer.test:ro \
+          alpine:latest sh -ec 'apk add --no-cache iputils-arping; /transfer.test -test.run "^TestIPTransferKernel$" -test.v -test.timeout 90s'

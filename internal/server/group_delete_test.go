@@ -49,7 +49,7 @@ func (p *releasingPeer) BringDownIP(_ context.Context, req *rpc.DownIpRequest) (
 	if p.refuse {
 		return nil, status.Error(codes.Unavailable, "connection refused")
 	}
-	return &rpc.DownIpResponse{Success: true, Message: "IPs brought down"}, nil
+	return &rpc.DownIpResponse{Success: true, Message: "IPs brought down", VerificationVersion: ipVerificationVersion, VerifiedIps: req.Ips}, nil
 }
 
 func (p *releasingPeer) released() []string {
@@ -161,6 +161,9 @@ func newGroupDeleteTestServer(t *testing.T, peerAddrs ...string) *Server {
 	}
 
 	return &Server{
+		ipVerificationSnapshot: func() (ipStateLookup, error) {
+			return func(string) (bool, string, error) { return false, "", nil }, nil
+		},
 		config:     cfg,
 		logger:     logger,
 		memberList: ml,
