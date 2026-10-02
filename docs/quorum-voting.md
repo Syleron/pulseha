@@ -88,8 +88,22 @@ successful node-status vote before requesting promotion in a configured cluster
 of three or more. The configured electorate does not shrink when members become
 Unknown or are missing from the runtime member list. Missing voting support,
 refusal, unavailable peers, and failed promotion requests leave the candidate
-Passive; there is no direct status-write fallback. Reachability recovery also
-restores a Passive candidate instead of authorizing ownership itself.
+Passive; there is no direct status-write fallback.
+
+Reachability recovery does not assign a role. In active-passive mode, an Unknown
+peer recovers the role in its next successful, identified HealthCheck response.
+A TCP connection alone cannot promote or demote it. An existing Active can thus
+remain the owner when only its link to the coordinator fails; a peer reporting
+Passive still needs an election before promotion. This applies with auto-failback
+both enabled and disabled. ConfigSync ignores Unknown observations about the
+receiving node itself, preserving its actual role for health replies; explicit
+higher-epoch Passive demotions still apply.
+
+Older HealthCheck responses omit the responder identity and role. Such a peer
+can remain Unknown until a role-bearing health reply or an existing config-state
+update arrives; no role is invented from reachability. Upgrade all members for
+this recovery behavior. A peer's self-report is not a fencing proof or a new
+ownership grant, and it does not solve stale asynchronous operations.
 
 The election sends `ForceDemote: false`. The force flag remains an explicit
 operator recovery option. The Promote admission path and asynchronous worker

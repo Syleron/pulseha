@@ -220,7 +220,7 @@ type HealthChecker struct {
 	// enforce and now: the real thing needs a network, and what needs testing
 	// here is what the caller does with the answer rather than how it is
 	// obtained. nil in the daemon, which uses the method.
-	deepCheck       func(*Member) membershipVerdict
+	deepCheck       func(*Member) (membershipVerdict, MemberStatus)
 	reconcileCycles int // cycles since startup; reconciliation waits for a grace period
 
 	// reconcileInFlight guards the reconciliation pass, which runs off the tick.
@@ -451,6 +451,7 @@ func (h *HealthChecker) performHealthChecks() {
 		// see membershipUnresolved for why that distinction is not the same one.
 		startTime := time.Now()
 		var isReachable bool
+		reportedRole := StatusUnknown
 		// The scheduled deep check, or the single immediate retry a node earns
 		// when it first becomes unresolved. Per member, not per pass: one slow
 		// peer must not drag every other node onto the expensive path.
@@ -460,7 +461,8 @@ func (h *HealthChecker) performHealthChecks() {
 			// which costs nothing.
 			delete(h.membershipRetry, member.ID)
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-			verdict := h.membershipOf(member)
+			verdict, role := h.membershipOf(member)
+			reportedRole = role
 
 			// Only a confirmed membership counts as reachable. Neither a
 			// rejection nor an unresolved check falls back to the TCP dial: a
@@ -572,20 +574,20 @@ func (h *HealthChecker) performHealthChecks() {
 		autoFailback := hcCfg.Pulse.AutoFailback
 		mode := hcCfg.Pulse.Mode
 
-		if wasUnknown && autoFailback {
-			switch mode {
-			case "active-passive":
-				// Reachability recovery is not authority to own the group. The
-				// reconciliation election must authorize promotion separately.
-				member.Status = StatusPassive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
-			case "active-active":
-				member.Status = StatusActive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to active", member.Hostname))
-			default:
-				member.Status = StatusPassive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
+		if mode == "active-passive" {
+			// A successful TCP dial proves neither a role nor ownership. Only a
+			// fresh, identified health reply may recover an Unknown peer's role.
+			// Never overwrite a role that changed while the probe was in flight.
+			// In particular, reachability alone must neither promote a Passive
+			// nor demote an existing Active (including when auto_failback is on).
+			if member.Status == StatusUnknown && reportedRole != StatusUnknown {
+				member.Status = reportedRole
+				statusChanges = append(statusChanges, fmt.Sprintf("%s reports %s after recovery",
+					member.Hostname, StatusToString(reportedRole)))
 			}
+		} else if wasUnknown && autoFailback {
+			member.Status = recoveredStatus(mode)
+			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
 			member.Status = recoveredStatus(mode)
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
@@ -1997,11 +1999,11 @@ func (h *HealthChecker) findActiveNode() *Member {
 // rejects the token, or is running in a different cluster.
 // membershipOf runs the deep membership check, through the test seam when one
 // is installed.
-func (h *HealthChecker) membershipOf(member *Member) membershipVerdict {
+func (h *HealthChecker) membershipOf(member *Member) (membershipVerdict, MemberStatus) {
 	if h.deepCheck != nil {
 		return h.deepCheck(member)
 	}
-	return h.checkClusterMembership(member)
+	return h.probeClusterMembership(member)
 }
 
 // membershipVerdict is what a deep membership check concluded, as distinct from
@@ -2046,26 +2048,31 @@ func (v membershipVerdict) String() string {
 }
 
 func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict {
+	verdict, _ := h.probeClusterMembership(member)
+	return verdict
+}
+
+func (h *HealthChecker) probeClusterMembership(member *Member) (membershipVerdict, MemberStatus) {
 	if member.IP == "" || member.Port == "" {
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	cfg := h.members.Config()
 	if cfg == nil {
 		h.logger.Warn("checkClusterMembership: no config")
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	localToken := cfg.Pulse.ClusterToken
 	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	remoteClient, err := client.New()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to create client: %v", err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	defer remoteClient.Close()
 
@@ -2073,12 +2080,12 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to build TLS credentials for %s: %v",
 			member.Hostname, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	if err := remoteClient.Connect(member.IP, member.Port, creds); err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to connect to %s (%s:%s): %v",
 			member.Hostname, member.IP, member.Port, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2093,7 +2100,7 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 		// Unavailable from a dead one are indistinguishable here, and neither is
 		// a statement about which cluster the peer belongs to.
 		h.logger.Warnf("checkClusterMembership: gRPC call to %s failed: %v", member.Hostname, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	if !resp.Success {
@@ -2101,16 +2108,28 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 		// which on an appliance whose node id is re-minted by `lbcli setup` is a
 		// real and asymmetric condition worth latching.
 		h.logger.Warnf("checkClusterMembership: %s rejected membership check: %s", member.Hostname, resp.Message)
-		return membershipRejected
+		return membershipRejected, StatusUnknown
 	}
 
 	// Verify the remote node echoes a matching token (detects split-cluster scenarios)
 	if localToken != "" && resp.ClusterToken != "" && resp.ClusterToken != localToken {
 		h.logger.Warnf("checkClusterMembership: %s is in a different cluster (token mismatch)", member.Hostname)
-		return membershipRejected
+		return membershipRejected, StatusUnknown
 	}
 
-	return membershipConfirmed
+	// Missing identity/role (old binaries) cannot authorize a role transition.
+	role := StatusUnknown
+	if resp.NodeId == member.ID {
+		switch resp.Status {
+		case rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE:
+			role = StatusActive
+		case rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE:
+			role = StatusPassive
+		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
+			role = StatusMaintenance
+		}
+	}
+	return membershipConfirmed, role
 }
 
 // checkNodeConnectivity verifies basic node connectivity

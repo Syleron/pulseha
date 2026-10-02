@@ -2467,7 +2467,8 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 
 // HealthCheck handles the health check RPC call
 func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (*rpc.HealthCheckResponse, error) {
-	localToken := s.config.Pulse.ClusterToken
+	cfg := s.currentConfig()
+	localToken := cfg.Pulse.ClusterToken
 
 	// Validate cluster membership token when provided
 	if req.ClusterToken != "" && !tokensEqual(req.ClusterToken, localToken) {
@@ -2522,7 +2523,14 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 	// side of the call can see is not a round trip.
 	s.logger.Debugf("Member %s health-checked us", member.Hostname)
 
+	localID, _ := cfg.GetLocalNodeUUID()
+	role := rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
+	if local := s.memberList.GetMemberByID(localID); local != nil {
+		role = rpc.MemberStatusEnum(local.GetStatus())
+	}
 	return &rpc.HealthCheckResponse{
+		NodeId:       localID,
+		Status:       role,
 		Success:      true,
 		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
 		ClusterToken: localToken,
@@ -5873,6 +5881,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.
 					if id == syncLocalID {
+						// Unknown is the sender's reachability observation, not a
+						// decision to change this live daemon's role. Preserve it
+						// so health replies can report the incumbent accurately.
+						if st == membership.StatusUnknown {
+							return current, false
+						}
 						// The same principle applied to status generally. This node knows
 						// its own status better than a peer whose view may predate the
 						// change — most importantly when a coordinator has just assigned

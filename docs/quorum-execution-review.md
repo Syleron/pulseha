@@ -49,3 +49,30 @@ Before claiming partition-safe ownership, run a three-node Linux test with only
 the cluster link cut (keep client connectivity), separately isolating the Active
 and a Passive. Assert actual interface addresses and traffic, then rejoin. Keep
 the deliberate two-node duplicate-ownership expectation as a separate test.
+
+## Follow-up: asymmetric reachability (2 October 2026)
+
+The review of #263 found that unconditional Unknown-to-Passive recovery with
+`auto_failback` enabled could broadcast a demotion of a reachable incumbent and
+release its addresses before a replacement was authorised. Recovery now uses the
+peer's identified HealthCheck role, while ConfigSync preserves the receiver's
+own role against Unknown gossip. A role changed during a probe is left alone.
+Explicit demotions and quorum requirements for new promotions remain in place.
+
+Regression coverage exercises real gRPC role replies, absent/wrong responder
+identity, TCP-only reachability, role changes during the probe, and repeated
+higher-epoch Unknown gossip followed by the incumbent's health reply. The full
+race suite and vet pass. The Docker test builder now follows Go 1.26; the protobuf
+test request is cloned rather than copying its embedded lock.
+
+A four-node Linux Docker run with `auto_failback: true` kept the coordinator and
+incumbent on separate nodes. After a stable 20-second baseline, bidirectional
+iptables drops blocked only their cluster-network link for 65 seconds, followed
+by 20 seconds of healing. The service network stayed connected. Actual interface
+sampling found one unchanged holder in all 19 baseline, 61 partition and 19 heal
+samples, with zero dark or dual-holder samples. A separate service-only probe
+received all 206 ICMP packets. Logs confirmed coordinator-to-incumbent failures
+and another peer recovering the incumbent's reported Active role. An earlier run
+changed owners during setup and was discarded because its cut missed the actual
+incumbent. This one-address bridge test validates the reported regression; it is
+not a full fencing, reboot, or large-address-set acceptance test.
