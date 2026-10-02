@@ -94,6 +94,9 @@ func newRemoveIPTestServer(t *testing.T, peerAddrs ...string) *Server {
 	local.SetActiveIPs(append([]string(nil), groupIPs...))
 
 	return &Server{
+		ipVerificationSnapshot: func() (ipStateLookup, error) {
+			return func(string) (bool, string, error) { return false, "", nil }, nil
+		},
 		config:     cfg,
 		logger:     logger,
 		memberList: ml,

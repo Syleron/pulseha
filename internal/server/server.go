@@ -135,6 +135,9 @@ func callerAddr(ctx context.Context) string {
 
 // Server represents the PulseHA server
 type Server struct {
+	// Optional inventory seam for deterministic failure tests; nil reads the kernel.
+	ipVerificationSnapshot func() (ipStateLookup, error)
+
 	voteMu         pulselock.Mutex
 	voteState      *persistentVotes
 	voteStatePath  string
@@ -2129,12 +2132,16 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 
 	// Step 1: Demote previous active if needed
 	demotionFailed := false
-	if shouldDemote && !isTargetNodePromotion {
+	if shouldDemote {
 		s.logger.Info("PROMOTE_ASYNC: Demoting current active before promotion",
 			"previous_active", prevActiveID,
 			"new_active", targetNodeID)
 
-		if _, err := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID}); err != nil {
+		demoteResp, demoteErr := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID})
+		if demoteErr == nil && (demoteResp == nil || !demoteResp.Success) {
+			demoteErr = fmt.Errorf("demotion not confirmed: %v", demoteResp)
+		}
+		if err := demoteErr; err != nil {
 			s.logger.Error("PROMOTE_ASYNC: Failed to demote previous active",
 				"previous_active", prevActiveID,
 				"error", err)
@@ -2157,10 +2164,6 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 		} else {
 			s.logger.Info("PROMOTE_ASYNC: Successfully demoted previous active", "previous_active", prevActiveID)
 		}
-	} else if shouldDemote && isTargetNodePromotion {
-		s.logger.Info("PROMOTE_ASYNC: Skipping demotion (remote-initiated promotion)",
-			"previous_active", prevActiveID,
-			"new_active", targetNodeID)
 	}
 
 	// Step 1b: There is no reachable Active, but an unreachable peer may still be holding the
@@ -2270,7 +2273,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			ForceDemote: forceDemote,
 		})
 
-		if rerr != nil || (rresp != nil && !rresp.Success) {
+		if rerr != nil || rresp == nil || !rresp.Success {
 			s.logger.Error("PROMOTE_ASYNC: Remote promotion failed",
 				"error", rerr,
 				"response", rresp)
@@ -2304,8 +2307,13 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				"old_node", prevActiveID,
 				"new_node", targetNodeID)
 
-			if err := s.OrchestrateIPFailover(prevActiveID, targetNodeID, allIPs); err != nil {
-				s.logger.Warn("PROMOTE_ASYNC: IP failover encountered issues", "error", err)
+			source := prevActiveID
+			if demotionFailed {
+				source = ""
+			} // explicit force policy, not a verified release
+			if err := s.OrchestrateIPFailover(source, targetNodeID, allIPs); err != nil {
+				s.logger.Error("PROMOTE_ASYNC: Address acquisition incomplete; no completed-transfer broadcast", "error", err)
+				return
 			} else {
 				s.logger.Info("PROMOTE_ASYNC: IP failover completed successfully")
 			}
@@ -3055,7 +3063,7 @@ func (s *Server) refreshLocalMonitorExpectedIPs() {
 			}
 			if len(missing) > 0 {
 				s.logger.Info("REFRESH: Bringing up missing IPs on Active node", "iface", iface, "missingIPs", missing, "status", membership.StatusToString(status))
-				_, err := s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: missing})
+				err := s.bringIPsOnNodeUp(localID, iface, missing)
 				if err != nil {
 					s.logger.Error("REFRESH: Failed to bring up missing IPs", "error", err, "iface", iface, "ips", missing)
 				} else {
@@ -4824,19 +4832,17 @@ func (s *Server) releaseIPsOnTarget(ctx context.Context, target ipReleaseTarget)
 		Iface: target.iface,
 		Ips:   target.ips,
 	})
-	switch {
-	case err != nil:
-		return fmt.Sprintf("failed to release %d floating IP(s) on node %s: %v", len(target.ips), target.hostname, err), false
-	case !resp.Success:
-		return fmt.Sprintf("node %s refused to release %d floating IP(s): %s", target.hostname, len(target.ips), resp.Message), false
+	if err != nil {
+		return fmt.Sprintf("release RPC on %s: %v", target.hostname, err), false
 	}
-
-	// A peer's per-address netlink failures are not visible here, and cannot be:
-	// no RPC exposes a peer's interface state (the same wall defect #54 hit). They
-	// are also the benign case — a failed bring-down is overwhelmingly "cannot
-	// assign requested address", i.e. the address was already gone (#34). What
-	// must not be waved through is the transport failing, which is what the two
-	// cases above cover.
+	if resp == nil {
+		return "empty release response", false
+	}
+	verified, err := validatedIPResult(target.ips, resp.Success, resp.VerificationVersion, resp.VerifiedIps, resp.FailedIps, resp.Message)
+	s.recordVerifiedIPs(target.nodeID, verified, false)
+	if err != nil {
+		return fmt.Sprintf("release on %s unconfirmed: %v", target.hostname, err), false
+	}
 	return "", true
 }
 
@@ -4847,49 +4853,27 @@ func (s *Server) releaseIPsOnTarget(ctx context.Context, target ipReleaseTarget)
 // is the only place in the cluster where "the release worked" can be verified
 // instead of assumed.
 func (s *Server) releaseIPsLocally(ctx context.Context, target ipReleaseTarget) (warning string, confirmed bool) {
-	// An address cannot be up on an interface the node does not have, so there is
-	// nothing to release and nothing to strand.
-	if exists, _ := network.InterfaceExist(target.iface); !exists {
-		return fmt.Sprintf("interface %s does not exist on local node; nothing to release there", target.iface), true
-	}
-
-	if len(target.ips) > 0 {
-		if _, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips}); err != nil {
-			return fmt.Sprintf("failed to release %d floating IP(s) locally: %v", len(target.ips), err), false
+	if exists, _ := network.InterfaceExist(target.iface); exists && len(target.ips) > 0 {
+		resp, err := s.BringDownIP(ctx, &rpc.DownIpRequest{Iface: target.iface, Ips: target.ips})
+		if err != nil {
+			return err.Error(), false
+		}
+		if resp == nil {
+			return "empty local release response", false
+		}
+		if _, err = validatedIPResult(target.ips, resp.Success, resp.VerificationVersion, resp.VerifiedIps, resp.FailedIps, resp.Message); err != nil {
+			return err.Error(), false
 		}
 	}
-
-	// Keep the local assignment list honest whatever the mode: BringDownIP only
-	// maintains it in active-active, and an address left on the list once the
-	// config stops referencing it is reported as held forever, since nothing can
-	// recompute it downward again (defect #58). In active-passive that list is
-	// written once, at promotion, and never recomputed — which is why a removed
-	// floating IP kept appearing under `pulsectl status`'s Active IPs.
-	if member := s.memberList.GetMemberByID(target.nodeID); member != nil {
-		member.RemoveActiveIPs(target.ips)
-	}
-
-	inventory, err := network.BuildIPInventory()
+	// Check all candidate addresses, including aliases on another interface.
+	ips, err := canonicalTransferIPs(target.candidates)
 	if err != nil {
-		// A host whose addresses cannot be read is a problem of its own, but
-		// refusing the delete over it would leave no way to finish one. Say so
-		// and take the release at its word.
-		return fmt.Sprintf("released %d floating IP(s) locally but could not read interface state to confirm: %v",
-			len(target.ips), err), true
+		return err.Error(), false
 	}
-
-	// Checked over every address the group could have here, not only the ones the
-	// record said to release. That record was append-only until defect #58 and is
-	// about to be deleted along with the group, so the kernel is the authority for
-	// the one node where it can be read — and an address it reports up is exactly
-	// the strand this whole ordering exists to prevent.
-	stillHeld := stillHeldLocally(target.candidates, func(ip string) bool {
-		held, _, err := inventory.Exists(ip)
-		return err == nil && held
-	})
-	if len(stillHeld) > 0 {
-		return fmt.Sprintf("%d floating IP(s) of this group are still up locally on %s: %s",
-			len(stillHeld), target.iface, strings.Join(stillHeld, ", ")), false
+	verified, failed := s.verifyLocalIPBatch(target.iface, ips, false)
+	s.recordVerifiedIPs(target.nodeID, verified, false)
+	if len(failed) > 0 {
+		return fmt.Sprintf("release unconfirmed for %v", failed), false
 	}
 	return "", true
 }
@@ -6728,6 +6712,9 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 
 // BringUpIP implements the Server.BringUpIP RPC for remote IP assignment
 func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIpResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.logger.Infof("RPC BringUpIP on iface %s for %d IP(s)", req.Iface, len(req.Ips))
 
 	// Ensure interface exists
@@ -6746,6 +6733,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		return &rpc.UpIpResponse{Success: false, Message: "invalid IP"}, nil
 	}
 
+	normalized, _ = canonicalTransferIPs(normalized)
 	// One call for the whole request, not one per address. AddExpectedIPs takes the
 	// monitor lock and calls TriggerEnforce — which starts an enforceExpectations
 	// *goroutine*, coalesced since #63 to one pass in flight and one queued. That
@@ -6789,7 +6777,18 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	}
 
 	attempts := placeRequestedIPs(req.Iface, normalized, heldOn, liveHeldOnIface,
-		network.BringIPdown, network.BringIPup)
+		func(iface, ip string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return network.BringIPdown(iface, ip)
+		},
+		func(iface, ip string) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return network.BringIPup(iface, ip)
+		})
 	summary := summarizeUpAttempts(attempts)
 
 	// Per address only for the outcome worth reading, as on the release path (#61).
@@ -6825,8 +6824,13 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// re-reads each address against the kernel immediately before its own arping,
 	// announcing what the interface holds and returning the rest as skipped: the
 	// kernel decides, at announce time.
-	if attempted := attemptedIPs(attempts); len(attempted) > 0 {
+	var announceErr error
+	if attempted := attemptedIPs(attempts); len(attempted) > 0 && ctx.Err() == nil {
 		skipped, err := network.SendGARPBatch(req.Iface, attempted)
+		announceErr = err
+		if announceErr == nil && len(skipped) > 0 {
+			announceErr = fmt.Errorf("%d addresses were absent during announcement", len(skipped))
+		}
 		if err != nil {
 			s.logger.Warn("BringUpIP: failed to announce some IPs", "iface", req.Iface, "error", err)
 		}
@@ -6840,21 +6844,17 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		}
 	}
 
-	// Abandoned on a genuine failure, as before, and after the announcement above:
-	// the addresses placed before it are on the interface either way. The failure
-	// is always the last attempt, since the loop stops at it.
-	if summary.Failed > 0 {
-		message := "failed to bring up IP"
-		if last := attempts[len(attempts)-1]; last.Err != nil {
-			message = last.Err.Error()
-		}
-		return &rpc.UpIpResponse{Success: false, Message: message}, nil
+	verified, failed := s.verifyLocalIPBatch(req.Iface, normalized, true)
+	// Drop only unconfirmed additions from the monitor cache. Confirmed partial
+	// placement remains recorded and can be retried without rolling back ownership.
+	if len(failed) > 0 {
+		s.ipMonitor.RemoveExpectedIPs(req.Iface, failed)
 	}
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
 	// call means the coordinator has assigned these IPs to us. Transition to
 	// Active so the ENFORCE loop doesn't immediately strip the IPs back off.
-	if s.config.Pulse.Mode == "active-active" {
+	if s.config.Pulse.Mode == "active-active" && len(verified) > 0 {
 		localID, err := s.config.GetLocalNodeUUID()
 		if err == nil {
 			localMember := s.memberList.GetMemberByID(localID)
@@ -6872,7 +6872,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 					// IPMonitor.deriveExpectedIPs matches against the configured group
 					// to decide what this node is still expected to hold, so an entry
 					// spelled differently there is an entry that expectation misses.
-					return current.WithAddresses(normalized...), true
+					return current.WithAddresses(verified...), true
 				})
 				// Logged after the decision returns, so nothing but the claim
 				// itself happens with the member lock held.
@@ -6906,17 +6906,27 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		}
 	}
 
-	return &rpc.UpIpResponse{Success: true, Message: "IPs brought up"}, nil
+	s.recordVerifiedIPs(s.currentConfig().Pulse.LocalNode, verified, true)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &rpc.UpIpResponse{Success: len(failed) == 0 && summary.Failed == 0 && announceErr == nil,
+		Message:             fmt.Sprintf("%d acquired, %d unverified, %d placement failures; announcement: %v", len(verified), len(failed), summary.Failed, announceErr),
+		VerificationVersion: ipVerificationVersion, VerifiedIps: verified, FailedIps: failed}, nil
 }
 
 // BringDownIP implements the Server.BringDownIP RPC for remote IP removal
 func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	s.logger.Infof("RPC BringDownIP on iface %s for %d IP(s)", req.Iface, len(req.Ips))
 
 	normalized, invalid := normalizeDownRequest(req.Ips)
-	for _, ip := range invalid {
-		s.logger.Warn("BringDownIP skipping invalid IP", "ip", ip)
+	if len(invalid) > 0 {
+		return &rpc.DownIpResponse{Success: false, Message: "invalid IP"}, nil
 	}
+	normalized, _ = canonicalTransferIPs(normalized)
 
 	// One call for the whole request, not one per address. RemoveExpectedIPs
 	// takes the monitor lock, logs the remaining expectation set, and calls
@@ -6959,7 +6969,12 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 		}
 	}
 
-	attempts := releaseRequestedIPs(req.Iface, normalized, heldHere, network.BringIPdownClassified)
+	attempts := releaseRequestedIPs(req.Iface, normalized, heldHere, func(iface, ip string) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return network.BringIPdownClassified(iface, ip)
+	})
 	summary := summarizeDownAttempts(attempts)
 
 	// Per address only for the outcome worth reading. The other three are
@@ -6977,24 +6992,16 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 			"released", summary.Released, "of", len(normalized))
 	}
 
-	// In active-active mode keep the local member's ActiveIPs bookkeeping in
-	// sync (mirror of BringUpIP) so a later monitor refresh doesn't resurrect
-	// IPs that were deliberately moved to another node.
-	if s.config.Pulse.Mode == "active-active" {
-		if localID, err := s.config.GetLocalNodeUUID(); err == nil {
-			if localMember := s.memberList.GetMemberByID(localID); localMember != nil {
-				// RemoveActiveIPs rather than a filter written out here. The two
-				// were the same loop apart from the LoadFactor recompute, and
-				// with that field gone there is nothing left to keep separate.
-				localMember.RemoveActiveIPs(req.Ips)
-			}
-		}
+	verified, failed := s.verifyLocalIPBatch(req.Iface, normalized, false)
+	// Only observed absence can remove ownership bookkeeping. A permission
+	// failure or unreadable interface inventory must retain an unresolved claim.
+	s.recordVerifiedIPs(s.currentConfig().Pulse.LocalNode, verified, false)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
-	if summary.Failed > 0 {
-		return &rpc.DownIpResponse{Success: true, Message: "Best-effort: some IPs may not have been present"}, nil
-	}
-	return &rpc.DownIpResponse{Success: true, Message: "IPs brought down"}, nil
+	return &rpc.DownIpResponse{Success: len(failed) == 0,
+		Message:             fmt.Sprintf("%d released, %d unverified", len(verified), len(failed)),
+		VerificationVersion: ipVerificationVersion, VerifiedIps: verified, FailedIps: failed}, nil
 }
 
 // InitiateJoin performs a server-driven join against a target member
@@ -7247,186 +7254,39 @@ func (s *Server) preflightBind(ip, port string) error {
 	return nil
 }
 
-// OrchestrateIPFailover moves a set of floating IPs from an old active node to a new active node.
-// It brings the IPs down on the old node first (best-effort) and then brings them up on the new node,
-// using the server's IP helper RPCs (or local equivalents) grouped per interface according to config.
+// OrchestrateIPFailover performs a cooperative transfer. A named source must
+// confirm release before any acquisition is requested. Empty source means an
+// acquisition whose takeover policy has already been decided by the caller;
+// it is not evidence that a missing owner has been fenced.
 func (s *Server) OrchestrateIPFailover(oldNodeID, newNodeID string, ips []string) error {
-	s.logger.Info("IP_FAILOVER: Starting orchestration",
-		"old_node", oldNodeID,
-		"new_node", newNodeID,
-		"ip_count", len(ips))
-
-	// Group IPs per interface for old and new nodes based on current configuration
-	oldIfaceToIPs, err := s.groupIPsByInterfaceForNode(oldNodeID, ips)
+	cfg := s.currentConfig()
+	requested, err := canonicalTransferIPs(ips)
 	if err != nil {
-		// Old node grouping failure should not block bringing IPs up elsewhere; log and continue
-		s.logger.Warn("IP_FAILOVER: Failed to map IPs to interfaces on old node", "node", oldNodeID, "error", err)
-		oldIfaceToIPs = map[string][]string{}
+		return err
 	}
-
-	newIfaceToIPs, err := s.groupIPsByInterfaceForNode(newNodeID, ips)
+	if len(requested) == 0 {
+		return nil
+	}
+	newPlan, err := planIPTransfer(cfg, newNodeID, requested)
 	if err != nil {
-		return fmt.Errorf("failed to map IPs to interfaces on new node: %w", err)
+		return fmt.Errorf("destination preflight: %w", err)
 	}
-
-	s.logger.Info("IP_FAILOVER: Grouped IPs by interface",
-		"old_node_interfaces", len(oldIfaceToIPs),
-		"new_node_interfaces", len(newIfaceToIPs))
-
-	// OPTIMIZATION: Parallelize bring-down operations across interfaces
-	// Best-effort: bring down IPs on old node per interface
-	if oldNodeID != "" && len(oldIfaceToIPs) > 0 {
-		s.logger.Info("IP_FAILOVER: Bringing down IPs on old node (parallel)",
-			"old_node", oldNodeID,
-			"interface_count", len(oldIfaceToIPs))
-
-		var wg sync.WaitGroup
-		for iface, ipList := range oldIfaceToIPs {
-			wg.Add(1)
-			go func(iface string, ipList []string) {
-				defer wg.Done()
-				if oldNodeID == s.config.Pulse.LocalNode {
-					// Local: call helper directly
-					if _, derr := s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ipList}); derr != nil {
-						s.logger.Warn("IP_FAILOVER: Failed to bring IPs down locally on old node", "iface", iface, "error", derr)
-					} else {
-						s.logger.Debug("IP_FAILOVER: Successfully brought down IPs locally", "iface", iface, "count", len(ipList))
-					}
-				} else {
-					if derr := s.bringIPsOnNodeDown(oldNodeID, iface, ipList); derr != nil {
-						s.logger.Warn("IP_FAILOVER: Failed to bring IPs down on old node", "node", oldNodeID, "iface", iface, "error", derr)
-					} else {
-						s.logger.Debug("IP_FAILOVER: Successfully brought down IPs remotely", "node", oldNodeID, "iface", iface, "count", len(ipList))
-					}
-				}
-			}(iface, ipList)
+	var oldPlan map[string][]string
+	if oldNodeID != "" && oldNodeID != newNodeID {
+		oldPlan, err = planIPTransfer(cfg, oldNodeID, requested)
+		if err != nil {
+			return fmt.Errorf("source preflight: %w", err)
 		}
-		wg.Wait()
-		s.logger.Info("IP_FAILOVER: Completed bringing down IPs on old node")
-	}
-
-	// OPTIMIZATION: Parallelize bring-up operations across interfaces
-	// Bring up IPs on new node per interface
-	if len(newIfaceToIPs) > 0 {
-		s.logger.Info("IP_FAILOVER: Bringing up IPs on new node (parallel)",
-			"new_node", newNodeID,
-			"interface_count", len(newIfaceToIPs))
-
-		type bringUpResult struct {
-			iface string
-			err   error
-		}
-		resultChan := make(chan bringUpResult, len(newIfaceToIPs))
-
-		var wg sync.WaitGroup
-		for iface, ipList := range newIfaceToIPs {
-			wg.Add(1)
-			go func(iface string, ipList []string) {
-				defer wg.Done()
-				var uerr error
-				if newNodeID == s.config.Pulse.LocalNode {
-					// Local: call helper directly
-					_, uerr = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ipList})
-					if uerr != nil {
-						s.logger.Error("IP_FAILOVER: Failed to bring IPs up locally", "iface", iface, "error", uerr)
-					} else {
-						s.logger.Debug("IP_FAILOVER: Successfully brought up IPs locally", "iface", iface, "count", len(ipList))
-					}
-				} else {
-					uerr = s.bringIPsOnNodeUp(newNodeID, iface, ipList)
-					if uerr != nil {
-						s.logger.Error("IP_FAILOVER: Failed to bring IPs up remotely", "node", newNodeID, "iface", iface, "error", uerr)
-					} else {
-						s.logger.Debug("IP_FAILOVER: Successfully brought up IPs remotely", "node", newNodeID, "iface", iface, "count", len(ipList))
-					}
-				}
-				resultChan <- bringUpResult{iface: iface, err: uerr}
-			}(iface, ipList)
-		}
-		wg.Wait()
-		close(resultChan)
-
-		// Check for any critical bring-up failures
-		var failedInterfaces []string
-		for result := range resultChan {
-			if result.err != nil {
-				failedInterfaces = append(failedInterfaces, result.iface)
-			}
-		}
-
-		if len(failedInterfaces) > 0 {
-			s.logger.Error("IP_FAILOVER: Some interfaces failed to bring up IPs",
-				"failed_interfaces", failedInterfaces,
-				"total_interfaces", len(newIfaceToIPs))
-			return fmt.Errorf("failed to bring up IPs on %d/%d interfaces: %v",
-				len(failedInterfaces), len(newIfaceToIPs), failedInterfaces)
-		}
-
-		s.logger.Info("IP_FAILOVER: Successfully brought up all IPs on new node")
-	}
-
-	// For local node, refresh expected IPs for the interfaces involved
-	if s.ipMonitor != nil && newNodeID == s.config.Pulse.LocalNode {
-		s.logger.Debug("IP_FAILOVER: Refreshing IP monitor expected IPs", "interface_count", len(newIfaceToIPs))
-		for iface := range newIfaceToIPs {
-			// Recompute from authoritative config, honouring this node's assignments.
-			// The BringUpIP above has already recorded the moved addresses per-IP, so
-			// in active-active this must not widen the set back out to the whole group.
-			ifaceIPs := s.expectedIfaceIPs(newNodeID, iface)
-			s.ipMonitor.ClearExpectedIPs(iface)
-			if len(ifaceIPs) > 0 {
-				s.ipMonitor.UpdateExpectedIPs(iface, ifaceIPs)
-			}
+		if err = s.transferInterfaces(cfg, oldNodeID, oldPlan, false); err != nil {
+			return fmt.Errorf("source release unconfirmed; destination not requested: %w", err)
 		}
 	}
-
-	s.logger.Info("IP_FAILOVER: Orchestration completed successfully")
+	if err = s.transferInterfaces(cfg, newNodeID, newPlan, true); err != nil {
+		return fmt.Errorf("destination acquisition incomplete (partial results retained): %w", err)
+	}
+	s.logger.Info("IP_FAILOVER: Verified requested address acquisition", "old_node", oldNodeID,
+		"new_node", newNodeID, "ip_count", len(requested), "source_verified", len(oldPlan) > 0)
 	return nil
-}
-
-// groupIPsByInterfaceForNode maps IPs to interfaces for a specific node based on group assignments
-func (s *Server) groupIPsByInterfaceForNode(nodeID string, ips []string) (map[string][]string, error) {
-	ifaceToIPs := make(map[string][]string)
-
-	nodeCfg := s.config.Nodes[nodeID]
-	if nodeCfg == nil {
-		return nil, fmt.Errorf("node configuration not found for %s", nodeID)
-	}
-
-	// Build map group->iface for this node
-	groupToIface := make(map[string]string)
-	for iface, groups := range nodeCfg.IPGroups {
-		for _, g := range groups {
-			groupToIface[g] = iface
-		}
-	}
-
-	// For each IP, find its group in config and interface on this node
-	for _, ip := range ips {
-		var groupName string
-		matched := false
-		for g, ipList := range s.config.Groups {
-			for _, gip := range ipList {
-				if gip == ip {
-					groupName = g
-					matched = true
-					break
-				}
-			}
-			if matched {
-				break
-			}
-		}
-		if !matched {
-			return nil, fmt.Errorf("no group found for IP %s", ip)
-		}
-		iface, ok := groupToIface[groupName]
-		if !ok || iface == "" {
-			return nil, fmt.Errorf("group %s not assigned to any interface on node %s", groupName, nodeID)
-		}
-		ifaceToIPs[iface] = append(ifaceToIPs[iface], ip)
-	}
-	return ifaceToIPs, nil
 }
 
 // Remote IP-batch deadline sizing.
@@ -7577,7 +7437,7 @@ func (s *Server) AnnounceNodeIPs(nodeID string) error {
 	for iface, ips := range plan {
 		if nodeID == localID {
 			ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
-			_, err = s.BringUpIP(ctx, &rpc.UpIpRequest{Iface: iface, Ips: ips})
+			err = s.transferIPBatch(ctx, s.currentConfig(), nodeID, iface, ips, true)
 			cancel()
 		} else {
 			err = s.bringIPsOnNodeUp(nodeID, iface, ips)
@@ -7603,42 +7463,9 @@ func (s *Server) AnnounceNodeIPs(nodeID string) error {
 
 // bringIPsOnNodeUp contacts a specific node and asks it to bring IPs up on the given interface
 func (s *Server) bringIPsOnNodeUp(nodeID, iface string, ips []string) error {
-	node := s.config.Nodes[nodeID]
-	if node == nil {
-		return fmt.Errorf("node configuration not found")
-	}
-	remoteClient, err := client.New()
-	if err != nil {
-		return err
-	}
-	defer remoteClient.Close()
-	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
-		return err
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), bringUpTimeoutFor(len(ips)))
 	defer cancel()
-	_, err = remoteClient.Server().BringUpIP(ctx, &rpc.UpIpRequest{Iface: iface, Ips: ips})
-	return err
-}
-
-// bringIPsOnNodeDown contacts a specific node and asks it to bring IPs down on the given interface
-func (s *Server) bringIPsOnNodeDown(nodeID, iface string, ips []string) error {
-	node := s.config.Nodes[nodeID]
-	if node == nil {
-		return fmt.Errorf("node configuration not found")
-	}
-	remoteClient, err := client.New()
-	if err != nil {
-		return err
-	}
-	defer remoteClient.Close()
-	if err := s.dialPeer(remoteClient, node.IP, node.Port); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), membership.DemotionTimeoutFor(len(ips)))
-	defer cancel()
-	_, err = remoteClient.Server().BringDownIP(ctx, &rpc.DownIpRequest{Iface: iface, Ips: ips})
-	return err
+	return s.transferIPBatch(ctx, s.currentConfig(), nodeID, iface, ips, true)
 }
 
 // GetClusterEpoch returns the current cluster epoch (term)

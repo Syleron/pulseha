@@ -248,6 +248,9 @@ message UpIpRequest {
 message UpIpResponse {
     bool success = 1;
     string message = 2;
+    uint32 verification_version = 3; // 1: fresh post-operation interface inventory
+    repeated string verified_ips = 4; // present on target iface (up), absent on node (down)
+    repeated string failed_ips = 5; // unresolved or failed; partitions request with verified_ips
 }
 
 message DownIpRequest {
@@ -258,6 +261,9 @@ message DownIpRequest {
 message DownIpResponse {
     bool success = 1;
     string message = 2;
+    uint32 verification_version = 3; // 1: fresh post-operation interface inventory
+    repeated string verified_ips = 4; // present on target iface (up), absent on node (down)
+    repeated string failed_ips = 5; // unresolved or failed; partitions request with verified_ips
 }
 
 // Health Check Request/Response
