@@ -270,6 +270,8 @@ message HealthCheckResponse {
     bool success = 1;
     string message = 2;
     string cluster_token = 3; // Receiver echoes its own token so caller can verify
+    string node_id = 4; // Identity of the responding node
+    MemberStatusEnum status = 5; // Its current role, not a role assigned by the caller
 }
 
 // Logs Request/Response

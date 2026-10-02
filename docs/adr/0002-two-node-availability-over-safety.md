@@ -49,8 +49,8 @@ node should stand down.
   by a node that cannot see its peer: the winner may be the node whose service network is the
   broken one, and it will claim addresses the other was serving perfectly well. It converts a
   duplicated address into a dark one, which is the failure this decision exists to refuse.
-  The implementation of this rule is present at `internal/membership/health_check.go` but is
-  unreachable from the two-node election path, and must stay that way.
+  Automatic elections bypass voting only for a configured one/two-node cluster. A degraded
+  larger cluster must obtain explicit votes from a configured majority, not use an ID tie-break.
 - **Neither node serves without confirmation.** Fail closed: a node that cannot prove it is the
   survivor releases everything. Gives a genuine single-owner guarantee and is what a cluster
   with shared storage would require. Rejected outright — a heartbeat glitch takes the whole

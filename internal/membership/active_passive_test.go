@@ -21,7 +21,10 @@ type stubServer struct {
 
 	// quorum is what GetQuorumManager hands back. nil by default, which is what
 	// every existing test wants.
-	quorum *quorum.QuorumManager
+	quorum       *quorum.QuorumManager
+	vote         func(string) error
+	promotions   []*rpc.PromoteRequest
+	promoteFails bool
 
 	leaderID         string
 	epoch            int64
@@ -82,11 +85,20 @@ func (s *stubServer) RequestConfigReconcile() { s.configReconciles++ }
 
 func (s *stubServer) BroadcastVoteRequest(sessionID string, voteType, subject, description string,
 	timeoutSeconds int64) error {
+	if s.quorum != nil {
+		if err := s.quorum.BindSessionEpoch(sessionID, s.epoch+1); err != nil {
+			return err
+		}
+	}
+	if s.vote != nil {
+		return s.vote(sessionID)
+	}
 	return nil
 }
 
 func (s *stubServer) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.PromoteResponse, error) {
-	return &rpc.PromoteResponse{Success: true}, nil
+	s.promotions = append(s.promotions, req)
+	return &rpc.PromoteResponse{Success: !s.promoteFails}, nil
 }
 
 func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (*rpc.MakePassiveResponse, error) {
