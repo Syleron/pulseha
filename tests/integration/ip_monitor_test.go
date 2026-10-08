@@ -17,8 +17,8 @@ func TestIPMonitoring(t *testing.T) {
 		t.Skip("integration tests run only on Linux")
 	}
 	// Skip if not running as root (needed for IP manipulation)
-	if !testutil.IsRoot() {
-		t.Skip("This test requires root privileges to run")
+	if !testutil.HasNetAdmin() {
+		t.Skip("This test requires CAP_NET_ADMIN to manage interface addresses")
 	}
 
 	// Create a new test cluster

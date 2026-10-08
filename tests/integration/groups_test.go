@@ -66,21 +66,6 @@ func TestGroupManagement(t *testing.T) {
 	require.NoError(t, err, "Failed to get group")
 	require.Equal(t, storedIPs, group, "Group IPs don't match")
 
-	// Manually test the GetActiveIPs functionality
-	t.Log("Testing GetActiveIPs functionality directly")
-
-	// Set node1 to active and check its active IPs
-	node1.SetStatus(testutils.StatusActive)
-	node1ActiveIPs := node1.GetActiveIPs()
-	t.Logf("Node1 active IPs: %v", node1ActiveIPs)
-
-	// Verify node1 has the expected IPs
-	for _, ip := range storedIPs {
-		if !contains(node1ActiveIPs, ip) {
-			t.Errorf("Expected node1 to have IP %s, but got active IPs: %v", ip, node1ActiveIPs)
-		}
-	}
-
 	// Fail over to node2, through the daemon rather than by flipping a field.
 	//
 	// This used to be two SetStatus calls, which write member.Status on the member
@@ -107,37 +92,45 @@ func TestGroupManagement(t *testing.T) {
 	err = node2.AssignGroupToInterface(groupName, "eth0")
 	require.NoError(t, err, "Failed to assign group to node2's interface")
 
-	t.Log("Failing over to node2 via the promotion RPC")
-	err = node2.PromoteNode(node2.Hostname, storedIPs)
-	require.NoError(t, err, "Failed to promote node2")
+	// Group configuration above is unprivileged. Address acquisition below
+	// needs NET_ADMIN; GetActiveIPs' configuration fallback is not kernel proof.
+	t.Run("privileged failover", func(t *testing.T) {
+		if !testutil.HasNetAdmin() {
+			t.Skip("address placement requires CAP_NET_ADMIN; isolated kernel/container tests cover this path")
+		}
+		t.Log("Failing over to node2 via the promotion RPC")
+		err = node2.PromoteNode(node2.Hostname, storedIPs)
+		require.NoError(t, err, "Failed to promote node2")
 
-	// Poll rather than sleep: promotion is asynchronous on the daemon side, so a
-	// fixed wait asserts at one arbitrary instant and lets a loaded runner decide
-	// the result.
-	var node2ActiveIPs []string
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		node2ActiveIPs = node2.GetActiveIPs()
-		missing := false
-		for _, ip := range storedIPs {
-			if !contains(node2ActiveIPs, ip) {
-				missing = true
+		// Poll rather than sleep: promotion is asynchronous on the daemon side, so a
+		// fixed wait asserts at one arbitrary instant and lets a loaded runner decide
+		// the result.
+		var node2ActiveIPs []string
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			node2ActiveIPs = node2.GetActiveIPs()
+			missing := false
+			for _, ip := range storedIPs {
+				if !contains(node2ActiveIPs, ip) {
+					missing = true
+					break
+				}
+			}
+			if !missing {
 				break
 			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		if !missing {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	t.Logf("Node2 active IPs: %v", node2ActiveIPs)
+		t.Logf("Node2 active IPs: %v", node2ActiveIPs)
 
-	// Verify node2 has taken over the IPs
-	for _, ip := range storedIPs {
-		if !contains(node2ActiveIPs, ip) {
-			t.Errorf("Expected node2 to have IP %s after failover, but got active IPs: %v", ip, node2ActiveIPs)
+		// Verify node2 has taken over the IPs
+		for _, ip := range storedIPs {
+			if !contains(node2ActiveIPs, ip) {
+				t.Errorf("Expected node2 to have IP %s after failover, but got active IPs: %v", ip, node2ActiveIPs)
+			}
 		}
-	}
+
+	})
 
 	// Clean up
 	cluster.StopNode(node1.Hostname)
@@ -194,7 +187,7 @@ func TestGroupIPRemoval(t *testing.T) {
 	group, err = node1.GetGroup(groupName)
 	require.NoError(t, err, "Failed to get group")
 	require.NotContains(t, group, storedIPs[0], "Group should not contain the removed IP")
-	require.Contains(t, group, ips[1], "Group should still contain the other IP")
+	require.Contains(t, group, storedIPs[1], "Group should still contain the other IP")
 }
 
 // Helper function to check if a slice contains a string

@@ -135,3 +135,24 @@ race; it is not counted as a partition pass. The harness now bootstraps node1 in
 maintenance so node2 wins the startup election, then returns node1 to Passive
 and verifies stable ownership before introducing a fault. This isolates the
 asymmetric-link case without claiming the separate handoff race is resolved.
+
+
+CI follow-up: the status-agreement integration fixture used a zero failover grace
+and a 1ms polling loop. Logs showed it declaring its own Active unreachable after
+about a millisecond (`failOverLimit=0`). It also replayed raw join states outside
+ConfigSync and used a join token different from the configured node token. The
+fixture now supplies a 10-second grace and 50ms cadence, shares its token, applies
+received states through ConfigSync and uses locked setters for its initial role
+seeds. The original status-agreement assertions passed twenty Linux repetitions;
+no expected status was weakened.
+
+The same fixture audit exposed address-placement assertions without NET_ADMIN
+and a bare-IP versus canonical-CIDR assertion mismatch. Group CRUD/assignment
+checks still run unprivileged; the failover subtest and physical-address tests
+now check CAP_NET_ADMIN rather than assuming UID 0 can modify interfaces. The
+surviving-IP assertion checks the stored CIDR form. The full applicable suite
+passed both as a CI-equivalent non-root user and as container root without
+NET_ADMIN. Capability-dependent tests are not claimed as exercised by those
+runs: real address ownership is covered by the separate isolated kernel and
+four-container tests above. The full legacy suite with NET_ADMIN is not claimed
+as validated here.
