@@ -180,19 +180,23 @@ func TestActiveActiveMode(t *testing.T) {
 	// Wait for health checks to run
 	time.Sleep(1 * time.Second)
 
-	// Check the statuses of both nodes
-	// In active-active mode, all eligible nodes should be active
-	requireMemberStatus(t, node1, node1.Hostname, "active", "Node1 should be active in active-active mode")
-	requireMemberStatus(t, node2, node2.Hostname, "active",
-		"Node2 should be active in active-active mode")
+	// This in-process fixture shares one host network namespace, and CI has
+	// no NET_ADMIN. Group assignment accepts configuration; it cannot prove
+	// successful placement. A failed acquisition must not be turned into an
+	// Active destination just to satisfy this test. Both Active and Passive
+	// members are eligible rebalance candidates; Unknown/Maintenance are not.
+	for _, node := range []*testutils.TestNode{node1, node2} {
+		require.Eventually(t, func() bool {
+			status := node.GetMemberStatus(node.Hostname)
+			return status == "active" || status == "passive"
+		}, statusSettleTimeout, 50*time.Millisecond, "node must remain a healthy rebalance candidate")
+		cfg := node.Server.GetMemberList().Config()
+		require.ElementsMatch(t, []string{"10.0.0.1/32", "10.0.0.2/32"}, cfg.Groups["group1"])
+	}
+	// GetActiveIPs has a configuration-based fallback in this fixture, so it
+	// is not evidence of kernel ownership. TestIPTransferKernel exercises
+	// actual RPC placement, wrong-interface refusal and release in isolation.
 
-	// Log the active IPs from both nodes
-	t.Logf("Node1 active IPs: %v", node1.GetActiveIPs())
-	t.Logf("Node2 active IPs: %v", node2.GetActiveIPs())
-
-	// Verify that at least one node has active IPs
-	allActiveIPs := append(node1.GetActiveIPs(), node2.GetActiveIPs()...)
-	require.NotEmpty(t, allActiveIPs, "At least one node should have active IPs")
 }
 
 // END-2289. Two nodes in one healthy cluster published contradictory views of
