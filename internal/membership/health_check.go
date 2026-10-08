@@ -463,6 +463,9 @@ func (h *HealthChecker) performHealthChecks() {
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
 			verdict, role := h.membershipOf(member)
 			reportedRole = role
+			if verdict == membershipConfirmed && role != StatusUnknown {
+				member.ObserveRole(role, time.Now())
+			}
 
 			// Only a confirmed membership counts as reachable. Neither a
 			// rejection nor an unresolved check falls back to the TCP dial: a

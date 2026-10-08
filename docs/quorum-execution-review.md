@@ -74,5 +74,44 @@ samples, with zero dark or dual-holder samples. A separate service-only probe
 received all 206 ICMP packets. Logs confirmed coordinator-to-incumbent failures
 and another peer recovering the incumbent's reported Active role. An earlier run
 changed owners during setup and was discarded because its cut missed the actual
-incumbent. This one-address bridge test validates the reported regression; it is
+incumbent. This single successful run was insufficient: the 5 October review reproduced
+dual ownership on the same revision. It is
 not a full fencing, reboot, or large-address-set acceptance test.
+
+
+## Follow-up: independent voter health evidence (8 October 2026)
+
+The remaining failure crossed four boundaries: Unknown gossip overwrote a
+voter's directly observed Active role; the vote read that converged field alone;
+the worker treated its own failed socket probe plus a majority as sufficient;
+and acquisition ran with an empty source while the incumbent still held its IPs.
+
+Acceptance now includes bounded direct role probes at each voter. Reachable
+Active/unknown/legacy/unresponsive peers deny the vote. Recent direct Active
+observations are stored separately from gossip, protect peer roles from Unknown
+updates and survive failed transport probes until the configured grace expires.
+TCP success cannot renew that evidence. No network I/O runs under membership or
+server/config locks. The certificate synchronization test now joins its async
+reconfiguration before test configuration cleanup.
+
+The real-gRPC regression applies Unknown ConfigSync before requesting a vote,
+including a four-node topology where only the proposer cannot reach the Active.
+Running these tests against the previous voting/ConfigSync code with a Go overlay
+reproduced the erroneous grant and a three-YES majority. The corrected tests
+also cover actual unavailability, expired direct evidence, reachable unknown and
+legacy roles, wedged RPCs, and caller cancellation.
+
+The opt-in Linux test is reproducible with:
+
+```sh
+docker build -f docker/test/Dockerfile -t pulseha-pr263-review .
+python3 docker/test/check-asymmetric-election.py
+```
+
+It uses separate cluster and service networks, samples actual kernel addresses
+through repeated coordinator/incumbent cuts and heals, and then verifies takeover
+with the incumbent stopped and its addresses explicitly removed. That last
+control tests availability, not fencing of a killed process's retained addresses.
+The harness prints its retained logs/samples directory and cleans up only its own
+containers/networks. Arbitrary partitions and stale asynchronous writers remain
+outside this fix's ownership guarantee.

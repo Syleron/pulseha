@@ -14,7 +14,16 @@ local decision path as a peer.
 
 Peers check the electorate, deadline and epoch against their own view. A
 node-status proposal names the candidate; a peer refuses it when the candidate
-is not Passive or an Active is still known. An IP-redistribution proposal carries
+is not Passive or an Active is still known. Before accepting a node-status
+proposal, each voter also probes every other non-candidate peer directly. The
+parallel checks share an 800ms budget inside the existing one-second accept
+phase and honor caller cancellation. A peer that answers TCP must provide an
+identified, matching-cluster Passive or Maintenance health reply; Active,
+Unknown, legacy replies and a wedged RPC refuse the vote. Failed TCP probes do
+not erase direct Active evidence retained for the configured failover grace.
+These are local observations, independent of the proposer's gossip.
+
+An IP-redistribution proposal carries
 the JSON list of addresses in `subject`, rather than just their count. A peer
 refuses unknown addresses or addresses still claimed by a member not beyond its
 failure grace period. Generic configuration-change descriptions are not enough
@@ -97,11 +106,16 @@ remain the owner when only its link to the coordinator fails; a peer reporting
 Passive still needs an election before promotion. This applies with auto-failback
 both enabled and disabled. ConfigSync ignores Unknown observations about the
 receiving node itself, preserving its actual role for health replies; explicit
-higher-epoch Passive demotions still apply.
+higher-epoch Passive demotions still apply. Recent direct Active observations
+also protect peer roles against Unknown gossip, expire after `fo_limit`, and are
+renewed only by identified role replies, never by TCP reachability alone.
 
 Older HealthCheck responses omit the responder identity and role. Such a peer
 can remain Unknown until a role-bearing health reply or an existing config-state
-update arrives; no role is invented from reachability. Upgrade all members for
+update arrives; no role is invented from reachability. A reachable peer with
+such a legacy reply blocks the new election acceptance check, even if upgraded
+voters could otherwise form a majority. This is a deliberate fail-closed rollout
+cost: upgrade all members for
 this recovery behavior. A peer's self-report is not a fencing proof or a new
 ownership grant, and it does not solve stale asynchronous operations.
 

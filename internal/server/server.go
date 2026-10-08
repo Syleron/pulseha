@@ -5877,6 +5877,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				// live verification is grep-based (docs/TEST-PLAN.md passim), so
 				// moving the log surface would cost more than the shorter
 				// critical section is worth.
+				// A sender's reachability failure does not invalidate our own
+				// recent, identified observation of an Active incumbent.
+				if id != syncLocalID && st == membership.StatusUnknown &&
+					m.RecentlyReportedActive(time.Now(), time.Duration(statesCfg.Pulse.FailOverLimit)*time.Millisecond) {
+					continue
+				}
 				m.UpdateClaim(func(current membership.Claim) (membership.Claim, bool) {
 					// Peers must not override the local node's maintenance state;
 					// only the local daemon controls its own maintenance flag.

@@ -87,10 +87,10 @@ func (s *Server) RequestVote(ctx context.Context, req *rpc.RequestVoteRequest) (
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return s.decideVote(cfg, req), nil
+	return s.decideVote(ctx, cfg, req), nil
 }
 
-func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rpc.RequestVoteResponse {
+func (s *Server) decideVote(ctx context.Context, cfg *config.Config, req *rpc.RequestVoteRequest) *rpc.RequestVoteResponse {
 	resp := &rpc.RequestVoteResponse{SessionId: req.SessionId, VoterId: cfg.Pulse.LocalNode, Epoch: req.Epoch, ProtocolVersion: 2, Phase: req.Phase, Ballot: req.Ballot}
 	deny := func(reason string) *rpc.RequestVoteResponse { resp.Reason = reason; return resp }
 	ids := votingMembers(cfg)
@@ -139,6 +139,9 @@ func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rp
 					return deny("an active node is still known")
 				}
 			}
+			if err := s.checkElectionIncumbents(ctx, cfg, req.Subject); err != nil {
+				return deny(err.Error())
+			}
 		case quorum.VoteTypeIPRedistribution:
 			var ips []string
 			if json.Unmarshal([]byte(req.Subject), &ips) != nil || len(ips) == 0 {
@@ -177,6 +180,9 @@ func (s *Server) decideVote(cfg *config.Config, req *rpc.RequestVoteRequest) *rp
 	}
 	// No server/config locks are held across disk I/O. Serialize the durable
 	// promise and acceptance before replying, including our own local ballot.
+	if ctx.Err() != nil || !time.Now().Before(time.UnixMilli(req.ExpiresAtUnixMilli)) {
+		return deny("proposal expired during incumbent checks")
+	}
 	s.voteMu.Lock()
 	defer s.voteMu.Unlock()
 	if err := s.loadVotesLocked(cfg); err != nil {
@@ -340,7 +346,7 @@ func (s *Server) collectVotePhase(ctx context.Context, cfg *config.Config, req *
 				return
 			}
 			if id == cfg.Pulse.LocalNode {
-				resp = s.decideVote(cfg, req)
+				resp = s.decideVote(ctx, cfg, req)
 			} else {
 				node := cfg.Nodes[id]
 				c, err := client.New()
