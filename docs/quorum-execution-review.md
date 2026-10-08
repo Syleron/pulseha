@@ -115,3 +115,14 @@ control tests availability, not fencing of a killed process's retained addresses
 The harness prints its retained logs/samples directory and cleans up only its own
 containers/networks. Arbitrary partitions and stale asynchronous writers remain
 outside this fix's ownership guarantee.
+
+
+Validation on 8 October: the full race-enabled internal/package/command/unit
+suites passed on macOS and Linux; vet passed. The new election regressions also
+passed ten repeated race runs, and the post-probe role-change regressions passed
+five repeated race runs. A four-node Linux run completed three 35-second
+coordinator/incumbent cuts, each followed by 20 seconds of healing. All 136 cut
+samples and 78 heal samples retained node2 as the sole kernel-address holder.
+After stopping node2 and explicitly removing its address, node1 acquired it and
+remained the sole holder in 13 further samples. These are sampled observations,
+not a guarantee against sub-sample overlap or arbitrary network partitions.

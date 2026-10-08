@@ -15,14 +15,18 @@ import (
 
 type electionHealthPeer struct {
 	rpc.UnimplementedServerServer
-	reply *rpc.HealthCheckResponse
-	hang  bool
+	reply    *rpc.HealthCheckResponse
+	hang     bool
+	onHealth func()
 }
 
 func (p *electionHealthPeer) HealthCheck(ctx context.Context, _ *rpc.HealthCheckRequest) (*rpc.HealthCheckResponse, error) {
 	if p.hang {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if p.onHealth != nil {
+		p.onHealth()
 	}
 	return p.reply, nil
 }
@@ -177,5 +181,20 @@ func TestElectionProbeHonorsCallerDeadline(t *testing.T) {
 	}
 	if time.Since(start) > 300*time.Millisecond {
 		t.Fatal("caller deadline ignored")
+	}
+}
+
+func TestElectionRechecksRolesAfterProbe(t *testing.T) {
+	for _, changed := range []string{"a", "b"} {
+		s := newVotingServer(t, "b")
+		peer := &electionHealthPeer{reply: &rpc.HealthCheckResponse{Success: true, NodeId: "c", ClusterToken: s.config.Pulse.ClusterToken, Status: rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE}, onHealth: func() { s.memberList.GetMemberByID(changed).SetStatus(membership.StatusActive) }}
+		setVoterAddress(t, s, "c", serveVoter(t, peer))
+		r := voteRequest(s)
+		r.VoteType = "node_status"
+		r.Subject = "a"
+		resp, err := preparedTestVote(s, r)
+		if err != nil || resp.Granted {
+			t.Fatalf("role changed for %s during probe: %+v %v", changed, resp, err)
+		}
 	}
 }

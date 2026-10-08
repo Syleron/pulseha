@@ -47,7 +47,25 @@ func (s *Server) checkElectionIncumbents(ctx context.Context, cfg *config.Config
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	return first
+	if first != nil {
+		return first
+	}
+	// Network I/O allowed roles to change. Revalidate the current view and
+	// independently retained observations before granting this acceptance.
+	grace := time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
+	for id, m := range s.memberList.MembersSnapshot() {
+		if id == candidate {
+			if m.GetStatus() != membership.StatusPassive {
+				return fmt.Errorf("candidate changed role during incumbent checks")
+			}
+		} else if m.GetStatus() == membership.StatusActive || m.RecentlyReportedActive(time.Now(), grace) {
+			return fmt.Errorf("member %s became Active during incumbent checks", id)
+		}
+	}
+	if local.GetStatus() == membership.StatusUnknown {
+		return fmt.Errorf("local voter became unavailable")
+	}
+	return nil
 }
 
 func (s *Server) checkElectionPeer(ctx context.Context, cfg *config.Config, id string, node *config.Node) error {
