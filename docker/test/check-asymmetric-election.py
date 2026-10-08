@@ -89,6 +89,9 @@ try:
     nodes = {ids[i-1]: {'hostname': 'node'+str(i), 'bind_address': f'10.186.0.{i+10}',
              'bind_port': '8080', 'group_assignments': {interfaces[i]: ['test']}}
              for i in range(1, 5)}
+    # Bootstrap node2 as incumbent without racing an explicit ownership handoff.
+    # Node1 rejoins eligibility before any baseline or fault samples.
+    nodes[ids[0]]['maintenance'] = True
     for i, name in enumerate(names, 1):
         cfg = {'pulseha': {'local_node': ids[i-1], 'cluster_token': 'isolated-regression-token',
                 'mode': 'active-passive', 'hcs_interval': 1000, 'fos_interval': 5000,
@@ -100,7 +103,6 @@ try:
     for name in names:
         docker('exec', '-d', name, 'sh', '-c', 'exec pulseha > /tmp/daemon.log 2>&1')
     time.sleep(15)
-    print(execute(2, 'pulsectl', 'node', 'promote', '--node-id', ids[1]), flush=True)
     deadline = time.monotonic()+90
     consecutive = 0
     while time.monotonic() < deadline:
@@ -110,6 +112,8 @@ try:
         time.sleep(1)
     else:
         raise AssertionError('node2 never became the stable sole holder')
+    print(execute(1, 'pulsectl', 'node', 'maintenance', '--disable'), flush=True)
+    measure('coordinator-eligible', 15, [2])
     for r in range(1, a.rounds+1):
         measure(f'baseline-{r}', 5, [2])
         cut('-I')

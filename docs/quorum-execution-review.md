@@ -126,3 +126,12 @@ samples and 78 heal samples retained node2 as the sole kernel-address holder.
 After stopping node2 and explicitly removing its address, node1 acquired it and
 remained the sole holder in 13 further samples. These are sampled observations,
 not a guarantee against sub-sample overlap or arbitrary network partitions.
+
+
+The combined #264 run initially failed to establish node2 as its baseline owner:
+an explicit promotion raced a new node1 election and consolidation returned the
+addresses to node1. This matches the already reported manual-handoff/stale-worker
+race; it is not counted as a partition pass. The harness now bootstraps node1 in
+maintenance so node2 wins the startup election, then returns node1 to Passive
+and verifies stable ownership before introducing a fault. This isolates the
+asymmetric-link case without claiming the separate handoff race is resolved.
