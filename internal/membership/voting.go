@@ -25,7 +25,23 @@ func (h *HealthChecker) requestQuorumDecision(kind quorum.VoteType, subject, des
 		return nil, false
 	}
 	result, err := manager.GetVotingSession(id)
-	return result, err == nil && result.Result != nil && result.Result.Passed && result.Result.QuorumMet && time.Now().Before(result.EndTime)
+	if err != nil || result.Result == nil || !result.Result.Passed || !result.Result.QuorumMet || !time.Now().Before(result.EndTime) || result.Epoch != h.server.GetClusterEpoch()+1 {
+		return nil, false
+	}
+	cfg := h.members.Config()
+	if cfg == nil {
+		return nil, false
+	}
+	cfg.Lock()
+	ids := make([]string, 0, len(cfg.Nodes))
+	for id, node := range cfg.Nodes {
+		if id != "" && node != nil {
+			ids = append(ids, id)
+		}
+	}
+	cfg.Unlock()
+	sort.Strings(ids)
+	return result, slices.Equal(ids, result.MemberIDs)
 }
 
 func (h *HealthChecker) approvedRedistribution(ips []string) ([]string, bool) {

@@ -2,7 +2,9 @@ package testutil
 
 import (
 	"net"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -52,6 +54,23 @@ func Contains(slice []string, item string) bool {
 	for _, s := range slice {
 		if s == item {
 			return true
+		}
+	}
+	return false
+}
+
+// HasNetAdmin checks the capability required for Linux address placement.
+// Root inside a container does not necessarily have this capability.
+func HasNetAdmin() bool {
+	data, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "CapEff:" {
+			caps, err := strconv.ParseUint(fields[1], 16, 64)
+			return err == nil && caps&(1<<12) != 0
 		}
 	}
 	return false

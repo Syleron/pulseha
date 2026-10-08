@@ -220,7 +220,7 @@ type HealthChecker struct {
 	// enforce and now: the real thing needs a network, and what needs testing
 	// here is what the caller does with the answer rather than how it is
 	// obtained. nil in the daemon, which uses the method.
-	deepCheck       func(*Member) membershipVerdict
+	deepCheck       func(*Member) (membershipVerdict, MemberStatus)
 	reconcileCycles int // cycles since startup; reconciliation waits for a grace period
 
 	// reconcileInFlight guards the reconciliation pass, which runs off the tick.
@@ -451,6 +451,7 @@ func (h *HealthChecker) performHealthChecks() {
 		// see membershipUnresolved for why that distinction is not the same one.
 		startTime := time.Now()
 		var isReachable bool
+		reportedRole := StatusUnknown
 		// The scheduled deep check, or the single immediate retry a node earns
 		// when it first becomes unresolved. Per member, not per pass: one slow
 		// peer must not drag every other node onto the expensive path.
@@ -460,7 +461,11 @@ func (h *HealthChecker) performHealthChecks() {
 			// which costs nothing.
 			delete(h.membershipRetry, member.ID)
 			h.logger.Debugf("About to deep-check cluster membership for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-			verdict := h.membershipOf(member)
+			verdict, role := h.membershipOf(member)
+			reportedRole = role
+			if verdict == membershipConfirmed && role != StatusUnknown {
+				member.ObserveRole(role, time.Now())
+			}
 
 			// Only a confirmed membership counts as reachable. Neither a
 			// rejection nor an unresolved check falls back to the TCP dial: a
@@ -572,30 +577,20 @@ func (h *HealthChecker) performHealthChecks() {
 		autoFailback := hcCfg.Pulse.AutoFailback
 		mode := hcCfg.Pulse.Mode
 
-		if wasUnknown && autoFailback {
-			switch mode {
-			case "active-passive":
-				activeExists := false
-				for _, otherMember := range membersSnapshot {
-					if otherMember.ID != member.ID && otherMember.Status == StatusActive {
-						activeExists = true
-						break
-					}
-				}
-				if !activeExists {
-					member.Status = StatusActive
-					statusChanges = append(statusChanges, fmt.Sprintf("%s promoted to active", member.Hostname))
-				} else {
-					member.Status = StatusPassive
-					statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
-				}
-			case "active-active":
-				member.Status = StatusActive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to active", member.Hostname))
-			default:
-				member.Status = StatusPassive
-				statusChanges = append(statusChanges, fmt.Sprintf("%s restored to passive", member.Hostname))
+		if mode == "active-passive" {
+			// A successful TCP dial proves neither a role nor ownership. Only a
+			// fresh, identified health reply may recover an Unknown peer's role.
+			// Never overwrite a role that changed while the probe was in flight.
+			// In particular, reachability alone must neither promote a Passive
+			// nor demote an existing Active (including when auto_failback is on).
+			if member.Status == StatusUnknown && reportedRole != StatusUnknown {
+				member.Status = reportedRole
+				statusChanges = append(statusChanges, fmt.Sprintf("%s reports %s after recovery",
+					member.Hostname, StatusToString(reportedRole)))
 			}
+		} else if wasUnknown && autoFailback {
+			member.Status = recoveredStatus(mode)
+			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
 			member.Status = recoveredStatus(mode)
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
@@ -1833,54 +1828,8 @@ func (h *HealthChecker) electNewActiveNode() {
 
 	h.logger.Infof("ELECTION: Selected candidate: %s", bestCandidate.Hostname)
 
-	// Step 3: Try voting first, then promote directly if voting fails
-	if votedCandidate, voted := h.votedElectionCandidate(bestCandidate); voted {
-		bestCandidate = votedCandidate
-		h.logger.Info("ELECTION: Voting election succeeded, promoting candidate")
-		if h.tryForcePromote(bestCandidate) {
-			return
-		}
-		// Explicitly set status after successful voting
-		bestCandidate.mu.Lock()
-		bestCandidate.Status = StatusActive
-		bestCandidate.mu.Unlock()
-		h.logger.Infof("ELECTION: Promoted %s to Active after successful vote", bestCandidate.Hostname)
-
-		// Trigger IP refresh to bring up VIPs after successful voting
-		if h.server != nil {
-			h.logger.Info("HEALTH_CHECK: Triggering IP refresh after voting success to bring up VIPs")
-			h.server.RefreshLocalMonitorExpectedIPs()
-		}
-	} else {
-		h.logger.Info("ELECTION: Voting failed, checking if active node appeared before direct promotion")
-		if h.tryForcePromote(bestCandidate) {
-			return
-		}
-
-		// CRITICAL: Re-check if an active node appeared while we were voting
-		// This prevents multiple nodes from promoting themselves simultaneously
-		if activeNode := h.findActiveNode(); activeNode != nil {
-			h.logger.Info("ELECTION: Active node appeared during voting, aborting promotion", "activeNode",
-				activeNode.Hostname)
-			return
-		}
-
-		h.logger.Info("ELECTION: No active node found, promoting candidate directly")
-		// Since we've already coordinated with deterministic backoff, this node
-		// is the designated winner and can promote the candidate directly
-		bestCandidate.mu.Lock()
-		bestCandidate.Status = StatusActive
-		bestCandidate.mu.Unlock()
-		h.logger.Infof("ELECTION: Promoted %s to Active", bestCandidate.Hostname)
-
-		// Trigger IP refresh to bring up VIPs after promotion
-		// This is needed because we disabled automatic refresh in ConfigSync to prevent GARP storms
-		// but we still need to bring up VIPs when a node becomes Active after failover
-		if h.server != nil {
-			h.logger.Info("HEALTH_CHECK: Triggering IP refresh after promotion to bring up VIPs")
-			h.server.RefreshLocalMonitorExpectedIPs()
-		}
-	}
+	// Every automatic path shares the vote gate and the non-forced RPC path.
+	h.tryAutomaticPromotion(bestCandidate)
 }
 
 // findElectionCoordinator returns the ID of the node that should coordinate elections
@@ -2004,48 +1953,10 @@ func (h *HealthChecker) waitForCoordinatorElection() {
 func (h *HealthChecker) attemptVotingElection(candidate *Member) bool {
 	h.logger.Debug("Attempting voting-based election")
 
-	// Count available nodes for voting
-	availableCount := 0
-	for _, member := range h.members.MembersSnapshot() {
-		member.mu.Lock()
-		status := member.Status
-		member.mu.Unlock()
-		if status == StatusPassive || status == StatusUnknown {
-			availableCount++
-		}
-	}
-
-	if availableCount < 3 {
-		h.logger.Debug("Less than 3 nodes available, skipping voting")
+	if candidate == nil {
 		return false
 	}
-
-	// Try existing quorum voting with short timeout
-	h.logger.Debug("Starting quorum vote with timeout")
-	if h.server != nil && h.server.GetQuorumManager() != nil {
-		// Use existing voting but with timeout monitoring
-		done := make(chan bool, 1)
-		go func() {
-			result := h.initiateNodeStatusVote(candidate.ID, StatusActive)
-			done <- result
-		}()
-
-		// Wait for vote or timeout
-		select {
-		case result := <-done:
-			if result {
-				h.logger.Debug("Voting succeeded")
-				return true
-			}
-			h.logger.Debug("Voting failed")
-			return false
-		case <-time.After(8 * time.Second):
-			h.logger.Debug("Voting timed out")
-			return false
-		}
-	}
-
-	return false
+	return h.initiateNodeStatusVote(candidate.ID, StatusActive)
 }
 
 // emergencyFallback handles the case where even coordinator fails
@@ -2073,20 +1984,7 @@ func (h *HealthChecker) emergencyFallback() {
 
 	h.logger.Info("Emergency fallback: This node is coordinator, promoting best candidate")
 	candidate := h.selectBestCandidate()
-	if candidate != nil {
-		candidate.mu.Lock()
-		candidate.Status = StatusActive
-		candidate.mu.Unlock()
-		h.logger.Infof("Emergency fallback: Promoted %s to Active", candidate.Hostname)
-
-		// Trigger IP refresh to bring up VIPs after emergency promotion
-		if h.server != nil {
-			h.logger.Info("HEALTH_CHECK: Triggering IP refresh after emergency fallback to bring up VIPs")
-			h.server.RefreshLocalMonitorExpectedIPs()
-		}
-	} else {
-		h.logger.Error("Emergency fallback failed: no candidates available")
-	}
+	h.tryAutomaticPromotion(candidate)
 }
 
 // findActiveNode returns the current active node
@@ -2104,11 +2002,11 @@ func (h *HealthChecker) findActiveNode() *Member {
 // rejects the token, or is running in a different cluster.
 // membershipOf runs the deep membership check, through the test seam when one
 // is installed.
-func (h *HealthChecker) membershipOf(member *Member) membershipVerdict {
+func (h *HealthChecker) membershipOf(member *Member) (membershipVerdict, MemberStatus) {
 	if h.deepCheck != nil {
 		return h.deepCheck(member)
 	}
-	return h.checkClusterMembership(member)
+	return h.probeClusterMembership(member)
 }
 
 // membershipVerdict is what a deep membership check concluded, as distinct from
@@ -2153,26 +2051,31 @@ func (v membershipVerdict) String() string {
 }
 
 func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict {
+	verdict, _ := h.probeClusterMembership(member)
+	return verdict
+}
+
+func (h *HealthChecker) probeClusterMembership(member *Member) (membershipVerdict, MemberStatus) {
 	if member.IP == "" || member.Port == "" {
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	cfg := h.members.Config()
 	if cfg == nil {
 		h.logger.Warn("checkClusterMembership: no config")
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	localToken := cfg.Pulse.ClusterToken
 	localNodeID, err := cfg.GetLocalNodeUUID()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to get local node ID: %v", err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	remoteClient, err := client.New()
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to create client: %v", err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	defer remoteClient.Close()
 
@@ -2180,12 +2083,12 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 	if err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to build TLS credentials for %s: %v",
 			member.Hostname, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 	if err := remoteClient.Connect(member.IP, member.Port, creds); err != nil {
 		h.logger.Warnf("checkClusterMembership: failed to connect to %s (%s:%s): %v",
 			member.Hostname, member.IP, member.Port, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -2200,7 +2103,7 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 		// Unavailable from a dead one are indistinguishable here, and neither is
 		// a statement about which cluster the peer belongs to.
 		h.logger.Warnf("checkClusterMembership: gRPC call to %s failed: %v", member.Hostname, err)
-		return membershipUnverified
+		return membershipUnverified, StatusUnknown
 	}
 
 	if !resp.Success {
@@ -2208,16 +2111,28 @@ func (h *HealthChecker) checkClusterMembership(member *Member) membershipVerdict
 		// which on an appliance whose node id is re-minted by `lbcli setup` is a
 		// real and asymmetric condition worth latching.
 		h.logger.Warnf("checkClusterMembership: %s rejected membership check: %s", member.Hostname, resp.Message)
-		return membershipRejected
+		return membershipRejected, StatusUnknown
 	}
 
 	// Verify the remote node echoes a matching token (detects split-cluster scenarios)
 	if localToken != "" && resp.ClusterToken != "" && resp.ClusterToken != localToken {
 		h.logger.Warnf("checkClusterMembership: %s is in a different cluster (token mismatch)", member.Hostname)
-		return membershipRejected
+		return membershipRejected, StatusUnknown
 	}
 
-	return membershipConfirmed
+	// Missing identity/role (old binaries) cannot authorize a role transition.
+	role := StatusUnknown
+	if resp.NodeId == member.ID {
+		switch resp.Status {
+		case rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE:
+			role = StatusActive
+		case rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE:
+			role = StatusPassive
+		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
+			role = StatusMaintenance
+		}
+	}
+	return membershipConfirmed, role
 }
 
 // checkNodeConnectivity verifies basic node connectivity
@@ -2324,219 +2239,11 @@ func (h *HealthChecker) checkIP(ip string) HealthCheck {
 // initiateNodeStatusVote initiates a quorum vote for a node status change
 // Returns true if the vote passes or if quorum voting is not applicable
 func (h *HealthChecker) initiateNodeStatusVote(nodeID string, newStatus MemberStatus) bool {
-	maxRetries := 3
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		h.logger.Infof("Initiating vote for node %s status change to %s (attempt %d/%d)", nodeID,
-			statusToString(newStatus), attempt, maxRetries)
-
-		// Check cluster size to determine if voting is needed
-		// Count only available/responding nodes for quorum calculation
-		availableNodes := 0
-		membersSnapshot := h.members.MembersSnapshot()
-		for _, member := range membersSnapshot {
-			member.mu.Lock()
-			isAvailable := member.Status == StatusActive || member.Status == StatusPassive
-			member.mu.Unlock()
-			if isAvailable {
-				availableNodes++
-			}
-		}
-
-		h.logger.Infof("Available nodes for voting: %d out of %d total", availableNodes, len(membersSnapshot))
-
-		if availableNodes == 1 {
-			h.logger.Infof("Only 1 node available, becoming active immediately")
-			return true
-		} else if availableNodes == 2 {
-			// Two nodes *available*, which is not the same as a two-node cluster and must
-			// never be reached from one. availableNodes counts only Active and Passive
-			// members, so this branch belongs to a degraded cluster of three or more — the
-			// Active has failed and two Passives remain (handlePartialFailure), or two of
-			// four are Unknown (attemptVotingElection). A genuine two-node cluster never
-			// arrives here at all: attemptVotingElection returns at availableCount < 3 and
-			// handlePartialFailure only votes at clusterSize >= 3, so the pair promotes
-			// directly and both sides claim the group.
-			//
-			// That is deliberate, not an oversight. Electing a single owner by node ID means
-			// deciding from a node that cannot see its peer, so the winner may be the one
-			// whose service network is the broken half — turning a duplicated address into a
-			// dark one. See docs/adr/0002-two-node-availability-over-safety.md. Routing the
-			// two-node election into this branch would reverse that decision.
-			//
-			h.logger.Infof("Exactly 2 nodes available, using deterministic tie-breaking")
-			if newStatus == StatusActive {
-				// Decided about nodeID, the subject of the vote, and never about the node
-				// running it (END-2325).
-				//
-				// The rule used to be `localNodeID < otherNodeID`, which answers "should *I*
-				// win" to a question asked about someone else. Via attemptVotingElection the
-				// candidate is frequently not the local node — selectBestCandidate gives the
-				// local node only +5 against a score built from status, latency and recency —
-				// so a coordinator whose own ID sorted higher returned false and blocked the
-				// promotion of a perfectly good candidate. In handlePartialFailure that
-				// answer is not advisory: `!voteResult` returns, abandoning the failover.
-				//
-				// Worse than blocking one promotion, it made the answer depend on who asked.
-				// Two nodes running this concurrently for the same candidate computed
-				// opposite results, which is precisely what a tie-break with no majority
-				// behind it must never do. Deciding on the subject is viewer-independent:
-				// every node reaches the same verdict about the same candidate. Same lesson
-				// as the config tiebreak, which had to become origin-versus-origin rather
-				// than sender-versus-receiver (internal/server/config_generation_test.go).
-				lowest := ""
-				subjectAvailable := false
-				for _, member := range membersSnapshot {
-					member.mu.Lock()
-					isAvailable := member.Status == StatusActive || member.Status == StatusPassive
-					memberID := member.ID
-					member.mu.Unlock()
-					if !isAvailable {
-						continue
-					}
-					if memberID == nodeID {
-						subjectAvailable = true
-					}
-					if lowest == "" || memberID < lowest {
-						lowest = memberID
-					}
-				}
-
-				// A subject that is not one of the two contenders is not in the tie this rule
-				// exists to break, so it has nothing to say about it. Allowed rather than
-				// refused, which is what the old code did for its own unresolvable case, and
-				// the promotion still has to get past confirmPeerReleasedIPs.
-				if !subjectAvailable {
-					h.logger.Info("2-node tie-breaking: subject is not an available node, allowing",
-						"subject", nodeID)
-					return true
-				}
-
-				shouldWin := nodeID == lowest
-				h.logger.Infof("2-node tie-breaking: subject=%s, lowest=%s, shouldWin=%v",
-					nodeID, lowest, shouldWin)
-				return shouldWin
-			}
-			return true // Allow non-Active status changes
-		} else if availableNodes < 3 {
-			h.logger.Debugf("Only %d nodes available, voting not required (need 3+ available)", availableNodes)
-			return true
-		}
-
-		// Get the server instance from the context
-		if h.server == nil {
-			h.logger.Warn("Server reference not available, cannot initiate vote")
-			return true // Default to allowing the change if we can't vote
-		}
-
-		// Get the quorum manager
-		quorumManager := h.server.GetQuorumManager()
-		if quorumManager == nil {
-			h.logger.Warn("Quorum manager not available, cannot initiate vote")
-			return true // Default to allowing the change if quorum manager is not available
-		}
-
-		// Update the quorum manager with the current count of available nodes
-		quorumManager.UpdateNodeCount(availableNodes)
-
-		// Get the node hostname for better logging
-		var hostname string
-		for _, member := range membersSnapshot {
-			if member.ID == nodeID {
-				hostname = member.Hostname
-				break
-			}
-		}
-
-		// Create a descriptive subject and description for the vote
-		subject := nodeID
-		description := fmt.Sprintf("Change node %s (%s) status to %s", hostname, nodeID, statusToString(newStatus))
-
-		// Initiate the vote through the quorum manager
-		sessionID, err := quorumManager.StartVotingSession(
-			quorum.VoteTypeNodeStatus,
-			subject,
-			description,
-			30*time.Second, // 30 second timeout for votes
-		)
-
-		if err != nil {
-			h.logger.Errorf("Failed to start voting session: %v", err)
-			if attempt < maxRetries {
-				h.logger.Infof("Retrying in 2 seconds...")
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			return true // Default to allowing the change if we can't start a vote
-		}
-
-		h.logger.Infof("Started voting session %s for node status change", sessionID)
-
-		// Broadcast the vote request to other nodes so they can participate
-		h.logger.Infof("Broadcasting vote request to cluster nodes...")
-		if err := h.server.BroadcastVoteRequest(sessionID, "node_status", subject, description, 30); err != nil {
-			h.logger.Warnf("Failed to broadcast vote request: %v", err)
-			// Continue anyway - maybe some nodes are offline but others might still vote
-		}
-
-		// Wait for the vote to complete with shorter polling interval
-		voteCompleted := false
-		for i := 0; i < 30; i++ { // Poll for up to 30 seconds
-			time.Sleep(1 * time.Second)
-
-			session, err := quorumManager.GetVotingSession(sessionID)
-			if err != nil {
-				h.logger.Errorf("Failed to get voting session: %v", err)
-				continue
-			}
-
-			// Check if the vote has completed
-			if session.Result != nil {
-				h.logger.Infof("Vote completed: passed=%v, quorum=%v, yes=%d, no=%d, total=%d",
-					session.Result.Passed, session.Result.QuorumMet,
-					session.Result.YesCount, session.Result.NoCount,
-					session.Result.TotalVotes)
-
-				voteCompleted = true
-				if session.Subject == nodeID && session.Result.Passed && session.Result.QuorumMet {
-					return true // Vote passed
-				}
-				break // Vote failed or didn't meet quorum
-			}
-
-			// Early termination if we already have enough YES votes to guarantee passage
-			yesCount := 0
-			for _, vote := range session.Votes {
-				if vote.Decision == quorum.VoteDecisionYes {
-					yesCount++
-				}
-			}
-			if quorumManager.HasQuorum(yesCount) {
-				h.logger.Debugf("Early termination: enough YES votes received (%d)", yesCount)
-				break
-			}
-		}
-
-		if !voteCompleted {
-			h.logger.Warnf("Vote timed out on attempt %d", attempt)
-			if attempt < maxRetries {
-				h.logger.Infof("Retrying vote in 3 seconds...")
-				time.Sleep(3 * time.Second)
-				continue
-			}
-		} else {
-			// Vote completed but failed, retry if possible
-			if attempt < maxRetries {
-				h.logger.Infof("Vote failed, retrying in 5 seconds...")
-				time.Sleep(5 * time.Second)
-				continue
-			}
-		}
-		break
+	if newStatus != StatusActive {
+		return true
 	}
-
-	h.logger.Error("All vote attempts failed after %d retries, aborting election to prevent split-brain", maxRetries)
-	h.logger.Error("Manual intervention required - check network connectivity, node health, or use 'pulsectl promote' to force promotion after investigation")
-	return false // Block promotion to prevent split-brain scenarios
+	candidate, ok := h.votedElectionCandidate(h.members.GetMemberByID(nodeID))
+	return ok && candidate.ID == nodeID
 }
 
 // initiateIPRedistributionVote is the exact-proposal compatibility helper.
@@ -2620,7 +2327,7 @@ func statusToString(status MemberStatus) string {
 	return StatusToString(status)
 }
 
-func (h *HealthChecker) tryForcePromote(candidate *Member) bool {
+func (h *HealthChecker) tryAutomaticPromotion(candidate *Member) bool {
 	if candidate == nil {
 		return false
 	}
@@ -2630,12 +2337,22 @@ func (h *HealthChecker) tryForcePromote(candidate *Member) bool {
 		return false
 	}
 
+	if h.findActiveNode() != nil {
+		return false
+	}
+	recovered, authorized := h.votedElectionCandidate(candidate)
+	if !authorized || h.findActiveNode() != nil {
+		h.logger.Warn("ELECTION: Automatic promotion not authorized", "candidate", candidate.ID)
+		return false
+	}
+	candidate = recovered
+
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	resp, err := server.Promote(ctx, &rpc.PromoteRequest{
 		NodeId:      candidate.ID,
-		ForceDemote: true,
+		ForceDemote: false,
 	})
 	if err != nil {
 		h.logger.Warn("ELECTION: Promote RPC failed", "candidate", candidate.Hostname, "error", err)
@@ -2650,7 +2367,6 @@ func (h *HealthChecker) tryForcePromote(candidate *Member) bool {
 		return false
 	}
 
-	h.logger.Info("ELECTION: Promote RPC succeeded", "candidate", candidate.Hostname)
-	server.RefreshLocalMonitorExpectedIPs()
+	h.logger.Info("ELECTION: Promotion accepted; awaiting completion", "candidate", candidate.Hostname)
 	return true
 }

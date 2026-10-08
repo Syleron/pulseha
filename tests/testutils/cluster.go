@@ -84,6 +84,11 @@ func (c *TestCluster) AddNode(hostname string) (*TestNode, error) {
 	logger.SetFormatter(log.TextFormatter)
 	logger.SetLevel(log.DebugLevel)
 
+	// Every member and the join request must use the same cluster token.
+	// A second random token in GetToken made health checks reject a joined peer.
+	if c.token == "" {
+		c.token = uuid.New().String()
+	}
 	// Create new node
 	node := &TestNode{
 		ID:       hostname, // Using hostname as ID for simplicity in tests
@@ -94,9 +99,12 @@ func (c *TestCluster) AddNode(hostname string) (*TestNode, error) {
 			Groups: make(map[string][]string),
 			Nodes:  make(map[string]*config.Node),
 			Pulse: config.Local{
-				LoggingLevel: "debug",
-				LocalNode:    hostname,
-				ClusterToken: "test-cluster-token", // Set a consistent token for all nodes
+				LoggingLevel:        "debug",
+				LocalNode:           hostname,
+				ClusterToken:        c.token,
+				HealthCheckInterval: 50,
+				FailOverInterval:    5000,
+				FailOverLimit:       10000,
 			},
 		},
 		Logger:  logger,
@@ -242,9 +250,11 @@ func (n *TestNode) Start() error {
 		nodeCfg.Pulse.ClusterToken = "test-token"
 	}
 
-	// Set health check interval to 1ms for very fast testing
-	n.Logger.Infof("Setting health check interval to 1ms for fast testing")
-	nodeCfg.Pulse.HealthCheckInterval = 1
+	// Keep a fast polling cadence without a zero failure grace. A zero
+	// fo_limit declares even the local Active dead after any elapsed time.
+	if nodeCfg.Pulse.HealthCheckInterval <= 0 {
+		nodeCfg.Pulse.HealthCheckInterval = 50
+	}
 
 	// Create new member list and health checker with node-specific config
 	n.Logger.Debug("Creating member list and health checker")
@@ -305,9 +315,7 @@ func (n *TestNode) Start() error {
 		return fmt.Errorf("failed to start server: %v", err)
 	}
 
-	// Start health checker with a very short interval for tests (1ms)
-	n.Logger.Infof("Starting health checker with interval of 1ms")
-	healthChecker.Start(1 * time.Millisecond)
+	healthChecker.Start(time.Duration(nodeCfg.Pulse.HealthCheckInterval) * time.Millisecond)
 
 	return nil
 }
@@ -364,10 +372,6 @@ func (n *TestNode) Join(targetNode *TestNode) error {
 	// Store the node ID from the response
 	n.ID = resp.NodeId
 
-	// Update local config with cluster info
-	n.Config.Pulse.LocalNode = resp.NodeId
-	n.Config.Pulse.ClusterToken = token
-
 	// If a full cluster configuration was provided, sync it to the local daemon
 	if len(resp.ClusterConfig) > 0 {
 		localClient, err := client.New()
@@ -397,18 +401,9 @@ func (n *TestNode) Join(targetNode *TestNode) error {
 			n.Config = newCfg
 		}
 
-		// Also apply member states directly to the in-process server's member list for immediate visibility
-		var enhanced struct {
-			MemberStates map[string]membership.MemberStatus `json:"member_states"`
-		}
-		if err := json.Unmarshal(resp.ClusterConfig, &enhanced); err == nil && n.Server != nil && enhanced.MemberStates != nil {
-			ml := n.Server.GetMemberList()
-			for id, st := range enhanced.MemberStates {
-				if m := ml.GetMemberByID(id); m != nil {
-					m.Status = st
-				}
-			}
-		}
+		// The received payload is applied only through ConfigSync. Replaying
+		// raw member states here bypassed its local-role protection and could
+		// set this live node to Unknown while health checks were running.
 	}
 
 	// Save config
@@ -420,19 +415,19 @@ func (n *TestNode) Join(targetNode *TestNode) error {
 	if n.Server != nil {
 		ml := n.Server.GetMemberList()
 		if m := ml.GetMemberByHostname(targetNode.Hostname); m != nil {
-			m.Status = membership.StatusActive
+			m.SetStatus(membership.StatusActive)
 		}
 		if m := ml.GetMemberByHostname(n.Hostname); m != nil {
-			m.Status = membership.StatusPassive
+			m.SetStatus(membership.StatusPassive)
 		}
 	}
 	if targetNode != nil && targetNode.Server != nil {
 		ml := targetNode.Server.GetMemberList()
 		if m := ml.GetMemberByHostname(targetNode.Hostname); m != nil {
-			m.Status = membership.StatusActive
+			m.SetStatus(membership.StatusActive)
 		}
 		if m := ml.GetMemberByHostname(n.Hostname); m != nil {
-			m.Status = membership.StatusPassive
+			m.SetStatus(membership.StatusPassive)
 		}
 	}
 
