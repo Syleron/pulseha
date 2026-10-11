@@ -47,15 +47,19 @@ func runNodeRound(t *testing.T, s *Server, subject string) (*quorum.VotingSessio
 
 func TestSplitVoteRecoversHighestAcceptedCandidate(t *testing.T) {
 	peers := []*Server{newVotingServer(t, "a"), newVotingServer(t, "b"), newVotingServer(t, "c")}
+	// Prepare and accept both fsync durable state. Give setup a realistic
+	// budget, then wait for the actual deadline rather than racing a 30ms
+	// timer against disk scheduling on the CI runner.
+	expires := time.Now().Add(3 * time.Second)
 	for _, s := range peers {
 		r := nodeProposal(s, s.config.Pulse.LocalNode, 1)
-		r.ExpiresAtUnixMilli = time.Now().Add(30 * time.Millisecond).UnixMilli()
+		r.ExpiresAtUnixMilli = expires.UnixMilli()
 		resp, err := preparedTestVote(s, r)
 		if err != nil || !resp.Granted {
 			t.Fatalf("split acceptance: %v %v", resp, err)
 		}
 	}
-	time.Sleep(35 * time.Millisecond)
+	time.Sleep(time.Until(expires.Add(time.Millisecond)))
 	linkVoters(t, peers...)
 	// A higher round can recover any highest acceptance in its prepare majority,
 	// but must return that actual candidate and preserve it on subsequent rounds.

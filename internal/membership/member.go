@@ -109,6 +109,8 @@ type Member struct {
 	Port           string // Node's port
 	Status         MemberStatus
 	LastHCResponse time.Time
+	directRole     MemberStatus
+	directRoleAt   time.Time
 	Latency        string
 	Score          int
 	Client         *client.Client
@@ -120,6 +122,24 @@ type Member struct {
 	// Active-Active support
 	ActiveIPs []string // IPs currently hosted by this member
 	Capacity  int      // Node capacity for weighted distribution
+}
+
+// ObserveRole records an identified reply received directly from this member.
+// Gossip can change the converged claim, but cannot erase this local evidence.
+func (m *Member) ObserveRole(role MemberStatus, at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if at.After(m.directRoleAt) {
+		m.directRole, m.directRoleAt = role, at
+	}
+}
+
+// RecentlyReportedActive survives gossip and expires without fresh role replies.
+// TCP reachability alone must never renew evidence of ownership.
+func (m *Member) RecentlyReportedActive(now time.Time, grace time.Duration) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.directRole == StatusActive && !m.directRoleAt.IsZero() && now.Sub(m.directRoleAt) <= grace
 }
 
 // NewMember creates a new member instance

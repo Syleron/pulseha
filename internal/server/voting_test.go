@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 const orphanProposal = `["10.0.0.1/32"]`
@@ -171,9 +172,9 @@ func voteRequest(s *Server) *rpc.RequestVoteRequest {
 }
 
 func preparedTestVote(s *Server, r *rpc.RequestVoteRequest) (*rpc.RequestVoteResponse, error) {
-	p := *r
+	p := proto.Clone(r).(*rpc.RequestVoteRequest)
 	p.Phase = "prepare"
-	resp, err := s.RequestVote(context.Background(), &p)
+	resp, err := s.RequestVote(context.Background(), p)
 	if err != nil || !resp.Granted {
 		return resp, err
 	}

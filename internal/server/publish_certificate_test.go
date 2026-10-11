@@ -132,6 +132,7 @@ func TestCertificateFingerprintIsShortAndStable(t *testing.T) {
 func TestASyncNeverOverwritesThisNodesOwnCertificate(t *testing.T) {
 	withCertFile(t, "-----BEGIN CERTIFICATE-----\nmine\n-----END CERTIFICATE-----\n")
 	s := newRemoveIPTestServer(t, startReleasingPeer(t, &releasingPeer{}))
+	t.Cleanup(s.awaitAsyncReconfigures)
 	s.PublishLocalCertificate()
 
 	mine := localNode(t, s).TLSCert

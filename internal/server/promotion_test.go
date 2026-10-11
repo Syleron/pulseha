@@ -62,8 +62,8 @@ func TestFilterStillHeld(t *testing.T) {
 // into (&Response{Success: false}, nil), so the error is always nil and every peer — wedged,
 // refused, or demoted — looks identical. The first cut of this fix did exactly that and the
 // guard silently degraded to a no-op that logged "confirmed released" for a stopped daemon.
-// Only a transport-level failure proves nothing is holding the addresses; everything
-// indeterminate must count as still-alive.
+// Transport failure establishes unreachability only; fencing an isolated incumbent
+// remains separate from preventing minority promotion.
 func TestCanPromoteWithoutConfirmedRelease(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -83,14 +83,11 @@ func TestCanPromoteWithoutConfirmedRelease(t *testing.T) {
 		// Minority side of a partition must not claim addresses it cannot prove were released.
 		{"dead peer without quorum must not be claimed", false, false, false, false},
 
-		// force must NOT rescue a live peer. HealthChecker.tryForcePromote sets ForceDemote on
-		// every election-driven promotion, so treating it as an operator override disabled this
-		// check for the exact TC-6 path — observed live: "Proceeding without a confirmed release
-		// force_demote=true peer_still_alive=true" while the wedged peer held all 201 IPs.
+		// Explicit operator force must still not override a reachable, wedged peer.
 		{"force must not override a wedged peer", true, true, true, false},
 		{"force must not override a wedged peer without quorum", true, false, true, false},
 
-		// force still applies once the peer is provably down — a minority-side operator recovery.
+		// Explicit operator recovery can override the majority check for an unreachable peer.
 		{"force overrides a lack of quorum when peer is down", false, false, true, true},
 	}
 

@@ -101,7 +101,7 @@ func newLatchTestChecker(t *testing.T) (*HealthChecker, *Member, *membershipVerd
 	h := NewHealthChecker(ml, log.New(io.Discard))
 
 	verdict := membershipConfirmed
-	h.deepCheck = func(*Member) membershipVerdict { return verdict }
+	h.deepCheck = func(*Member) (membershipVerdict, MemberStatus) { return verdict, StatusPassive }
 	return h, peer, &verdict
 }
 
@@ -190,9 +190,9 @@ func TestAnUnresolvedNodeIsRetriedOnceThenFallsBackToTheSchedule(t *testing.T) {
 	h, peer, verdict := newLatchTestChecker(t)
 
 	var deepChecks int
-	h.deepCheck = func(*Member) membershipVerdict {
+	h.deepCheck = func(*Member) (membershipVerdict, MemberStatus) {
 		deepChecks++
-		return *verdict
+		return *verdict, StatusPassive
 	}
 
 	*verdict = membershipUnverified
@@ -229,9 +229,9 @@ func TestTheImmediateRetryIsUsedAtAll(t *testing.T) {
 
 	var cyclesWithDeepCheck []int
 	cycle := 0
-	h.deepCheck = func(*Member) membershipVerdict {
+	h.deepCheck = func(*Member) (membershipVerdict, MemberStatus) {
 		cyclesWithDeepCheck = append(cyclesWithDeepCheck, cycle)
-		return *verdict
+		return *verdict, StatusPassive
 	}
 
 	*verdict = membershipUnverified
@@ -523,9 +523,9 @@ func TestAConfirmedDeepCheckReturnsTheNodeToTheCheapPath(t *testing.T) {
 	h, peer, verdict := newLatchTestChecker(t)
 
 	var deepChecks int
-	h.deepCheck = func(*Member) membershipVerdict {
+	h.deepCheck = func(*Member) (membershipVerdict, MemberStatus) {
 		deepChecks++
-		return *verdict
+		return *verdict, StatusPassive
 	}
 
 	*verdict = membershipUnverified

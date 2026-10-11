@@ -1,7 +1,5 @@
-# Must track go.mod's `go` directive (1.25.0). Pinned at 1.23 the builder failed
-# every rig in this directory at `go mod download` with "go.mod requires go >= 1.25.0",
-# so none of them had been buildable since that bump.
-FROM golang:1.25-alpine AS builder
+# Keep the builder aligned with go.mod.
+FROM golang:1.26-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git make gcc musl-dev linux-headers

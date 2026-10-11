@@ -17,8 +17,8 @@ func TestCombinedFeatures(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("integration tests run only on Linux")
 	}
-	if !testutil.IsRoot() {
-		t.Skip("This test requires root privileges to run")
+	if !testutil.HasNetAdmin() {
+		t.Skip("This test requires CAP_NET_ADMIN to manage interface addresses")
 	}
 
 	// Create a new test cluster
