@@ -139,6 +139,9 @@ func (s *Server) decideVote(ctx context.Context, cfg *config.Config, req *rpc.Re
 					return deny("an active node is still known")
 				}
 			}
+			if target := s.handoffInProgress(); target != "" {
+				return deny("an explicit handoff to " + target + " is in progress")
+			}
 			if err := s.checkElectionIncumbents(ctx, cfg, req.Subject); err != nil {
 				return deny(err.Error())
 			}

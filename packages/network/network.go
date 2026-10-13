@@ -63,7 +63,15 @@ func BuildIPInventory() (*IPInventory, error) {
 		return nil, err
 	}
 	defer handle.Delete()
+	return readIPInventory(handle)
+}
 
+type ipInventoryReader interface {
+	LinkList() ([]netlink.Link, error)
+	AddrList(netlink.Link, int) ([]netlink.Addr, error)
+}
+
+func readIPInventory(handle ipInventoryReader) (*IPInventory, error) {
 	links, err := handle.LinkList()
 	if err != nil {
 		log.Debug("NETWORK: BuildIPInventory failed to list links", "error", err)
@@ -79,8 +87,7 @@ func BuildIPInventory() (*IPInventory, error) {
 		for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
 			addrs, err := handle.AddrList(link, family)
 			if err != nil {
-				log.Debug("NETWORK: BuildIPInventory failed to list addresses", "iface", iface, "family", family, "error", err)
-				continue
+				return nil, fmt.Errorf("read addresses on %s (family %d): %w", iface, family, err)
 			}
 			for _, addr := range addrs {
 				normalized, ok := normalizeIP(addr.IP)

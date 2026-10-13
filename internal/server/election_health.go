@@ -117,5 +117,10 @@ func (s *Server) checkElectionPeer(ctx context.Context, cfg *config.Config, id s
 	if role == membership.StatusActive {
 		return fmt.Errorf("member %s directly reports Active", id)
 	}
+	// No member looks Active in the middle of an explicit handoff, yet the
+	// group is spoken for. An election here takes it back from the target.
+	if reply.HandoffTo != "" {
+		return fmt.Errorf("member %s reports a handoff to %s in progress", id, reply.HandoffTo)
+	}
 	return nil
 }
