@@ -75,6 +75,15 @@ func (s *Server) noteDemotedForHandoff(target string) {
 	g.mu.Unlock()
 }
 
+// receivingHandoff reports whether this node is orchestrating a live handoff to
+// itself. Reads only the guard, so it is safe under a member's lock.
+func (s *Server) receivingHandoff(localID string) bool {
+	g := &s.handoff
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.orchestrating && g.target == localID && time.Now().Before(g.until)
+}
+
 // handoffInProgress returns the target of a live handoff this node is part of,
 // or "" when there is none.
 func (s *Server) handoffInProgress() string {

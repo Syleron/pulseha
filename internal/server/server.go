@@ -5846,6 +5846,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// Compared against the epoch held on entry, not currentEpoch: by this
 			// point a higher incoming epoch has already been adopted above.
 			decisive := incomingEpoch > preSyncEpoch
+			// Peers broadcast what their health checks observe at epoch+1, so the
+			// demoted node's "nobody is Active" arrives as a decisive epoch while
+			// this node is still acquiring. Applying it strips the addresses
+			// mid-bring-up and fails the handoff (#266). Only this node's own final
+			// broadcast, or the end of the handoff window, settles its role.
+			receivingHandoff := s.receivingHandoff(syncLocalID)
 
 			for id, st := range incomingMemberStates {
 				m := s.memberList.GetMemberByID(id)
@@ -5888,6 +5894,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 						// decision to change this live daemon's role. Preserve it
 						// so health replies can report the incumbent accurately.
 						if st == membership.StatusUnknown {
+							return current, false
+						}
+						if receivingHandoff && st != current.Status {
+							s.logger.Info("CONFIG_SYNC: Ignoring peer's view of local status during handoff",
+								"local", membership.StatusToString(current.Status),
+								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
 							return current, false
 						}
 						// The same principle applied to status generally. This node knows

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -131,5 +132,37 @@ func TestEndingSupersededHandoffKeepsNewerGuard(t *testing.T) {
 	endOld()
 	if got := s.handoffInProgress(); got != "c" {
 		t.Fatalf("stale handoff cleared its replacement: %q", got)
+	}
+}
+
+// #266, second race: the demoted node's health check broadcasts "nobody is
+// Active" at epoch+1 while the target is still acquiring. The target must not
+// demote itself on it, or it strips the addresses it is bringing up.
+func TestHandoffTargetIgnoresPeerDemotionOfItself(t *testing.T) {
+	for _, receiving := range []bool{true, false} {
+		s, ml := newConfigSyncTestServer(t, "target", "previous", "other")
+		s.config.Pulse.Mode = "active-passive"
+		if receiving {
+			end := s.beginHandoff("target")
+			defer end()
+		}
+		ml.GetMemberByID("target").SetStatus(membership.StatusActive)
+		payload, _ := json.Marshal(map[string]any{
+			"member_states": map[string]int{"target": int(membership.StatusPassive), "previous": int(membership.StatusPassive)},
+			"epoch":         s.GetClusterEpoch() + 1})
+		if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: payload}); err != nil {
+			t.Fatal(err)
+		}
+		got := ml.GetMemberByID("target").GetStatus()
+		// Control: without the handoff the same higher-epoch sync does demote it,
+		// so the hold above is the guard's doing.
+		want := membership.StatusPassive
+		if receiving {
+			want = membership.StatusActive
+		}
+		if got != want {
+			t.Fatalf("receiving=%v: local status %s, want %s", receiving,
+				membership.StatusToString(got), membership.StatusToString(want))
+		}
 	}
 }
