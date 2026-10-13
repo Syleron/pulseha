@@ -145,6 +145,10 @@ type Server struct {
 	voteEpochFloor atomic.Int64
 	voteRoundMu    pulselock.Mutex
 
+	// An explicit handoff this node is orchestrating or was demoted by; see
+	// handoffGuard.
+	handoff handoffGuard
+
 	pulselock.RWMutex
 	config      *config.Config
 	logger      *log.Logger
@@ -2137,7 +2141,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			"previous_active", prevActiveID,
 			"new_active", targetNodeID)
 
-		demoteResp, demoteErr := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID})
+		// From here until the final broadcast no member looks Active. Hold off
+		// elections for that gap, here and on the demoted node (#266).
+		endHandoff := s.beginHandoff(targetNodeID)
+		defer endHandoff()
+
+		demoteResp, demoteErr := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID, HandoffTo: targetNodeID})
 		if demoteErr == nil && (demoteResp == nil || !demoteResp.Success) {
 			demoteErr = fmt.Errorf("demotion not confirmed: %v", demoteResp)
 		}
@@ -2420,6 +2429,9 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// Passive with nothing claimed: a demoted node must not go on telling
 		// peers it holds addresses it has given up.
 		member.SetClaim(membership.Claim{Status: membership.StatusPassive})
+		if req.HandoffTo != "" {
+			s.noteDemotedForHandoff(req.HandoffTo)
+		}
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -2451,7 +2463,7 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// deadline only because it bypasses this method entirely.
 		ctx2, cancel := s.remoteDemotionContext(ctx)
 		defer cancel()
-		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId})
+		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId, HandoffTo: req.HandoffTo})
 		if rerr != nil {
 			return &rpc.MakePassiveResponse{Success: false, Message: "Remote make passive failed: " + rerr.Error()}, nil
 		}
@@ -2542,6 +2554,7 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		Success:      true,
 		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
 		ClusterToken: localToken,
+		HandoffTo:    s.handoffInProgress(),
 	}, nil
 }
 
@@ -5833,6 +5846,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			// Compared against the epoch held on entry, not currentEpoch: by this
 			// point a higher incoming epoch has already been adopted above.
 			decisive := incomingEpoch > preSyncEpoch
+			// Peers broadcast what their health checks observe at epoch+1, so the
+			// demoted node's "nobody is Active" arrives as a decisive epoch while
+			// this node is still acquiring. Applying it strips the addresses
+			// mid-bring-up and fails the handoff (#266). Only this node's own final
+			// broadcast, or the end of the handoff window, settles its role.
+			receivingHandoff := s.receivingHandoff(syncLocalID)
 
 			for id, st := range incomingMemberStates {
 				m := s.memberList.GetMemberByID(id)
@@ -5875,6 +5894,12 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 						// decision to change this live daemon's role. Preserve it
 						// so health replies can report the incumbent accurately.
 						if st == membership.StatusUnknown {
+							return current, false
+						}
+						if receivingHandoff && st != current.Status {
+							s.logger.Info("CONFIG_SYNC: Ignoring peer's view of local status during handoff",
+								"local", membership.StatusToString(current.Status),
+								"peer_claims", membership.StatusToString(st), "epoch", incomingEpoch)
 							return current, false
 						}
 						// The same principle applied to status generally. This node knows
