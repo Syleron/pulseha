@@ -145,6 +145,10 @@ type Server struct {
 	voteEpochFloor atomic.Int64
 	voteRoundMu    pulselock.Mutex
 
+	// An explicit handoff this node is orchestrating or was demoted by; see
+	// handoffGuard.
+	handoff handoffGuard
+
 	pulselock.RWMutex
 	config      *config.Config
 	logger      *log.Logger
@@ -2137,7 +2141,12 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			"previous_active", prevActiveID,
 			"new_active", targetNodeID)
 
-		demoteResp, demoteErr := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID})
+		// From here until the final broadcast no member looks Active. Hold off
+		// elections for that gap, here and on the demoted node (#266).
+		endHandoff := s.beginHandoff(targetNodeID)
+		defer endHandoff()
+
+		demoteResp, demoteErr := s.MakePassive(context.Background(), &rpc.MakePassiveRequest{NodeId: prevActiveID, HandoffTo: targetNodeID})
 		if demoteErr == nil && (demoteResp == nil || !demoteResp.Success) {
 			demoteErr = fmt.Errorf("demotion not confirmed: %v", demoteResp)
 		}
@@ -2420,6 +2429,9 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// Passive with nothing claimed: a demoted node must not go on telling
 		// peers it holds addresses it has given up.
 		member.SetClaim(membership.Claim{Status: membership.StatusPassive})
+		if req.HandoffTo != "" {
+			s.noteDemotedForHandoff(req.HandoffTo)
+		}
 	} else {
 		node := s.config.Nodes[req.NodeId]
 		if node == nil {
@@ -2451,7 +2463,7 @@ func (s *Server) MakePassive(ctx context.Context, req *rpc.MakePassiveRequest) (
 		// deadline only because it bypasses this method entirely.
 		ctx2, cancel := s.remoteDemotionContext(ctx)
 		defer cancel()
-		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId})
+		rresp, rerr := remoteClient.Server().MakePassive(ctx2, &rpc.MakePassiveRequest{NodeId: req.NodeId, HandoffTo: req.HandoffTo})
 		if rerr != nil {
 			return &rpc.MakePassiveResponse{Success: false, Message: "Remote make passive failed: " + rerr.Error()}, nil
 		}
@@ -2542,6 +2554,7 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		Success:      true,
 		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
 		ClusterToken: localToken,
+		HandoffTo:    s.handoffInProgress(),
 	}, nil
 }
 

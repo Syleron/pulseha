@@ -232,6 +232,10 @@ message FetchConfigResponse {
 // MakePassive Request/Response
 message MakePassiveRequest {
     string node_id = 1;
+    // Set when the demotion is the first step of explicitly promoting the node
+    // named here. The demoted node then reports a handoff in progress until the target
+    // turns Active or the handoff window lapses, so no election fills the gap.
+    string handoff_to = 2;
 }
 
 message MakePassiveResponse {
@@ -278,6 +282,7 @@ message HealthCheckResponse {
     string cluster_token = 3; // Receiver echoes its own token so caller can verify
     string node_id = 4; // Identity of the responding node
     MemberStatusEnum status = 5; // Its current role, not a role assigned by the caller
+    string handoff_to = 6; // Node an explicit handoff this member is part of is moving the group to; empty when none
 }
 
 // Logs Request/Response
