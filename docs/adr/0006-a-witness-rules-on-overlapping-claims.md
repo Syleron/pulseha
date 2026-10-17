@@ -77,6 +77,21 @@ Two consequences of that are easy to undo by accident:
   check still says a SIGSTOPped Active is serving — either would keep the survivor from
   promoting while the address answers nobody. The proof of life is the peer reporting its own
   Claim; the Witness's memory is used for the tie-break and nothing else.
+- **A wedged peer the Witness cannot see either may be taken over — and nothing else lifts the
+  TC-6 rule.** A peer that accepts a connection and never answers is read as alive and holding,
+  and blocks any takeover at any cluster size. A frozen box looks exactly like that: its kernel
+  completes the handshake while the address answers nobody, and only a takeover ends it. When a
+  trusted Witness — which exists only in a pair — asked that peer itself and got nothing back,
+  the takeover goes ahead. If it was only the daemon that froze and the box still serves, the
+  address is duplicated, which ADR-0002 already ranks above dark in a pair, and the Ruling settles
+  it when the daemon thaws. No Witness, a silent or untrusted one, or a Witness that sees the peer
+  answering leaves the rule exactly as it was.
+- **The Witness never speaks for anyone's state.** It sees both sides of a partition, so the
+  member states it would broadcast are each side's relayed to the other. A node that cannot reach
+  its peer, handed a second-hand view of two Actives, settled them by its own tie-break against the
+  Ruling — measured on the rig. The Witness sends no state broadcasts, and a node ignores member
+  states, epoch and leader from one; and "sees its peer" means a direct answer, which gossip cannot
+  supply, not a status.
 - **The Witness talks to nodes over the service network**, on an address each node declares for
   it. Over `bind_address` alone it shares the heartbeat path, cannot tell a broken cluster link
   from a dead node, and resolves nothing in a cluster-link-only partition.

@@ -2113,7 +2113,17 @@ func (s *Server) hasConfiguredPromotionMajority() bool {
 // which is what the Witness's answer is for (ADR-0006).
 func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool, witness witnessAnswer) bool {
 	if peerStillAlive {
-		return false
+		// The TC-6 rule: a peer that accepts a connection and never answers is
+		// wedged and still holds its addresses, and nothing overrides that --
+		// with one exception. A trusted Witness, which exists only in a pair,
+		// asked that peer itself and got no answer either. That is a second,
+		// independent observation that its daemon is gone, and in a pair
+		// ADR-0002 already ranks a duplicated address above a dark one: a frozen
+		// box holds the address while answering nobody, and only a takeover
+		// ends that. If it was only the daemon that froze and the box is still
+		// serving, the takeover duplicates the address, and the Ruling settles
+		// it once the daemon thaws (ADR-0006).
+		return witness == witnessPeerNotVisible && (haveQuorum || forceDemote)
 	}
 	switch witness {
 	case witnessPeerServing:

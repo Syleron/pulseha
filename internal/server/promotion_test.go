@@ -129,8 +129,15 @@ func TestCanPromoteWithTheWitnessAnswer(t *testing.T) {
 		{"a Fenced node waits out a brief silence", false, true, false, witnessSilentWhileFenced, false},
 		{"an operator can cut the hold-down short", false, true, true, witnessSilentWhileFenced, true},
 
-		// The Witness never overrides a wedged peer: alive here blocks anyway.
-		{"a wedged peer is not claimed whatever the Witness says", true, true, false, witnessPeerNotVisible, false},
+		// A wedged peer -- accepts a connection, answers nothing -- is the TC-6
+		// rule, and only one answer lifts it: a trusted Witness that asked the
+		// peer itself and got nothing either. A frozen box holds the address
+		// while answering nobody, and in a pair a takeover is the only way out.
+		{"a wedged peer the Witness cannot see either is claimed", true, true, false, witnessPeerNotVisible, true},
+		{"a wedged peer serving the Witness is not claimed", true, true, false, witnessPeerServing, false},
+		{"a wedged peer with a silent Witness is not claimed", true, true, false, witnessSilent, false},
+		{"a wedged peer idle to the Witness is not claimed", true, true, false, witnessPeerIdle, false},
+		{"a wedged peer is not claimed during a hold-down", true, true, false, witnessSilentWhileFenced, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := canPromoteWithoutConfirmedRelease(tc.alive, tc.quorum, tc.force, tc.witness); got != tc.want {
