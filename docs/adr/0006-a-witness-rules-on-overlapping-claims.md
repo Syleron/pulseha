@@ -55,6 +55,20 @@ path — a node that lost both its peer and the Witness would count one of three
 promote, the fail-closed outcome ADR-0002 rejects. The role is fixed at join, one per cluster,
 and refused on clusters of three or more, which are END-2325's territory.
 
+Two consequences of that are easy to undo by accident:
+
+- **The status is not the guard; the role is.** A Witness that is up holds a status of its own,
+  so anything that accepts only Active or Passive leaves it out by default. But a Witness that is
+  down reads Unknown, and candidate selection, the Election Coordinator and the Coordinator all
+  consider Unknown members. So the role travels on the member, a Witness can only ever be given
+  Witness or Unknown whoever writes its status, and every election, coordinator, placement and
+  promotion path reads a member list with the Witness taken out. A decision path that ranges over
+  every member is the bug.
+- **A Witness may only join a cluster whose every member understands one.** An older binary
+  counts every configured node, so to it a pair with a Witness is three, and its two-node path is
+  off. The join asks each member for the Witness protocol version it speaks and refuses on any
+  member that is older or cannot be asked.
+
 ## Evidence has to be live, and it has to be trusted
 
 - **Every Witness Report is formed by fresh round-trips**, each with a deadline strictly inside
