@@ -29,7 +29,9 @@ func (s *Server) checkElectionIncumbents(ctx context.Context, cfg *config.Config
 	results := make(chan error, len(cfg.Nodes))
 	count := 0
 	for id, node := range cfg.Nodes {
-		if id == candidate || node == nil {
+		// The Witness is never an incumbent: it holds nothing, and a Witness
+		// that is down must not fail a vote by failing to answer.
+		if id == candidate || node == nil || node.IsWitness() {
 			continue
 		}
 		if id == cfg.Pulse.LocalNode {

@@ -125,6 +125,49 @@ type Member struct {
 	// Active-Active support
 	ActiveIPs []string // IPs currently hosted by this member
 	Capacity  int      // Node capacity for weighted distribution
+
+	// witness is this member's role, copied from its config entry, and it is
+	// what keeps a Witness out of every decision whatever its status says. A
+	// Witness that is down is StatusUnknown, which several decision paths still
+	// consider, so the status alone cannot be the guard (ADR-0006). Read with
+	// IsWitness; written only from config, under mu.
+	witness bool
+}
+
+// IsWitness reports whether this member is the cluster's Witness. The role,
+// not the status: it stays true while the Witness is down.
+func (m *Member) IsWitness() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.witness
+}
+
+// setWitness records the role from config. A Witness holds nothing, so turning
+// the role on also settles whatever status and addresses the member had into
+// the only claim a Witness can make.
+func (m *Member) setWitness(witness bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.witness == witness {
+		return
+	}
+	m.witness = witness
+	if witness {
+		m.setClaimLocked(m.claimLocked())
+	}
+}
+
+// admitLocked is the only status a member may be given, given its role. A
+// Witness is either up -- StatusWitness -- or not answering -- StatusUnknown --
+// and nothing anyone sends, a peer's broadcast, a recovery default, a
+// promotion, can make it anything else. That is "a peer cannot override it in
+// either direction" held by construction, at the one place status is written,
+// rather than at each of the places that write it.
+func (m *Member) admitLocked(status MemberStatus) MemberStatus {
+	if !m.witness || status == StatusUnknown {
+		return status
+	}
+	return StatusWitness
 }
 
 // ObserveRole records an identified reply received directly from this member.
@@ -473,7 +516,7 @@ func (m *Member) GetStatus() MemberStatus {
 func (m *Member) SetStatus(status MemberStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Status = status
+	m.Status = m.admitLocked(status)
 }
 
 // MarkUnreachable records that this member is no longer known to hold any
@@ -497,12 +540,22 @@ func (m *Member) claimLocked() Claim {
 
 func (m *Member) setClaimLocked(c Claim) {
 	c = c.copyIPs()
-	m.Status = c.Status
+	m.Status = m.admitLocked(c.Status)
 	m.ActiveIPs = c.ActiveIPs
+	if m.witness {
+		// A Witness claims no addresses, whatever it was handed.
+		m.ActiveIPs = nil
+	}
 }
 
 // BringUpIPs brings up the specified IPs on this member
 func (m *Member) BringUpIPs(ips []string) error {
+	// The last line of defence, behind admitLocked and the candidates snapshot:
+	// whatever path reached here, a Witness never brings an address up.
+	if len(ips) > 0 && m.IsWitness() {
+		return fmt.Errorf("member %s is the Witness and never holds floating IPs", m.ID)
+	}
+
 	// Resolve interface per IP using group assignments
 	ifaceToIPs, err := m.groupIPsByInterface(ips)
 	if err != nil {
@@ -799,7 +852,7 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusActive {
 		m.ActiveIPs = nil
 	}
-	m.Status = StatusMaintenance
+	m.Status = m.admitLocked(StatusMaintenance)
 	return nil
 }
 

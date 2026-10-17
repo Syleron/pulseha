@@ -1835,6 +1835,15 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 		}, nil
 	}
 
+	// A Witness can never become Active, by any route, forced or not (ADR-0006).
+	if member.IsWitness() {
+		s.logger.Warn("PROMOTE: Rejecting - target is the Witness", "node_id", req.NodeId)
+		return &rpc.PromoteResponse{
+			Success: false,
+			Message: fmt.Sprintf("Node %s is the cluster's Witness and can never be promoted", req.NodeId),
+		}, nil
+	}
+
 	// Check if already active
 	if member.GetStatus() == membership.StatusActive {
 		s.logger.Info("PROMOTE: Node is already active", "node_id", req.NodeId)
@@ -2098,7 +2107,10 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 	unconfirmedIncumbents := make([]string, 0, 1)
 	reachableCount := 0
 	if s.config.Pulse.Mode == "active-passive" {
-		for id, m := range s.memberList.MembersSnapshot() {
+		// Candidates only. A Witness holds nothing, so a Witness that is down is
+		// not an incumbent whose release has to be confirmed -- counting it as
+		// one would let a down Witness block every failover.
+		for id, m := range s.memberList.CandidatesSnapshot() {
 			status := m.GetStatus()
 			if status != membership.StatusUnknown {
 				reachableCount++
@@ -2109,7 +2121,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			}
 		}
 		if prevActiveID == "" {
-			for id, m := range s.memberList.MembersSnapshot() {
+			for id, m := range s.memberList.CandidatesSnapshot() {
 				if id != targetNodeID && m.GetStatus() == membership.StatusUnknown {
 					unconfirmedIncumbents = append(unconfirmedIncumbents, id)
 				}
@@ -3270,15 +3282,16 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// from here, the node handling the request, so it happens exactly once
 	// rather than once per node reacting to the mode change.
 	if req.Mode == "active-passive" {
-		activeNode := membership.ConsolidationTarget(s.memberList.MembersSnapshot(), s.leaderID)
+		activeNode := membership.ConsolidationTarget(s.memberList.CandidatesSnapshot(), s.leaderID)
 		if activeNode == nil {
 			s.logger.Warn("No eligible node found to become active during mode switch")
 		} else {
 			s.logger.Info("Consolidating floating IPs onto a single active node",
 				"hostname", activeNode.Hostname, "node_id", activeNode.ID)
 
-			// Demote every other node and release the IPs it holds.
-			for _, member := range s.memberList.MembersSnapshot() {
+			// Demote every other node and release the IPs it holds. A Witness holds
+			// none and has no status to demote from.
+			for _, member := range s.memberList.CandidatesSnapshot() {
 				if member.ID == activeNode.ID {
 					continue
 				}
@@ -3424,7 +3437,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 // — the lock is not reentrant and SetMode calls this with the write lock held —
 // and the member writes below take only the individual member locks.
 func (s *Server) seedActiveActiveAssignments() bool {
-	members := s.memberList.MembersSnapshot()
+	members := s.memberList.CandidatesSnapshot()
 
 	var owner *membership.Member
 	for _, member := range members {
@@ -3471,7 +3484,9 @@ func (s *Server) seedActiveActiveAssignments() bool {
 // Returns "" when no node is eligible, which the caller reads as "place it later"
 // rather than "place it everywhere". Callers must hold s.Lock().
 func (s *Server) leastLoadedNodeForGroup(groupName string) string {
-	members := s.memberList.MembersSnapshot()
+	// Candidates only: a node missing from this map is skipped below, which is
+	// how the Witness is never offered an address even if a group names it.
+	members := s.memberList.CandidatesSnapshot()
 
 	best := ""
 	bestCount := -1

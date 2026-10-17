@@ -126,7 +126,7 @@ func (h *HealthChecker) Coordinator() string {
 	if h.members == nil {
 		return ""
 	}
-	return clusterCoordinator(h.members.MembersSnapshot(), h.failoverGrace())
+	return clusterCoordinator(h.members.CandidatesSnapshot(), h.failoverGrace())
 }
 
 // HealthCheck represents the result of a health check
@@ -584,15 +584,17 @@ func (h *HealthChecker) performHealthChecks() {
 			// In particular, reachability alone must neither promote a Passive
 			// nor demote an existing Active (including when auto_failback is on).
 			if member.Status == StatusUnknown && reportedRole != StatusUnknown {
-				member.Status = reportedRole
+				member.Status = member.admitLocked(reportedRole)
 				statusChanges = append(statusChanges, fmt.Sprintf("%s reports %s after recovery",
 					member.Hostname, StatusToString(reportedRole)))
 			}
 		} else if wasUnknown && autoFailback {
-			member.Status = recoveredStatus(mode)
+			member.Status = member.admitLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
-			member.Status = recoveredStatus(mode)
+			// Through admitLocked: in active-active the recovery default is
+			// Active, which is the one status a returning Witness must not get.
+			member.Status = member.admitLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
 				member.Hostname, StatusToString(member.Status)))
 		}
@@ -853,7 +855,7 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 
 	h.nextReconcileCycle()
 
-	members := h.members.MembersSnapshot()
+	members := h.members.CandidatesSnapshot()
 	config := h.members.Config()
 
 	// Find the active node
@@ -1835,7 +1837,7 @@ func (h *HealthChecker) electNewActiveNode() {
 // findElectionCoordinator returns the ID of the node that should coordinate elections
 func (h *HealthChecker) findElectionCoordinator() string {
 	var coordinatorID string
-	for nodeID, member := range h.members.MembersSnapshot() {
+	for nodeID, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		member.mu.Unlock()
@@ -1855,7 +1857,7 @@ func (h *HealthChecker) selectBestCandidate() *Member {
 	var bestCandidate *Member
 	var bestScore float64 = -1
 
-	for _, member := range h.members.MembersSnapshot() {
+	for _, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		latencyStr := member.Latency
@@ -2269,7 +2271,7 @@ func (h *HealthChecker) calculateElectionBackoffWithRole(localNodeID string) (ti
 
 	// Get list of all available nodes that could participate in election
 	var availableNodes []string
-	for _, member := range h.members.MembersSnapshot() {
+	for _, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		nodeID := member.ID
