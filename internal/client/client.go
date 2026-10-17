@@ -320,6 +320,13 @@ func (c *Client) JoinCluster(address, token, bindIP, bindPort string) error {
 
 // JoinClusterWithNodeID allows specifying a custom node ID
 func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customNodeID string) error {
+	return c.JoinClusterAs(address, token, bindIP, bindPort, customNodeID, false)
+}
+
+// JoinClusterAs is JoinClusterWithNodeID with the role to join in. witness joins
+// this node as the cluster's Witness, which is fixed for as long as it stays in
+// the cluster.
+func (c *Client) JoinClusterAs(address, token, bindIP, bindPort, customNodeID string, witness bool) error {
 	// Split address into host and port if port is specified
 	host, port := address, "8080"
 	if strings.Contains(address, ":") {
@@ -360,6 +367,7 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 		BindIp:     bindIP,
 		BindPort:   bindPort,
 		NodeId:     nodeID,
+		Witness:    witness,
 	})
 	if err != nil {
 		return fmt.Errorf("join initiate failed: %v", err)

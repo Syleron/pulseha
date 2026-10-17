@@ -497,6 +497,23 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 	return nil
 }
 
+// AddWitness adds the cluster's Witness. For the join path, which adds the
+// member before the config entry naming its role exists, so AddMember cannot
+// read the role from there. The Witness starts Unknown, like any remote node,
+// until it answers a health check -- and never in Maintenance.
+func (m *MemberList) AddWitness(nodeID, hostname, bindIP, bindPort string) error {
+	if err := m.AddMember(nodeID, hostname, bindIP, bindPort); err != nil {
+		return err
+	}
+	member := m.GetMemberByID(nodeID)
+	if member == nil {
+		return fmt.Errorf("witness %s missing from the member list after it was added", nodeID)
+	}
+	member.setWitness(true)
+	member.SetClaim(Claim{Status: StatusUnknown})
+	return nil
+}
+
 // AddMemberQuiet adds a member with just the ID for backward compatibility
 func (m *MemberList) AddMemberQuiet(id string) error {
 	// Get node config

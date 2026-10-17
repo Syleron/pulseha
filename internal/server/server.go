@@ -1133,6 +1133,14 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 
 	// Check if this is initial cluster creation
 	if s.memberList.GetMemberCount() == 0 && req.Token == "" {
+		if req.Witness {
+			// A Witness watches a pair; a cluster of only a Witness has nothing
+			// to watch and nothing that could ever serve.
+			return &rpc.JoinResponse{
+				Success: false,
+				Message: "a Witness joins an existing cluster; it cannot be a cluster's first node",
+			}, nil
+		}
 		s.logger.Info("Initializing new cluster with first node: ", req.Hostname)
 
 		// Node ID must be provided
@@ -1213,9 +1221,29 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	nodeID := req.NodeId
 	s.logger.Debugf("Using node_id: %s", nodeID)
 
+	// The Witness rules, checked before anything is touched for the same reason
+	// the bind address is: refusing later would leave the member behind.
+	s.config.Lock()
+	refusal := witnessJoinRefusal(s.config.Nodes, nodeID, req.Witness)
+	s.config.Unlock()
+	if refusal != "" {
+		s.logger.Warn("Refusing join", "hostname", req.Hostname, "witness", req.Witness, "reason", refusal)
+		return &rpc.JoinResponse{Success: false, Message: refusal}, nil
+	}
+	if req.Witness {
+		if err := s.confirmPeersUnderstandWitness(ctx, nodeID); err != nil {
+			s.logger.Warn("Refusing Witness join", "hostname", req.Hostname, "reason", err)
+			return &rpc.JoinResponse{Success: false, Message: err.Error()}, nil
+		}
+	}
+
 	// Add the node to the member list
 	s.logger.Debugf("Adding member %s to member list...", nodeID)
-	if err := s.memberList.AddMember(nodeID, req.Hostname, req.BindIp, req.BindPort); err != nil {
+	addMember := s.memberList.AddMember
+	if req.Witness {
+		addMember = s.memberList.AddWitness
+	}
+	if err := addMember(nodeID, req.Hostname, req.BindIp, req.BindPort); err != nil {
 		s.logger.Error("Failed to add member to member list", "error", err)
 		return &rpc.JoinResponse{
 			Success: false,
@@ -1247,11 +1275,15 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		}
 	}
 	s.config.Nodes[nodeID] = &config.Node{
-		Hostname:    req.Hostname,
-		IP:          req.BindIp,
-		Port:        req.BindPort,
-		IPGroups:    make(map[string][]string),
-		Maintenance: true,
+		Hostname: req.Hostname,
+		IP:       req.BindIp,
+		Port:     req.BindPort,
+		IPGroups: make(map[string][]string),
+		// A joining node is parked in Maintenance until an operator assigns it a
+		// group. A Witness never is: it never becomes eligible, so there is
+		// nothing to hold it back from.
+		Maintenance: !req.Witness,
+		Witness:     req.Witness,
 		// Recorded, not required. A joiner running a build that predates this
 		// sends nothing and publishes for itself a moment later, which is exactly
 		// the behaviour step 2 shipped -- so an empty value here is a slower path
@@ -2579,6 +2611,8 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
 		ClusterToken: localToken,
 		HandoffTo:    s.handoffInProgress(),
+
+		WitnessProtocolVersion: witnessProtocolVersion,
 	}, nil
 }
 
@@ -4231,6 +4265,12 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 		return &rpc.AssignGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("node_id %s not found", req.NodeId),
+		}, nil
+	}
+	if node.IsWitness() {
+		return &rpc.AssignGroupResponse{
+			Success: false,
+			Message: fmt.Sprintf("node %s is the cluster's Witness and never holds floating IPs", req.NodeId),
 		}, nil
 	}
 
@@ -6254,6 +6294,18 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 		targetID = localID
 	}
 
+	// Maintenance and Witness are different things, and a Witness has nothing
+	// to drain: it serves nothing and is never eligible to (ADR-0006).
+	s.config.Lock()
+	targetIsWitness := s.config.Nodes[targetID].IsWitness()
+	s.config.Unlock()
+	if targetIsWitness {
+		return &rpc.SetMaintenanceResponse{
+			Success: false,
+			Message: fmt.Sprintf("node %s is the cluster's Witness; Maintenance does not apply to it", targetID),
+		}, nil
+	}
+
 	if targetID != localID {
 		// Remote target: forward the request directly to that node so it manages its own state
 		return s.setMaintenanceRemote(ctx, targetID, req.Enable)
@@ -7207,6 +7259,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// simply publishes for itself shortly after, which is what happened before
 		// this existed.
 		TlsCert: s.localCertificatePEM(),
+		Witness: req.Witness,
 	}
 	s.logger.Info("INITIATE_JOIN: Sending join request to target",
 		"targetHost", req.TargetHost,

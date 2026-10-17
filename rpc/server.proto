@@ -111,6 +111,10 @@ message JoinRequest {
     // itself a moment later -- so the joinee records what it is given and does
     // not require it.
     string tls_cert = 6;
+    // Joins as the cluster's Witness: a member that never serves and is never
+    // counted. Fixed for the node's lifetime -- there is no RPC that changes it
+    // afterwards (docs/adr/0006-a-witness-rules-on-overlapping-claims.md).
+    bool witness = 7;
 }
 
 message JoinResponse {
@@ -295,6 +299,11 @@ message HealthCheckResponse {
     string node_id = 4; // Identity of the responding node
     MemberStatusEnum status = 5; // Its current role, not a role assigned by the caller
     string handoff_to = 6; // Node an explicit handoff this member is part of is moving the group to; empty when none
+    // The version of the Witness protocol this daemon understands; 0 from a
+    // build that predates it. A Witness may only join a cluster in which every
+    // member reports at least 1, because an older binary would count the
+    // Witness as a third node and switch off the two-node path (ADR-0002).
+    int32 witness_protocol_version = 7;
 }
 
 // Logs Request/Response
@@ -620,6 +629,7 @@ message InitiateJoinRequest {
     string bind_ip = 4;
     string bind_port = 5;
     string node_id = 6;
+    bool witness = 7; // Join as the cluster's Witness; see JoinRequest.witness
 }
 
 message InitiateJoinResponse {
