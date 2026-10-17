@@ -75,6 +75,15 @@ func TestDeriveMemberStatus(t *testing.T) {
 			want:                   rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE,
 		},
 		{
+			// A Witness holds nothing and never will. Standby means "eligible
+			// for promotion", which is the one thing a Witness never is.
+			name:                   "witness outranks an empty assignment list",
+			status:                 membership.StatusWitness,
+			assignedIPs:            0,
+			selfReportsAssignments: true,
+			want:                   rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS,
+		},
+		{
 			name:                   "unknown is a health fact and is never derived away",
 			status:                 membership.StatusUnknown,
 			assignedIPs:            0,

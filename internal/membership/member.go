@@ -36,6 +36,9 @@ const (
 	StatusPassive MemberStatus = 2
 	// 3 is reserved for the removed StatusPartialActive — see above.
 	StatusMaintenance MemberStatus = 4 // Node is up but excluded from failover promotion
+	// 5 is Standby, which is derived at the status boundary and never held by a
+	// member, so it has no value here.
+	StatusWitness MemberStatus = 6 // The cluster's Witness, up and answering; never serves, never counted
 )
 
 // Claim is what a member asserts about itself: its status, together with the
@@ -821,6 +824,8 @@ func StatusToString(status MemberStatus) string {
 		return "Passive"
 	case StatusMaintenance:
 		return "Maintenance"
+	case StatusWitness:
+		return "Witness"
 	case StatusUnknown:
 		return "Unknown"
 	default:

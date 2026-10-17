@@ -259,6 +259,9 @@ type Member struct {
 	ActiveIPs    []string `json:"active_ips"`
 	LastResponse string   `json:"last_response"`
 	Latency      string   `json:"latency"`
+	// Witness is the member's role, not its status: a Witness that is down
+	// reports Status "Unknown" and still has this set.
+	Witness bool `json:"witness,omitempty"`
 }
 
 // GroupInfo represents a floating IP group
@@ -444,6 +447,8 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Maintenance"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY:
 			statusStr = "Standby"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS:
+			statusStr = "Witness"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
 			statusStr = "Unknown"
 		}
@@ -456,6 +461,7 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			Latency:      m.Latency,
 			IP:           m.Ip,
 			Port:         m.Port,
+			Witness:      m.Witness,
 		}
 
 		// Log the latency for debugging

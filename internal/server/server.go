@@ -1467,6 +1467,8 @@ func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, selfRep
 		return rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
 	case membership.StatusMaintenance:
 		return rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
+	case membership.StatusWitness:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS
 	default:
 		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
 	}

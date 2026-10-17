@@ -162,6 +162,14 @@ enum MemberStatusEnum {
     // consumer must still handle it in either mode: the mode is runtime
     // configuration, not a build-time fact.
     MEMBER_STATUS_STANDBY = 5;
+    // A member that never serves and is never counted, reachable and answering.
+    // Unlike STANDBY this one is stored and sent between nodes: it is the status
+    // a Witness holds while it is up, so every check that accepts only ACTIVE or
+    // PASSIVE leaves it out without having been told about it. A Witness that
+    // stops answering reads UNKNOWN like any member; the role itself travels as
+    // Member.witness, which is what a consumer reads to tell the two apart
+    // (docs/adr/0006-a-witness-rules-on-overlapping-claims.md).
+    MEMBER_STATUS_WITNESS = 6;
 }
 
 message Member {
@@ -176,6 +184,10 @@ message Member {
     string port = 8;
     string node_id = 9;  // UUID of the node
     map<string, GroupAssignment> group_assignments = 10;  // Map of interface to group assignments
+    // Whether this member is the cluster's Witness. Its role, not its status: it
+    // stays true while the Witness is down and its status reads UNKNOWN, so a
+    // consumer can keep an absent Witness from reading as a failed node.
+    bool witness = 11;
 }
 
 // Promote Request/Response
