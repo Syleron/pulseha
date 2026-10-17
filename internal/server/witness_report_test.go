@@ -10,23 +10,52 @@ import (
 	"github.com/syleron/pulseha/rpc"
 )
 
-// newWitnessTrio is a, b and the Witness c, each a real Server, with the
-// Witness's view of b and a's view of the Witness pointed at served addresses.
-// bAddr, when not empty, replaces where the Witness reaches b.
+// newWitnessTrio is a, b and the Witness c, each a real Server with its own
+// identity, every certificate published to every config, and every node serving
+// a real Witness listener -- the trusted Witness path, end to end. bAddr, when not
+// empty, replaces where the Witness reaches b.
 func newWitnessTrio(t *testing.T, bAddr string) (a, b, w *Server) {
 	t.Helper()
 	a, b, w = newVotingServer(t, "a"), newVotingServer(t, "b"), newVotingServer(t, "c")
-	for _, s := range []*Server{a, b, w} {
+	all := map[string]*Server{"a": a, "b": b, "c": w}
+	certs := map[string]string{}
+	addrs := map[string]string{}
+	for id, s := range all {
+		dir := t.TempDir()
+		s.SetCertDir(dir)
+		certs[id] = mintIdentityInto(t, dir, id)
+		addrs[id] = freeAddr(t)
+	}
+	for _, s := range all {
+		for id, node := range s.config.Nodes {
+			node.TLSCert = certs[id]
+			node.WitnessAddress = addrs[id]
+		}
 		s.config.Nodes["c"].Witness = true
 		s.memberList.UpdateConfig(s.config)
 	}
 	w.memberList.GetMemberByID("c").SetStatus(membership.StatusWitness)
-	if bAddr == "" {
-		bAddr = serveVoter(t, b)
+	if bAddr != "" {
+		w.config.Nodes["b"].WitnessAddress = bAddr
 	}
-	setVoterAddress(t, w, "b", bAddr)
-	setVoterAddress(t, a, "c", serveVoter(t, w))
+	for _, s := range all {
+		s := s
+		s.reconcileWitnessListener()
+		t.Cleanup(s.stopWitnessListener)
+	}
 	return a, b, w
+}
+
+// freeAddr is a loopback address nothing is listening on, for a listener to take.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+	return addr
 }
 
 func peerView(t *testing.T, resp *rpc.WitnessReportResponse, id string) *rpc.PeerView {
@@ -141,11 +170,17 @@ func TestAPeerThatIsGoneOrAnswersAsSomeoneElseIsNotVisible(t *testing.T) {
 	}
 	gone := closed.Addr().String()
 	closed.Close()
-	impostor := serveVoter(t, newVotingServer(t, "a")) // answers as a, at b's address
-
-	for name, addr := range map[string]string{"gone": gone, "answers as another member": impostor} {
+	for _, name := range []string{"gone", "answers as another member"} {
 		t.Run(name, func(t *testing.T) {
-			a, _, _ := newWitnessTrio(t, addr)
+			addr := gone
+			if name != "gone" {
+				// The Witness is pointed at a's own listener while it expects b.
+				addr = ""
+			}
+			a, _, w := newWitnessTrio(t, addr)
+			if name != "gone" {
+				w.config.Nodes["b"].WitnessAddress = a.config.Nodes["a"].WitnessAddress
+			}
 			resp, err := a.askWitness(context.Background())
 			if err != nil {
 				t.Fatalf("askWitness: %v", err)

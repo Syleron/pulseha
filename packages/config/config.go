@@ -158,6 +158,16 @@ type Node struct {
 	// Empty until the node publishes, which is what the permissive phase is for:
 	// the trust set accumulates while nothing depends on it.
 	TLSCert string `json:"tls_cert,omitempty"`
+	// WitnessAddress is where this node is reached on the Witness path, as
+	// host:port on the service network -- not the heartbeat path, which is the
+	// link whose failure the Witness is there to arbitrate (ADR-0006). Optional:
+	// without it the Witness path falls back to bind_address and still settles a
+	// crashed or frozen node, but cannot tell a broken cluster link from a dead
+	// node.
+	//
+	// Node-owned like TLSCert: only this node can say where it listens, so a sync
+	// adopts every other node's and never its own.
+	WitnessAddress string `json:"witness_address,omitempty"`
 }
 
 // SyslogEnabled reports whether this node should send its log to syslog.

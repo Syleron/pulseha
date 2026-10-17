@@ -98,6 +98,9 @@ func translateStatusResponse(resp *rpc.StatusResponse) (*client.ClusterStatus, e
 			LastResponse: m.LastResponse,
 			Latency:      m.Latency,
 			Witness:      m.Witness,
+
+			WitnessAddress: m.WitnessAddress,
+			WitnessTrusted: m.WitnessTrusted,
 		}
 	}
 	for _, g := range resp.Groups {
@@ -166,6 +169,9 @@ func printClusterStatus(status *client.ClusterStatus) error {
 		}
 		fmt.Printf("Address: %s:%s\n", utils.FormatIPv6(member.IP), member.Port)
 		fmt.Printf("Status: %s\n", member.Status)
+		if line := witnessLine(member, status.Members); line != "" {
+			fmt.Println(line)
+		}
 		if len(member.ActiveIPs) > 0 {
 			fmt.Printf("Active IPs: %v\n", member.ActiveIPs)
 		}
@@ -242,4 +248,35 @@ func printClusterStatus(status *client.ClusterStatus) error {
 	}
 
 	return nil
+}
+
+// witnessLine is what status says about a member's part in arbitration, or ""
+// when there is nothing to say -- a cluster with no Witness reads exactly as it
+// always has.
+//
+// The Witness gets one of three readings, because they behave differently and an
+// operator diagnosing a partition needs to know which: arbitrating, configured but
+// not trusted (it arbitrates nothing until every leg is verified), or down. A
+// member with no witness_address in a cluster that has a Witness is named too:
+// the Witness reaches it over the heartbeat path, and cannot settle the
+// cluster-link-only partition it exists for (ADR-0006).
+func witnessLine(m client.Member, all []client.Member) string {
+	if m.Witness {
+		switch {
+		case m.Status == "Unknown":
+			return "Witness: down -- a partition leaves both nodes Active until it is back"
+		case !m.WitnessTrusted:
+			return "Witness: configured but not trusted -- every member needs a published certificate " +
+				"and a witness_address (or tls_mode=required); it arbitrates nothing until then"
+		default:
+			return "Witness: arbitrating"
+		}
+	}
+	for _, other := range all {
+		if other.Witness && m.WitnessAddress == "" {
+			return "Witness address: none -- reached over the heartbeat path, so a cluster-link-only " +
+				"partition is not arbitrated (pulsectl config set witness_address host:port)"
+		}
+	}
+	return ""
 }

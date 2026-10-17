@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/syleron/pulseha/internal/client"
@@ -154,5 +155,34 @@ func TestTranslateStatusResponseRendersTheWitness(t *testing.T) {
 	}
 	if got.Members[1].Status != "Unknown" || !got.Members[1].Witness {
 		t.Errorf("witness that is down = %+v, want Status Unknown with the role still set", got.Members[1])
+	}
+}
+
+func TestWitnessLine(t *testing.T) {
+	witness := func(status string, trusted bool) client.Member {
+		return client.Member{Status: status, Witness: true, WitnessTrusted: trusted, WitnessAddress: "10.0.0.3:9084"}
+	}
+	for _, tc := range []struct {
+		name   string
+		member client.Member
+		all    []client.Member
+		want   string
+	}{
+		{"an arbitrating Witness", witness("Witness", true), nil, "arbitrating"},
+		{"a Witness not yet trusted", witness("Witness", false), nil, "configured but not trusted"},
+		{"a Witness that is down", witness("Unknown", true), nil, "down"},
+		{"a node with no witness_address beside a Witness", client.Member{Status: "Active"},
+			[]client.Member{witness("Witness", true)}, "Witness address: none"},
+		{"a node with a witness_address", client.Member{Status: "Active", WitnessAddress: "10.0.0.1:9084"},
+			[]client.Member{witness("Witness", true)}, ""},
+		{"a cluster with no Witness says nothing", client.Member{Status: "Active"},
+			[]client.Member{{Status: "Passive"}}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := witnessLine(tc.member, tc.all)
+			if tc.want == "" && got != "" || tc.want != "" && !strings.Contains(got, tc.want) {
+				t.Errorf("witnessLine = %q, want it to say %q", got, tc.want)
+			}
+		})
 	}
 }

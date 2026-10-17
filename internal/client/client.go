@@ -262,6 +262,12 @@ type Member struct {
 	// Witness is the member's role, not its status: a Witness that is down
 	// reports Status "Unknown" and still has this set.
 	Witness bool `json:"witness,omitempty"`
+	// WitnessAddress is where the member is reached on the Witness path; empty
+	// when it is reached on its bind address.
+	WitnessAddress string `json:"witness_address,omitempty"`
+	// WitnessTrusted, on the Witness, is whether every leg of the Witness path is
+	// verified TLS. False is "configured but not trusted": it arbitrates nothing.
+	WitnessTrusted bool `json:"witness_trusted,omitempty"`
 }
 
 // GroupInfo represents a floating IP group
@@ -470,6 +476,9 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			IP:           m.Ip,
 			Port:         m.Port,
 			Witness:      m.Witness,
+
+			WitnessAddress: m.WitnessAddress,
+			WitnessTrusted: m.WitnessTrusted,
 		}
 
 		// Log the latency for debugging

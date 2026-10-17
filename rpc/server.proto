@@ -196,6 +196,13 @@ message Member {
     // stays true while the Witness is down and its status reads UNKNOWN, so a
     // consumer can keep an absent Witness from reading as a failed node.
     bool witness = 11;
+    // Where this member is reached on the Witness path; empty when it declares
+    // none and is reached on its bind address instead.
+    string witness_address = 12;
+    // On the Witness only: whether every leg of the Witness path is verified
+    // TLS, so its Reports can be acted on. False is "configured but not
+    // trusted" -- it arbitrates nothing, and a partition leaves both nodes Active.
+    bool witness_trusted = 13;
 }
 
 // Promote Request/Response

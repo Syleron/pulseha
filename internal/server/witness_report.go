@@ -165,7 +165,7 @@ func (s *Server) observePeers(ctx context.Context, localID, token string, peers 
 
 // askPeerForClaim is one round-trip: the peer's own Claim, or why there is none.
 func (s *Server) askPeerForClaim(ctx context.Context, localID, token, id string, node *config.Node) (*rpc.MemberClaim, error) {
-	peer, err := s.getPeerClient(id, node)
+	peer, err := s.witnessPathClient(id, *node)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +186,12 @@ func (s *Server) askPeerForClaim(ctx context.Context, localID, token, id string,
 // which is not a failure: it is tier 3, today's behaviour.
 var errNoWitness = errors.New("no Witness configured")
 
+// errWitnessNotTrusted is askWitness's answer while some leg of the Witness
+// path is not verified TLS. Treated as silence, like any other failure to get
+// a Report, but distinct so it can be said plainly.
+var errWitnessNotTrusted = errors.New("the Witness is configured but not trusted: " +
+	"every member needs a published certificate and a witness_address, or tls_mode=required")
+
 // askWitness asks the configured Witness what it can see, within
 // witnessAskTimeout. An error means there is no usable report -- no Witness, or
 // one that did not answer or did not answer as itself -- and the caller must
@@ -205,14 +211,22 @@ func (s *Server) askWitness(ctx context.Context) (*rpc.WitnessReportResponse, er
 			witnessID, witness = id, *node
 		}
 	}
+	trusted := witnessPathTrusted(cfg.Nodes, cfg.Pulse.TLSRequired())
 	cfg.Unlock()
 	if witnessID == "" || witnessID == localID {
 		return nil, errNoWitness
 	}
+	// Configured but not trusted arbitrates nothing. A Report that crossed an
+	// unverified leg -- this node to the Witness, or the Witness to a peer --
+	// could have been written by anyone on that network, and acting on it would
+	// hand them a way to fence a serving node (ADR-0006).
+	if !trusted {
+		return nil, errWitnessNotTrusted
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, witnessAskTimeout)
 	defer cancel()
-	peer, err := s.getPeerClient(witnessID, &witness)
+	peer, err := s.witnessPathClient(witnessID, witness)
 	if err != nil {
 		return nil, err
 	}

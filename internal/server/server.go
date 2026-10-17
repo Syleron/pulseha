@@ -219,6 +219,14 @@ type Server struct {
 	witnessFence    witnessFence
 	witnessLoopOnce sync.Once
 	witnessLoopStop chan struct{}
+	// The Witness listener and the connections made on the Witness path; see
+	// witness_listener.go. Their own locks, never held across anything else.
+	witnessListenMu      pulselock.Mutex
+	witnessListenSrv     *grpc.Server
+	witnessListenAddr    string
+	witnessListenProblem string
+	witnessClientsMu     pulselock.Mutex
+	witnessClients       map[string]*client.Client
 	// demoteSelf, releaseSelf and announceSelf replace the local MakePassive,
 	// the active-active release and AnnounceNodeIPs when acting on a Ruling.
 	// Test seams, nil in production: all three touch the interfaces.
@@ -774,6 +782,7 @@ func (s *Server) Stop() {
 	// propagate, and so an in-flight retry loop cannot outlive the server.
 	s.stopConfigBroadcaster()
 	s.stopWitnessLoop()
+	s.stopWitnessListener()
 
 	// Best-effort convergence hint: broadcast we're going down so peers can elect a new active
 	func() {
@@ -1577,6 +1586,12 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			NodeId:       member.ID,
 			Witness:      s.config.Nodes[member.ID].IsWitness(),
 		})
+		if node := s.config.Nodes[member.ID]; node != nil {
+			members[len(members)-1].WitnessAddress = node.WitnessAddress
+			if node.IsWitness() {
+				members[len(members)-1].WitnessTrusted = witnessPathTrusted(s.config.Nodes, s.config.Pulse.TLSRequired())
+			}
+		}
 	}
 
 	// Build groups information from server config so clients don't need local config
@@ -5643,6 +5658,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 							"sender", senderID)
 					}
 					incoming.TLSCert = mine.TLSCert
+					// Node-owned for the same reason: only this node knows where
+					// it listens on the Witness path (ADR-0006).
+					incoming.WitnessAddress = mine.WitnessAddress
 				}
 			}
 		}
@@ -6228,6 +6246,10 @@ var settableConfigKeys = map[string]configKeyScope{
 	// tlsPreconditionsMet before it is written, which is the whole of ADR-0005's
 	// migration safety.
 	"tls_mode": scopeCluster,
+	// Set on the node it describes, like the logging keys, but published: every
+	// member has to know where every other is reached on the Witness path.
+	// UpdateConfig hands it to applyWitnessAddress.
+	"witness_address": scopeNode,
 }
 
 // What UpdateConfig reports back about the reach of a change it applied. The CLI
@@ -6268,6 +6290,9 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 	// since it reads the member list and reconfigures this node afterwards.
 	if req.Key == "tls_mode" {
 		return s.applyTLSMode(req.Value), nil
+	}
+	if req.Key == "witness_address" {
+		return s.applyWitnessAddress(req.Value), nil
 	}
 
 	if req.Key == "mode" {

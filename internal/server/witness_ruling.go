@@ -290,6 +290,7 @@ func (s *Server) stopWitnessLoop() {
 }
 
 func (s *Server) witnessLoopTick() {
+	s.reconcileWitnessListener()
 	cfg := s.clusterSnapshot()()
 	if cfg == nil {
 		return
