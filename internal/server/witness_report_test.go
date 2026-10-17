@@ -198,3 +198,83 @@ func TestThePeerBudgetSitsInsideTheAskersDeadline(t *testing.T) {
 		t.Errorf("budget with no deadline = %s, want %s", got, witnessPeerTimeoutDefault)
 	}
 }
+
+func TestTheWitnessAnswerBeforePromoting(t *testing.T) {
+	t.Run("a peer serving the Witness", func(t *testing.T) {
+		a, b, _ := newWitnessTrio(t, "")
+		b.memberList.GetMemberByID("b").SetStatus(membership.StatusActive)
+		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessPeerServing {
+			t.Errorf("answer = %s, want peer-serving", got)
+		}
+	})
+	t.Run("a peer the Witness cannot see clears the fence", func(t *testing.T) {
+		closed, _ := net.Listen("tcp", "127.0.0.1:0")
+		gone := closed.Addr().String()
+		closed.Close()
+		a, _, _ := newWitnessTrio(t, gone)
+		a.witnessFence.fence(time.Now())
+		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessPeerNotVisible {
+			t.Errorf("answer = %s, want peer-not-visible", got)
+		}
+		if a.witnessFence.isFenced() {
+			t.Error("still Fenced although the peer it was ruled out for is gone")
+		}
+	})
+	t.Run("no Witness is silence", func(t *testing.T) {
+		if got := newVotingServer(t, "a").witnessAnswerFor(context.Background(), "b"); got != witnessSilent {
+			t.Errorf("answer = %s, want silent", got)
+		}
+	})
+	t.Run("a Fenced node waits out a brief silence, and only a brief one", func(t *testing.T) {
+		a := newVotingServer(t, "a")
+		a.config.Nodes["c"].Witness = true // configured, but nothing listens there
+		a.memberList.UpdateConfig(a.config)
+		a.witnessFence.fence(time.Now())
+		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessSilentWhileFenced {
+			t.Errorf("answer inside the hold-down = %s, want silent-while-fenced", got)
+		}
+		a.witnessFence.answered(time.Now().Add(-2 * a.witnessHoldDown()))
+		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessSilent {
+			t.Errorf("answer after the hold-down = %s, want silent", got)
+		}
+	})
+}
+
+// End to end through the promotion itself: the incumbent is unreachable from
+// here -- its port refuses -- but serving the Witness. The cluster-link-only
+// partition this exists for. The promotion must abort and leave this node Passive.
+func TestAPromotionOverAPeerServingTheWitnessAborts(t *testing.T) {
+	a, b, _ := newWitnessTrio(t, "")
+	a.config.Pulse.Mode = "active-passive"
+	// No addresses: the abort is what is under test, and a promotion that went
+	// ahead must not touch this machine's interfaces.
+	a.config.Groups = map[string][]string{}
+	b.memberList.GetMemberByID("b").SetStatus(membership.StatusActive)
+	a.memberList.GetMemberByID("b").SetStatus(membership.StatusUnknown) // a cannot see b
+
+	a.performPromotionAsync("a", nil, false)
+	if got := a.memberList.GetMemberByID("a").GetStatus(); got != membership.StatusPassive {
+		t.Fatalf("a = %s after promoting over a peer serving the Witness; want Passive", membership.StatusToString(got))
+	}
+}
+
+// Seeing the peer again ends the partition, and with it the hold-down.
+func TestSeeingThePeerAgainClearsTheFence(t *testing.T) {
+	a := newVotingServer(t, "a")
+	a.config.Nodes["c"].Witness = true
+	a.memberList.UpdateConfig(a.config)
+	a.witnessFence.fence(time.Now())
+
+	a.memberList.GetMemberByID("b").SetStatus(membership.StatusUnknown)
+	a.witnessLoopTick()
+	if !a.witnessFence.isFenced() {
+		t.Fatal("cleared while the peer is still unseen")
+	}
+	// The Witness being down is not the peer being unseen.
+	a.memberList.GetMemberByID("b").SetStatus(membership.StatusPassive)
+	a.memberList.GetMemberByID("c").SetStatus(membership.StatusUnknown)
+	a.witnessLoopTick()
+	if a.witnessFence.isFenced() {
+		t.Fatal("still Fenced with the peer visible again")
+	}
+}

@@ -216,6 +216,7 @@ type Server struct {
 	// see witnessHistory. witnessLoopOnce/witnessLoopStop run and stop the loop
 	// that does this node's part of arbitration (startWitnessLoop).
 	witnessHistory  witnessHistory
+	witnessFence    witnessFence
 	witnessLoopOnce sync.Once
 	witnessLoopStop chan struct{}
 	// Rate limiting for refresh calls
@@ -2087,13 +2088,26 @@ func (s *Server) hasConfiguredPromotionMajority() bool {
 
 // canPromoteWithoutConfirmedRelease retains the operator recovery override.
 // Automatic elections never set forceDemote. A reachable but unresponsive
-// incumbent blocks both paths. An unreachable incumbent can still own its IPs:
-// this majority check does not replace witness/lease fencing (END-2631).
-func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
+// incumbent blocks both paths. An unreachable incumbent can still own its IPs,
+// which is what the Witness's answer is for (ADR-0006).
+func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool, witness witnessAnswer) bool {
 	if peerStillAlive {
 		return false
 	}
-	// The peer is unreachable: require a majority or explicit operator override.
+	switch witness {
+	case witnessPeerServing:
+		// Unreachable from here, but answering the Witness and claiming Active:
+		// the same situation as a wedged peer -- alive and holding -- and force
+		// does not override that either. Promoting would only be ruled back.
+		return false
+	case witnessSilentWhileFenced:
+		// This node was ruled against and the Witness has gone quiet only
+		// briefly; only an operator may cut the hold-down short.
+		return forceDemote
+	}
+	// The peer is unreachable and nothing says it is serving: require a
+	// majority -- which a configured pair always has (ADR-0002) -- or an
+	// explicit operator override.
 	return haveQuorum || forceDemote
 }
 
@@ -2279,12 +2293,21 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// a minority must never claim addresses it cannot prove were released.
 			haveQuorum := s.hasConfiguredPromotionMajority()
 
-			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote) {
+			// Unreachable from here is the question the Witness answers: dead, or
+			// only cut off from this node. Not asked about a wedged peer, which
+			// blocks the promotion whatever the Witness says.
+			witness := witnessSilent
+			if !stillAlive {
+				witness = s.witnessAnswerFor(context.Background(), id)
+			}
+
+			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote, witness) {
 				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",
 					"unconfirmed_node", id,
 					"target", targetNodeID,
 					"peer_still_alive", stillAlive,
 					"have_quorum", haveQuorum,
+					"witness", witness,
 					"reachable_nodes", reachableCount,
 					"error", err)
 				s.restoreMemberStates(originalStates)

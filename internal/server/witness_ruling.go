@@ -235,11 +235,30 @@ func (s *Server) witnessLoopTick() {
 		return
 	}
 	cfg.Lock()
-	localIsWitness := cfg.Nodes[cfg.Pulse.LocalNode].IsWitness()
+	localID := cfg.Pulse.LocalNode
+	localIsWitness := cfg.Nodes[localID].IsWitness()
 	cfg.Unlock()
 	if localIsWitness {
 		s.observeForHistory(context.Background())
+		return
 	}
+	if s.witnessFence.isFenced() && s.seesEveryPeer(localID) {
+		// The partition is over. Normal reconvergence takes it from here, and a
+		// Fenced node that kept its hold-down past that would wait out a
+		// silence that no longer means anything.
+		s.logger.Info("WITNESS: peer visible again; no longer Fenced")
+		s.witnessFence.clear()
+	}
+}
+
+// seesEveryPeer reports whether every other candidate is answering this node.
+func (s *Server) seesEveryPeer(localID string) bool {
+	for id, m := range s.memberList.CandidatesSnapshot() {
+		if id != localID && m.GetStatus() == membership.StatusUnknown {
+			return false
+		}
+	}
+	return true
 }
 
 // statusOf is a Claim's status as a membership status. MemberStatusEnum's
