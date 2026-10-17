@@ -75,6 +75,10 @@ type ServerReference interface {
 	AnnounceNodeIPs(nodeID string) error
 	// Re-broadcast of the current config, for the periodic reconcile below
 	RequestConfigReconcile()
+	// Addresses orphan redistribution must leave alone, because the Witness
+	// says a peer this node cannot see is still serving them, or a Ruling took
+	// them from this node. Never blocks; empty without a Witness (ADR-0006).
+	WitnessHeldBack() map[string]bool
 }
 
 // reconcileConfigAcrossPeers re-broadcasts the coordinator's config once a
@@ -1535,6 +1539,23 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 	}
 
 	orphaned := orphanedGroupIPs(cfg.Groups, hosted)
+	// An address is orphaned when no node this one can see holds it. The Witness
+	// can see further: what it says a peer is still serving is not orphaned, only
+	// cut off from here, and taking it would make an overlap to rule on.
+	if h.server != nil {
+		if held := h.server.WitnessHeldBack(); len(held) > 0 {
+			kept := orphaned[:0]
+			for _, ip := range orphaned {
+				if !held[ip] {
+					kept = append(kept, ip)
+				}
+			}
+			if dropped := len(orphaned) - len(kept); dropped > 0 {
+				h.logger.Info("ACTIVE_CHECK: leaving addresses the Witness says are still served", "count", dropped)
+			}
+			orphaned = kept
+		}
+	}
 	if len(orphaned) == 0 {
 		return false
 	}

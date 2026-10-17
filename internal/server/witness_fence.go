@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/syleron/pulseha/internal/membership"
@@ -56,6 +57,16 @@ type witnessFence struct {
 	fenced     bool
 	lastAnswer time.Time
 	contested  *contested
+	// ruledOut is what a Ruling took from this node in active-active, held back
+	// from redistribution for as long as the hold-down lasts.
+	ruledOut []string
+	// peerServing is what the Witness last said a peer this node cannot see is
+	// serving, in active-active.
+	peerServing map[string]bool
+	// reannounced is the Rulings this node, as keeper, has already re-announced
+	// for. A settled Ruling keeps arriving for a hold-down; the announcement it
+	// calls for is made once.
+	reannounced map[string]time.Time
 }
 
 func (f *witnessFence) answered(at time.Time) {
@@ -64,17 +75,20 @@ func (f *witnessFence) answered(at time.Time) {
 	f.lastAnswer = at
 }
 
-func (f *witnessFence) fence(at time.Time) {
+func (f *witnessFence) fence(at time.Time, ruledOut []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fenced = true
 	f.lastAnswer = at
+	f.ruledOut = append([]string(nil), ruledOut...)
 }
 
 func (f *witnessFence) clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.fenced = false
+	f.ruledOut = nil
+	f.peerServing = nil
 }
 
 func (f *witnessFence) isFenced() bool {
@@ -140,41 +154,40 @@ func (s *Server) witnessAnswerFor(ctx context.Context, peerID string) witnessAns
 	return witnessSilent
 }
 
-// rulingAgainst returns the first Ruling in which localID is a contender and
-// not the keeper, or nil.
-func rulingAgainst(rulings []*rpc.Ruling, localID string) *rpc.Ruling {
-	for _, r := range rulings {
-		if r.GetKeeper() != localID && contains(r.GetContenders(), localID) {
-			return r
-		}
-	}
-	return nil
-}
-
 // contested is, on the node a Ruling kept, what it is waiting for the losers to
 // release before it re-announces. Kept beside the fence because the two are the
-// same arbitration from opposite sides.
+// same arbitration from opposite sides. addresses is nil in active-passive,
+// where the Ruling covers everything.
 type contested struct {
-	since  time.Time
-	losers []string
+	since     time.Time
+	losers    []string
+	addresses []string
 }
 
 // witnessWatch is a serving node's tick while it cannot see a peer: ask the
 // Witness, and act on the Ruling.
 //
-// Ruled against: Fenced -- demote and release. Ruled for: note the losers, and
-// re-announce once a later report shows them no longer claiming, because the
-// network follows whoever announced last and that is usually the loser, which
-// promoted into the partition. Re-announcing on the Ruling itself would race the
-// loser's own last announcement; on the release it cannot (ADR-0006).
+// Ruled against: Fenced. In active-passive it stands down; in active-active it
+// gives back only the addresses ruled on and keeps serving the rest. Ruled for:
+// it notes the losers, and re-announces once a later report shows them no
+// longer claiming, because the network follows whoever announced last and that
+// is usually the loser, which promoted into the partition. Re-announcing on the
+// Ruling itself would race the loser's own last announcement; on the release it
+// cannot (ADR-0006).
 //
-// Witness silence never fences. It only lets a pending re-announcement age out,
-// so a Witness that disappears between the Ruling and the release still cannot
-// leave the address pointed at a node that has let go of it.
-func (s *Server) witnessWatch(ctx context.Context, localID string) {
+// In active-active it also records which addresses a peer it cannot see is
+// still serving to the Witness, so that orphan redistribution leaves them alone
+// rather than taking them and making an overlap to rule on.
+//
+// Witness silence never fences. It forgets what the Witness last said the peer
+// was serving -- silence is tier 3 -- and lets a pending re-announcement age
+// out, so a Witness that disappears between the Ruling and the release still
+// cannot leave the address pointed at a node that has let go of it.
+func (s *Server) witnessWatch(ctx context.Context, localID, mode string) {
 	now := time.Now()
 	resp, err := s.askWitness(ctx)
 	if err != nil {
+		s.setPeerServing(nil)
 		if c := s.takeContestedOlderThan(now, s.witnessHoldDown()); c != nil {
 			s.logger.Warn("WITNESS: no report since the Ruling; re-announcing on the age-out",
 				"losers", c.losers, "since", c.since)
@@ -184,39 +197,105 @@ func (s *Server) witnessWatch(ctx context.Context, localID string) {
 	}
 	s.witnessFence.answered(now)
 
-	if r := rulingAgainst(resp.GetRulings(), localID); r != nil {
-		s.logger.Warn("WITNESS: ruled against; standing down", "keeper", r.GetKeeper(), "contenders", r.GetContenders())
-		if err := s.demoteForRuling(ctx, localID); err != nil {
-			// Still Active and still contested; the next tick asks again.
+	if mode == "active-active" {
+		serving := make(map[string]bool)
+		for _, v := range resp.GetPeers() {
+			if v.GetVisible() && statusOf(v.GetClaim()) == membership.StatusActive {
+				for _, ip := range v.GetClaim().GetActiveIps() {
+					serving[ip] = true
+				}
+			}
+		}
+		s.setPeerServing(serving)
+	}
+
+	if against := rulingsAgainst(resp.GetRulings(), localID); len(against) > 0 {
+		addrs := rulingAddresses(against)
+		s.logger.Warn("WITNESS: ruled against; standing down", "keeper", against[0].GetKeeper(),
+			"contenders", against[0].GetContenders(), "addresses", len(addrs))
+		var err error
+		if mode == "active-active" {
+			err = s.releaseForRuling(ctx, localID, addrs)
+		} else {
+			err = s.demoteForRuling(ctx, localID)
+		}
+		if err != nil {
+			// Still claiming and still contested; the next tick asks again.
 			s.logger.Error("WITNESS: could not stand down after a Ruling against this node", "error", err)
 			return
 		}
-		s.witnessFence.fence(now)
-		s.clearContested()
-		return
+		s.witnessFence.fence(now, addrs)
+		if mode != "active-active" {
+			// Stood down entirely: there is nothing left to have kept.
+			s.clearContested()
+			return
+		}
+		// In active-active the same report can rule this node out of the
+		// addresses it took and in on the ones it held all along -- each side
+		// took the other's groups -- so carry on to what it kept.
 	}
 
 	for _, r := range resp.GetRulings() {
-		if r.GetKeeper() == localID {
-			s.noteContested(now, r.GetContenders(), localID)
+		if r.GetKeeper() == localID && s.markReannounced(now, r) {
+			s.noteContested(now, r.GetContenders(), r.GetAddresses(), localID)
 		}
 	}
-	if c := s.contestedSnapshot(); c != nil && losersReleased(resp.GetPeers(), c.losers) {
+	if c := s.contestedSnapshot(); c != nil && losersReleased(resp.GetPeers(), c.losers, c.addresses) {
 		s.logger.Info("WITNESS: the node ruled against has released; re-announcing", "losers", c.losers)
 		s.clearContested()
 		s.reannounce(localID)
 	}
 }
 
+// rulingsAgainst returns every Ruling in which localID is a contender and not
+// the keeper.
+func rulingsAgainst(rulings []*rpc.Ruling, localID string) []*rpc.Ruling {
+	var out []*rpc.Ruling
+	for _, r := range rulings {
+		// Never a settled one: it was decided for an earlier report, and this
+		// node may since have taken over legitimately.
+		if !r.GetSettled() && r.GetKeeper() != localID && contains(r.GetContenders(), localID) {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// rulingAddresses is every address the Rulings name; nil when any of them
+// covers everything, which is active-passive.
+func rulingAddresses(rulings []*rpc.Ruling) []string {
+	var addrs []string
+	for _, r := range rulings {
+		if len(r.GetAddresses()) == 0 {
+			return nil
+		}
+		for _, ip := range r.GetAddresses() {
+			addrs = appendUnique(addrs, ip)
+		}
+	}
+	return addrs
+}
+
 // losersReleased reports whether a report shows every loser visible and no
-// longer claiming Active. A loser the Witness cannot see has not been seen to
-// release anything; that waits for the age-out.
-func losersReleased(views []*rpc.PeerView, losers []string) bool {
+// longer claiming what it was ruled out of: Active at all in active-passive,
+// any of the addresses in active-active. A loser the Witness cannot see has not
+// been seen to release anything; that waits for the age-out.
+func losersReleased(views []*rpc.PeerView, losers, addresses []string) bool {
 	for _, id := range losers {
 		released := false
 		for _, v := range views {
-			if v.GetNodeId() == id && v.GetVisible() && statusOf(v.GetClaim()) != membership.StatusActive {
-				released = true
+			if v.GetNodeId() != id || !v.GetVisible() {
+				continue
+			}
+			if len(addresses) == 0 {
+				released = statusOf(v.GetClaim()) != membership.StatusActive
+				continue
+			}
+			released = true
+			for _, ip := range v.GetClaim().GetActiveIps() {
+				if contains(addresses, ip) {
+					released = false
+				}
 			}
 		}
 		if !released {
@@ -226,19 +305,46 @@ func losersReleased(views []*rpc.PeerView, losers []string) bool {
 	return true
 }
 
-func (s *Server) noteContested(now time.Time, contenders []string, localID string) {
+// markReannounced reports whether r is a Ruling this node has not yet taken up
+// as keeper, and records that it now has. Entries older than the hold-down are
+// forgotten, matching how long the Witness goes on sending a settled Ruling.
+func (s *Server) markReannounced(now time.Time, r *rpc.Ruling) bool {
+	key := r.GetKeeper() + "\x01" + joinIDs(r.GetContenders()) + "\x01" + joinIDs(r.GetAddresses())
+	window := s.witnessHoldDown()
 	s.witnessFence.mu.Lock()
 	defer s.witnessFence.mu.Unlock()
-	if s.witnessFence.contested != nil {
-		return // keep the first Ruling's time, which is what the age-out counts from
-	}
-	var losers []string
-	for _, id := range contenders {
-		if id != localID {
-			losers = append(losers, id)
+	for k, at := range s.witnessFence.reannounced {
+		if now.Sub(at) >= window {
+			delete(s.witnessFence.reannounced, k)
 		}
 	}
-	s.witnessFence.contested = &contested{since: now, losers: losers}
+	if _, done := s.witnessFence.reannounced[key]; done {
+		return false
+	}
+	if s.witnessFence.reannounced == nil {
+		s.witnessFence.reannounced = make(map[string]time.Time)
+	}
+	s.witnessFence.reannounced[key] = now
+	return true
+}
+
+func (s *Server) noteContested(now time.Time, contenders, addresses []string, localID string) {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	c := s.witnessFence.contested
+	if c == nil {
+		// The first Ruling's time is what the age-out counts from.
+		c = &contested{since: now}
+		s.witnessFence.contested = c
+	}
+	for _, id := range contenders {
+		if id != localID {
+			c.losers = appendUnique(c.losers, id)
+		}
+	}
+	for _, ip := range addresses {
+		c.addresses = appendUnique(c.addresses, ip)
+	}
 }
 
 func (s *Server) contestedSnapshot() *contested {
@@ -266,6 +372,69 @@ func (s *Server) clearContested() {
 	s.witnessFence.mu.Lock()
 	defer s.witnessFence.mu.Unlock()
 	s.witnessFence.contested = nil
+}
+
+func (s *Server) setPeerServing(serving map[string]bool) {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	s.witnessFence.peerServing = serving
+}
+
+// WitnessHeldBack is the set of addresses orphan redistribution must leave
+// alone on this node: what the Witness last said a peer this node cannot see
+// is serving, and what a Ruling took from this node while it is held down. Never
+// blocks -- the health-check tick reads it -- and empty when the Witness is
+// silent, which is today's behaviour.
+func (s *Server) WitnessHeldBack() map[string]bool {
+	now, holdDown := time.Now(), s.witnessHoldDown()
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	held := make(map[string]bool, len(s.witnessFence.peerServing)+len(s.witnessFence.ruledOut))
+	for ip := range s.witnessFence.peerServing {
+		held[ip] = true
+	}
+	if s.witnessFence.fenced && now.Sub(s.witnessFence.lastAnswer) < holdDown {
+		for _, ip := range s.witnessFence.ruledOut {
+			held[ip] = true
+		}
+	}
+	return held
+}
+
+// releaseForRuling gives back exactly the addresses a Ruling took from this
+// node, and keeps serving the rest: in active-active the node ruled against
+// took the other's groups during the partition, and the Ruling returns those,
+// not what it held before. Brought down while still claimed, as MakePassive
+// does, then dropped from the claim, then verified against the interfaces.
+func (s *Server) releaseForRuling(ctx context.Context, localID string, addrs []string) error {
+	if s.releaseSelf != nil {
+		return s.releaseSelf(ctx, addrs)
+	}
+	local := s.memberList.GetMemberByID(localID)
+	if local == nil {
+		return errors.New("local member missing")
+	}
+	if err := local.BringDownIPs(addrs); err != nil {
+		return err
+	}
+	local.UpdateClaim(func(c membership.Claim) (membership.Claim, bool) {
+		kept := c.ActiveIPs[:0:0]
+		for _, ip := range c.ActiveIPs {
+			if !contains(addrs, ip) {
+				kept = append(kept, ip)
+			}
+		}
+		c.ActiveIPs = kept
+		return c, true
+	})
+	remaining, err := stillHeldIPs(addrs)
+	if err != nil {
+		return fmt.Errorf("cannot verify the release: %w", err)
+	}
+	if len(remaining) > 0 {
+		return fmt.Errorf("%d address(es) still up after the release", len(remaining))
+	}
+	return nil
 }
 
 // demoteForRuling stands this node down through the same local MakePassive a

@@ -121,7 +121,10 @@ func (s *Server) WitnessReport(ctx context.Context, req *rpc.WitnessReportReques
 		return resp, nil
 	}
 	resp.Peers = s.observePeers(ctx, localID, token, peers)
-	resp.Rulings = s.rulingsFor(mode, req.GetClaim(), resp.Peers)
+	now := time.Now()
+	current := s.rulingsFor(mode, req.GetClaim(), resp.Peers)
+	s.witnessHistory.remember(now, current)
+	resp.Rulings = append(current, s.witnessHistory.settledFor(now, s.witnessHoldDown(), req.GetNodeId(), current)...)
 	return resp, nil
 }
 

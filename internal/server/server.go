@@ -218,12 +218,13 @@ type Server struct {
 	witnessHistory  witnessHistory
 	witnessFence    witnessFence
 	witnessLoopOnce sync.Once
-	// demoteSelf and announceSelf replace the local MakePassive and
-	// AnnounceNodeIPs when acting on a Ruling. Test seams, nil in production:
-	// both touch the interfaces.
-	demoteSelf      func(ctx context.Context) error
-	announceSelf    func(nodeID string) error
 	witnessLoopStop chan struct{}
+	// demoteSelf, releaseSelf and announceSelf replace the local MakePassive,
+	// the active-active release and AnnounceNodeIPs when acting on a Ruling.
+	// Test seams, nil in production: all three touch the interfaces.
+	demoteSelf   func(ctx context.Context) error
+	releaseSelf  func(ctx context.Context, addrs []string) error
+	announceSelf func(nodeID string) error
 	// Rate limiting for refresh calls
 	lastRefresh      time.Time
 	leaderLeaseUntil time.Time

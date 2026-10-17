@@ -114,10 +114,18 @@ func TestTheReportCarriesTheRuling(t *testing.T) {
 		t.Fatalf("rulings = %v, want b keeping against a", r)
 	}
 
-	// A peer the Witness cannot see is not a contender, whatever it held.
+	// With only one Active nothing is contested. The Ruling just issued is
+	// still sent, settled, so a keeper that did not see the contest learns
+	// what it kept -- but nobody stands down on it.
 	b.memberList.GetMemberByID("b").SetStatus(membership.StatusPassive)
-	if resp, _ := a.askWitness(context.Background()); len(resp.GetRulings()) != 0 {
-		t.Errorf("rulings with only one Active = %v, want none", resp.GetRulings())
+	resp, _ = a.askWitness(context.Background())
+	for _, r := range resp.GetRulings() {
+		if !r.GetSettled() {
+			t.Errorf("live ruling with only one Active: %v", r)
+		}
+	}
+	if len(rulingsAgainst(resp.GetRulings(), "a")) != 0 {
+		t.Error("a settled Ruling would make a stand down")
 	}
 }
 

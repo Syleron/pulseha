@@ -734,4 +734,8 @@ message Ruling {
     // which is the active-passive case: there the conflict is two Active Claims,
     // and an Active node's address list is not knowledge (ADR-0001).
     repeated string addresses = 3;
+    // Issued for an earlier report and no longer contested -- the loser has
+    // already let go. Carried so that a keeper that did not see the contest
+    // still re-announces what it kept. Nobody stands down on a settled Ruling.
+    bool settled = 4;
 }

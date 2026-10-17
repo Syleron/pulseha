@@ -141,3 +141,25 @@ func TestDecisionPathsNeverSeeTheWitness(t *testing.T) {
 		})
 	}
 }
+
+// An address is orphaned when no node this one can see holds it. What the
+// Witness says a peer is still serving is only cut off from here, and taking it
+// would make an overlap for the Witness to rule on (ADR-0006).
+func TestRedistributionLeavesWhatTheWitnessSaysIsServed(t *testing.T) {
+	cfg := newAATestConfig(map[string][]string{"group1": {"10.0.0.1/24", "10.0.0.2/24"}})
+	cfg.Pulse.FailOverLimit = 10000
+	cut := newAATestMember("node-a", "host-a", StatusUnknown, []string{"10.0.0.1/24", "10.0.0.2/24"})
+	cut.LastHCResponse = time.Now().Add(-30 * time.Second)
+	here := newAATestMember("node-b", "host-b", StatusActive, nil)
+	ml := newAATestMemberList(cfg, cut, here)
+	cfg.Nodes["node-a"] = &config.Node{Hostname: "host-a"}
+	cfg.Nodes["node-b"] = &config.Node{Hostname: "host-b", IPGroups: map[string][]string{"eth0": {"group1"}}}
+	h := NewHealthChecker(ml, log.New(io.Discard))
+	h.server = &stubServer{members: ml, heldBack: map[string]bool{"10.0.0.1/24": true}}
+
+	h.redistributeOrphanedIPs(ml.Members)
+	got := here.Claim().ActiveIPs
+	if len(got) != 1 || got[0] != "10.0.0.2/24" {
+		t.Errorf("redistributed %v; want only 10.0.0.2/24, the address nobody is serving", got)
+	}
+}

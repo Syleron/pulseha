@@ -121,3 +121,65 @@ func silenceWitness(t *testing.T, s *Server) {
 	delete(s.peerClients, "c")
 	s.clientMutex.Unlock()
 }
+
+// The active-active split: during the partition each side took the other's
+// group, so both claim both addresses. Each is ruled out of what it took and in
+// on what it held, keeps serving the rest, and re-announces what it kept once
+// it sees the other let go of it.
+func TestARulingEndsAnActiveActiveSplit(t *testing.T) {
+	const one, two = "10.0.0.1/32", "10.0.0.2/32"
+	a, b, w := newWitnessTrio(t, "")
+	setVoterAddress(t, w, "a", serveVoter(t, a))
+	setVoterAddress(t, b, "c", serveVoter(t, w))
+	released := map[string][]string{}
+	announced := map[string]int{}
+	for id, s := range map[string]*Server{"a": a, "b": b} {
+		id, s := id, s
+		s.memberList.GetMemberByID(id).SetClaim(membership.Claim{Status: membership.StatusActive, ActiveIPs: []string{one, two}})
+		s.releaseSelf = func(_ context.Context, addrs []string) error {
+			released[id] = append(released[id], addrs...)
+			s.memberList.GetMemberByID(id).UpdateClaim(func(c membership.Claim) (membership.Claim, bool) {
+				var kept []string
+				for _, ip := range c.ActiveIPs {
+					if !contains(addrs, ip) {
+						kept = append(kept, ip)
+					}
+				}
+				c.ActiveIPs = kept
+				return c, true
+			})
+			return nil
+		}
+		s.demoteSelf = func(context.Context) error { t.Errorf("%s stood down entirely in active-active", id); return nil }
+		s.announceSelf = func(string) error { announced[id]++; return nil }
+	}
+	a.memberList.GetMemberByID("b").SetStatus(membership.StatusUnknown)
+	b.memberList.GetMemberByID("a").SetStatus(membership.StatusUnknown)
+	w.witnessHistory.record("active-active", []*rpc.MemberClaim{activeClaim("a", one), activeClaim("b", two)})
+
+	a.witnessLoopTick()
+	if got := released["a"]; len(got) != 1 || got[0] != two {
+		t.Fatalf("a released %v, want only %s, the address it took", got, two)
+	}
+	if held := a.WitnessHeldBack(); !held[two] {
+		t.Errorf("a does not hold back %s, which it was just ruled out of; redistribution would take it again", two)
+	}
+
+	b.witnessLoopTick() // ruled out of one; sees a has let go of two
+	if got := released["b"]; len(got) != 1 || got[0] != one {
+		t.Fatalf("b released %v, want only %s", got, one)
+	}
+	if announced["b"] != 1 {
+		t.Errorf("b re-announced %d times after a released %s, want 1", announced["b"], two)
+	}
+
+	a.witnessLoopTick() // sees b has let go of one
+	if announced["a"] != 1 {
+		t.Errorf("a re-announced %d times after b released %s, want 1", announced["a"], one)
+	}
+	for id, s := range map[string]*Server{"a": a, "b": b} {
+		if got := s.memberList.GetMemberByID(id).GetStatus(); got != membership.StatusActive {
+			t.Errorf("%s = %s after its Ruling; in active-active it keeps serving what it held", id, membership.StatusToString(got))
+		}
+	}
+}

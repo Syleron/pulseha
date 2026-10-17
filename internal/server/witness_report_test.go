@@ -212,7 +212,7 @@ func TestTheWitnessAnswerBeforePromoting(t *testing.T) {
 		gone := closed.Addr().String()
 		closed.Close()
 		a, _, _ := newWitnessTrio(t, gone)
-		a.witnessFence.fence(time.Now())
+		a.witnessFence.fence(time.Now(), nil)
 		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessPeerNotVisible {
 			t.Errorf("answer = %s, want peer-not-visible", got)
 		}
@@ -229,7 +229,7 @@ func TestTheWitnessAnswerBeforePromoting(t *testing.T) {
 		a := newVotingServer(t, "a")
 		a.config.Nodes["c"].Witness = true // configured, but nothing listens there
 		a.memberList.UpdateConfig(a.config)
-		a.witnessFence.fence(time.Now())
+		a.witnessFence.fence(time.Now(), nil)
 		if got := a.witnessAnswerFor(context.Background(), "b"); got != witnessSilentWhileFenced {
 			t.Errorf("answer inside the hold-down = %s, want silent-while-fenced", got)
 		}
@@ -263,7 +263,7 @@ func TestSeeingThePeerAgainClearsTheFence(t *testing.T) {
 	a := newVotingServer(t, "a")
 	a.config.Nodes["c"].Witness = true
 	a.memberList.UpdateConfig(a.config)
-	a.witnessFence.fence(time.Now())
+	a.witnessFence.fence(time.Now(), nil)
 
 	a.memberList.GetMemberByID("b").SetStatus(membership.StatusUnknown)
 	a.witnessLoopTick()

@@ -26,6 +26,66 @@ type witnessHistory struct {
 	mu      pulselock.Mutex
 	elected string
 	holders map[string]string
+	// recent is the Rulings issued in the last hold-down, so a keeper that asks
+	// only after the loser has let go is still told what it kept.
+	recent []issuedRuling
+}
+
+type issuedRuling struct {
+	ruling *rpc.Ruling
+	at     time.Time
+}
+
+// remember records rulings as issued at now, replacing an earlier record of
+// the same decision.
+func (h *witnessHistory) remember(now time.Time, rulings []*rpc.Ruling) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range rulings {
+		kept := h.recent[:0]
+		for _, old := range h.recent {
+			if !sameRuling(old.ruling, r) {
+				kept = append(kept, old)
+			}
+		}
+		h.recent = append(kept, issuedRuling{ruling: r, at: now})
+	}
+}
+
+// settledFor is every Ruling issued within window that names asker as a
+// contender and is not among current, marked settled.
+func (h *witnessHistory) settledFor(now time.Time, window time.Duration, asker string, current []*rpc.Ruling) []*rpc.Ruling {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	kept := h.recent[:0]
+	var out []*rpc.Ruling
+	for _, old := range h.recent {
+		if now.Sub(old.at) >= window {
+			continue
+		}
+		kept = append(kept, old)
+		live := false
+		for _, r := range current {
+			if sameRuling(old.ruling, r) {
+				live = true
+			}
+		}
+		if !live && contains(old.ruling.GetContenders(), asker) {
+			out = append(out, &rpc.Ruling{
+				Keeper:     old.ruling.GetKeeper(),
+				Contenders: old.ruling.GetContenders(),
+				Addresses:  old.ruling.GetAddresses(),
+				Settled:    true,
+			})
+		}
+	}
+	h.recent = kept
+	return out
+}
+
+func sameRuling(a, b *rpc.Ruling) bool {
+	return a.GetKeeper() == b.GetKeeper() && joinIDs(a.GetContenders()) == joinIDs(b.GetContenders()) &&
+		joinIDs(a.GetAddresses()) == joinIDs(b.GetAddresses())
 }
 
 // record updates the history from one round of claims, but only from a round
@@ -247,10 +307,12 @@ func (s *Server) witnessLoopTick() {
 	// A serving node that cannot see its peer is the one moment, besides a
 	// promotion, that asks the Witness. With the peer visible nobody asks, and
 	// the cluster behaves exactly as it does without a Witness.
-	if mode == "active-passive" && !s.seesEveryPeer(localID) {
+	if !s.seesEveryPeer(localID) {
 		if local := s.memberList.GetMemberByID(localID); local != nil && local.GetStatus() == membership.StatusActive {
-			s.witnessWatch(context.Background(), localID)
+			s.witnessWatch(context.Background(), localID, mode)
 		}
+	} else {
+		s.setPeerServing(nil)
 	}
 	if s.witnessFence.isFenced() && s.seesEveryPeer(localID) {
 		// The partition is over. Normal reconvergence takes it from here, and a
