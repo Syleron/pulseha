@@ -55,6 +55,7 @@ type witnessFence struct {
 	mu         pulselock.Mutex
 	fenced     bool
 	lastAnswer time.Time
+	contested  *contested
 }
 
 func (f *witnessFence) answered(at time.Time) {
@@ -148,4 +149,148 @@ func rulingAgainst(rulings []*rpc.Ruling, localID string) *rpc.Ruling {
 		}
 	}
 	return nil
+}
+
+// contested is, on the node a Ruling kept, what it is waiting for the losers to
+// release before it re-announces. Kept beside the fence because the two are the
+// same arbitration from opposite sides.
+type contested struct {
+	since  time.Time
+	losers []string
+}
+
+// witnessWatch is a serving node's tick while it cannot see a peer: ask the
+// Witness, and act on the Ruling.
+//
+// Ruled against: Fenced -- demote and release. Ruled for: note the losers, and
+// re-announce once a later report shows them no longer claiming, because the
+// network follows whoever announced last and that is usually the loser, which
+// promoted into the partition. Re-announcing on the Ruling itself would race the
+// loser's own last announcement; on the release it cannot (ADR-0006).
+//
+// Witness silence never fences. It only lets a pending re-announcement age out,
+// so a Witness that disappears between the Ruling and the release still cannot
+// leave the address pointed at a node that has let go of it.
+func (s *Server) witnessWatch(ctx context.Context, localID string) {
+	now := time.Now()
+	resp, err := s.askWitness(ctx)
+	if err != nil {
+		if c := s.takeContestedOlderThan(now, s.witnessHoldDown()); c != nil {
+			s.logger.Warn("WITNESS: no report since the Ruling; re-announcing on the age-out",
+				"losers", c.losers, "since", c.since)
+			s.reannounce(localID)
+		}
+		return
+	}
+	s.witnessFence.answered(now)
+
+	if r := rulingAgainst(resp.GetRulings(), localID); r != nil {
+		s.logger.Warn("WITNESS: ruled against; standing down", "keeper", r.GetKeeper(), "contenders", r.GetContenders())
+		if err := s.demoteForRuling(ctx, localID); err != nil {
+			// Still Active and still contested; the next tick asks again.
+			s.logger.Error("WITNESS: could not stand down after a Ruling against this node", "error", err)
+			return
+		}
+		s.witnessFence.fence(now)
+		s.clearContested()
+		return
+	}
+
+	for _, r := range resp.GetRulings() {
+		if r.GetKeeper() == localID {
+			s.noteContested(now, r.GetContenders(), localID)
+		}
+	}
+	if c := s.contestedSnapshot(); c != nil && losersReleased(resp.GetPeers(), c.losers) {
+		s.logger.Info("WITNESS: the node ruled against has released; re-announcing", "losers", c.losers)
+		s.clearContested()
+		s.reannounce(localID)
+	}
+}
+
+// losersReleased reports whether a report shows every loser visible and no
+// longer claiming Active. A loser the Witness cannot see has not been seen to
+// release anything; that waits for the age-out.
+func losersReleased(views []*rpc.PeerView, losers []string) bool {
+	for _, id := range losers {
+		released := false
+		for _, v := range views {
+			if v.GetNodeId() == id && v.GetVisible() && statusOf(v.GetClaim()) != membership.StatusActive {
+				released = true
+			}
+		}
+		if !released {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) noteContested(now time.Time, contenders []string, localID string) {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	if s.witnessFence.contested != nil {
+		return // keep the first Ruling's time, which is what the age-out counts from
+	}
+	var losers []string
+	for _, id := range contenders {
+		if id != localID {
+			losers = append(losers, id)
+		}
+	}
+	s.witnessFence.contested = &contested{since: now, losers: losers}
+}
+
+func (s *Server) contestedSnapshot() *contested {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	if s.witnessFence.contested == nil {
+		return nil
+	}
+	c := *s.witnessFence.contested
+	return &c
+}
+
+func (s *Server) takeContestedOlderThan(now time.Time, age time.Duration) *contested {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	c := s.witnessFence.contested
+	if c == nil || now.Sub(c.since) < age {
+		return nil
+	}
+	s.witnessFence.contested = nil
+	return c
+}
+
+func (s *Server) clearContested() {
+	s.witnessFence.mu.Lock()
+	defer s.witnessFence.mu.Unlock()
+	s.witnessFence.contested = nil
+}
+
+// demoteForRuling stands this node down through the same local MakePassive a
+// peer's demotion uses, which releases every address and verifies the release
+// against the interfaces before it reports success.
+func (s *Server) demoteForRuling(ctx context.Context, localID string) error {
+	if s.demoteSelf != nil {
+		return s.demoteSelf(ctx)
+	}
+	resp, err := s.MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: localID})
+	if err != nil {
+		return err
+	}
+	if !resp.GetSuccess() {
+		return errors.New(resp.GetMessage())
+	}
+	return nil
+}
+
+func (s *Server) reannounce(localID string) {
+	announce := s.AnnounceNodeIPs
+	if s.announceSelf != nil {
+		announce = s.announceSelf
+	}
+	if err := announce(localID); err != nil {
+		s.logger.Warn("WITNESS: re-announcement failed", "error", err)
+	}
 }

@@ -237,10 +237,20 @@ func (s *Server) witnessLoopTick() {
 	cfg.Lock()
 	localID := cfg.Pulse.LocalNode
 	localIsWitness := cfg.Nodes[localID].IsWitness()
+	mode := cfg.Pulse.Mode
 	cfg.Unlock()
 	if localIsWitness {
 		s.observeForHistory(context.Background())
 		return
+	}
+
+	// A serving node that cannot see its peer is the one moment, besides a
+	// promotion, that asks the Witness. With the peer visible nobody asks, and
+	// the cluster behaves exactly as it does without a Witness.
+	if mode == "active-passive" && !s.seesEveryPeer(localID) {
+		if local := s.memberList.GetMemberByID(localID); local != nil && local.GetStatus() == membership.StatusActive {
+			s.witnessWatch(context.Background(), localID)
+		}
 	}
 	if s.witnessFence.isFenced() && s.seesEveryPeer(localID) {
 		// The partition is over. Normal reconvergence takes it from here, and a
