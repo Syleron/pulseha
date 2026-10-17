@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -134,6 +135,15 @@ type Node struct {
 	IPGroups    map[string][]string `json:"group_assignments"`
 	Maintenance bool                `json:"maintenance,omitempty"`
 	Capacity    int                 `json:"capacity,omitempty"` // Max floating IPs this node may host; 0 = unlimited
+	// Witness marks the cluster's Witness: a member that never serves and is
+	// never counted (docs/adr/0006-a-witness-rules-on-overlapping-claims.md).
+	//
+	// A distinct field rather than a kind of Maintenance, because the two are
+	// opposites in the one way that matters here. Maintenance is temporary and
+	// still counts toward the cluster's size; a Witness is fixed at join and
+	// counts toward nothing. Read it through CountedNodeIDs and IsWitness rather
+	// than ranging over Nodes, which is how a Witness gets counted by accident.
+	Witness bool `json:"witness,omitempty"`
 	// TLSCert is this node's public certificate, PEM encoded, as the node itself
 	// published it. Never a private key.
 	//
@@ -247,6 +257,48 @@ func (c *Config) GetConfig() *Config {
 // NodeCount - Returns the total number of nodes in the configured cluster
 func (c *Config) NodeCount() int {
 	return len(c.Nodes)
+}
+
+// IsWitness reports whether n is the cluster's Witness. Nil-safe, so a lookup
+// that misses reads as "not a Witness" rather than panicking.
+func (n *Node) IsWitness() bool {
+	return n != nil && n.Witness
+}
+
+// CountedNodeIDs returns, sorted, the IDs of the nodes that count: every
+// configured node except the Witness. It is the cluster's size for quorum, its
+// electorate for voting, and its membership for anything that asks "how many
+// nodes is this cluster".
+//
+// The Witness is left out because counting it is the one way to undo what it is
+// for. A two-node cluster with a Witness counted would be three, which switches
+// off the two-node path that ADR-0002 depends on: a node that lost both its peer
+// and the Witness would count one of three and refuse to promote, leaving the
+// group dark. A two-node cluster with a Witness is a two-node cluster in every
+// count.
+//
+// Takes the map rather than the Config because every caller already holds the
+// config lock, and sync.Mutex is not reentrant.
+func CountedNodeIDs(nodes map[string]*Node) []string {
+	ids := make([]string, 0, len(nodes))
+	for id, node := range nodes {
+		if id != "" && node != nil && !node.Witness {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// CountedNodeCount is len(CountedNodeIDs(nodes)) without the allocation.
+func CountedNodeCount(nodes map[string]*Node) int {
+	n := 0
+	for id, node := range nodes {
+		if id != "" && node != nil && !node.Witness {
+			n++
+		}
+	}
+	return n
 }
 
 // GetLocalNodeUUID returns the UUID of the local node

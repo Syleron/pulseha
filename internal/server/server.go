@@ -536,7 +536,11 @@ func (s *Server) Start() error {
 	// Initialize quorum manager with node count
 	s.logger.Debug("Initializing quorum manager...")
 	if s.quorumManager != nil {
-		nodeCount := s.memberList.GetMemberCount()
+		// Counted nodes, not members: the member list holds the Witness, and a
+		// two-node cluster whose quorum manager counted it would be three (ADR-0006).
+		s.config.Lock()
+		nodeCount := config.CountedNodeCount(s.config.Nodes)
+		s.config.Unlock()
 		s.quorumManager.UpdateNodeCount(nodeCount)
 		s.quorumManager.Start()
 		s.logger.Debug("Quorum manager started", "node_count", nodeCount)
@@ -960,11 +964,16 @@ func (s *Server) loadInitialMembers(cfg *config.Config) error {
 			case !isLocalNode:
 				// Remote nodes start as Unknown until health checks establish connection
 				reason = "Setting remote node %s as Unknown (will be determined via health checks)"
+			case node.IsWitness():
+				// The role is fixed at join and outranks everything else: a
+				// Witness never serves, so it never starts in a serving status.
+				initial.Status = membership.StatusWitness
+				reason = "Restoring local node %s to Witness (its role in config)"
 			case node.Maintenance:
 				// Restore maintenance state across restarts before applying any other default
 				initial.Status = membership.StatusMaintenance
 				reason = "Restoring local node %s to Maintenance (persisted in config)"
-			case cfg.Pulse.Mode == "active-passive" && len(cfg.Nodes) == 1:
+			case cfg.Pulse.Mode == "active-passive" && config.CountedNodeCount(cfg.Nodes) == 1:
 				// Single node cluster - should be active
 				initial.Status = membership.StatusActive
 				reason = "Setting single node %s as Active"
@@ -1508,6 +1517,7 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			Ip:           ip,
 			Port:         port,
 			NodeId:       member.ID,
+			Witness:      s.config.Nodes[member.ID].IsWitness(),
 		})
 	}
 
@@ -2636,26 +2646,35 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 	// Get all peers (excluding the node being removed and ourselves)
 	s.RLock()
 	var peers []struct {
-		id   string
-		ip   string
-		port string
+		id      string
+		ip      string
+		port    string
+		counted bool
 	}
-	totalClusterSize := len(s.config.Nodes)
+	// The Witness is told about the removal like any member, since it holds the
+	// config too, but it is not part of the cluster's size and its
+	// acknowledgement is not part of the quorum (ADR-0006).
+	totalClusterSize := config.CountedNodeCount(s.config.Nodes)
+	removedIsCounted := !s.config.Nodes[req.NodeId].IsWitness()
 	for id, node := range s.config.Nodes {
 		if id == req.NodeId || id == localNodeID || node == nil {
 			continue
 		}
 		peers = append(peers, struct {
-			id   string
-			ip   string
-			port string
-		}{id: id, ip: node.IP, port: node.Port})
+			id      string
+			ip      string
+			port    string
+			counted bool
+		}{id: id, ip: node.IP, port: node.Port, counted: !node.IsWitness()})
 	}
 	s.RUnlock()
 
 	// Calculate quorum requirement: majority of the cluster AFTER the node is removed
 	// If we have 4 nodes and removing 1, quorum is majority of remaining 3 = 2
-	remainingNodes := totalClusterSize - 1 // Excluding the node being removed
+	remainingNodes := totalClusterSize
+	if removedIsCounted {
+		remainingNodes-- // Excluding the node being removed
+	}
 	requiredQuorum := (remainingNodes / 2) + 1
 
 	s.logger.Info("Quorum-based removal initiated",
@@ -2701,7 +2720,9 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 		}
 
 		s.logger.Info("Peer successfully removed node", "peer", peer.id)
-		updatedCount++
+		if peer.counted {
+			updatedCount++
+		}
 	}
 
 	// Count ourselves (coordinator) as updated
@@ -6619,7 +6640,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 		}
 
 		// Membership reconciliation with quorum (clusters >=3)
-		clusterSize := len(s.config.Nodes)
+		clusterSize := config.CountedNodeCount(s.config.Nodes)
 		if clusterSize >= 3 {
 			// Build presence counts for each known node based on peer snapshots
 			presenceCount := make(map[string]int)
@@ -6679,7 +6700,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 				}
 				if presenceCount[id] < majority && member.GetStatus() == membership.StatusUnknown {
 					// Start a quorum vote to remove this member
-					if s.quorumManager == nil || len(s.config.Nodes) < 3 {
+					if s.quorumManager == nil || config.CountedNodeCount(s.config.Nodes) < 3 {
 						s.logger.Infof("Resync: member %s missing from majority but quorum unavailable; skipping automatic removal", id)
 						continue
 					}

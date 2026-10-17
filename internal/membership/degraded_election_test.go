@@ -184,3 +184,35 @@ func TestRedistributionConsumesOnlyRecoveredOrphans(t *testing.T) {
 		t.Fatal("recovered address was not an orphan")
 	}
 }
+
+// A pair with a Witness is still a pair. If the Witness counted, the cluster
+// would be three, and a node that had lost both its peer and the Witness would
+// need a majority it can never get -- the fail-closed outcome ADR-0002 rejects.
+// Asserted with the Witness down as well as up, since down is when it matters.
+func TestAPairWithAWitnessKeepsThePairPolicy(t *testing.T) {
+	for _, witnessStatus := range []MemberStatus{StatusWitness, StatusUnknown} {
+		t.Run(StatusToString(witnessStatus), func(t *testing.T) {
+			a := newAATestMember("a", "a", StatusPassive, nil)
+			b := newAATestMember("b", "b", StatusUnknown, nil)
+			w := newAATestMember("w", "w", witnessStatus, nil)
+			h, stub := newAPTestChecker("a", a, b, w)
+			h.members.Config().Nodes["w"].Witness = true
+			stub.quorum = quorum.NewQuorumManager(h.members.Config(), h.logger)
+			if !h.tryAutomaticPromotion(a) || len(stub.promotions) != 1 || stub.promotions[0].ForceDemote {
+				t.Fatal("a pair with a Witness was refused the pair's non-forced promotion")
+			}
+		})
+	}
+}
+
+// A Witness is configured, and that must not make it a candidate.
+func TestTheWitnessIsNeverAVotedCandidate(t *testing.T) {
+	a := newAATestMember("a", "a", StatusPassive, nil)
+	b := newAATestMember("b", "b", StatusUnknown, nil)
+	w := newAATestMember("w", "w", StatusPassive, nil)
+	h, _ := newAPTestChecker("a", a, b, w)
+	h.members.Config().Nodes["w"].Witness = true
+	if got, ok := h.votedElectionCandidate(w); ok || got != nil {
+		t.Fatalf("votedElectionCandidate(witness) = %v, %v; want refused", got, ok)
+	}
+}
