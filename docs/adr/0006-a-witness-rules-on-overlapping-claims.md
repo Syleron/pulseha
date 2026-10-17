@@ -94,6 +94,16 @@ Two consequences of that are easy to undo by accident:
   follow whoever announced last, and the winner, having held the address throughout, would
   otherwise announce nothing. The health-check re-announcement cannot cover this, because the
   winner cannot see its peer.
+- **The Witness goes on sending a Ruling after the contest ends, marked settled.** Whichever
+  node asks first acts first: if the loser asks, releases, and only then does the keeper ask,
+  the keeper sees no overlap and so no Ruling, and would never re-announce what it kept. A
+  settled Ruling, sent to its contenders for a hold-down, tells the keeper anyway. A keeper
+  re-announces on one once; nobody stands down on one, because a node ruled against earlier may
+  since have taken over legitimately.
+- **In active-active, what the Witness says a peer is still serving is not orphaned.** Orphan
+  redistribution would otherwise take the addresses of a peer that is only cut off, making the
+  overlap there was no need for, and would take straight back whatever a Ruling just made a node
+  release. Both are held back from it; Witness silence holds back nothing.
 - **A Fenced node promotes again** at once on a report that its peer is not visible, but on
   Witness silence only after a hold-down longer than peer-failure detection; otherwise a flaky
   Witness swings the service between the nodes once a cycle. Seeing the peer again, or a
