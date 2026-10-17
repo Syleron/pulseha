@@ -201,3 +201,38 @@ func marshalConfigWith(t *testing.T, s *Server, edit func(id string, n *config.N
 	}
 	return b
 }
+
+// The Witness never speaks for anyone's state. It sees both sides of a
+// partition, so its broadcast would carry each side's status to the other -- and
+// a cut-off node acting on a relayed view of two Actives demoted the incumbent
+// the Witness had just ruled for. The same envelope from a member that is not
+// the Witness is the control: it is applied.
+func TestStatesFromTheWitnessAreIgnored(t *testing.T) {
+	envelope := func(sender string) []byte {
+		b, _ := json.Marshal(map[string]any{
+			"member_states": map[string]int{"b": int(membership.StatusActive)},
+			"epoch":         99,
+			"leader_id":     "b",
+			"sender_id":     sender,
+		})
+		return b
+	}
+	for _, tc := range []struct {
+		sender  string
+		applied bool
+	}{{"c", false}, {"b", true}} {
+		s := newVotingServer(t, "a")
+		s.config.Nodes["c"].Witness = true
+		s.memberList.UpdateConfig(s.config)
+		s.memberList.GetMemberByID("b").SetStatus(membership.StatusPassive)
+
+		if _, err := s.ConfigSync(context.Background(), &rpc.ConfigSyncRequest{Config: envelope(tc.sender)}); err != nil {
+			t.Fatal(err)
+		}
+		gotActive := s.memberList.GetMemberByID("b").GetStatus() == membership.StatusActive
+		gotEpoch := s.GetClusterEpoch() == 99
+		if gotActive != tc.applied || gotEpoch != tc.applied {
+			t.Errorf("states from %s: b Active %v, epoch adopted %v; want both %v", tc.sender, gotActive, gotEpoch, tc.applied)
+		}
+	}
+}

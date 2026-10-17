@@ -80,6 +80,7 @@ func TestWitnessSilenceNeverFences(t *testing.T) {
 func TestNoOneAsksWhileThePeerIsVisible(t *testing.T) {
 	p := newSplitPair(t)
 	p.a.memberList.GetMemberByID("b").SetStatus(membership.StatusActive)
+	p.a.memberList.GetMemberByID("b").SetLastResponse(time.Now())
 	p.a.witnessLoopTick()
 	if p.demoted["a"] != 0 {
 		t.Errorf("a node that can see its peer stood down on a Ruling")

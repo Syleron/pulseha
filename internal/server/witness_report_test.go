@@ -305,8 +305,15 @@ func TestSeeingThePeerAgainClearsTheFence(t *testing.T) {
 	if !a.witnessFence.isFenced() {
 		t.Fatal("cleared while the peer is still unseen")
 	}
-	// The Witness being down is not the peer being unseen.
-	a.memberList.GetMemberByID("b").SetStatus(membership.StatusPassive)
+	// A status relayed by gossip is not the peer being seen: the Witness carries
+	// a cut-off peer's status across the partition.
+	a.memberList.GetMemberByID("b").SetStatus(membership.StatusActive)
+	a.witnessLoopTick()
+	if !a.witnessFence.isFenced() {
+		t.Fatal("cleared on a relayed status, with no direct answer from the peer")
+	}
+	// A direct answer is. And the Witness being down is not the peer being unseen.
+	a.memberList.GetMemberByID("b").SetLastResponse(time.Now())
 	a.memberList.GetMemberByID("c").SetStatus(membership.StatusUnknown)
 	a.witnessLoopTick()
 	if a.witnessFence.isFenced() {

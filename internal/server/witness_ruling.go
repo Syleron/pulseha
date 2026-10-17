@@ -324,10 +324,29 @@ func (s *Server) witnessLoopTick() {
 	}
 }
 
-// seesEveryPeer reports whether every other candidate is answering this node.
+// seesEveryPeer reports whether every other candidate has answered this node
+// directly within the failover limit -- the same measure the active-node check
+// uses to call a node unreachable.
+//
+// Not the member's status. With a Witness in the cluster, a peer this node
+// cannot reach still has its status relayed: the Witness sees both sides and
+// its state broadcasts carry each to the other, so a cut-off peer reads Active,
+// not Unknown. Measured on the rig, where judging by status cleared a fence in
+// the middle of the partition. A direct answer is the one thing gossip cannot
+// supply.
 func (s *Server) seesEveryPeer(localID string) bool {
+	grace := time.Duration(0)
+	if cfg := s.clusterSnapshot()(); cfg != nil {
+		cfg.Lock()
+		grace = time.Duration(cfg.Pulse.FailOverLimit) * time.Millisecond
+		cfg.Unlock()
+	}
 	for id, m := range s.memberList.CandidatesSnapshot() {
-		if id != localID && m.GetStatus() == membership.StatusUnknown {
+		if id == localID {
+			continue
+		}
+		last := m.GetHealthStatus().LastResponse
+		if m.GetStatus() == membership.StatusUnknown || last.IsZero() || time.Since(last) > grace {
 			return false
 		}
 	}

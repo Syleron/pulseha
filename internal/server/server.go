@@ -2299,6 +2299,21 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// and verifies every configured group address, so on the 201-address topology
 			// a healthy but loaded incumbent overran the flat deadline — and an overrun is
 			// read as "still owns its IPs", which aborts a promotion that was safe.
+			// The Witness first, before anything is asked of the peer. A node that
+			// cannot see its peer keeps retrying elections for as long as the
+			// partition lasts, and the attempt that lands as the link comes back
+			// would otherwise ask a healthy incumbent to release -- and it would,
+			// handing the address to the node that was only cut off. Measured on
+			// the rig: the takeover happened in the same second as the heal.
+			witness := s.witnessAnswerFor(context.Background(), id)
+			if witness == witnessPeerServing {
+				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion - the Witness reports the incumbent serving",
+					"unconfirmed_node", id, "target", targetNodeID)
+				s.restoreMemberStates(originalStates)
+				_ = s.broadcastNextEpoch(originalStates)
+				return
+			}
+
 			mpCtx, mpCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
 			released, provablyDown, err := s.confirmPeerReleasedIPs(mpCtx, id)
 			mpCancel()
@@ -2314,14 +2329,9 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// a minority must never claim addresses it cannot prove were released.
 			haveQuorum := s.hasConfiguredPromotionMajority()
 
-			// Unreachable from here is the question the Witness answers: dead, or
-			// only cut off from this node. Not asked about a wedged peer, which
-			// blocks the promotion whatever the Witness says.
-			witness := witnessSilent
-			if !stillAlive {
-				witness = s.witnessAnswerFor(context.Background(), id)
-			}
-
+			// Unreachable from here is the question the Witness answered above:
+			// dead, or only cut off from this node. A wedged peer blocks the
+			// promotion whatever the Witness says.
 			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote, witness) {
 				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",
 					"unconfirmed_node", id,
@@ -5541,6 +5551,22 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 	}
 
+	// The Witness never speaks for anyone's state. It sees both sides of a
+	// partition, so the member states, epoch and leader it would carry are each
+	// side's relayed to the other -- and acting on them gave a node that cannot
+	// reach its peer a second-hand view of two Actives, which enforceSingleActive
+	// then settled by its own tie-break, against the Ruling. Measured on the rig:
+	// the incumbent demoted itself in the same second the Witness ruled for it.
+	// Its config is still taken like any member's (ADR-0006).
+	fromWitness := s.senderIsWitness(senderID)
+	if fromWitness {
+		if incomingMemberStates != nil {
+			putStatusMap(incomingMemberStates)
+			incomingMemberStates = nil
+		}
+		incomingEpoch, incomingLeaderID = 0, ""
+	}
+
 	// Envelope syncs are the only continuous signal there is: they flow every few
 	// seconds where a full config only follows a mutation, which is why a node that
 	// missed one join broadcast stayed diverged until something unrelated changed
@@ -5930,7 +5956,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// never takes s.Lock() at all, so the compare-and-write here was the same
 		// unsynchronised access on a different path: the config broadcaster reads
 		// both fields under RLock, so -race flags it.
-		s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
+		if !fromWitness {
+			s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
+		}
 		// Keep member list as-is for envelope updates to avoid clobbering runtime states
 		// s.memberList.UpdateConfig(s.config)
 		// Skip loadInitialMembers here; members are stable
@@ -7849,6 +7877,12 @@ func (s *Server) closePeerClients() {
 
 // BroadcastClusterState broadcasts member states and convergence metadata to peers via ConfigSync
 func (s *Server) BroadcastClusterState(memberStates map[string]membership.MemberStatus, epoch int64, leaderID string, leases map[string]string) error {
+	// The Witness does not broadcast states: it never decides anyone's, and
+	// relaying them is how a cut-off node came to act on its peer's (ADR-0006).
+	// Receivers ignore them anyway; not sending them saves the traffic.
+	if s.senderIsWitness(s.localNodeIDForWitness()) {
+		return nil
+	}
 	s.Lock()
 	if epoch > s.clusterEpoch {
 		s.clusterEpoch = epoch

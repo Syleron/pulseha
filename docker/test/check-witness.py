@@ -161,14 +161,36 @@ try:
     nodes[ids[WITNESS-1]]['witness'] = True
     # node2 bootstraps as the incumbent; node1 rejoins eligibility afterwards.
     nodes[ids[0]]['maintenance'] = True
+    def write_configs():
+        for i, name in enumerate(names, 1):
+            cfg = {'pulseha': {'local_node': ids[i-1], 'cluster_token': 'witness-rig-token',
+                   'mode': 'active-passive', 'hcs_interval': 1000, 'fos_interval': 5000,
+                   'fo_limit': 10000, 'auto_failback': True, 'logging_level': 'debug',
+                   'log_to_file': False}, 'nodes': nodes, 'floating_ip_groups': {'test': [fip+'/24']}}
+            path = root/f'config{i}.json'
+            path.write_text(json.dumps(cfg))
+            docker('cp', str(path), name+':/etc/pulseha/config.json')
+
+    # Certificates are seeded rather than left to the daemons to publish. Each
+    # daemon publishes its certificate into the cluster config at start, and
+    # nodes that start from the same file each make that publish config version
+    # 1 under their own origin; ConfigSync ignores an equal version from another
+    # origin, so the certificates never converge and the Witness path is never
+    # trusted. That is a ConfigSync tie-break defect that predates the Witness.
+    # Here each daemon runs once to mint its identity -- stable across restarts
+    # (EnsureCertificates) -- and every config is then written already holding
+    # all three, the state the publishes should have converged to.
+    write_configs()
+    for name in names:
+        docker('exec', '-d', name, 'sh', '-c', 'exec pulseha > /tmp/mint.log 2>&1')
+    time.sleep(6)
     for i, name in enumerate(names, 1):
-        cfg = {'pulseha': {'local_node': ids[i-1], 'cluster_token': 'witness-rig-token',
-               'mode': 'active-passive', 'hcs_interval': 1000, 'fos_interval': 5000,
-               'fo_limit': 10000, 'auto_failback': True, 'logging_level': 'debug',
-               'log_to_file': False}, 'nodes': nodes, 'floating_ip_groups': {'test': [fip+'/24']}}
-        path = root/f'config{i}.json'
-        path.write_text(json.dumps(cfg))
-        docker('cp', str(path), name+':/etc/pulseha/config.json')
+        execute(i, 'pkill', '-KILL', '-x', 'pulseha', check=False)
+    time.sleep(1)
+    for i in (1, 2, 3):
+        nodes[ids[i-1]]['tls_cert'] = execute(i, 'cat', '/root/.pulseha/certs/pulseha.crt').strip()
+        execute(i, 'sh', '-c', 'ip addr del %s/24 dev %s 2>/dev/null; true' % (fip, ifaces[i]) if i != WITNESS else 'true')
+    write_configs()
     for name in names:
         docker('exec', '-d', name, 'sh', '-c', 'exec pulseha > /tmp/daemon.log 2>&1')
 
@@ -195,13 +217,33 @@ try:
         signal(WITNESS, 'STOP')
         reach('control', 60, [1, 2])
         hold('control-steady', 5, [1, 2])
-        # node1 promoted last, so the client is expected to have followed it.
-        print('control: client ARP entry on', client_sees('control'), flush=True)
+        # node1 promoted last, so the client is expected to have followed it. If
+        # it did not, the ruling phase cannot show a repair -- say so rather than
+        # pass on an ARP entry that never moved.
+        macs = {1: mac(1, ifaces[1]), 2: mac(2, ifaces[2])}
+        print('MACs: node1', macs[1], 'node2', macs[2], flush=True)
+        during = client_sees('control')
+        print('control: client ARP entry on', during,
+              '(node1: the re-announcement below is exercised)' if during == macs[1]
+              else '(not node1: the re-announcement below is NOT exercised by this run)', flush=True)
+
+        # While both hold the address both answer ARP requests, so the client
+        # may never have followed node1 on its own. Put its cache where the
+        # network ends up when node1 announced last -- the state ADR-0002
+        # measured -- so the phase below tests that node2's re-announcement,
+        # and nothing else, moves it back.
+        if during != macs[1]:
+            execute(WITNESS, 'ip', 'neigh', 'replace', fip, 'lladdr', macs[1], 'nud', 'reachable',
+                    'dev', next(x['ifname'] for x in addresses(WITNESS)
+                                if any(y['local'] == service(WITNESS) for y in x['addr_info'])))
+            print('control: client ARP entry seeded to node1', flush=True)
 
         # Ruling: thaw the Witness with the split still in place.
         signal(WITNESS, 'CONT')
         reach('ruling', 60, [2])
-        client_reaches('ruling', 30, mac(2, ifaces[2]))
+        # Within a few seconds, well inside the entry's reachable time, so only
+        # an announcement can have moved it -- not the kernel re-probing.
+        client_reaches('ruling', 10, mac(2, ifaces[2]))
         hold('ruling-steady', 15, [2])
     finally:
         signal(WITNESS, 'CONT')

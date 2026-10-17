@@ -249,3 +249,28 @@ func witnessPathTrusted(nodes map[string]*config.Node, tlsRequired bool) bool {
 	}
 	return hasWitness
 }
+
+// senderIsWitness reports whether id is the cluster's Witness. Reads the config
+// through the snapshot, so it takes no server lock.
+func (s *Server) senderIsWitness(id string) bool {
+	if id == "" {
+		return false
+	}
+	cfg := s.clusterSnapshot()()
+	if cfg == nil {
+		return false
+	}
+	cfg.Lock()
+	defer cfg.Unlock()
+	return cfg.Nodes[id].IsWitness()
+}
+
+func (s *Server) localNodeIDForWitness() string {
+	cfg := s.clusterSnapshot()()
+	if cfg == nil {
+		return ""
+	}
+	cfg.Lock()
+	defer cfg.Unlock()
+	return cfg.Pulse.LocalNode
+}
