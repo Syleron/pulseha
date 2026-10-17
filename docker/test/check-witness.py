@@ -176,7 +176,8 @@ try:
     # nodes that start from the same file each make that publish config version
     # 1 under their own origin; ConfigSync ignores an equal version from another
     # origin, so the certificates never converge and the Witness path is never
-    # trusted. That is a ConfigSync tie-break defect that predates the Witness.
+    # trusted. That is a ConfigSync defect that predates the Witness: #268.
+    # Remove this seeding once it is fixed, and this rig becomes its regression.
     # Here each daemon runs once to mint its identity -- stable across restarts
     # (EnsureCertificates) -- and every config is then written already holding
     # all three, the state the publishes should have converged to.
