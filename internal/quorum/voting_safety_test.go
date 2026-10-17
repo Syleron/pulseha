@@ -1,8 +1,12 @@
 package quorum
 
 import (
+	"io"
 	"testing"
 	"time"
+
+	log "github.com/charmbracelet/log"
+	"github.com/syleron/pulseha/packages/config"
 )
 
 func TestSessionElectorateCannotShrinkOrAcceptUnknownVoters(t *testing.T) {
@@ -121,5 +125,35 @@ func TestRecoveredProposalCannotReuseExistingVotes(t *testing.T) {
 	session, _ := q.GetVotingSession(id)
 	if session.Subject != "node-b" {
 		t.Fatal("recovered subject changed after a vote")
+	}
+}
+
+// A Witness never votes. With two serving nodes and a Witness there is no
+// electorate of three to hold a session over, and with three serving nodes the
+// Witness is not one of the voters (ADR-0006).
+func TestTheWitnessIsNeverInTheElectorate(t *testing.T) {
+	withWitness := func(serving int) *QuorumManager {
+		cfg := &config.Config{Nodes: map[string]*config.Node{"witness": {Witness: true}}}
+		for i := 0; i < serving; i++ {
+			id := "node-" + string(rune('a'+i))
+			cfg.Nodes[id] = &config.Node{Hostname: id}
+		}
+		return NewQuorumManager(cfg, log.New(io.Discard))
+	}
+
+	if !withWitness(2).HasQuorum(1) {
+		t.Error("two nodes and a Witness lost the two-node short-circuit: one vote is not quorum")
+	}
+	if _, err := withWitness(2).StartVotingSession(VoteTypeNodeStatus, "node-a", "promote", time.Second); err == nil {
+		t.Error("two nodes and a Witness started a voting session, so the Witness was counted as a third")
+	}
+
+	q := withWitness(3)
+	id, err := q.StartVotingSession(VoteTypeNodeStatus, "node-a", "promote", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.CastVote(id, "witness", VoteDecisionYes); err == nil {
+		t.Error("the Witness was accepted as a voter")
 	}
 }

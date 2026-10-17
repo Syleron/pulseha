@@ -60,7 +60,7 @@ node should stand down.
   for: under a cluster-link-only partition both nodes still reach the third, so both count two
   of three and both conclude they have quorum. Counting is the wrong operation. What resolves
   the ambiguity is a member that *reports what it can see*, which is a different design and is
-  tracked separately.
+  tracked separately — see [ADR-0006](./0006-a-witness-rules-on-overlapping-claims.md).
 
 ## Consequences
 
@@ -100,6 +100,10 @@ availability this buys is **continuity, not capacity**, and it is bought by maki
 possible where one was previously refused. The refusal was not conservatism paying off — a pair
 that cannot promote is strictly worse on this invariant than a pair that duplicates an address,
 because the address a dead node holds is dark and the address two live nodes hold is not.
+
+A Witness, where one is configured, reachable and trusted, can now end the both-Active state
+with a Ruling ([ADR-0006](./0006-a-witness-rules-on-overlapping-claims.md)). Everywhere else —
+no Witness, or one that cannot be reached or verified — this decision applies unchanged.
 
 The decision is scoped to clusters of exactly two. At three members and above a majority exists,
 quorum means something, and split-brain remains a defect to be prevented rather than a state to

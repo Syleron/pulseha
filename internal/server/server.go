@@ -205,6 +205,34 @@ type Server struct {
 	// Convergence state
 	clusterEpoch int64
 	leaderID     string
+	// published is clusterEpoch and leaderID as one value, readable without the
+	// server lock. Written by publishConvergenceLocked after every change to
+	// either field, and read by the Witness Report, which must answer while this
+	// node's own election path may be holding the lock -- an answer held up by it
+	// would read as "not visible" about a node that is alive (ADR-0006).
+	published atomic.Pointer[convergence]
+
+	// witnessHistory is, on the Witness, what it last saw held without contest;
+	// see witnessHistory. witnessLoopOnce/witnessLoopStop run and stop the loop
+	// that does this node's part of arbitration (startWitnessLoop).
+	witnessHistory  witnessHistory
+	witnessFence    witnessFence
+	witnessLoopOnce sync.Once
+	witnessLoopStop chan struct{}
+	// The Witness listener and the connections made on the Witness path; see
+	// witness_listener.go. Their own locks, never held across anything else.
+	witnessListenMu      pulselock.Mutex
+	witnessListenSrv     *grpc.Server
+	witnessListenAddr    string
+	witnessListenProblem string
+	witnessClientsMu     pulselock.Mutex
+	witnessClients       map[string]*client.Client
+	// demoteSelf, releaseSelf and announceSelf replace the local MakePassive,
+	// the active-active release and AnnounceNodeIPs when acting on a Ruling.
+	// Test seams, nil in production: all three touch the interfaces.
+	demoteSelf   func(ctx context.Context) error
+	releaseSelf  func(ctx context.Context, addrs []string) error
+	announceSelf func(nodeID string) error
 	// Rate limiting for refresh calls
 	lastRefresh      time.Time
 	leaderLeaseUntil time.Time
@@ -409,6 +437,7 @@ func (s *Server) Start() error {
 	s.Lock()
 	defer s.Unlock()
 	s.clusterEpoch = max(s.clusterEpoch, s.voteEpochFloor.Load())
+	s.publishConvergenceLocked()
 
 	// Verify config is loaded
 	s.logger.Debug("Verifying server configuration...")
@@ -536,7 +565,11 @@ func (s *Server) Start() error {
 	// Initialize quorum manager with node count
 	s.logger.Debug("Initializing quorum manager...")
 	if s.quorumManager != nil {
-		nodeCount := s.memberList.GetMemberCount()
+		// Counted nodes, not members: the member list holds the Witness, and a
+		// two-node cluster whose quorum manager counted it would be three (ADR-0006).
+		s.config.Lock()
+		nodeCount := config.CountedNodeCount(s.config.Nodes)
+		s.config.Unlock()
 		s.quorumManager.UpdateNodeCount(nodeCount)
 		s.quorumManager.Start()
 		s.logger.Debug("Quorum manager started", "node_count", nodeCount)
@@ -719,6 +752,10 @@ func (s *Server) startHealthChecker() {
 	s.healthCheck.Start(interval)
 	s.logger.Info("Health checker started successfully")
 
+	// On the same tick and the same precondition: arbitration has nothing to do
+	// before there is a cluster to arbitrate.
+	s.startWitnessLoop(interval)
+
 	// The IP monitor is started here, with the health checker, because the two share a
 	// precondition and a trigger: neither can run without a configured cluster, and both
 	// become startable at the same moments — daemon start on an already-configured node,
@@ -744,6 +781,8 @@ func (s *Server) Stop() {
 	// Before the teardown below starts mutating state we no longer want to
 	// propagate, and so an in-flight retry loop cannot outlive the server.
 	s.stopConfigBroadcaster()
+	s.stopWitnessLoop()
+	s.stopWitnessListener()
 
 	// Best-effort convergence hint: broadcast we're going down so peers can elect a new active
 	func() {
@@ -960,11 +999,16 @@ func (s *Server) loadInitialMembers(cfg *config.Config) error {
 			case !isLocalNode:
 				// Remote nodes start as Unknown until health checks establish connection
 				reason = "Setting remote node %s as Unknown (will be determined via health checks)"
+			case node.IsWitness():
+				// The role is fixed at join and outranks everything else: a
+				// Witness never serves, so it never starts in a serving status.
+				initial.Status = membership.StatusWitness
+				reason = "Restoring local node %s to Witness (its role in config)"
 			case node.Maintenance:
 				// Restore maintenance state across restarts before applying any other default
 				initial.Status = membership.StatusMaintenance
 				reason = "Restoring local node %s to Maintenance (persisted in config)"
-			case cfg.Pulse.Mode == "active-passive" && len(cfg.Nodes) == 1:
+			case cfg.Pulse.Mode == "active-passive" && config.CountedNodeCount(cfg.Nodes) == 1:
 				// Single node cluster - should be active
 				initial.Status = membership.StatusActive
 				reason = "Setting single node %s as Active"
@@ -1124,6 +1168,14 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 
 	// Check if this is initial cluster creation
 	if s.memberList.GetMemberCount() == 0 && req.Token == "" {
+		if req.Witness {
+			// A Witness watches a pair; a cluster of only a Witness has nothing
+			// to watch and nothing that could ever serve.
+			return &rpc.JoinResponse{
+				Success: false,
+				Message: "a Witness joins an existing cluster; it cannot be a cluster's first node",
+			}, nil
+		}
 		s.logger.Info("Initializing new cluster with first node: ", req.Hostname)
 
 		// Node ID must be provided
@@ -1204,9 +1256,29 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	nodeID := req.NodeId
 	s.logger.Debugf("Using node_id: %s", nodeID)
 
+	// The Witness rules, checked before anything is touched for the same reason
+	// the bind address is: refusing later would leave the member behind.
+	s.config.Lock()
+	refusal := witnessJoinRefusal(s.config.Nodes, nodeID, req.Witness)
+	s.config.Unlock()
+	if refusal != "" {
+		s.logger.Warn("Refusing join", "hostname", req.Hostname, "witness", req.Witness, "reason", refusal)
+		return &rpc.JoinResponse{Success: false, Message: refusal}, nil
+	}
+	if req.Witness {
+		if err := s.confirmPeersUnderstandWitness(ctx, nodeID); err != nil {
+			s.logger.Warn("Refusing Witness join", "hostname", req.Hostname, "reason", err)
+			return &rpc.JoinResponse{Success: false, Message: err.Error()}, nil
+		}
+	}
+
 	// Add the node to the member list
 	s.logger.Debugf("Adding member %s to member list...", nodeID)
-	if err := s.memberList.AddMember(nodeID, req.Hostname, req.BindIp, req.BindPort); err != nil {
+	addMember := s.memberList.AddMember
+	if req.Witness {
+		addMember = s.memberList.AddWitness
+	}
+	if err := addMember(nodeID, req.Hostname, req.BindIp, req.BindPort); err != nil {
 		s.logger.Error("Failed to add member to member list", "error", err)
 		return &rpc.JoinResponse{
 			Success: false,
@@ -1238,11 +1310,15 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		}
 	}
 	s.config.Nodes[nodeID] = &config.Node{
-		Hostname:    req.Hostname,
-		IP:          req.BindIp,
-		Port:        req.BindPort,
-		IPGroups:    make(map[string][]string),
-		Maintenance: true,
+		Hostname: req.Hostname,
+		IP:       req.BindIp,
+		Port:     req.BindPort,
+		IPGroups: make(map[string][]string),
+		// A joining node is parked in Maintenance until an operator assigns it a
+		// group. A Witness never is: it never becomes eligible, so there is
+		// nothing to hold it back from.
+		Maintenance: !req.Witness,
+		Witness:     req.Witness,
 		// Recorded, not required. A joiner running a build that predates this
 		// sends nothing and publishes for itself a moment later, which is exactly
 		// the behaviour step 2 shipped -- so an empty value here is a slower path
@@ -1467,6 +1543,8 @@ func deriveMemberStatus(status membership.MemberStatus, assignedIPs int, selfRep
 		return rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE
 	case membership.StatusMaintenance:
 		return rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE
+	case membership.StatusWitness:
+		return rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS
 	default:
 		return rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN
 	}
@@ -1506,7 +1584,14 @@ func (s *Server) GetClusterStatus(ctx context.Context, req *rpc.StatusRequest) (
 			Ip:           ip,
 			Port:         port,
 			NodeId:       member.ID,
+			Witness:      s.config.Nodes[member.ID].IsWitness(),
 		})
+		if node := s.config.Nodes[member.ID]; node != nil {
+			members[len(members)-1].WitnessAddress = node.WitnessAddress
+			if node.IsWitness() {
+				members[len(members)-1].WitnessTrusted = witnessPathTrusted(s.config.Nodes, s.config.Pulse.TLSRequired())
+			}
+		}
 	}
 
 	// Build groups information from server config so clients don't need local config
@@ -1823,6 +1908,15 @@ func (s *Server) Promote(ctx context.Context, req *rpc.PromoteRequest) (*rpc.Pro
 		}, nil
 	}
 
+	// A Witness can never become Active, by any route, forced or not (ADR-0006).
+	if member.IsWitness() {
+		s.logger.Warn("PROMOTE: Rejecting - target is the Witness", "node_id", req.NodeId)
+		return &rpc.PromoteResponse{
+			Success: false,
+			Message: fmt.Sprintf("Node %s is the cluster's Witness and can never be promoted", req.NodeId),
+		}, nil
+	}
+
 	// Check if already active
 	if member.GetStatus() == membership.StatusActive {
 		s.logger.Info("PROMOTE: Node is already active", "node_id", req.NodeId)
@@ -2015,13 +2109,36 @@ func (s *Server) hasConfiguredPromotionMajority() bool {
 
 // canPromoteWithoutConfirmedRelease retains the operator recovery override.
 // Automatic elections never set forceDemote. A reachable but unresponsive
-// incumbent blocks both paths. An unreachable incumbent can still own its IPs:
-// this majority check does not replace witness/lease fencing (END-2631).
-func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool) bool {
+// incumbent blocks both paths. An unreachable incumbent can still own its IPs,
+// which is what the Witness's answer is for (ADR-0006).
+func canPromoteWithoutConfirmedRelease(peerStillAlive, haveQuorum, forceDemote bool, witness witnessAnswer) bool {
 	if peerStillAlive {
-		return false
+		// The TC-6 rule: a peer that accepts a connection and never answers is
+		// wedged and still holds its addresses, and nothing overrides that --
+		// with one exception. A trusted Witness, which exists only in a pair,
+		// asked that peer itself and got no answer either. That is a second,
+		// independent observation that its daemon is gone, and in a pair
+		// ADR-0002 already ranks a duplicated address above a dark one: a frozen
+		// box holds the address while answering nobody, and only a takeover
+		// ends that. If it was only the daemon that froze and the box is still
+		// serving, the takeover duplicates the address, and the Ruling settles
+		// it once the daemon thaws (ADR-0006).
+		return witness == witnessPeerNotVisible && (haveQuorum || forceDemote)
 	}
-	// The peer is unreachable: require a majority or explicit operator override.
+	switch witness {
+	case witnessPeerServing:
+		// Unreachable from here, but answering the Witness and claiming Active:
+		// the same situation as a wedged peer -- alive and holding -- and force
+		// does not override that either. Promoting would only be ruled back.
+		return false
+	case witnessSilentWhileFenced:
+		// This node was ruled against and the Witness has gone quiet only
+		// briefly; only an operator may cut the hold-down short.
+		return forceDemote
+	}
+	// The peer is unreachable and nothing says it is serving: require a
+	// majority -- which a configured pair always has (ADR-0002) -- or an
+	// explicit operator override.
 	return haveQuorum || forceDemote
 }
 
@@ -2086,7 +2203,10 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 	unconfirmedIncumbents := make([]string, 0, 1)
 	reachableCount := 0
 	if s.config.Pulse.Mode == "active-passive" {
-		for id, m := range s.memberList.MembersSnapshot() {
+		// Candidates only. A Witness holds nothing, so a Witness that is down is
+		// not an incumbent whose release has to be confirmed -- counting it as
+		// one would let a down Witness block every failover.
+		for id, m := range s.memberList.CandidatesSnapshot() {
 			status := m.GetStatus()
 			if status != membership.StatusUnknown {
 				reachableCount++
@@ -2097,7 +2217,7 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			}
 		}
 		if prevActiveID == "" {
-			for id, m := range s.memberList.MembersSnapshot() {
+			for id, m := range s.memberList.CandidatesSnapshot() {
 				if id != targetNodeID && m.GetStatus() == membership.StatusUnknown {
 					unconfirmedIncumbents = append(unconfirmedIncumbents, id)
 				}
@@ -2189,6 +2309,21 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// and verifies every configured group address, so on the 201-address topology
 			// a healthy but loaded incumbent overran the flat deadline — and an overrun is
 			// read as "still owns its IPs", which aborts a promotion that was safe.
+			// The Witness first, before anything is asked of the peer. A node that
+			// cannot see its peer keeps retrying elections for as long as the
+			// partition lasts, and the attempt that lands as the link comes back
+			// would otherwise ask a healthy incumbent to release -- and it would,
+			// handing the address to the node that was only cut off. Measured on
+			// the rig: the takeover happened in the same second as the heal.
+			witness := s.witnessAnswerFor(context.Background(), id)
+			if witness == witnessPeerServing {
+				s.logger.Warn("PROMOTE_ASYNC: Aborting promotion - the Witness reports the incumbent serving",
+					"unconfirmed_node", id, "target", targetNodeID)
+				s.restoreMemberStates(originalStates)
+				_ = s.broadcastNextEpoch(originalStates)
+				return
+			}
+
 			mpCtx, mpCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
 			released, provablyDown, err := s.confirmPeerReleasedIPs(mpCtx, id)
 			mpCancel()
@@ -2204,12 +2339,16 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 			// a minority must never claim addresses it cannot prove were released.
 			haveQuorum := s.hasConfiguredPromotionMajority()
 
-			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote) {
+			// Unreachable from here is the question the Witness answered above:
+			// dead, or only cut off from this node. A wedged peer blocks the
+			// promotion whatever the Witness says.
+			if !canPromoteWithoutConfirmedRelease(stillAlive, haveQuorum, forceDemote, witness) {
 				s.logger.Error("PROMOTE_ASYNC: Aborting promotion - cannot confirm unreachable node released its floating IPs",
 					"unconfirmed_node", id,
 					"target", targetNodeID,
 					"peer_still_alive", stillAlive,
 					"have_quorum", haveQuorum,
+					"witness", witness,
 					"reachable_nodes", reachableCount,
 					"error", err)
 				s.restoreMemberStates(originalStates)
@@ -2555,6 +2694,8 @@ func (s *Server) HealthCheck(ctx context.Context, req *rpc.HealthCheckRequest) (
 		Message:      fmt.Sprintf("Node %s is healthy", member.Hostname),
 		ClusterToken: localToken,
 		HandoffTo:    s.handoffInProgress(),
+
+		WitnessProtocolVersion: witnessProtocolVersion,
 	}, nil
 }
 
@@ -2634,26 +2775,35 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 	// Get all peers (excluding the node being removed and ourselves)
 	s.RLock()
 	var peers []struct {
-		id   string
-		ip   string
-		port string
+		id      string
+		ip      string
+		port    string
+		counted bool
 	}
-	totalClusterSize := len(s.config.Nodes)
+	// The Witness is told about the removal like any member, since it holds the
+	// config too, but it is not part of the cluster's size and its
+	// acknowledgement is not part of the quorum (ADR-0006).
+	totalClusterSize := config.CountedNodeCount(s.config.Nodes)
+	removedIsCounted := !s.config.Nodes[req.NodeId].IsWitness()
 	for id, node := range s.config.Nodes {
 		if id == req.NodeId || id == localNodeID || node == nil {
 			continue
 		}
 		peers = append(peers, struct {
-			id   string
-			ip   string
-			port string
-		}{id: id, ip: node.IP, port: node.Port})
+			id      string
+			ip      string
+			port    string
+			counted bool
+		}{id: id, ip: node.IP, port: node.Port, counted: !node.IsWitness()})
 	}
 	s.RUnlock()
 
 	// Calculate quorum requirement: majority of the cluster AFTER the node is removed
 	// If we have 4 nodes and removing 1, quorum is majority of remaining 3 = 2
-	remainingNodes := totalClusterSize - 1 // Excluding the node being removed
+	remainingNodes := totalClusterSize
+	if removedIsCounted {
+		remainingNodes-- // Excluding the node being removed
+	}
 	requiredQuorum := (remainingNodes / 2) + 1
 
 	s.logger.Info("Quorum-based removal initiated",
@@ -2699,7 +2849,9 @@ func (s *Server) CoordinateRemoval(ctx context.Context, req *rpc.CoordinateRemov
 		}
 
 		s.logger.Info("Peer successfully removed node", "peer", peer.id)
-		updatedCount++
+		if peer.counted {
+			updatedCount++
+		}
 	}
 
 	// Count ourselves (coordinator) as updated
@@ -3247,15 +3399,16 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// from here, the node handling the request, so it happens exactly once
 	// rather than once per node reacting to the mode change.
 	if req.Mode == "active-passive" {
-		activeNode := membership.ConsolidationTarget(s.memberList.MembersSnapshot(), s.leaderID)
+		activeNode := membership.ConsolidationTarget(s.memberList.CandidatesSnapshot(), s.leaderID)
 		if activeNode == nil {
 			s.logger.Warn("No eligible node found to become active during mode switch")
 		} else {
 			s.logger.Info("Consolidating floating IPs onto a single active node",
 				"hostname", activeNode.Hostname, "node_id", activeNode.ID)
 
-			// Demote every other node and release the IPs it holds.
-			for _, member := range s.memberList.MembersSnapshot() {
+			// Demote every other node and release the IPs it holds. A Witness holds
+			// none and has no status to demote from.
+			for _, member := range s.memberList.CandidatesSnapshot() {
 				if member.ID == activeNode.ID {
 					continue
 				}
@@ -3325,6 +3478,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// Bump epoch by 2 so our health-check broadcasts (epoch+1) supersede any stale
 	// broadcasts from peers that still carry the pre-switch epoch.
 	s.clusterEpoch += 2
+	s.publishConvergenceLocked()
 
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
@@ -3401,7 +3555,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 // — the lock is not reentrant and SetMode calls this with the write lock held —
 // and the member writes below take only the individual member locks.
 func (s *Server) seedActiveActiveAssignments() bool {
-	members := s.memberList.MembersSnapshot()
+	members := s.memberList.CandidatesSnapshot()
 
 	var owner *membership.Member
 	for _, member := range members {
@@ -3448,7 +3602,9 @@ func (s *Server) seedActiveActiveAssignments() bool {
 // Returns "" when no node is eligible, which the caller reads as "place it later"
 // rather than "place it everywhere". Callers must hold s.Lock().
 func (s *Server) leastLoadedNodeForGroup(groupName string) string {
-	members := s.memberList.MembersSnapshot()
+	// Candidates only: a node missing from this map is skipped below, which is
+	// how the Witness is never offered an address even if a group names it.
+	members := s.memberList.CandidatesSnapshot()
 
 	best := ""
 	bestCount := -1
@@ -4193,6 +4349,12 @@ func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequ
 		return &rpc.AssignGroupResponse{
 			Success: false,
 			Message: fmt.Sprintf("node_id %s not found", req.NodeId),
+		}, nil
+	}
+	if node.IsWitness() {
+		return &rpc.AssignGroupResponse{
+			Success: false,
+			Message: fmt.Sprintf("node %s is the cluster's Witness and never holds floating IPs", req.NodeId),
 		}, nil
 	}
 
@@ -5399,6 +5561,22 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		}
 	}
 
+	// The Witness never speaks for anyone's state. It sees both sides of a
+	// partition, so the member states, epoch and leader it would carry are each
+	// side's relayed to the other -- and acting on them gave a node that cannot
+	// reach its peer a second-hand view of two Actives, which enforceSingleActive
+	// then settled by its own tie-break, against the Ruling. Measured on the rig:
+	// the incumbent demoted itself in the same second the Witness ruled for it.
+	// Its config is still taken like any member's (ADR-0006).
+	fromWitness := s.senderIsWitness(senderID)
+	if fromWitness {
+		if incomingMemberStates != nil {
+			putStatusMap(incomingMemberStates)
+			incomingMemberStates = nil
+		}
+		incomingEpoch, incomingLeaderID = 0, ""
+	}
+
 	// Envelope syncs are the only continuous signal there is: they flow every few
 	// seconds where a full config only follows a mutation, which is why a node that
 	// missed one join broadcast stayed diverged until something unrelated changed
@@ -5516,6 +5694,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 							"sender", senderID)
 					}
 					incoming.TLSCert = mine.TLSCert
+					// Node-owned for the same reason: only this node knows where
+					// it listens on the Witness path (ADR-0006).
+					incoming.WitnessAddress = mine.WitnessAddress
 				}
 			}
 		}
@@ -5785,7 +5966,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// never takes s.Lock() at all, so the compare-and-write here was the same
 		// unsynchronised access on a different path: the config broadcaster reads
 		// both fields under RLock, so -race flags it.
-		s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
+		if !fromWitness {
+			s.adoptConvergenceMetadata(incomingEpoch, incomingLeaderID, false)
+		}
 		// Keep member list as-is for envelope updates to avoid clobbering runtime states
 		// s.memberList.UpdateConfig(s.config)
 		// Skip loadInitialMembers here; members are stable
@@ -6101,6 +6284,10 @@ var settableConfigKeys = map[string]configKeyScope{
 	// tlsPreconditionsMet before it is written, which is the whole of ADR-0005's
 	// migration safety.
 	"tls_mode": scopeCluster,
+	// Set on the node it describes, like the logging keys, but published: every
+	// member has to know where every other is reached on the Witness path.
+	// UpdateConfig hands it to applyWitnessAddress.
+	"witness_address": scopeNode,
 }
 
 // What UpdateConfig reports back about the reach of a change it applied. The CLI
@@ -6141,6 +6328,9 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 	// since it reads the member list and reconfigures this node afterwards.
 	if req.Key == "tls_mode" {
 		return s.applyTLSMode(req.Value), nil
+	}
+	if req.Key == "witness_address" {
+		return s.applyWitnessAddress(req.Value), nil
 	}
 
 	if req.Key == "mode" {
@@ -6214,6 +6404,18 @@ func (s *Server) SetMaintenance(ctx context.Context, req *rpc.SetMaintenanceRequ
 	targetID := req.NodeId
 	if targetID == "" {
 		targetID = localID
+	}
+
+	// Maintenance and Witness are different things, and a Witness has nothing
+	// to drain: it serves nothing and is never eligible to (ADR-0006).
+	s.config.Lock()
+	targetIsWitness := s.config.Nodes[targetID].IsWitness()
+	s.config.Unlock()
+	if targetIsWitness {
+		return &rpc.SetMaintenanceResponse{
+			Success: false,
+			Message: fmt.Sprintf("node %s is the cluster's Witness; Maintenance does not apply to it", targetID),
+		}, nil
 	}
 
 	if targetID != localID {
@@ -6617,7 +6819,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 		}
 
 		// Membership reconciliation with quorum (clusters >=3)
-		clusterSize := len(s.config.Nodes)
+		clusterSize := config.CountedNodeCount(s.config.Nodes)
 		if clusterSize >= 3 {
 			// Build presence counts for each known node based on peer snapshots
 			presenceCount := make(map[string]int)
@@ -6677,7 +6879,7 @@ func (s *Server) ResyncNetwork(ctx context.Context, req *rpc.ResyncNetworkReques
 				}
 				if presenceCount[id] < majority && member.GetStatus() == membership.StatusUnknown {
 					// Start a quorum vote to remove this member
-					if s.quorumManager == nil || len(s.config.Nodes) < 3 {
+					if s.quorumManager == nil || config.CountedNodeCount(s.config.Nodes) < 3 {
 						s.logger.Infof("Resync: member %s missing from majority but quorum unavailable; skipping automatic removal", id)
 						continue
 					}
@@ -7169,6 +7371,7 @@ func (s *Server) InitiateJoin(ctx context.Context, req *rpc.InitiateJoinRequest)
 		// simply publishes for itself shortly after, which is what happened before
 		// this existed.
 		TlsCert: s.localCertificatePEM(),
+		Witness: req.Witness,
 	}
 	s.logger.Info("INITIATE_JOIN: Sending join request to target",
 		"targetHost", req.TargetHost,
@@ -7591,6 +7794,7 @@ func (s *Server) adoptConvergenceMetadataLocked(epoch int64, leaderID string, at
 	}
 	s.clusterEpoch = epoch
 	s.leaderID = leaderID
+	s.publishConvergenceLocked()
 	return true
 }
 
@@ -7683,11 +7887,18 @@ func (s *Server) closePeerClients() {
 
 // BroadcastClusterState broadcasts member states and convergence metadata to peers via ConfigSync
 func (s *Server) BroadcastClusterState(memberStates map[string]membership.MemberStatus, epoch int64, leaderID string, leases map[string]string) error {
+	// The Witness does not broadcast states: it never decides anyone's, and
+	// relaying them is how a cut-off node came to act on its peer's (ADR-0006).
+	// Receivers ignore them anyway; not sending them saves the traffic.
+	if s.senderIsWitness(s.localNodeIDForWitness()) {
+		return nil
+	}
 	s.Lock()
 	if epoch > s.clusterEpoch {
 		s.clusterEpoch = epoch
 	}
 	s.leaderID = leaderID
+	s.publishConvergenceLocked()
 	// If we are leader, extend our lease
 	if leaderID != "" && leaderID == s.config.Pulse.LocalNode {
 		s.leaderLeaseUntil = time.Now().Add(5 * time.Second)

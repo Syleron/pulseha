@@ -45,6 +45,7 @@ type stubServer struct {
 	// matters: an announcement that lands before the demotions is the last word on
 	// nothing, because the demoted node's own bring-up already announced later.
 	announced     []string
+	heldBack      map[string]bool
 	announceFails bool
 
 	// sequence interleaves demotions and announcements in call order, because
@@ -122,6 +123,10 @@ func (s *stubServer) MakePassive(ctx context.Context, req *rpc.MakePassiveReques
 	}
 	return &rpc.MakePassiveResponse{Success: true}, nil
 }
+
+// heldBack is what WitnessHeldBack hands back; nil by default, as for a
+// cluster with no Witness.
+func (s *stubServer) WitnessHeldBack() map[string]bool { return s.heldBack }
 
 func (s *stubServer) AnnounceNodeIPs(nodeID string) error {
 	if s.announceFails {

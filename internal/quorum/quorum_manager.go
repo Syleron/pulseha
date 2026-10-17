@@ -139,7 +139,7 @@ func NewQuorumManagerWithSource(source func() *config.Config, logger *log.Logger
 		activeSessions: make(map[string]*VotingSession),
 		sessionHistory: make(map[string]*VotingSession),
 		compactHistory: make([]CompactSessionHistory, 0, maxHistorySize),
-		nodeCount:      len(cfg.Nodes),
+		nodeCount:      config.CountedNodeCount(cfg.Nodes),
 		stopChan:       make(chan struct{}),
 	}
 }
@@ -170,14 +170,11 @@ func (q *QuorumManager) StartVotingSession(voteType VoteType, subject string, de
 		return "", fmt.Errorf("no cluster configuration")
 	}
 	cfg.Lock()
-	members := make([]string, 0, len(cfg.Nodes))
-	for id, node := range cfg.Nodes {
-		if id != "" && node != nil {
-			members = append(members, id)
-		}
-	}
+	// The Witness is never part of the electorate: it does not vote, and a
+	// cluster that counted it would reach three and start holding votes it was
+	// never meant to need (ADR-0006).
+	members := config.CountedNodeIDs(cfg.Nodes)
 	cfg.Unlock()
-	slices.Sort(members)
 	q.Lock()
 	defer q.Unlock()
 

@@ -114,7 +114,36 @@ vocabulary with no PulseHA status behind them
 Two members both Active in active-passive, each believing the other is gone. Not a status —
 no node ever publishes it — but the name for a condition an operator reads off two nodes at
 once. A defect in a cluster of three or more, where a majority exists and should prevent it;
-the accepted behaviour of a partitioned two-node cluster, which has no majority to appeal to.
-See [ADR-0002](./docs/adr/0002-two-node-availability-over-safety.md).
+the accepted behaviour of a partitioned two-node cluster, which has no majority to appeal to —
+unless that cluster has a Witness it can reach and trust, in which case a Ruling ends it.
+See [ADR-0002](./docs/adr/0002-two-node-availability-over-safety.md) and
+[ADR-0006](./docs/adr/0006-a-witness-rules-on-overlapping-claims.md).
 _Avoid_: dual active, both active — these name the symptom without saying it is unintended in
 one case and not the other
+
+**Witness**:
+A member of a two-node cluster that never serves and is never counted, whose only role is to
+report what it can see and to rule on addresses claimed twice. A member, because it is
+configured, trusted and kept in sync; never counted, because the cluster it watches is still
+a two-node cluster in every count that decides quorum, voting and placement.
+_Avoid_: arbitrator, tie-breaker, quorum node, third node, observer — "quorum node" names the
+vote-counter design that was rejected, and counting is the one thing a Witness does not do
+
+**Witness Report**:
+What the Witness tells a member: each peer's Claim as obtained by a live round-trip, or *not
+visible*, together with its Ruling and the Cluster Epoch it was formed in. Never a recollection —
+a peer that does not answer the round-trip is not visible, whatever it said a moment ago.
+_Avoid_: view, health report, status — a status is a member's word about itself, and this is a
+statement about others
+
+**Ruling**:
+The Witness's decision on which member keeps each address that two members claim at once. It
+settles overlapping Claims; it does not choose the Elected Node, and nobody votes on it.
+_Avoid_: verdict, vote, decision, election
+
+**Fenced**:
+A member that has given up Claims because a Ruling went against it. A condition, not a status —
+like Split-brain, no node publishes it — and local to the member: it does not survive a restart.
+See [ADR-0006](./docs/adr/0006-a-witness-rules-on-overlapping-claims.md).
+_Avoid_: stood down, self-demoted, isolated, minority side — a two-node cluster has no majority,
+so it has no minority either

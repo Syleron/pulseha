@@ -130,6 +130,9 @@ func (m *MemberList) UpdateConfig(cfg *config.Config) {
 					member.mu.Lock()
 					member.Capacity = node.Capacity
 					member.mu.Unlock()
+					// The role is fixed at join, so this only ever turns it on:
+					// for a member added before the config that names it arrived.
+					member.setWitness(node.IsWitness())
 				}
 			}
 
@@ -237,7 +240,7 @@ func (m *MemberList) redistributeIPsLocked(failedIPs []string) error {
 // Status while holding only the member lock.
 func (m *MemberList) getAvailableNodes() []*Member {
 	var available []*Member
-	for _, member := range m.Members {
+	for _, member := range m.candidatesLocked() {
 		member.mu.Lock()
 		status := member.Status
 		member.mu.Unlock()
@@ -472,6 +475,13 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 	if m.config != nil {
 		if node, ok := m.config.Nodes[nodeID]; ok {
 			member.Capacity = node.Capacity
+			// A Witness is never parked in Maintenance: it is never eligible, so
+			// there is nothing to verify before it becomes so. It starts Unknown
+			// like any remote node until it answers a health check.
+			if node.IsWitness() {
+				member.witness = true
+				member.Status = StatusUnknown
+			}
 		}
 	}
 
@@ -484,6 +494,23 @@ func (m *MemberList) AddMember(nodeID, hostname, bindIP, bindPort string) error 
 	m.Members[nodeID] = member
 
 	m.logger.Info("Successfully added member to member list", "hostname", hostname, "id", nodeID)
+	return nil
+}
+
+// AddWitness adds the cluster's Witness. For the join path, which adds the
+// member before the config entry naming its role exists, so AddMember cannot
+// read the role from there. The Witness starts Unknown, like any remote node,
+// until it answers a health check -- and never in Maintenance.
+func (m *MemberList) AddWitness(nodeID, hostname, bindIP, bindPort string) error {
+	if err := m.AddMember(nodeID, hostname, bindIP, bindPort); err != nil {
+		return err
+	}
+	member := m.GetMemberByID(nodeID)
+	if member == nil {
+		return fmt.Errorf("witness %s missing from the member list after it was added", nodeID)
+	}
+	member.setWitness(true)
+	member.SetClaim(Claim{Status: StatusUnknown})
 	return nil
 }
 

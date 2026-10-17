@@ -259,6 +259,15 @@ type Member struct {
 	ActiveIPs    []string `json:"active_ips"`
 	LastResponse string   `json:"last_response"`
 	Latency      string   `json:"latency"`
+	// Witness is the member's role, not its status: a Witness that is down
+	// reports Status "Unknown" and still has this set.
+	Witness bool `json:"witness,omitempty"`
+	// WitnessAddress is where the member is reached on the Witness path; empty
+	// when it is reached on its bind address.
+	WitnessAddress string `json:"witness_address,omitempty"`
+	// WitnessTrusted, on the Witness, is whether every leg of the Witness path is
+	// verified TLS. False is "configured but not trusted": it arbitrates nothing.
+	WitnessTrusted bool `json:"witness_trusted,omitempty"`
 }
 
 // GroupInfo represents a floating IP group
@@ -317,6 +326,13 @@ func (c *Client) JoinCluster(address, token, bindIP, bindPort string) error {
 
 // JoinClusterWithNodeID allows specifying a custom node ID
 func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customNodeID string) error {
+	return c.JoinClusterAs(address, token, bindIP, bindPort, customNodeID, false)
+}
+
+// JoinClusterAs is JoinClusterWithNodeID with the role to join in. witness joins
+// this node as the cluster's Witness, which is fixed for as long as it stays in
+// the cluster.
+func (c *Client) JoinClusterAs(address, token, bindIP, bindPort, customNodeID string, witness bool) error {
 	// Split address into host and port if port is specified
 	host, port := address, "8080"
 	if strings.Contains(address, ":") {
@@ -357,6 +373,7 @@ func (c *Client) JoinClusterWithNodeID(address, token, bindIP, bindPort, customN
 		BindIp:     bindIP,
 		BindPort:   bindPort,
 		NodeId:     nodeID,
+		Witness:    witness,
 	})
 	if err != nil {
 		return fmt.Errorf("join initiate failed: %v", err)
@@ -444,6 +461,8 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			statusStr = "Maintenance"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_STANDBY:
 			statusStr = "Standby"
+		case rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS:
+			statusStr = "Witness"
 		case rpc.MemberStatusEnum_MEMBER_STATUS_UNKNOWN:
 			statusStr = "Unknown"
 		}
@@ -456,6 +475,10 @@ func (c *Client) GetClusterStatus() (*ClusterStatus, error) {
 			Latency:      m.Latency,
 			IP:           m.Ip,
 			Port:         m.Port,
+			Witness:      m.Witness,
+
+			WitnessAddress: m.WitnessAddress,
+			WitnessTrusted: m.WitnessTrusted,
 		}
 
 		// Log the latency for debugging
