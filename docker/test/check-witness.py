@@ -224,8 +224,7 @@ try:
         print('MACs: node1', macs[1], 'node2', macs[2], flush=True)
         during = client_sees('control')
         print('control: client ARP entry on', during,
-              '(node1: the re-announcement below is exercised)' if during == macs[1]
-              else '(not node1: the re-announcement below is NOT exercised by this run)', flush=True)
+              '(node1 already)' if during == macs[1] else '(not node1; seeding it below)', flush=True)
 
         # While both hold the address both answer ARP requests, so the client
         # may never have followed node1 on its own. Put its cache where the
