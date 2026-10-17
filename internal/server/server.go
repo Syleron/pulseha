@@ -211,6 +211,13 @@ type Server struct {
 	// node's own election path may be holding the lock -- an answer held up by it
 	// would read as "not visible" about a node that is alive (ADR-0006).
 	published atomic.Pointer[convergence]
+
+	// witnessHistory is, on the Witness, what it last saw held without contest;
+	// see witnessHistory. witnessLoopOnce/witnessLoopStop run and stop the loop
+	// that does this node's part of arbitration (startWitnessLoop).
+	witnessHistory  witnessHistory
+	witnessLoopOnce sync.Once
+	witnessLoopStop chan struct{}
 	// Rate limiting for refresh calls
 	lastRefresh      time.Time
 	leaderLeaseUntil time.Time
@@ -730,6 +737,10 @@ func (s *Server) startHealthChecker() {
 	s.healthCheck.Start(interval)
 	s.logger.Info("Health checker started successfully")
 
+	// On the same tick and the same precondition: arbitration has nothing to do
+	// before there is a cluster to arbitrate.
+	s.startWitnessLoop(interval)
+
 	// The IP monitor is started here, with the health checker, because the two share a
 	// precondition and a trigger: neither can run without a configured cluster, and both
 	// become startable at the same moments — daemon start on an already-configured node,
@@ -755,6 +766,7 @@ func (s *Server) Stop() {
 	// Before the teardown below starts mutating state we no longer want to
 	// propagate, and so an in-flight retry loop cannot outlive the server.
 	s.stopConfigBroadcaster()
+	s.stopWitnessLoop()
 
 	// Best-effort convergence hint: broadcast we're going down so peers can elect a new active
 	func() {

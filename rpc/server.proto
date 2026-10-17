@@ -715,4 +715,23 @@ message WitnessReportResponse {
     // Every configured member other than the responder and the asker.
     repeated PeerView peers = 5;
     int32 witness_protocol_version = 6;
+    // The Witness's decisions on addresses that more than one member claims
+    // right now, judged from the asker's own Claim and the visible peers'. Empty
+    // when nothing overlaps, and always empty from a member that is not the
+    // Witness.
+    repeated Ruling rulings = 7;
+}
+
+// Who keeps an overlapping claim. The keeper is the member the Witness last saw
+// holding it without contest -- the one the network has already learned -- and
+// the lowest node ID only when the Witness has no such observation.
+message Ruling {
+    string keeper = 1;
+    // The members whose Claims overlapped. Every contender but the keeper is
+    // ruled against and gives the addresses up.
+    repeated string contenders = 2;
+    // The addresses ruled on. Empty means every address the contenders hold,
+    // which is the active-passive case: there the conflict is two Active Claims,
+    // and an Active node's address list is not knowledge (ADR-0001).
+    repeated string addresses = 3;
 }

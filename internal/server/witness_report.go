@@ -95,6 +95,7 @@ func (s *Server) WitnessReport(ctx context.Context, req *rpc.WitnessReportReques
 	token := cfg.Pulse.ClusterToken
 	askerKnown := cfg.Nodes[req.GetNodeId()] != nil
 	localIsWitness := cfg.Nodes[localID].IsWitness()
+	mode := cfg.Pulse.Mode
 	peers := make(map[string]config.Node, len(cfg.Nodes))
 	for id, node := range cfg.Nodes {
 		if id != localID && id != req.GetNodeId() && node != nil {
@@ -120,6 +121,7 @@ func (s *Server) WitnessReport(ctx context.Context, req *rpc.WitnessReportReques
 		return resp, nil
 	}
 	resp.Peers = s.observePeers(ctx, localID, token, peers)
+	resp.Rulings = s.rulingsFor(mode, req.GetClaim(), resp.Peers)
 	return resp, nil
 }
 
