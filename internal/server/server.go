@@ -205,6 +205,12 @@ type Server struct {
 	// Convergence state
 	clusterEpoch int64
 	leaderID     string
+	// published is clusterEpoch and leaderID as one value, readable without the
+	// server lock. Written by publishConvergenceLocked after every change to
+	// either field, and read by the Witness Report, which must answer while this
+	// node's own election path may be holding the lock -- an answer held up by it
+	// would read as "not visible" about a node that is alive (ADR-0006).
+	published atomic.Pointer[convergence]
 	// Rate limiting for refresh calls
 	lastRefresh      time.Time
 	leaderLeaseUntil time.Time
@@ -409,6 +415,7 @@ func (s *Server) Start() error {
 	s.Lock()
 	defer s.Unlock()
 	s.clusterEpoch = max(s.clusterEpoch, s.voteEpochFloor.Load())
+	s.publishConvergenceLocked()
 
 	// Verify config is loaded
 	s.logger.Debug("Verifying server configuration...")
@@ -3395,6 +3402,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// Bump epoch by 2 so our health-check broadcasts (epoch+1) supersede any stale
 	// broadcasts from peers that still carry the pre-switch epoch.
 	s.clusterEpoch += 2
+	s.publishConvergenceLocked()
 
 	// Update local monitor expectations based on new role
 	s.refreshLocalMonitorExpectedIPs()
@@ -7682,6 +7690,7 @@ func (s *Server) adoptConvergenceMetadataLocked(epoch int64, leaderID string, at
 	}
 	s.clusterEpoch = epoch
 	s.leaderID = leaderID
+	s.publishConvergenceLocked()
 	return true
 }
 
@@ -7779,6 +7788,7 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 		s.clusterEpoch = epoch
 	}
 	s.leaderID = leaderID
+	s.publishConvergenceLocked()
 	// If we are leader, extend our lease
 	if leaderID != "" && leaderID == s.config.Pulse.LocalNode {
 		s.leaderLeaseUntil = time.Now().Add(5 * time.Second)

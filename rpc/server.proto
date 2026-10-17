@@ -93,6 +93,10 @@ service Server {
     rpc GetVotingResult(GetVotingResultRequest) returns (GetVotingResultResponse) {}
     // Maintenance — forwarded from the initiating node so the target manages its own state
     rpc SetMaintenance(SetMaintenanceRequest) returns (SetMaintenanceResponse) {}
+    // What the responder can see. Every member answers with its own Claim; the
+    // cluster's Witness also reports each peer as obtained by a round-trip made
+    // for this report. See WitnessReportResponse.
+    rpc WitnessReport(WitnessReportRequest) returns (WitnessReportResponse) {}
 }
 
 // Join Request/Response
@@ -665,4 +669,50 @@ message RequestVoteResponse {
     uint64 accepted_ballot = 11;
     string accepted_by = 12;
     string accepted_subject = 13;
+}
+
+// Witness Report
+// -----------------------------------------------------------------------------
+// docs/adr/0006-a-witness-rules-on-overlapping-claims.md. A node that cannot see
+// its peer asks the Witness what it can see; the Witness asks the peer, there and
+// then, and reports the answer or that none came. Nothing in a report is a
+// recollection: a peer is visible only if it answered a round-trip made for the
+// report that names it, and a TCP connect is never an answer.
+
+// What a member asserts about itself, as of the Cluster Epoch it was formed in.
+message MemberClaim {
+    string node_id = 1;
+    MemberStatusEnum status = 2;
+    repeated string active_ips = 3;
+    int64 cluster_epoch = 4;
+    // The member this one believes is the Elected Node, as of cluster_epoch.
+    string elected_node = 5;
+}
+
+message WitnessReportRequest {
+    string node_id = 1;        // the asker
+    string cluster_token = 2;
+    // The asker's own Claim. Carried rather than fetched, so the Witness never
+    // calls back into a node that is waiting on its answer.
+    MemberClaim claim = 3;
+}
+
+message PeerView {
+    string node_id = 1;
+    // True only when the peer answered, under its own identity, a round-trip
+    // made for this report and inside its deadline.
+    bool visible = 2;
+    MemberClaim claim = 3;     // set if and only if visible
+    string reason = 4;         // why not visible; for logs, not for decisions
+}
+
+message WitnessReportResponse {
+    bool success = 1;
+    string message = 2;
+    MemberClaim self = 3;      // the responder's own Claim
+    // The responder is the cluster's Witness. peers is filled only when it is.
+    bool from_witness = 4;
+    // Every configured member other than the responder and the asker.
+    repeated PeerView peers = 5;
+    int32 witness_protocol_version = 6;
 }
