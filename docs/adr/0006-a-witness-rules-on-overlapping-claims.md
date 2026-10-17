@@ -130,8 +130,14 @@ Two consequences of that are easy to undo by accident:
   partition.
 - **Higher Cluster Epoch wins.** Rejected: each side of a partition bumps its epoch alone, so
   the numbers count each side's own history. The node that promoted *into* the partition has
-  the higher one and would win over the node that served throughout. The epoch still travels
-  in a Witness Report, so a stale report can be refused.
+  the higher one and would win over the node that served throughout.
+- **Refuse a Witness Report whose Cluster Epoch is stale.** Proposed as the guard against
+  fencing on old news, and dropped. A Report cannot be old news: it is formed by round-trips made
+  for it, there and then, and nothing in it is remembered. Nor is there anything to compare the
+  epoch against — the asker's own epoch and its peer's diverge across exactly the partition the
+  Report is about, so "stale" has no meaning there. What a stale-epoch check would have guarded
+  against is a replayed or forged Report, and the verified TLS path already refuses those. The
+  epoch is still carried in each Claim, for logs and for whoever reads a Report.
 - **The Witness pushes demotions.** Rejected for pull: a lost command leaves an unknown state,
   where a missing answer falls into ADR-0002's fallback; and a node's Claim keeps one writer,
   itself, under its own lock (ADR-0004).
