@@ -149,6 +149,12 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 			config.TLSModePermissive, config.TLSModeRequired, value)
 	}
 
+	// Cluster-scoped, so it waits at the currency gate like every other change
+	// that has to propagate (#117).
+	if err := s.awaitConfigCurrent(context.Background()); err != nil {
+		return refuse("%v", err)
+	}
+
 	cfg := s.currentConfig()
 	if cfg == nil {
 		return refuse("no cluster configuration to change")

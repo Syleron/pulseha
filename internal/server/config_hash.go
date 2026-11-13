@@ -57,6 +57,10 @@ func sharedConfigHash(cfg *config.Config) (string, error) {
 			delete(pulse, field)
 		}
 	}
+	// The persisted clock is metadata about the content, not content: two nodes
+	// holding the same config at the same version already agree, and a node
+	// that has not yet written its stamp is not diverged from one that has.
+	delete(decoded, persistedStampKey)
 
 	canonicalise(decoded)
 
@@ -71,6 +75,9 @@ func sharedConfigHash(cfg *config.Config) (string, error) {
 
 // localSettingsKey is the JSON name of config.Config.Pulse.
 const localSettingsKey = "pulseha"
+
+// persistedStampKey is the JSON name of config.Config.Stamp.
+const persistedStampKey = "config_stamp"
 
 // locallyPreservedFields are the JSON names of the fields ConfigSync keeps from
 // the local config rather than adopting from a peer. Kept in step with that
