@@ -108,6 +108,20 @@ func (m *IPMonitor) monitorLoop() {
 						_ = netlink.AddrAdd(targetLink, addrObj)
 					}
 					m.logger.Info("IP monitor: moved IP to correct interface", "ip", changedIP, "from", iface, "to", correctIface)
+					continue
+				}
+				// An IPv4 address that is not a floating IP arriving on an interface
+				// PulseHA manages is, in practice, NetworkManager re-adding the
+				// interface's static — the second half of the sequence that leaves
+				// a floating IP primary over it (docs/TEST-PLAN.md defect #116).
+				// The enforce pass is what repairs that, and a trigger here makes
+				// the repair take the pass's latency rather than up to a tick of
+				// health checks sourced from the wrong address. Triggers coalesce,
+				// so the burst of adds a profile re-apply produces costs one pass.
+				if _, floating := allExpected[changedIP]; !floating && upd.LinkAddress.IP.To4() != nil {
+					m.logger.Debug("IP monitor: an address that is not a floating IP was added on a managed interface; running the enforce pass",
+						"ip", changedIP, "iface", iface)
+					m.TriggerEnforce()
 				}
 				continue
 			}
@@ -154,6 +168,12 @@ func (m *IPMonitor) monitorLoop() {
 					// (docs/TEST-PLAN.md defect #60).
 					if m.restoreSuppressed(iface, exp) {
 						m.logger.Info("IP monitor: expected IP was released on request; not restoring", "ip", exp, "iface", iface)
+						break
+					}
+					// The enforce pass's own delete, with the add already behind it
+					// by the time this event is read (defect #116).
+					if m.reseatSuppressed(iface, exp) {
+						m.logger.Debug("IP monitor: expected IP is being reseated as a secondary address; not restoring", "ip", exp, "iface", iface)
 						break
 					}
 					m.logger.Warn("IP monitor: expected IP removed from Active node; restoring", "ip", exp, "iface", iface, "status", currentClaim.Status)
@@ -366,20 +386,7 @@ func (m *IPMonitor) enforceExpectations() {
 
 		// CRITICAL: Passive nodes must remove ALL cluster floating IPs, not just expected IPs
 		// This prevents split-brain IP conflicts when a node loses active status
-		// Build a complete list of all floating IPs from cluster groups
-		allClusterIPs := make(map[string][]string) // iface -> IPs
-
-		// Get local node config to know which interfaces map to which groups
-		localNodeCfg, ok := cfg.Nodes[localID]
-		if ok && localNodeCfg != nil && localNodeCfg.IPGroups != nil {
-			for iface, groups := range localNodeCfg.IPGroups {
-				for _, groupName := range groups {
-					if groupIPs, exists := cfg.Groups[groupName]; exists {
-						allClusterIPs[iface] = append(allClusterIPs[iface], groupIPs...)
-					}
-				}
-			}
-		}
+		allClusterIPs := clusterFloatingIPsByInterface(cfg, localID) // iface -> IPs
 
 		m.logger.Info("ENFORCE: Passive node checking all cluster IPs for cleanup", "clusterIPs", allClusterIPs)
 
@@ -487,6 +494,17 @@ func (m *IPMonitor) enforceExpectations() {
 		}
 	}
 
+	// Every expected address is up; now make sure none of them is the address the
+	// kernel prefers over the interface's own (docs/TEST-PLAN.md defect #116).
+	// After the placement loop rather than before it, so an address this pass has
+	// just added — a secondary, since the static was there first — is not read in
+	// a stale listing. The whole configured set is what counts as floating here,
+	// not just the expected one: see clusterFloatingIPsByInterface.
+	floatingByIface := clusterFloatingIPsByInterface(cfg, localID)
+	for iface, ips := range expectations {
+		m.keepFloatingIPsSecondary(iface, append(floatingByIface[iface], ips...))
+	}
+
 	// An Active node must also give up what is no longer its to hold. The Active
 	// branch only ever added, so a node that handed addresses to a peer kept
 	// serving them: after a mode switch the former sole Active sat at 172
@@ -513,6 +531,54 @@ func (m *IPMonitor) enforceExpectations() {
 	m.releaseUnassignedIPs(localID, expectations)
 
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
+}
+
+// keepFloatingIPsSecondary reseats the floating IPs on iface that have become the
+// primary address of their subnet behind the interface's own address.
+//
+// How a floating IP gets there, and why it matters, is the comment at the top of
+// packages/network/primary.go. In short: NetworkManager re-applying a profile
+// deletes and re-adds the static, promote_secondaries hands primary to the
+// floating IP in the gap, and from then on every health check on that subnet is
+// sourced from the floating IP — which in DR mode the real servers answer to
+// themselves. The static has to be first, and only a delete and re-add of the
+// floating IP puts it there.
+//
+// The watcher is told first, because the delete is one it would otherwise
+// restore with a warning. An address whose re-add failed has its protection
+// cleared and is placed again here, once, the way the pass places any missing
+// address; the next pass covers it after that.
+func (m *IPMonitor) keepFloatingIPsSecondary(iface string, floating []string) {
+	if len(floating) == 0 {
+		return
+	}
+	m.markReseating(iface, floating)
+	reseated, err := network.ReseatFloatingIPs(iface, floating)
+	for _, ip := range reseated {
+		m.logger.Warn("ENFORCE: floating IP had become the primary address of its subnet; "+
+			"reseated it behind the interface's own address",
+			"ip", ip, "iface", iface)
+	}
+	if err == nil {
+		return
+	}
+	m.logger.Error("ENFORCE: could not keep every floating IP secondary", "iface", iface, "error", err)
+	// Whichever addresses the reseat left down are among the floating set; the
+	// cheap, correct move is to let the restore paths see them again and to try
+	// each one once now.
+	m.clearReseating(iface, floating)
+	for _, ip := range floating {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			continue
+		}
+		if exists, on, cerr := network.CheckIfIPExists(ipOnly.String()); cerr == nil && exists && on == iface {
+			continue
+		}
+		if upErr := network.BringIPup(iface, ip); upErr != nil {
+			m.logger.Error("ENFORCE: failed to re-place a floating IP after its reseat", "ip", ip, "iface", iface, "error", upErr)
+		}
+	}
 }
 
 // releaseUnassignedIPs brings down cluster floating IPs this node is holding but

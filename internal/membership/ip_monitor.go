@@ -29,6 +29,17 @@ import (
 // clears the protection immediately.
 const releaseGraceWindow = 60 * time.Second
 
+// reseatGraceWindow is how long an address being reseated as a secondary (docs/
+// TEST-PLAN.md defect #116) is protected from the netlink watcher's restore.
+//
+// A reseat is a delete and an immediate add, and the delete's event reaches the
+// watcher some time after the add has already landed. The watcher's restore would
+// then log a warning and fail with EEXIST — harmless, but a false alarm on every
+// reseat. The window only has to cover the event's delivery, so it is seconds;
+// a reseat whose add genuinely failed clears the record itself, and the enforce
+// pass places the address the way it places any missing one.
+const reseatGraceWindow = 5 * time.Second
+
 // IPMonitor monitors IP addresses on interfaces and ensures they match the expected configuration
 type IPMonitor struct {
 	pulselock.RWMutex
@@ -40,8 +51,13 @@ type IPMonitor struct {
 	// without its mask, since a release and an expectation are not guaranteed to
 	// spell the same address the same way.
 	releasedIPs map[string]map[string]time.Time
-	// now is time.Now, indirected so the grace window can be tested without
-	// waiting a minute.
+	// reseatingIPs records, per interface, the addresses the enforce pass is
+	// deleting and adding straight back to seat them behind the interface's own
+	// address, and the moment each record stops applying. Same shape and keying
+	// as releasedIPs, for the same reader: the watcher's restore path.
+	reseatingIPs map[string]map[string]time.Time
+	// now is time.Now, indirected so the grace windows can be tested without
+	// waiting them out.
 	now      func() time.Time
 	stopChan chan struct{}
 	stopOnce sync.Once
@@ -71,13 +87,14 @@ type IPMonitor struct {
 // NewIPMonitor creates a new IP monitor
 func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 	m := &IPMonitor{
-		members:     members,
-		logger:      logger,
-		expectedIPs: make(map[string][]string),
-		releasedIPs: make(map[string]map[string]time.Time),
-		now:         time.Now,
-		stopChan:    make(chan struct{}),
-		done:        make(chan struct{}),
+		members:      members,
+		logger:       logger,
+		expectedIPs:  make(map[string][]string),
+		releasedIPs:  make(map[string]map[string]time.Time),
+		reseatingIPs: make(map[string]map[string]time.Time),
+		now:          time.Now,
+		stopChan:     make(chan struct{}),
+		done:         make(chan struct{}),
 	}
 	m.enforce = m.enforceExpectations
 	return m
@@ -425,6 +442,111 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 		return false
 	}
 	return true
+}
+
+// markReseating records that the enforce pass is about to delete and re-add ips
+// on iface, so the watcher leaves the delete alone for reseatGraceWindow.
+func (m *IPMonitor) markReseating(iface string, ips []string) {
+	if m == nil || len(ips) == 0 {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+	if m.reseatingIPs == nil {
+		m.reseatingIPs = make(map[string]map[string]time.Time)
+	}
+	now := m.timeNow()
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		reseating = make(map[string]time.Time, len(ips))
+		m.reseatingIPs[iface] = reseating
+	}
+	for ip, expiry := range reseating {
+		if !expiry.After(now) {
+			delete(reseating, ip)
+		}
+	}
+	expiry := now.Add(reseatGraceWindow)
+	for _, ip := range ips {
+		reseating[ipWithoutMask(ip)] = expiry
+	}
+}
+
+// clearReseating drops the reseat protection for ips on iface, for an address
+// whose re-add failed: it is genuinely down, and the watcher must be free to put
+// it back.
+func (m *IPMonitor) clearReseating(iface string, ips []string) {
+	if m == nil || len(ips) == 0 {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		return
+	}
+	for _, ip := range ips {
+		delete(reseating, ipWithoutMask(ip))
+	}
+	if len(reseating) == 0 {
+		delete(m.reseatingIPs, iface)
+	}
+}
+
+// reseatSuppressed reports whether a removal of ip on iface is the enforce
+// pass's own reseat rather than an address gone missing.
+func (m *IPMonitor) reseatSuppressed(iface, ip string) bool {
+	if m == nil {
+		return false
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		return false
+	}
+	key := ipWithoutMask(ip)
+	expiry, ok := reseating[key]
+	if !ok {
+		return false
+	}
+	if !expiry.After(m.timeNow()) {
+		delete(reseating, key)
+		if len(reseating) == 0 {
+			delete(m.reseatingIPs, iface)
+		}
+		return false
+	}
+	return true
+}
+
+// clusterFloatingIPsByInterface returns every configured floating IP on each of
+// the local node's interfaces: the whole of every group assigned to the
+// interface, whoever currently holds it.
+//
+// This is the set of addresses that are PulseHA's rather than the interface's
+// own. It is wider than the expectation set on purpose, because two passes need
+// the wider answer: a Passive node releases all of it, and the reseat of #116
+// must not mistake a surplus floating IP on its way out for a static address to
+// put first. A node the config has no entry for gets an empty map.
+func clusterFloatingIPsByInterface(cfg *config.Config, localID string) map[string][]string {
+	byIface := make(map[string][]string)
+	if cfg == nil {
+		return byIface
+	}
+	localNodeCfg, ok := cfg.Nodes[localID]
+	if !ok || localNodeCfg == nil || localNodeCfg.IPGroups == nil {
+		return byIface
+	}
+	for iface, groups := range localNodeCfg.IPGroups {
+		for _, groupName := range groups {
+			if groupIPs, exists := cfg.Groups[groupName]; exists {
+				byIface[iface] = append(byIface[iface], groupIPs...)
+			}
+		}
+	}
+	return byIface
 }
 
 // RestorableIPs is restorableIPs for the one restore path outside this package.
