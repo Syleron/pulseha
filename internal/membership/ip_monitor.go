@@ -530,11 +530,20 @@ func (m *IPMonitor) reseatSuppressed(iface, ip string) bool {
 // the wider answer: a Passive node releases all of it, and the reseat of #116
 // must not mistake a surplus floating IP on its way out for a static address to
 // put first. A node the config has no entry for gets an empty map.
+//
+// Read under the config's own lock and copied out, like reclaimInputs: cfg.Nodes
+// and cfg.Groups are maps the join handler writes under cfg.Lock(), and the
+// Passive branch used to read them bare — the race `make testrace` reported on
+// the join test the moment the Active branch started reading them too. The
+// lock is not reentrant, so no caller may hold it.
 func clusterFloatingIPsByInterface(cfg *config.Config, localID string) map[string][]string {
 	byIface := make(map[string][]string)
 	if cfg == nil {
 		return byIface
 	}
+	cfg.Lock()
+	defer cfg.Unlock()
+
 	localNodeCfg, ok := cfg.Nodes[localID]
 	if !ok || localNodeCfg == nil || localNodeCfg.IPGroups == nil {
 		return byIface
