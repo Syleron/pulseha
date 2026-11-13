@@ -249,13 +249,18 @@ type Server struct {
 	// stayed at 0 and broadcast unversioned, which the receiver applies
 	// unconditionally. Adopting the version on apply closes both.
 	//
-	// In-memory only and never persisted: the appliance rewrites config.json out
-	// from under us (defect #3), so a number on disk would be wrong exactly when
-	// that happens. The cost is that a just-restarted node reads 0 until its first
-	// full ConfigSync, so a mutation issued on it in that window is rejected by
-	// peers as stale. That is logged (see broadcastConfigToPeersOnce) rather than
-	// silent, and it is the correct answer: a node that is behind must not push a
-	// config, because ConfigSync applies one wholesale.
+	// The in-memory copy is the truth while the daemon runs; it is mirrored to
+	// disk beside the content it describes (config.Config.Stamp) whenever either
+	// moves, and seeded from there on start. It used to be in-memory only, on the
+	// reasoning that the appliance rewrites config.json out from under us (defect
+	// #3) and a number on disk would be wrong exactly then -- which it is, in the
+	// harmless direction (see config.Config.Stamp). What that cost was every
+	// ordinary restart: the node read 0 until its first full ConfigSync, and a
+	// mutation issued in that window -- lb_api issues one on every start -- was
+	// rejected by peers as stale and then reverted or left diverged (#117). A
+	// node that is behind still must not push, because ConfigSync applies a
+	// config wholesale; so the node now finds out whether it is behind, and pulls
+	// if so, before it accepts a mutation. See config_currency.go.
 	//
 	// Atomic rather than lock-guarded because every group mutation calls
 	// markConfigDirty while holding s.Lock() through a defer — taking the write
@@ -267,6 +272,11 @@ type Server struct {
 	// concurrent mutations differently from its peers, which is the divergence the
 	// pair exists to prevent.
 	configStamp atomic.Pointer[configStamp]
+
+	// currency is the gate that holds config mutations until this node knows
+	// its config is the cluster's current one, and the single-flight state of
+	// the pull that settles it (#117, config_currency.go).
+	currency configCurrency
 
 	// broadcastTrigger coalesces config broadcasts. It has capacity 1 and is
 	// signalled rather than written to: a single broadcaster goroutine drains
@@ -384,6 +394,14 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 		broadcastStop:    make(chan struct{}),
 	}
 
+	// Resume the config clock where the last run left it rather than at zero
+	// (#117). A file that carries no stamp -- one written before the field
+	// existed, or rewritten by the appliance -- leaves the clock empty, which is
+	// the previous behaviour and which the startup pull then corrects.
+	if persisted := cfg.PersistedStamp(); !persisted.IsZero() {
+		s.configStamp.Store(&configStamp{version: persisted.Version, origin: persisted.Origin})
+	}
+
 	// Set server reference in health checker
 	healthCheck.SetServerReference(s)
 
@@ -419,6 +437,15 @@ func (s *Server) Start() error {
 	// Owns every outbound config push, so that concurrent mutations coalesce
 	// into one ordered broadcast instead of racing each other (defect #5).
 	s.startConfigBroadcaster()
+
+	// Find out whether the config on disk is the cluster's current one before
+	// any mutation is taken against it (#117). The appliance's first mutation
+	// arrives within a second of this returning, so the gate has to be shut
+	// here, in the same critical section that opens the CLI socket below, and
+	// not from a goroutine that might lose the race to it.
+	if s.config.ClusterCheck() && s.config.NodeCount() > 1 {
+		s.startStartupConfigSync()
+	}
 
 	// Load initial members from config
 	s.logger.Debug("Loading initial members from configuration...")
@@ -1098,6 +1125,13 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	s.logger.Infof("Handling join request from node: %s", req.Hostname)
 	s.logger.Debugf("Join request details - NodeID: %s, BindIP: %s, BindPort: %s, Token provided: %v",
 		req.NodeId, req.BindIp, req.BindPort, req.Token != "")
+
+	// A join is a config mutation on this node, and one taken against a stale
+	// config is one the peers refuse and this node then reverts -- a member
+	// admitted and forgotten. Held at the currency gate like any other (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.JoinResponse{Success: false, Message: err.Error()}, nil
+	}
 
 	// A member with no address is a member nobody can reach, and recording one
 	// puts it in every peer's config by propagation (#114). The joining node
@@ -3169,6 +3203,12 @@ type pendingIPWork struct {
 // SetMode handles changing the cluster operation mode
 func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.SetModeResponse, error) {
 	s.logger.Infof("Received request to change cluster mode to: %s", req.Mode)
+	// Held at the currency gate until this node knows its config is the
+	// cluster's current one, and refused if it is not: a change the peers would
+	// reject as superseded is refused here, to the caller, instead (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.SetModeResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3525,6 +3565,10 @@ func (s *Server) groupIPsForNode(nodeID string) []string {
 // CreateGroup implements the CLI.CreateGroup RPC method
 func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (*rpc.CreateGroupResponse, error) {
 	s.logger.Infof("Received CreateGroup request for group: %s (caller: %s)", req.Name, callerAddr(ctx))
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.CreateGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3570,6 +3614,18 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 // AddIPToGroup implements the CLI.AddIPToGroup RPC method
 func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest) (*rpc.AddIPToGroupResponse, error) {
 	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
+	// Held at the currency gate until this node knows its config is the
+	// cluster's current one, and refused if it is not: a change the peers would
+	// reject as superseded is refused here, to the caller, instead (#117).
+	//
+	// This is the mutation the appliance makes on every daemon start: lb_api's
+	// reconcile re-adds the floating addresses within a second of the socket
+	// opening, inside the window where this node had not yet learned the
+	// cluster's config version. Before the lock, because the pull the gate waits
+	// on applies the peer's config under it.
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.AddIPToGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3935,6 +3991,11 @@ func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string
 func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, error) {
 	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.RemoveIPFromGroupResponse{Success: false, Message: err.Error()}, nil
+	}
+
 	done, exactIP, targets, warnings := s.beginIPRemoval(req)
 	if done != nil {
 		return done, nil
@@ -4169,6 +4230,10 @@ func (s *Server) commitIPRemoval(groupName, exactIP string) error {
 // AssignGroupToNode implements the CLI.AssignGroupToNode RPC method
 func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequest) (*rpc.AssignGroupResponse, error) {
 	s.logger.Infof("Received AssignGroupToNode request for group: %s", req.GroupName)
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.AssignGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -4303,6 +4368,11 @@ type DeleteGroupResponse struct {
 // success, which is #40's operator-visible lie returning at a different site.
 func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGroupRequest) (*rpc.UnassignGroupResponse, error) {
 	s.logger.Infof("Received UnassignGroupFromNode request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.UnassignGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 
 	done, targets := s.commitGroupUnassign(req)
 	if done != nil {
@@ -4506,6 +4576,11 @@ func (s *Server) planGroupUnassignRelease(groupName, nodeID, iface string) []ipR
 // for docs/TEST-PLAN.md defect #59.
 func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, error) {
 	s.logger.Infof("Received DeleteGroup request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.DeleteGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 
 	done, targets, warnings := s.beginGroupDeletion(req)
 	if done != nil {
@@ -5407,6 +5482,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	// adopting would pull a repair for a difference that is already being fixed.
 	if !isFullConfig {
 		s.noteConfigDivergence(senderID, incomingConfigHash)
+		// The version on the same envelope is the other detector: a sender
+		// above this node's version is ahead of it, with no majority to
+		// consult, and this node pulls from it (#117).
+		s.noteConfigVersion(senderID, incomingStamp)
 	}
 
 	// The epoch this node held *before* this sync is what decides whether the
@@ -5679,6 +5758,11 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 				nIncoming.Maintenance = existing.Maintenance
 			}
 		}
+
+		// The stamp this content is about to be held at travels to disk with it
+		// (#117), by the same rule adoptConfigStamp applies below: never lower
+		// than what is held, and unchanged by an unversioned payload.
+		newConfig.Stamp = persistedStampAfter(incomingStamp, s.loadConfigStamp())
 
 		// Persist and update our configuration
 		s.logger.Debug("CONFIG_SYNC: Saving synchronized configuration")
@@ -6154,6 +6238,14 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 		return &rpc.UpdateConfigResponse{Success: resp.Success, Message: resp.Message}, nil
 	}
 
+	// A cluster-scoped key has to propagate, so it waits at the currency gate
+	// like a group mutation (#117); a node-scoped one is this node's alone.
+	if scope == scopeCluster {
+		if err := s.awaitConfigCurrent(ctx); err != nil {
+			return &rpc.UpdateConfigResponse{Success: false, Message: err.Error()}, nil
+		}
+	}
+
 	s.Lock()
 	defer s.Unlock()
 
@@ -6401,6 +6493,10 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 // assignments above the new capacity are not evicted; the active-active
 // reconcile loop simply stops placing new IPs on the node.
 func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (*rpc.SetCapacityResponse, error) {
+	// See AddIPToGroup for the gate (#117).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.SetCapacityResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -7718,6 +7814,13 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	} else if hash != "" {
 		payload["config_hash"] = hash
 	}
+	// And the version, so a peer that is behind can tell without a majority
+	// (#117). Same keys as a full config's; an older binary reads them and uses
+	// them only on a full config, which this is not.
+	if stamp := s.loadConfigStamp(); !stamp.isEmpty() {
+		payload["config_version"] = stamp.version
+		payload["config_origin"] = stamp.origin
+	}
 
 	localID, _ := s.config.GetLocalNodeUUID()
 
@@ -7937,7 +8040,17 @@ func (s *Server) markConfigDirty() {
 	if err != nil {
 		origin = ""
 	}
-	s.nextConfigStamp(origin)
+	stamp := s.nextConfigStamp(origin)
+	// Mirrored to disk so a restart resumes this clock instead of starting at
+	// zero (#117). A failed write is a stamp one behind on the next start, which
+	// the startup pull corrects; it is not a reason to fail a mutation whose
+	// content has already been saved and is about to be broadcast.
+	if !stamp.isEmpty() {
+		if err := s.config.SaveStamp(config.Stamp{Version: stamp.version, Origin: stamp.origin}); err != nil {
+			s.logger.Warn("CONFIG_VERSION: could not persist the config version; "+
+				"the next start will resume one behind", "version", stamp.version, "error", err)
+		}
+	}
 	s.requestConfigBroadcast()
 }
 
@@ -8258,6 +8371,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 	// but they must also not be mistaken for peers that accepted the config.
 	var permanentlyRejected []string
 
+	// The peer that answered superseded, if any: this node is behind it, and
+	// pulls from it once the pass is over (#117).
+	aheadPeer := ""
+
 	for attempt := 1; attempt <= maxAttempts && len(pending) > 0; attempt++ {
 		// A newer broadcast is already queued; it carries everything this one
 		// would have delivered, so stop rather than compete with it.
@@ -8289,18 +8406,23 @@ func (s *Server) broadcastConfigToPeersOnce() {
 					"peer", id, "attempt", attempt, "version", stamp.version, "error", err)
 			case resp != nil && resp.Message == supersededConfigMessage:
 				// This node's config is older than the cluster's, so the change it
-				// just made will not propagate — the next sync will overwrite it.
-				// Warn, because the mutation reported success to the operator and
-				// is about to be undone: defect #38's signature seen from the
-				// sending end. Reachable when a node is mutated between its restart
-				// and its first full ConfigSync, while configVersion still reads 0.
+				// just made will not propagate. Warn, because if this was a mutation
+				// it reported success to the operator and is about to be undone:
+				// defect #38's signature seen from the sending end. It used to say
+				// "will be reverted by the next sync", and on a Passive node no sync
+				// ever came (#117); now the node pulls the peer's config itself, so
+				// the revert is seconds away rather than indefinite, and the gate is
+				// shut against further mutations until it lands.
 				//
 				// Only the peer-is-ahead case reaches here. A peer that holds this
 				// exact version answers configAlreadyHeldMessage instead and falls
 				// into the default arm below as the plain accept it is.
 				s.logger.Warn("CONFIG_BROADCAST: peer holds a newer config; this node's "+
-					"change will not propagate and will be reverted by the next sync",
+					"change will not propagate; pulling the peer's config",
 					"peer", id, "version", stamp.version)
+				if aheadPeer == "" {
+					aheadPeer = id
+				}
 				delete(pending, id)
 			case resp != nil && !resp.Success && isPermanentRejection(resp.Message):
 				// The payload itself is unusable to this peer, so re-sending the same
@@ -8327,6 +8449,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 				delete(pending, id)
 			}
 		}
+	}
+
+	if aheadPeer != "" {
+		s.startConfigPull(aheadPeer, configStaleSuperseded, 0)
 	}
 
 	// A permanent rejection is not propagation, so it is recorded like any other
@@ -8552,6 +8678,18 @@ func (s *Server) adoptConfigStamp(incoming configStamp) {
 	}
 }
 
+// persistedStampAfter is adoptConfigStamp's rule as a pure function, for the
+// stamp ConfigSync writes to disk with the content it applies: the incoming
+// stamp when it is newer, the held one otherwise, and the held one when the
+// payload is unversioned.
+func persistedStampAfter(incoming, held configStamp) config.Stamp {
+	chosen := held
+	if !incoming.isEmpty() && configIsNewer(incoming, held) {
+		chosen = incoming
+	}
+	return config.Stamp{Version: chosen.version, Origin: chosen.origin}
+}
+
 // broadcastConfigAndStates pushes the config and the member states it implies to
 // every peer in one ConfigSync.
 //
@@ -8730,6 +8868,15 @@ func (s *Server) PublishLocalCertificate() {
 	cert := s.localCertificatePEM()
 	if cert == "" {
 		s.logger.Debug("No certificate to publish yet", "dir", clustertls.CertDirOr(s.certDir))
+		return
+	}
+
+	// A publish is a config mutation, and it runs two seconds after Start --
+	// inside the window the startup pull is closing (#117). Waiting here costs
+	// nothing on an ordinary start; skipping it would mint a version against a
+	// config about to be replaced.
+	if err := s.awaitConfigCurrent(context.Background()); err != nil {
+		s.logger.Warn("Not publishing this node's certificate yet", "error", err)
 		return
 	}
 

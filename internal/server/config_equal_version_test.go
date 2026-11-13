@@ -181,8 +181,8 @@ func TestReAnnouncedConfigVersionIsNotWarnedAsALostChange(t *testing.T) {
 	if peer.callCount() == 0 {
 		t.Fatal("the peer received no ConfigSync at all")
 	}
-	if got := logs.String(); strings.Contains(got, "will be reverted by the next sync") {
-		t.Errorf("the broadcaster warned that its change will be reverted although the "+
+	if got := logs.String(); strings.Contains(got, "change will not propagate") {
+		t.Errorf("the broadcaster warned that its change will not propagate although the "+
 			"peer replied %q — the peer holds exactly this config, the change did "+
 			"propagate, and nothing will revert it. Logged:\n%s",
 			configAlreadyHeldMessage, got)
@@ -214,9 +214,17 @@ func TestSupersededConfigIsStillWarnedAsALostChange(t *testing.T) {
 	if peer.callCount() == 0 {
 		t.Fatal("the peer received no ConfigSync at all")
 	}
-	if got := logs.String(); !strings.Contains(got, "will be reverted by the next sync") {
+	if got := logs.String(); !strings.Contains(got, "change will not propagate") {
 		t.Errorf("a peer holding a strictly newer config produced no warning; this "+
 			"node's mutation reported success to the operator and is about to be "+
 			"undone (#38 from the sending end). Logged:\n%s", got)
+	}
+	// And since #117 the warning is followed by a pull of the peer's config, so
+	// the gate shuts and the pull settles it -- here against a stub that cannot
+	// serve a config, which must still leave the node usable.
+	s.awaitConfigRepairs()
+	if !s.configIsCurrent() {
+		t.Error("the gate stayed shut after the pull from a peer that could not serve " +
+			"its config; every mutation on this node would now be refused")
 	}
 }
