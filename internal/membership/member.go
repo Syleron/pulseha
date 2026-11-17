@@ -122,6 +122,30 @@ type Member struct {
 	// Active-Active support
 	ActiveIPs []string // IPs currently hosted by this member
 	Capacity  int      // Node capacity for weighted distribution
+
+	// activeSince is when this member last moved into Active from any other
+	// status; zero if it never has through setStatusLocked. The IP monitor uses it
+	// to tell a release that is still current from one the node has since been
+	// promoted past (GitHub #265). Written only by setStatusLocked, under mu.
+	activeSince time.Time
+}
+
+// setStatusLocked is the one place a member's status changes, so that a move
+// into Active is recorded however it arrives — an election, a handoff, a config
+// sync, a mode switch. Re-stating Active is not a move and leaves the moment
+// alone. The caller holds m.mu.
+func (m *Member) setStatusLocked(s MemberStatus) {
+	if s == StatusActive && m.Status != StatusActive {
+		m.activeSince = time.Now()
+	}
+	m.Status = s
+}
+
+// ActiveSince returns when this member last became Active; see activeSince.
+func (m *Member) ActiveSince() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeSince
 }
 
 // ObserveRole records an identified reply received directly from this member.
@@ -470,7 +494,7 @@ func (m *Member) GetStatus() MemberStatus {
 func (m *Member) SetStatus(status MemberStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Status = status
+	m.setStatusLocked(status)
 }
 
 // MarkUnreachable records that this member is no longer known to hold any
@@ -494,7 +518,7 @@ func (m *Member) claimLocked() Claim {
 
 func (m *Member) setClaimLocked(c Claim) {
 	c = c.copyIPs()
-	m.Status = c.Status
+	m.setStatusLocked(c.Status)
 	m.ActiveIPs = c.ActiveIPs
 }
 
@@ -796,7 +820,7 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusActive {
 		m.ActiveIPs = nil
 	}
-	m.Status = StatusMaintenance
+	m.setStatusLocked(StatusMaintenance)
 	return nil
 }
 
@@ -808,7 +832,7 @@ func (m *Member) ExitMaintenance() error {
 	if m.Status != StatusMaintenance {
 		return nil
 	}
-	m.Status = StatusPassive
+	m.setStatusLocked(StatusPassive)
 	return nil
 }
 

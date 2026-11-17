@@ -262,7 +262,10 @@ func (s *Server) runVIPReconcile(snapshot vipReconcileSnapshot) {
 		if claim {
 			_, _ = s.BringUpIP(context.Background(), &rpc.UpIpRequest{Iface: iface, Ips: ips})
 		} else {
-			_, _ = s.BringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips})
+			// Unprotected: this node is releasing because it is not the Active, not
+			// because it was told to, and the protection would only outlive the
+			// demotion into the node's next promotion (GitHub #265).
+			_, _ = s.bringDownIP(context.Background(), &rpc.DownIpRequest{Iface: iface, Ips: ips}, false)
 		}
 	}
 }

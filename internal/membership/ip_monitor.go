@@ -433,6 +433,37 @@ func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
 	m.TriggerEnforce()
 }
 
+// ForgetExpectedIPs drops expectations without recording them as released.
+//
+// For a removal that is not a release this node was told to make (GitHub #265):
+// an addition that did not take, and a node that is not the Active clearing up
+// on its own initiative (Server.bringDownIP with protect=false).
+// RemoveExpectedIPs' release record exists to stop a node undoing a release it
+// was told to make; recording an unverified bring-up as one made the Active
+// refuse its own addresses for the whole grace window — 74s on the lab pair,
+// after a NetworkManager re-apply had taken them down at the instant BringUpIP
+// verified them. Here the restore paths are welcome to try again.
+func (m *IPMonitor) ForgetExpectedIPs(iface string, ips []string) {
+	if m == nil {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	toRemove := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		toRemove[ip] = true
+	}
+	var updated []string
+	for _, ip := range m.expectedIPs[iface] {
+		if !toRemove[ip] {
+			updated = append(updated, ip)
+		}
+	}
+	m.expectedIPs[iface] = updated
+	m.logger.Info("Dropped IPs from interface expectations without a release record", "iface", iface, "ips", ips, "remaining", updated)
+}
+
 // markReleasedLocked records that this node has been told to give up these
 // addresses on iface, so its own restore paths leave them alone until either the
 // config agrees or the grace window runs out.
@@ -497,6 +528,10 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	if m == nil {
 		return false
 	}
+	// Read before the monitor's own lock, so it adds no edge to the lock order:
+	// this takes the member list's lock and then a member's.
+	activeSince := m.localActiveSince()
+
 	m.Lock()
 	defer m.Unlock()
 
@@ -509,6 +544,22 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	if !ok {
 		return false
 	}
+	// A release recorded before this node's latest move to Active is a release of
+	// a role it has since been given back (GitHub #265). The agreed Active then
+	// refused its own group for the rest of the window — 61-78s dark on the lab
+	// pairs, with status and elections reading healthy throughout — after a
+	// demotion crossed a promotion, a restart's startup cleanup, or a demotion
+	// handed over by config sync. Defect #60's node is Active when told to release
+	// and stays Active, so its release is newer than its promotion and still holds.
+	if markedAt := expiry.Add(-releaseGraceWindow); markedAt.Before(activeSince) {
+		delete(released, key)
+		if len(released) == 0 {
+			delete(m.releasedIPs, iface)
+		}
+		m.logger.Info("IP monitor: release protection predates this node's promotion to Active; restoring is allowed",
+			"ip", ip, "iface", iface)
+		return false
+	}
 	if !expiry.After(m.timeNow()) {
 		delete(released, key)
 		if len(released) == 0 {
@@ -517,6 +568,27 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 		return false
 	}
 	return true
+}
+
+// localActiveSince is when the local member last became Active, or zero when it
+// cannot be read. Zero predates every release, so it changes nothing.
+func (m *IPMonitor) localActiveSince() time.Time {
+	if m.members == nil {
+		return time.Time{}
+	}
+	cfg := m.members.Config()
+	if cfg == nil {
+		return time.Time{}
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return time.Time{}
+	}
+	member := m.members.GetMemberByID(localID)
+	if member == nil {
+		return time.Time{}
+	}
+	return member.ActiveSince()
 }
 
 // markReseating records that the enforce pass is about to delete and re-add ips
