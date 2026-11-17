@@ -45,6 +45,24 @@ func liveGroupIPs(s *Server, group string) []string {
 	return append([]string(nil), s.config.Groups[group]...)
 }
 
+// versionOf drops a persisted stamp's content fingerprint, for comparing the
+// version and origin alone.
+func versionOf(st config.Stamp) config.Stamp { return config.Stamp{Version: st.Version, Origin: st.Origin} }
+
+// wantFingerprint fails the test unless a persisted stamp's fingerprint is the
+// hash of the given config's shared content.
+func wantFingerprint(t *testing.T, where string, st config.Stamp, cfg *config.Config) {
+	t.Helper()
+	want, err := sharedConfigHash(cfg)
+	if err != nil {
+		t.Fatalf("sharedConfigHash: %v", err)
+	}
+	if st.Content != want {
+		t.Errorf("%s: the stamp fingerprints %q, want %q, the content it was written against; "+
+			"a restart would refuse to resume it", where, st.Content, want)
+	}
+}
+
 // stampOnDisk reads the stamp off the config file the harness points
 // CONFIG_LOCATION at. Read directly rather than through Load, which skips the
 // disk under PULSEHA_TEST.
@@ -216,13 +234,15 @@ func TestAMutationPersistsTheVersionItMints(t *testing.T) {
 	if got := heldStamp(s); got != (configStamp{version: 5, origin: "node-b"}) {
 		t.Fatalf("stamp after the mutation = %+v, want {5 node-b}", got)
 	}
-	if got := s.config.PersistedStamp(); got != (config.Stamp{Version: 5, Origin: "node-b"}) {
+	if got := s.config.PersistedStamp(); versionOf(got) != (config.Stamp{Version: 5, Origin: "node-b"}) {
 		t.Errorf("the live config carries stamp %+v, want {5 node-b}", got)
 	}
-	if got := stampOnDisk(t); got != (config.Stamp{Version: 5, Origin: "node-b"}) {
+	got := stampOnDisk(t)
+	if versionOf(got) != (config.Stamp{Version: 5, Origin: "node-b"}) {
 		t.Errorf("the config on disk carries stamp %+v, want {5 node-b}; a restart "+
 			"would resume the clock behind the cluster", got)
 	}
+	wantFingerprint(t, "after a mutation", got, s.config)
 }
 
 // Applying a peer's config writes that config's stamp to disk with it.
@@ -239,9 +259,13 @@ func TestApplyingAPeerConfigPersistsItsVersion(t *testing.T) {
 	}
 	s.awaitAsyncReconfigures()
 
-	if got := stampOnDisk(t); got != (config.Stamp{Version: 9, Origin: "node-a"}) {
+	got := stampOnDisk(t)
+	if versionOf(got) != (config.Stamp{Version: 9, Origin: "node-a"}) {
 		t.Errorf("the config on disk carries stamp %+v after applying version 9, want {9 node-a}", got)
 	}
+	s.RLock()
+	wantFingerprint(t, "after applying a peer's config", got, s.config)
+	s.RUnlock()
 }
 
 // NewServer resumes the clock from the file. This is the restart itself.
@@ -251,12 +275,19 @@ func TestANewServerResumesTheClockFromDisk(t *testing.T) {
 	config.CONFIG_LOCATION = t.TempDir() + "/config.json"
 	t.Cleanup(func() { config.CONFIG_LOCATION = prev })
 
-	cfg := &config.Config{
-		Pulse:  config.Local{Mode: "active-passive", LocalNode: "node-b", HealthCheckInterval: 1000, FailOverInterval: 5000, FailOverLimit: 10000},
-		Groups: map[string][]string{},
-		Nodes:  map[string]*config.Node{"node-b": {Hostname: "node-b", IP: "192.0.2.2", Port: "8443"}},
-		Stamp:  config.Stamp{Version: 31, Origin: "node-a"},
+	newCfg := func(port string) *config.Config {
+		return &config.Config{
+			Pulse:  config.Local{Mode: "active-passive", LocalNode: "node-b", HealthCheckInterval: 1000, FailOverInterval: 5000, FailOverLimit: 10000},
+			Groups: map[string][]string{},
+			Nodes:  map[string]*config.Node{"node-b": {Hostname: "node-b", IP: "192.0.2.2", Port: port}},
+		}
 	}
+	cfg := newCfg("8443")
+	content, err := sharedConfigHash(cfg)
+	if err != nil {
+		t.Fatalf("sharedConfigHash: %v", err)
+	}
+	cfg.Stamp = config.Stamp{Version: 31, Origin: "node-a", Content: content}
 	logger := log.New(io.Discard)
 	ml := membership.NewMemberList(cfg, logger)
 	s := NewServer(cfg, logger, ml, membership.NewHealthChecker(ml, logger))
@@ -265,12 +296,98 @@ func TestANewServerResumesTheClockFromDisk(t *testing.T) {
 		t.Errorf("a new server started its clock at %+v, want {31 node-a} from the file", got)
 	}
 
-	// And a file with no stamp -- one from before the field, or rewritten by
-	// the appliance -- leaves the clock empty, as it was.
-	cfg.Stamp = config.Stamp{}
-	s2 := NewServer(cfg, logger, ml, membership.NewHealthChecker(ml, logger))
-	if got := heldStamp(s2); !got.isEmpty() {
-		t.Errorf("a new server on an unstamped file started at %+v, want empty", got)
+	// Every file the version does not attest to leaves the clock empty, as it
+	// was before #123, so the startup pull adopts the cluster's config.
+	for _, tc := range []struct {
+		name  string
+		stamp config.Stamp
+		port  string
+	}{
+		{"no stamp: from before the field, or rewritten by the appliance", config.Stamp{}, "8443"},
+		{"a stamp with no fingerprint", config.Stamp{Version: 31, Origin: "node-a"}, "8443"},
+		{"content changed after the version was written", cfg.Stamp, "9443"},
+	} {
+		c := newCfg(tc.port)
+		c.Stamp = tc.stamp
+		s2 := NewServer(c, logger, ml, membership.NewHealthChecker(ml, logger))
+		if got := heldStamp(s2); !got.isEmpty() {
+			t.Errorf("%s: a new server started its clock at %+v, want empty", tc.name, got)
+		}
+	}
+}
+
+// The failure the MC-LB-3-node-4/5 run found on 2026-11-17, end to end. A
+// mutation saves its content and only then mints a version; SetMode deadlocked
+// between the two (#117) and was killed, so the file held active-passive under
+// the version its peer held active-active at. The restarted node resumed that
+// version, the startup pull found the peer level and changed nothing, and with
+// one peer the hash repair had no majority: the pair stayed diverged until a new
+// mutation. Now the fingerprint shows the content is not what the version was
+// written for, the node starts unversioned, and the pull adopts the peer's.
+func TestAChangeSavedButNeverVersionedDoesNotSurviveARestartAsCurrent(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		killedMidway bool
+		// resumeAnyway resumes the version whatever the fingerprint says: the
+		// code before this fix, and the negative control that shows the test
+		// can see the divergence at all.
+		resumeAnyway bool
+		wantResume   bool
+		wantIPs      int
+	}{
+		{"an untouched file is resumed and a level peer changes nothing", false, false, true, 5},
+		{"before the fingerprint: the saved change is kept and the pair diverges", true, true, false, 6},
+		{"the fingerprint refuses the version and the pull adopts the peer's", true, false, false, 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			local, peer := twoNodePair(t)
+			setStamp(peer, 7, "node-a")
+			setGroup(peer, "group1", ipRange(5))
+
+			// Both were level at 7 when the node went down...
+			setGroup(local, "group1", ipRange(5))
+			local.Lock()
+			content, err := sharedConfigHash(local.config)
+			if err != nil {
+				local.Unlock()
+				t.Fatalf("sharedConfigHash: %v", err)
+			}
+			if err := local.config.SaveStamp(config.Stamp{Version: 7, Origin: "node-a", Content: content}); err != nil {
+				local.Unlock()
+				t.Fatalf("SaveStamp: %v", err)
+			}
+			// ...and the killed mutation had saved its content, never minting.
+			if tc.killedMidway {
+				local.config.Groups["group1"] = ipRange(6)
+				if err := local.config.Save(); err != nil {
+					local.Unlock()
+					t.Fatalf("Save: %v", err)
+				}
+			}
+			local.Unlock()
+
+			// The restart, as NewServer does it.
+			persisted, reason := resumableStamp(local.config)
+			if (reason == "") != tc.wantResume {
+				t.Fatalf("resumableStamp(%+v) reason=%q, want resume=%v", persisted, reason, tc.wantResume)
+			}
+			if reason == "" || tc.resumeAnyway {
+				setStamp(local, persisted.Version, persisted.Origin)
+			} else {
+				local.configStamp.Store(&configStamp{})
+			}
+
+			local.startStartupConfigSync()
+			local.awaitConfigRepairs()
+			local.awaitAsyncReconfigures()
+
+			if got := groupIPCount(local, "group1"); got != tc.wantIPs {
+				t.Errorf("after the startup pull the node holds %d addresses, want %d (the peer holds 5)", got, tc.wantIPs)
+			}
+			if got := heldStamp(local); got != (configStamp{version: 7, origin: "node-a"}) {
+				t.Errorf("after the startup pull the node is at %+v, want the peer's {7 node-a}", got)
+			}
+		})
 	}
 }
 
@@ -717,7 +834,16 @@ func TestTheClockSurvivesARestartAfterASync(t *testing.T) {
 	local.awaitConfigRepairs()
 	local.awaitAsyncReconfigures()
 
-	if got := stampOnDisk(t); got != (config.Stamp{Version: 11, Origin: "node-a"}) {
+	got := stampOnDisk(t)
+	if versionOf(got) != (config.Stamp{Version: 11, Origin: "node-a"}) {
 		t.Errorf("the config on disk after the sync carries %+v, want {11 node-a}", got)
+	}
+	// And the next daemon resumes it: the fingerprint written with the sync is
+	// the content the sync left.
+	local.RLock()
+	_, reason := resumableStamp(local.config)
+	local.RUnlock()
+	if reason != "" {
+		t.Errorf("a restart after the sync would not resume its version: %s", reason)
 	}
 }

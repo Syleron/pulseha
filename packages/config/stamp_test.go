@@ -17,7 +17,7 @@ func TestSaveStampRoundTripsThroughLoad(t *testing.T) {
 		t.Fatalf("seed Save(): %v", err)
 	}
 
-	want := Stamp{Version: 42, Origin: "node-a"}
+	want := Stamp{Version: 42, Origin: "node-a", Content: "3f2a9c"}
 	if err := c.SaveStamp(want); err != nil {
 		t.Fatalf("SaveStamp: %v", err)
 	}

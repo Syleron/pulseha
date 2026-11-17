@@ -395,11 +395,15 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 	}
 
 	// Resume the config clock where the last run left it rather than at zero
-	// (#123). A file that carries no stamp -- one written before the field
-	// existed, or rewritten by the appliance -- leaves the clock empty, which is
+	// (#123) -- but only from a file whose content is still the content that
+	// version was written against. Anything else leaves the clock empty, which is
 	// the previous behaviour and which the startup pull then corrects.
-	if persisted := cfg.PersistedStamp(); !persisted.IsZero() {
+	if persisted, reason := resumableStamp(cfg); reason == "" {
 		s.configStamp.Store(&configStamp{version: persisted.Version, origin: persisted.Origin})
+	} else if !persisted.IsZero() {
+		s.logger.Warn("CONFIG_STARTUP: not resuming the config version on disk; "+
+			"starting unversioned so the startup pull adopts the cluster's config",
+			"version", persisted.Version, "origin", persisted.Origin, "reason", reason)
 	}
 
 	// Set server reference in health checker
@@ -5763,6 +5767,9 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// (#123), by the same rule adoptConfigStamp applies below: never lower
 		// than what is held, and unchanged by an unversioned payload.
 		newConfig.Stamp = persistedStampAfter(incomingStamp, s.loadConfigStamp())
+		if content, err := sharedConfigHash(newConfig); err == nil {
+			newConfig.Stamp.Content = content
+		}
 
 		// Persist and update our configuration
 		s.logger.Debug("CONFIG_SYNC: Saving synchronized configuration")
@@ -8046,7 +8053,15 @@ func (s *Server) markConfigDirty() {
 	// the startup pull corrects; it is not a reason to fail a mutation whose
 	// content has already been saved and is about to be broadcast.
 	if !stamp.isEmpty() {
-		if err := s.config.SaveStamp(config.Stamp{Version: stamp.version, Origin: stamp.origin}); err != nil {
+		persisted := config.Stamp{Version: stamp.version, Origin: stamp.origin}
+		// The fingerprint ties the version to the content it was minted for, so
+		// a restart can tell whether the file still holds that content. A hash
+		// that cannot be computed is left empty, which only means the next start
+		// does not resume this version -- the safe direction.
+		if content, err := sharedConfigHash(s.config); err == nil {
+			persisted.Content = content
+		}
+		if err := s.config.SaveStamp(persisted); err != nil {
 			s.logger.Warn("CONFIG_VERSION: could not persist the config version; "+
 				"the next start will resume one behind", "version", stamp.version, "error", err)
 		}
@@ -8682,6 +8697,39 @@ func (s *Server) adoptConfigStamp(incoming configStamp) {
 // stamp ConfigSync writes to disk with the content it applies: the incoming
 // stamp when it is newer, the held one otherwise, and the held one when the
 // payload is unversioned.
+// resumableStamp returns the stamp a starting server may resume its clock from,
+// or why it may not. An empty reason means resume.
+//
+// A persisted version is a claim about the content beside it, and the claim is
+// checked rather than trusted. Every mutation saves its content before it mints
+// the version for it (config.SaveStamp says why), so a daemon that dies in
+// between -- killed, or wedged and then killed, as #117's deadlock was on
+// 2026-11-17 -- leaves the previous version against the new content; and the
+// appliance rewriting config.json (#3) can keep the key against content it
+// changed. Either way the restarted node would be level with its peer by version
+// and different by content, and with one peer there is no majority to say which
+// is right, so the pair never converged. Starting unversioned instead puts the
+// node behind every peer, and the startup pull adopts the cluster's config: the
+// change that never reached a peer is lost, which is what its caller was told,
+// since none was ever answered success for it.
+func resumableStamp(cfg *config.Config) (config.Stamp, string) {
+	persisted := cfg.PersistedStamp()
+	if persisted.IsZero() {
+		return persisted, "the config carries no version"
+	}
+	if persisted.Content == "" {
+		return persisted, "the version records no fingerprint of its content"
+	}
+	content, err := sharedConfigHash(cfg)
+	if err != nil {
+		return persisted, "the config could not be fingerprinted: " + err.Error()
+	}
+	if content != persisted.Content {
+		return persisted, "the config changed after this version was written"
+	}
+	return persisted, ""
+}
+
 func persistedStampAfter(incoming, held configStamp) config.Stamp {
 	chosen := held
 	if !incoming.isEmpty() && configIsNewer(incoming, held) {
