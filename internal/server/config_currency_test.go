@@ -16,7 +16,7 @@ import (
 	"github.com/syleron/pulseha/rpc"
 )
 
-// Regression tests for docs/TEST-PLAN.md defect #117: a node that has just
+// Regression tests for docs/TEST-PLAN.md defect #123: a node that has just
 // restarted accepted a mutation against a config version of zero, reported
 // success, and had the change refused by every peer as superseded -- reverted on
 // the Active node, left as a permanent divergence on the Passive one. The
@@ -113,7 +113,7 @@ func TestTheGateHoldsCallersUntilTheNodeIsCurrent(t *testing.T) {
 	}
 }
 
-// Deliverable 2 of #117 at the gate itself: a caller that cannot wait is
+// Deliverable 2 of #123 at the gate itself: a caller that cannot wait is
 // refused, with the reason, rather than let through to a mutation the cluster
 // will refuse.
 func TestTheGateRefusesACallerThatCannotWait(t *testing.T) {
@@ -147,7 +147,7 @@ func TestAMutationOnANodeThatIsNotCurrentFailsToItsCaller(t *testing.T) {
 	}
 	if resp.Success {
 		t.Fatal("AddIPToGroup reported success on a node whose config is not current; " +
-			"the change would be refused by every peer and reverted here (#117)")
+			"the change would be refused by every peer and reverted here (#123)")
 	}
 	if !strings.Contains(resp.Message, "not current") {
 		t.Errorf("the refusal %q does not tell the caller why", resp.Message)
@@ -309,7 +309,7 @@ func TestTheHashIgnoresThePersistedStamp(t *testing.T) {
 
 // The lab's Passive-node restart, end to end. The restarted node's disk is
 // behind the peer; the startup pull brings it level; lb_api's re-add then mints
-// a version above the cluster's, and the peer takes it. Before #117 the add was
+// a version above the cluster's, and the peer takes it. Before #123 the add was
 // minted at 1, refused by the peer, and the two nodes never agreed again.
 func TestARestartedNodeDoesNotLoseTheFirstChangeMadeOnIt(t *testing.T) {
 	local, peer := twoNodePair(t)

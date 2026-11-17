@@ -14,7 +14,7 @@ import (
 )
 
 // Config currency: whether this node's config is known to be the cluster's
-// current one, and what to do when it is not (docs/TEST-PLAN.md #117).
+// current one, and what to do when it is not (docs/TEST-PLAN.md #123).
 //
 // The config clock (configStamp) orders competing pushes, and it depends on
 // every node holding the cluster's version. A node that has just restarted did

@@ -219,7 +219,7 @@ func TestSupersededConfigIsStillWarnedAsALostChange(t *testing.T) {
 			"node's mutation reported success to the operator and is about to be "+
 			"undone (#38 from the sending end). Logged:\n%s", got)
 	}
-	// And since #117 the warning is followed by a pull of the peer's config, so
+	// And since #123 the warning is followed by a pull of the peer's config, so
 	// the gate shuts and the pull settles it -- here against a stub that cannot
 	// serve a config, which must still leave the node usable.
 	s.awaitConfigRepairs()

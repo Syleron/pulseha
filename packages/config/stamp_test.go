@@ -8,7 +8,7 @@ import (
 
 // The config clock used to live only in the daemon's memory, so every restart
 // began at zero and the first mutation after it was refused by every peer as
-// stale (docs/TEST-PLAN.md #117). The stamp now travels to disk with the content
+// stale (docs/TEST-PLAN.md #123). The stamp now travels to disk with the content
 // it describes, and these are the properties the daemon relies on.
 
 func TestSaveStampRoundTripsThroughLoad(t *testing.T) {

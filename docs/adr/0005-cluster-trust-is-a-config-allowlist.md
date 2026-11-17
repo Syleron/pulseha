@@ -201,7 +201,7 @@ plane, added to smooth a transition that happens once.
   preserves node-local fields already, and this is the first that is node-*owned* rather than
   node-local — a distinction that does not exist today and will need one.
 - **The second field that is not configuration is the config clock itself.** *Added 2026-11-13,
-  from #117.* `config_stamp` is the server's Lamport clock over the config -- the version, and the
+  from #123.* `config_stamp` is the server's Lamport clock over the config -- the version, and the
   node whose mutation produced the content -- persisted beside the content it describes. It used
   to live only in memory, so every restart began at version 0 and the first mutation after a
   restart (which lb_api makes on every start) was refused by every peer as superseded. The

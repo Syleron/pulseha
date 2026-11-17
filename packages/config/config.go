@@ -76,7 +76,7 @@ type Config struct {
 	// Stamp is the cluster config version this content was written at: the
 	// server's Lamport clock over the config, persisted beside the content it
 	// describes so a restarted daemon resumes the clock instead of restarting it
-	// (docs/TEST-PLAN.md #117).
+	// (docs/TEST-PLAN.md #123).
 	//
 	// It is metadata about the content rather than configuration, and three
 	// things follow from that. It is excluded from the fingerprint two nodes
@@ -91,7 +91,7 @@ type Config struct {
 	// would be wrong exactly then. It is wrong then in the harmless direction: a
 	// rewritten file either drops the key, which is the old behaviour, or keeps it
 	// against changed content, which the fingerprint on the next envelope catches.
-	// What the in-memory-only stamp cost was every ordinary restart (#117).
+	// What the in-memory-only stamp cost was every ordinary restart (#123).
 	Stamp Stamp `json:"config_stamp,omitzero"`
 	pulselock.Mutex
 }

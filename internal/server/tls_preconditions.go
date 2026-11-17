@@ -150,7 +150,7 @@ func (s *Server) applyTLSMode(value string) *rpc.UpdateConfigResponse {
 	}
 
 	// Cluster-scoped, so it waits at the currency gate like every other change
-	// that has to propagate (#117).
+	// that has to propagate (#123).
 	if err := s.awaitConfigCurrent(context.Background()); err != nil {
 		return refuse("%v", err)
 	}
