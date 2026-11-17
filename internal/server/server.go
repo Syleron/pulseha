@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -140,6 +141,10 @@ type Server struct {
 
 	// Optional seam for the shutdown release in Stop; nil is network.BringIPdown.
 	releaseIP func(iface, ip string) error
+
+	// Test hook run after a promotion's address transfer, before its final
+	// broadcast; nil in the daemon.
+	afterPromotionTransfer func()
 
 	voteMu         pulselock.Mutex
 	voteState      *persistentVotes
@@ -1954,6 +1959,38 @@ func stillHeldIPs(ips []string) ([]string, error) {
 //   - provablyDown: the transport itself failed in a way that means no daemon is listening.
 //     Anything indeterminate (deadline, local fault, a peer that answers but
 //     declines) is reported as NOT provably down, so the caller stays conservative.
+// errIncumbentIsActive is confirmPeerReleasedIPs' answer for a peer that is
+// reachable and reports itself Active (GitHub #276).
+var errIncumbentIsActive = errors.New("incumbent is reachable and reports itself Active")
+
+// peerRoleProbeTimeout bounds the role question confirmPeerReleasedIPs asks
+// before MakePassive. The health checker's deep check uses the same 2s.
+const peerRoleProbeTimeout = 2 * time.Second
+
+// peerReportsActive asks nodeID for its role with the health-check RPC and
+// reports whether it answered, as itself and in this cluster, that it is
+// Active. Anything less — an error, a rejection, a foreign token, an
+// unidentified reply from an older binary — is not an answer, and the caller
+// carries on exactly as it did before it asked.
+func (s *Server) peerReportsActive(ctx context.Context, c *client.Client, nodeID string) bool {
+	localID, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		return false
+	}
+	token := s.config.Pulse.ClusterToken
+
+	hcCtx, cancel := context.WithTimeout(ctx, peerRoleProbeTimeout)
+	defer cancel()
+	resp, err := c.Server().HealthCheck(hcCtx, &rpc.HealthCheckRequest{NodeId: localID, ClusterToken: token})
+	if err != nil || resp == nil || !resp.Success || resp.NodeId != nodeID {
+		return false
+	}
+	if token != "" && resp.ClusterToken != "" && resp.ClusterToken != token {
+		return false
+	}
+	return resp.Status == rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
+}
+
 func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (released bool, provablyDown bool, err error) {
 	node := s.config.Nodes[nodeID]
 	if node == nil {
@@ -2007,6 +2044,16 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 		return false, true, fmt.Errorf("no daemon reachable at %s: %w", dialAddr, dialErr)
 	}
 	_ = probe.Close()
+
+	// Ask before demanding (GitHub #276). This step exists for an incumbent that may still hold
+	// the group while this node cannot see its role, and "Unknown" covers two cases: a peer that
+	// is gone, and one whose role this node has simply not learned yet — every peer, for the
+	// first cycles after this daemon starts. For the second, MakePassive was not a confirmation
+	// but a demotion: a node one second into a restart told the healthy Active to drop all 118
+	// addresses, and it did. A peer that answers and says it is Active is the Active.
+	if s.peerReportsActive(ctx, remoteClient, nodeID) {
+		return false, false, fmt.Errorf("%s: %w", nodeID, errIncumbentIsActive)
+	}
 
 	resp, err := remoteClient.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
 	if err != nil {
@@ -2248,6 +2295,38 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				continue
 			}
 
+			// The "unreachable" incumbent answered, as the Active (GitHub #276). This node's view
+			// was stale — on a restart, its peers' roles are unknown for the first cycles — so the
+			// election that brought it here was run against a healthy Active. Stand down, and
+			// record what the peer said so the next health check finds the Active rather than
+			// electing again. Nothing has been broadcast on this path, so there is nothing to undo.
+			//
+			// An operator's forced promotion is the exception: there the takeover is the intent,
+			// and the incumbent is demoted the way Step 1 demotes a known Active.
+			if errors.Is(err, errIncumbentIsActive) {
+				if !forceDemote {
+					s.logger.Warn("PROMOTE_ASYNC: Aborting promotion - the incumbent is reachable and reports itself Active",
+						"incumbent", id, "target", targetNodeID)
+					s.restoreMemberStates(originalStates)
+					if mm := s.memberList.GetMemberByID(id); mm != nil {
+						mm.SetStatus(membership.StatusActive)
+					}
+					return
+				}
+				s.logger.Warn("PROMOTE_ASYNC: Forced promotion over a reachable Active; demoting it", "incumbent", id)
+				dCtx, dCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
+				dResp, dErr := s.MakePassive(dCtx, &rpc.MakePassiveRequest{NodeId: id, HandoffTo: targetNodeID})
+				dCancel()
+				if dErr == nil && dResp != nil && dResp.Success {
+					continue
+				}
+				if dErr == nil {
+					dErr = fmt.Errorf("demotion not confirmed: %v", dResp)
+				}
+				err = dErr
+				provablyDown = false
+			}
+
 			// A transport failure is evidence of unreachability only. A reachable
 			// but wedged peer blocks takeover even when a majority is available.
 			stillAlive := !provablyDown
@@ -2378,6 +2457,24 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				s.logger.Info("PROMOTE_ASYNC: IP failover completed successfully")
 			}
 		}
+	}
+
+	if s.afterPromotionTransfer != nil {
+		s.afterPromotionTransfer()
+	}
+
+	// Step 4 announces a promotion the cluster may already have overruled (GitHub #276). The
+	// transfer above takes seconds for a large group — 16.7s for 118 addresses on the lab pair —
+	// and a ConfigSync can demote the target while it runs. Broadcasting it Active afterwards, at
+	// a fresh epoch, re-asserted a promotion the cluster had demoted 11s earlier and put the
+	// group back on both nodes. The target's current role is the answer to whether this
+	// promotion still stands.
+	if got := member.GetStatus(); got != membership.StatusActive {
+		s.logger.Warn("PROMOTE_ASYNC: Promotion was overruled during the address transfer; not broadcasting it",
+			"target_node", targetNodeID,
+			"status_now", membership.StatusToString(got),
+			"elapsed_time", time.Since(startTime).String())
+		return
 	}
 
 	// Step 4: Broadcast final cluster state

@@ -147,6 +147,11 @@ func TestAReachableMemberDoesGetStamped(t *testing.T) {
 	peer.mu.Lock()
 	peer.IP, peer.Port = host, port
 	peer.LastHCResponse = before
+	// A known role keeps this on the cheap path. An Unknown active-passive peer
+	// that answers TCP is deep-checked at once to learn its role (GitHub #276),
+	// and this listener accepts but never speaks gRPC — the wedged-daemon shape,
+	// which is rightly not contact.
+	peer.Status = StatusPassive
 	peer.mu.Unlock()
 
 	// One cheap cycle: a passing TCP dial.
