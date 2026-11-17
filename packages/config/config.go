@@ -73,7 +73,80 @@ type Config struct {
 	Groups  map[string][]string    `json:"floating_ip_groups"`
 	Nodes   map[string]*Node       `json:"nodes"`
 	Plugins map[string]interface{} `json:"plugins"`
+	// Stamp is the cluster config version this content was written at: the
+	// server's Lamport clock over the config, persisted beside the content it
+	// describes so a restarted daemon resumes the clock instead of restarting it
+	// (docs/TEST-PLAN.md #123).
+	//
+	// It is metadata about the content rather than configuration, and three
+	// things follow from that. It is excluded from the fingerprint two nodes
+	// compare to detect divergence. It is never adopted from the file by a
+	// running daemon -- the server's in-memory stamp is the truth while the
+	// daemon runs, and this field is only what that stamp was last written as. And
+	// `omitzero` keeps a config that has never been stamped byte-identical to one
+	// written before the field existed, which is what a rolling upgrade needs.
+	//
+	// The stamp used to be in-memory only, on the reasoning that the appliance
+	// rewrites config.json out from under the daemon (#3) and a number on disk
+	// would be wrong exactly then. What the in-memory-only stamp cost was every
+	// ordinary restart (#123).
+	//
+	// A number on disk is only as good as its claim to describe the content beside
+	// it, and two things break that claim: the appliance rewriting the file and
+	// keeping the key, and the daemon saving a mutation's content and dying before
+	// it mints the version for it (every mutation saves first, see SaveStamp). Both
+	// leave the old version against new content, and a restarted node holding that
+	// is level with its peer by version and different by content -- which a
+	// two-node cluster has no majority to repair, so it never converged. Content
+	// therefore records the fingerprint of what the version was written against,
+	// and the server resumes the clock only from a file whose content still
+	// matches it; anything else starts unversioned and the startup pull adopts the
+	// cluster's config, as before #123.
+	Stamp Stamp `json:"config_stamp,omitzero"`
 	pulselock.Mutex
+}
+
+// Stamp is the persisted form of the server's config clock: the version, and
+// the ID of the node whose mutation produced the content.
+type Stamp struct {
+	Version int64  `json:"version"`
+	Origin  string `json:"origin"`
+	// Content is the fingerprint of the shared config this version was written
+	// against (the server's sharedConfigHash). Empty in a stamp written before
+	// the field existed, which the server treats as not attesting to anything.
+	Content string `json:"content,omitempty"`
+}
+
+// IsZero reports a stamp that carries no ordering information. Named for
+// encoding/json's `omitzero`, which calls it.
+func (s Stamp) IsZero() bool { return s.Version <= 0 || s.Origin == "" }
+
+// PersistedStamp returns the stamp the config was last written at, under the
+// config's own lock so a concurrent Save cannot be observed half-way.
+func (c *Config) PersistedStamp() Stamp {
+	c.Lock()
+	defer c.Unlock()
+	return c.Stamp
+}
+
+// SaveStamp records the version this content now stands at and writes the
+// config, so the file carries the same clock the daemon holds in memory.
+//
+// A second write after the mutation's own Save rather than a stamp set before
+// it, deliberately: every mutation saves its content and only then mints a
+// version, and the rollback paths on a failed save rely on nothing having been
+// minted. Writing twice costs a millisecond; threading the mint through twelve
+// handlers' failure paths costs a version claimed for content that never landed.
+//
+// The price of that order is a window between the two writes in which the file
+// holds the new content under the previous version. A daemon that dies in it
+// leaves exactly that on disk, which is why the stamp carries a fingerprint of
+// its content and the server checks it before resuming the clock.
+func (c *Config) SaveStamp(stamp Stamp) error {
+	c.Lock()
+	defer c.Unlock()
+	c.Stamp = stamp
+	return c.saveLocked()
 }
 
 type Local struct {
@@ -474,6 +547,7 @@ func (c *Config) clone() *Config {
 		Groups:  make(map[string][]string, len(c.Groups)),
 		Nodes:   make(map[string]*Node, len(c.Nodes)),
 		Plugins: make(map[string]interface{}, len(c.Plugins)),
+		Stamp:   c.Stamp,
 	}
 
 	for name, ips := range c.Groups {
