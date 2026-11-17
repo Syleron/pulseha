@@ -75,6 +75,9 @@ type ServerReference interface {
 	AnnounceNodeIPs(nodeID string) error
 	// Re-broadcast of the current config, for the periodic reconcile below
 	RequestConfigReconcile()
+	// The target of a live handoff this node is part of — orchestrating it, or
+	// demoted by it — or "" when there is none (GitHub #286).
+	HandoffInProgress() string
 }
 
 // reconcileConfigAcrossPeers re-broadcasts the coordinator's config once a
@@ -2365,6 +2368,24 @@ func (h *HealthChecker) tryAutomaticPromotion(candidate *Member) bool {
 	if h.findActiveNode() != nil {
 		return false
 	}
+
+	// No automatic promotion from a node that is part of a handoff in progress
+	// (GitHub #286). #266's guard is held by the node orchestrating a handoff and
+	// by the node it demoted, and is enforced by voters, who probe the other
+	// members and refuse while any reports a handoff. A cluster of fewer than three
+	// takes no vote (ADR-0002), so on two nodes nothing read it: the demoted node,
+	// usually the coordinator, saw no Active — the target's status is broadcast only
+	// once its transfer finishes — and elected itself ~0.3s after its MakePassive,
+	// in 2 of 3 handoffs on the lab pair. Read here, before any vote, it holds at
+	// every cluster size. The guard lapses after handoffWindow and clears once
+	// another member is seen Active, so a handoff that dies part-way does not block
+	// elections for good.
+	if target := server.HandoffInProgress(); target != "" {
+		h.logger.Info("ELECTION: holding off; this node is part of a handoff in progress",
+			"handoff_to", target, "candidate", candidate.Hostname)
+		return false
+	}
+
 	recovered, authorized := h.votedElectionCandidate(candidate)
 	if !authorized || h.findActiveNode() != nil {
 		h.logger.Warn("ELECTION: Automatic promotion not authorized", "candidate", candidate.ID)
