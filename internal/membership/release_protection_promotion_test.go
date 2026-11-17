@@ -120,3 +120,21 @@ func TestForgettingAnUnverifiedAdditionDoesNotArmTheProtection(t *testing.T) {
 		t.Errorf("suppressed = %v, want none: forgetting an addition is not a release", got)
 	}
 }
+
+// The enforce pass's mid-pass role check (GitHub #281) reads the member's status
+// now, not the pass's snapshot: a demotion that lands while the pass runs has to
+// be seen by it.
+func TestLocalIsActiveReadsTheRoleNow(t *testing.T) {
+	m, member := releaseAfterPromotionMonitor(t, []string{"10.0.0.1/24"})
+	member.SetStatus(StatusActive)
+	if !m.localIsActive("node-a") {
+		t.Fatal("localIsActive = false for an Active member")
+	}
+	member.SetStatus(StatusPassive)
+	if m.localIsActive("node-a") {
+		t.Error("localIsActive = true after the member was demoted")
+	}
+	if m.localIsActive("no-such-node") {
+		t.Error("localIsActive = true for a member that does not exist")
+	}
+}

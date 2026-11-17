@@ -427,3 +427,97 @@ func TestRequireAnnouncerResolvesAnExistingBinary(t *testing.T) {
 		t.Errorf("second call returned (%q, %v), want the cached (%q, nil)", cachedPath, again, path)
 	}
 }
+
+// Regression for GitHub #281. A node's enforce pass places a whole group and then
+// announces it — 118 addresses at 32 an arping-wave of ~4s is ~16s — and a
+// demotion's cleanup is queued behind that pass (#63's coalescing), so a node
+// demoted mid-announcement kept every address until the last wave finished: all
+// of them up on both nodes for the rest of the ~16s.
+//
+// Once the caller says the announcements are no longer wanted, the batch starts
+// no new one. Those already running finish — at most one wave.
+func TestAnnouncementsStopStartingOnceTheCallerSaysStop(t *testing.T) {
+	ips := make([]string, 100)
+	for i := range ips {
+		ips[i] = fmt.Sprintf("10.0.%d.%d/16", i/250, i%250+1)
+	}
+
+	var (
+		mu      sync.Mutex
+		started int
+		stop    bool
+	)
+	gate := make(chan struct{})
+	keepGoing := func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return !stop
+	}
+
+	type result struct {
+		skipped []string
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		skipped, err := sendGARPBatch("enX0", ips, func(iface, ip string) error {
+			mu.Lock()
+			started++
+			mu.Unlock()
+			<-gate // the first wave is held mid-arping
+			return nil
+		}, stopWhen(keepGoing, func(iface, ip string) bool { return false }))
+		done <- result{skipped, err}
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := started
+		mu.Unlock()
+		if n == garpFanout {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the first wave never filled: %d of %d started", n, garpFanout)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	stop = true // the node was demoted while its first wave was running
+	mu.Unlock()
+	close(gate)
+
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the batch did not return after it was told to stop")
+	}
+	if started != garpFanout {
+		t.Errorf("announced %d addresses, want %d: only the wave already running may finish", started, garpFanout)
+	}
+	if len(r.skipped) != len(ips)-garpFanout {
+		t.Errorf("skipped %d, want %d", len(r.skipped), len(ips)-garpFanout)
+	}
+	if r.err != nil {
+		t.Errorf("stopping is not a failure: %v", r.err)
+	}
+}
+
+// A caller that never says stop gets every address announced, as before.
+func TestAnnouncementsRunToCompletionWhileTheCallerKeepsGoing(t *testing.T) {
+	ips := []string{"10.0.0.1/23", "10.0.0.2/23", "10.0.0.3/23"}
+	var mu sync.Mutex
+	announced := 0
+	skipped, err := sendGARPBatch("enX0", ips, func(iface, ip string) error {
+		mu.Lock()
+		announced++
+		mu.Unlock()
+		return nil
+	}, stopWhen(func() bool { return true }, func(iface, ip string) bool { return false }))
+	if err != nil || len(skipped) != 0 || announced != len(ips) {
+		t.Errorf("announced=%d skipped=%v err=%v, want all %d announced", announced, skipped, err, len(ips))
+	}
+}
