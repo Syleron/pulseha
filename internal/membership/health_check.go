@@ -2181,6 +2181,13 @@ func (h *HealthChecker) probeClusterMembership(member *Member) (membershipVerdic
 			role = StatusPassive
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			role = StatusMaintenance
+		case rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS:
+			// Without this a Witness that answers is a peer whose role is
+			// unknown, which is re-asked every cycle and held Unknown (#276's
+			// path): it never reads as up, so it never reads as arbitrating.
+			// Safe to accept from anyone, since setStatusLocked gives Witness
+			// only to a member whose config makes it one (ADR-0006).
+			role = StatusWitness
 		}
 	}
 	return membershipConfirmed, role

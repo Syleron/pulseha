@@ -7,6 +7,7 @@ import (
 
 	log "github.com/charmbracelet/log"
 	"github.com/syleron/pulseha/packages/config"
+	"github.com/syleron/pulseha/rpc"
 )
 
 func newWitnessMember(id string, status MemberStatus) *Member {
@@ -161,5 +162,21 @@ func TestRedistributionLeavesWhatTheWitnessSaysIsServed(t *testing.T) {
 	got := here.Claim().ActiveIPs
 	if len(got) != 1 || got[0] != "10.0.0.2/24" {
 		t.Errorf("redistributed %v; want only 10.0.0.2/24, the address nobody is serving", got)
+	}
+}
+
+// A Witness that answers its deep check has a role: Witness. Read as unknown,
+// it is re-asked every cycle and held Unknown, so it never reads as up and
+// never as arbitrating -- found on the rig after #276 made this the path that
+// decides a returning peer's role.
+func TestAWitnessThatAnswersIsReadAsTheWitness(t *testing.T) {
+	h, peer, _ := newLatchTestChecker(t)
+	h.deepCheck = nil // the real thing
+	servePeer(t, peer, &rpc.HealthCheckResponse{
+		Success: true, ClusterToken: "token-a", NodeId: peer.ID,
+		Status: rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS,
+	})
+	if verdict, role := h.probeClusterMembership(peer); verdict != membershipConfirmed || role != StatusWitness {
+		t.Errorf("probe = %s, %s; want confirmed, Witness", verdict, StatusToString(role))
 	}
 }
