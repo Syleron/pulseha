@@ -138,6 +138,9 @@ type Server struct {
 	// Optional inventory seam for deterministic failure tests; nil reads the kernel.
 	ipVerificationSnapshot func() (ipStateLookup, error)
 
+	// Optional seam for the shutdown release in Stop; nil is network.BringIPdown.
+	releaseIP func(iface, ip string) error
+
 	voteMu         pulselock.Mutex
 	voteState      *persistentVotes
 	voteStatePath  string
@@ -818,20 +821,30 @@ func (s *Server) Stop() {
 		}
 	}
 
-	// Best-effort: drop configured VIPs without taking the server lock to avoid deadlocks during shutdown
-	for iface, ips := range ifaceToIPs {
-		for _, ip := range ips {
-			_ = network.BringIPdown(iface, ip)
-		}
-	}
-
-	// Stop background workers first (no server lock needed)
+	// Stop everything that places addresses before releasing them (GitHub #273).
+	// The IP monitor answers each delete below with "expected IP removed from
+	// Active node; restoring", so releasing while it ran put every address
+	// straight back: the process exited holding the whole group and the peer
+	// took it over too, with every address on both nodes for 10-13s. Stop waits
+	// for the monitor's goroutines, so nothing of it outlives this call.
 	if s.healthCheck != nil {
 		s.healthCheck.Stop()
 	}
 	if s.ipMonitor != nil {
 		s.ipMonitor.Stop()
 	}
+
+	// Best-effort: drop configured VIPs without taking the server lock to avoid deadlocks during shutdown
+	release := s.releaseIP
+	if release == nil {
+		release = network.BringIPdown
+	}
+	for iface, ips := range ifaceToIPs {
+		for _, ip := range ips {
+			_ = release(iface, ip)
+		}
+	}
+
 	if s.quorumManager != nil {
 		s.quorumManager.Stop()
 	}
