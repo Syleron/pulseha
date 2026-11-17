@@ -544,16 +544,20 @@ func (m *IPMonitor) enforceExpectations() {
 // themselves. The static has to be first, and only a delete and re-add of the
 // floating IP puts it there.
 //
-// The watcher is told first, because the delete is one it would otherwise
-// restore with a warning. An address whose re-add failed has its protection
+// The watcher is told about each address immediately before its delete, and only
+// about an address that is actually being reseated, because the delete is one it
+// would otherwise restore with a warning. Telling it about the whole floating set
+// up front, as this first did, suppressed its restore of every floating IP for
+// reseatGraceWindow after every pass. An address whose re-add failed has its protection
 // cleared and is placed again here, once, the way the pass places any missing
 // address; the next pass covers it after that.
 func (m *IPMonitor) keepFloatingIPsSecondary(iface string, floating []string) {
 	if len(floating) == 0 {
 		return
 	}
-	m.markReseating(iface, floating)
-	reseated, err := network.ReseatFloatingIPs(iface, floating)
+	reseated, err := network.ReseatFloatingIPs(iface, floating, func(ip string) {
+		m.markReseating(iface, []string{ip})
+	})
 	for _, ip := range reseated {
 		m.logger.Warn("ENFORCE: floating IP had become the primary address of its subnet; "+
 			"reseated it behind the interface's own address",

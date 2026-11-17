@@ -131,15 +131,23 @@ func (netlinkAddrOps) AddrAdd(link netlink.Link, addr *netlink.Addr) error {
 // address on its way out is still not the interface's own, and must not be
 // mistaken for a static to put first.
 //
+// beforeDelete, if not nil, is called with each address immediately before it is
+// deleted, and only for an address that is actually about to be. It is how the
+// caller tells its netlink watcher that the removal it is about to see is a
+// reseat, and it has to be per address: marking the whole floating set on every
+// pass blinded the watcher to every floating IP for the length of its window
+// after every pass, reseat or not, so an address removed in that window stayed
+// down until the next periodic pass — ~29s against ~13ms on dev, measured live.
+//
 // An error means at least one address could not be put back after its delete,
 // and names it. The caller re-places such an address the way it places any
 // missing one; this function has already retried once.
-func ReseatFloatingIPs(iface string, floating []string) (reseated []string, err error) {
+func ReseatFloatingIPs(iface string, floating []string, beforeDelete func(ip string)) (reseated []string, err error) {
 	exists, link := InterfaceExist(iface)
 	if !exists {
 		return nil, errors.New("unable to reseat floating IPs as the network interface does not exist")
 	}
-	return reseatFloatingIPs(link, floating, netlinkAddrOps{}, ensurePromoteSecondaries)
+	return reseatFloatingIPs(link, floating, netlinkAddrOps{}, ensurePromoteSecondaries, beforeDelete)
 }
 
 // reseatFloatingIPs is ReseatFloatingIPs with its kernel access injected.
@@ -151,7 +159,7 @@ func ReseatFloatingIPs(iface string, floating []string) (reseated []string, err 
 // behind the static for good, so a run that takes more rounds than that is
 // fighting another writer and is better left to the next pass.
 func reseatFloatingIPs(link netlink.Link, floating []string, ops linkAddrOps,
-	promoteSecondaries func(iface string) error,
+	promoteSecondaries func(iface string) error, beforeDelete func(ip string),
 ) (reseated []string, err error) {
 	if len(floating) == 0 {
 		return nil, nil
@@ -183,6 +191,9 @@ func reseatFloatingIPs(link netlink.Link, floating []string, ops linkAddrOps,
 		// business restating. The prefix length is kept, since that is what
 		// decides which addresses the kernel groups it with.
 		again := &netlink.Addr{IPNet: held.IPNet}
+		if beforeDelete != nil {
+			beforeDelete(held.IP.String())
+		}
 		if delErr := ops.AddrDel(link, &held); delErr != nil {
 			return reseated, fmt.Errorf("delete %s on %s: %w", held.IPNet, iface, delErr)
 		}

@@ -249,7 +249,7 @@ func TestReseatPutsTheStaticBackInFront(t *testing.T) {
 		},
 	}
 
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100/24"}, k, promoteOn)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100/24"}, k, promoteOn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestReseatWorksThroughAChainOfFloatingIPs(t *testing.T) {
 		},
 	}
 
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100", "10.10.91.101"}, k, promoteOn)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100", "10.10.91.101"}, k, promoteOn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,6 +295,64 @@ func TestReseatWorksThroughAChainOfFloatingIPs(t *testing.T) {
 	}
 }
 
+// The hook is how the monitor tells its netlink watcher a removal is a reseat,
+// so it must name exactly the addresses about to be deleted, each one before its
+// delete, and nothing on a pass with nothing to do. Marking the whole floating set
+// on every pass instead blinded the watcher to every floating IP for its window
+// after every pass: an address removed then stayed down ~29s, not ~13ms (#116).
+func TestReseatAnnouncesOnlyTheAddressesItDeletesBeforeEachDelete(t *testing.T) {
+	healthy := &scriptedKernel{
+		promoteSecondaries: true,
+		addrs: []netlink.Addr{
+			addr("10.10.91.123/24", false),
+			addr("10.10.91.100/24", true),
+			addr("10.10.91.101/24", true),
+		},
+	}
+	var announced []string
+	if _, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100", "10.10.91.101"}, healthy, promoteOn,
+		func(ip string) { announced = append(announced, ip) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(announced) != 0 {
+		t.Errorf("announced %v on a healthy listing, want nothing", announced)
+	}
+
+	// The chain: .100 is primary, and deleting it promotes .101 before the static.
+	// Plus a floating IP in another subnet that is already a secondary behind
+	// that subnet's static, so it is in the floating set but never in the way.
+	k := &scriptedKernel{
+		promoteSecondaries: true,
+		addrs: []netlink.Addr{
+			addr("10.10.91.100/24", false),
+			addr("10.10.91.101/24", true),
+			addr("10.10.91.123/24", true),
+			addr("10.10.90.5/24", false),
+			addr("10.10.90.212/24", true),
+		},
+	}
+	announced = nil
+	var delsAtAnnounce []int
+	reseated, err := reseatFloatingIPs(dummyLink,
+		[]string{"10.10.91.100", "10.10.91.101", "10.10.90.212"}, k, promoteOn,
+		func(ip string) {
+			announced = append(announced, ip)
+			delsAtAnnounce = append(delsAtAnnounce, len(k.dels))
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(announced, ",") != strings.Join(reseated, ",") ||
+		strings.Join(announced, ",") != "10.10.91.100,10.10.91.101" {
+		t.Errorf("announced %v, reseated %v; want exactly the two deleted, in order", announced, reseated)
+	}
+	for i, n := range delsAtAnnounce {
+		if n != i {
+			t.Errorf("announcement %d came after %d deletes, want it before its own delete", i, n)
+		}
+	}
+}
+
 func TestReseatDoesNothingAndTouchesNoSysctlWhenNothingIsInTheWay(t *testing.T) {
 	k := &scriptedKernel{
 		promoteSecondaries: true,
@@ -306,7 +364,7 @@ func TestReseatDoesNothingAndTouchesNoSysctlWhenNothingIsInTheWay(t *testing.T) 
 	consulted := false
 	promote := func(string) error { consulted = true; return nil }
 
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.90.212/24"}, k, promote)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.90.212/24"}, k, promote, nil)
 	if err != nil || len(reseated) != 0 {
 		t.Fatalf("reseated=%v err=%v, want nothing done", reseated, err)
 	}
@@ -330,7 +388,7 @@ func TestReseatRefusesWithoutPromoteSecondaries(t *testing.T) {
 		},
 	}
 
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOff)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOff, nil)
 	if err == nil {
 		t.Fatal("want an error naming the refusal")
 	}
@@ -353,7 +411,7 @@ func TestReseatRetriesTheAddOnceAndReportsWhatStayedDown(t *testing.T) {
 		},
 		failAdds: map[string]int{"10.10.91.100": 1},
 	}
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn, nil)
 	if err != nil {
 		t.Fatalf("one failed add is retried and must succeed here: %v", err)
 	}
@@ -369,7 +427,7 @@ func TestReseatRetriesTheAddOnceAndReportsWhatStayedDown(t *testing.T) {
 		},
 		failAdds: map[string]int{"10.10.91.100": 2},
 	}
-	reseated, err = reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn)
+	reseated, err = reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn, nil)
 	if err == nil || !strings.Contains(err.Error(), "10.10.91.100") {
 		t.Fatalf("err=%v, want the address that stayed down named", err)
 	}
@@ -393,7 +451,7 @@ func TestReseatTreatsEEXISTOnTheAddAsSeated(t *testing.T) {
 		},
 	}
 	racing := &racingKernel{scriptedKernel: k}
-	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, racing, promoteOn)
+	reseated, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, racing, promoteOn, nil)
 	if err != nil || len(reseated) != 1 {
 		t.Fatalf("reseated=%v err=%v, want the address counted as seated", reseated, err)
 	}
@@ -418,7 +476,7 @@ func TestReseatIsBoundedAgainstAnotherWriter(t *testing.T) {
 	// writer re-ordering the addresses under us — must not keep the pass
 	// forever. One round per floating address plus one, then give up.
 	k := &stubbornKernel{}
-	_, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn)
+	_, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +495,7 @@ func (s *stubbornKernel) AddrAdd(netlink.Link, *netlink.Addr) error { return nil
 
 func TestReseatReportsAListingFailureRatherThanActingBlind(t *testing.T) {
 	k := &scriptedKernel{listErr: errors.New("interface dump interrupted")}
-	_, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn)
+	_, err := reseatFloatingIPs(dummyLink, []string{"10.10.91.100"}, k, promoteOn, nil)
 	if err == nil || len(k.dels) != 0 {
 		t.Fatalf("err=%v dels=%v, want the failure reported and nothing deleted", err, k.dels)
 	}
@@ -445,7 +503,7 @@ func TestReseatReportsAListingFailureRatherThanActingBlind(t *testing.T) {
 
 func TestReseatWithNoFloatingIPsReadsNothing(t *testing.T) {
 	k := &scriptedKernel{listErr: errors.New("should not be read")}
-	reseated, err := reseatFloatingIPs(dummyLink, nil, k, promoteOn)
+	reseated, err := reseatFloatingIPs(dummyLink, nil, k, promoteOn, nil)
 	if err != nil || reseated != nil {
 		t.Fatalf("reseated=%v err=%v, want a no-op", reseated, err)
 	}

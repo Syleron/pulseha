@@ -81,7 +81,12 @@ The pieces, so a reader can find them:
   static, so the repair takes the pass's latency rather than up to a 30-second tick.
 - `internal/membership/ip_monitor.go` — `markReseating` and `reseatSuppressed`: the watcher is
   told about the delete, because it is one the watcher would otherwise restore with a warning.
-  Same shape as the release protection of defect #60.
+  Same shape as the release protection of defect #60. It is told per address, through
+  `ReseatFloatingIPs`'s `beforeDelete` hook, immediately before that address's delete and only
+  for an address actually being deleted. Telling it about the whole floating set on every
+  pass, as the first version did, blinds the watcher to every floating IP for the window after
+  every pass: an address removed then stayed down until the next periodic pass, ~29s against
+  ~13ms (measured live 2026-11-17, docs/TEST-PLAN.md #116).
 
 ## What is deliberately *not* repaired
 
