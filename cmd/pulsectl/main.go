@@ -27,7 +27,9 @@ import (
 
 func main() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Println(err)
+		// Printed here, once: cobra's own printing is silenced on the root, which
+		// had every failure printed twice (GitHub #19).
+		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}
 }
@@ -38,6 +40,22 @@ var (
 		Use:   "pulsectl",
 		Short: "PulseHA cluster management tool",
 		Long:  `PulseHA cluster management tool - Manage your high availability cluster`,
+		// main prints a returned error itself, so cobra must not print it as well.
+		SilenceErrors: true,
+		// A command that fails while running — the daemon is unreachable, it refused
+		// the change — is not a usage mistake, and printing the usage after it read
+		// as if the operator had typed the command wrong (GitHub #19). So usage is
+		// silenced here, once the command line has been accepted: flags are parsed by
+		// now, and required flags are checked first because cobra only checks them
+		// after this hook, so a missing one still shows the usage. Inherited by every
+		// subcommand, none of which sets its own.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if err := cmd.ValidateRequiredFlags(); err != nil {
+				return err
+			}
+			cmd.SilenceUsage = true
+			return nil
+		},
 		Run: func(cmd *cobra.Command, args []string) {
 			if versionFlag {
 				fmt.Printf("PulseHA CLI Version: %s\n", utils.Version)
