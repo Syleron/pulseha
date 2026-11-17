@@ -15,9 +15,9 @@ import (
 )
 
 // startMonitorLoop uses netlink address subscription for event-driven reconciliation
-func (m *IPMonitor) monitorLoop() {
+func (m *IPMonitor) monitorLoop(stop <-chan struct{}) {
 	updates := make(chan netlink.AddrUpdate, 32)
-	if err := netlink.AddrSubscribe(updates, m.stopChan); err != nil {
+	if err := netlink.AddrSubscribe(updates, stop); err != nil {
 		m.logger.Error("IP monitor: failed to subscribe to netlink addr updates", "error", err)
 		return
 	}
@@ -26,7 +26,7 @@ func (m *IPMonitor) monitorLoop() {
 
 	for {
 		select {
-		case <-m.stopChan:
+		case <-stop:
 			return
 		case upd, ok := <-updates:
 			if !ok {
@@ -250,13 +250,13 @@ func (m *IPMonitor) restoreIP(iface string, ip string) {
 }
 
 // periodicReconcile runs a lightweight reconcile loop to enforce expected IPs
-func (m *IPMonitor) periodicReconcile() {
+func (m *IPMonitor) periodicReconcile(stop <-chan struct{}) {
 	// Run every 30s; exit on stop
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {
-		case <-m.stopChan:
+		case <-stop:
 			return
 		case <-t.C:
 			// Through the same gate as every other caller rather than calling the
