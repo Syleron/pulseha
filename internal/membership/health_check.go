@@ -455,7 +455,28 @@ func (h *HealthChecker) performHealthChecks() {
 		// The scheduled deep check, or the single immediate retry a node earns
 		// when it first becomes unresolved. Per member, not per pass: one slow
 		// peer must not drag every other node onto the expensive path.
-		if doDeepCheck || h.membershipRetry[member.ID] {
+		deep := doDeepCheck || h.membershipRetry[member.ID]
+
+		// An active-passive peer whose role is unknown but which answers TCP is
+		// asked for its role now rather than on the fifth cycle (GitHub #276).
+		// Only the deep check can recover the role, and until it does this node
+		// reads "no Active" — which is how a daemon one second into a restart
+		// elected itself and demoted a healthy Active holding all 118 addresses.
+		// Gated on the dial so a down peer stays on the cheap path: the deep
+		// check's 2s deadline runs under this lock. A peer the last deep check
+		// rejected or could not resolve already has its own handling below.
+		var dialed, dialReachable bool
+		if !deep && wasUnknown && passCfg != nil && passCfg.Pulse.Mode == "active-passive" &&
+			!h.membershipCheckFailed[member.ID] && !h.membershipUnresolved[member.ID] {
+			dialed = true
+			dialReachable = h.checkNodeConnectivity(member)
+			deep = dialReachable
+			if deep {
+				h.logger.Debugf("Node %s answers but its role is unknown; asking for it now", member.Hostname)
+			}
+		}
+
+		if deep {
 			// One-shot. A node that stays unresolved falls back to the
 			// scheduled cadence and is held Unknown by the cheap branch below,
 			// which costs nothing.
@@ -500,7 +521,11 @@ func (h *HealthChecker) performHealthChecks() {
 			}
 		} else {
 			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-			isReachable = h.checkNodeConnectivity(member)
+			if dialed {
+				isReachable = dialReachable // already dialled above; do not pay for a refusal twice
+			} else {
+				isReachable = h.checkNodeConnectivity(member)
+			}
 			// A node the last deep check placed in a different cluster stays
 			// unreachable however well it answers a TCP dial -- and so does one
 			// whose deep check could not be completed. A listening socket
