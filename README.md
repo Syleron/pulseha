@@ -85,9 +85,10 @@ go build -o pulseha cmd/pulseha/main.go
 # Build the CLI tool
 go build -o pulsectl cmd/pulsectl/main.go
 
-# Install binaries (optional)
-sudo cp pulseha /usr/local/bin/
-sudo cp pulsectl /usr/local/bin/
+# Install binaries (optional). /usr/local/sbin is where pulseha.service runs the
+# daemon from; `make install` (below) puts both binaries and the unit there.
+sudo cp pulseha /usr/local/sbin/
+sudo cp pulsectl /usr/local/sbin/
 ```
 
 ### Docker Installation
@@ -557,7 +558,15 @@ go mod download
 make build
 
 # Build CLI
-make build-cli
+make cli
+
+# Install the binaries, the systemd unit and /etc/pulseha, then reload systemd
+sudo make install
+
+# Or stage the install under another root for packaging. Nothing is written
+# outside it and systemd is not reloaded. PREFIX moves the binaries
+# (default /usr/local) and the unit's ExecStart follows them.
+make install DESTDIR=/tmp/pkgroot PREFIX=/usr
 
 # Run tests
 make test
