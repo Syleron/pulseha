@@ -425,7 +425,20 @@ func (m *IPMonitor) enforceExpectations() {
 
 	// Active node: bring up missing IPs
 	m.logger.Info("ENFORCE: Node is Active, ensuring expected IPs are present", "status", StatusToString(claim.Status))
+
+	// Whether this node is still the Active, read fresh rather than from the
+	// pass's claim snapshot (GitHub #281). Placing a large group and announcing it
+	// takes ~16s for 118 addresses, and a demotion's cleanup is queued behind this
+	// pass, so a node demoted mid-pass kept every address until the pass finished.
+	// Once it is no longer Active the pass starts nothing new: no further
+	// interface is placed, no further announcement begins, and it returns so the
+	// queued cleanup runs.
+	stillActive := func() bool { return m.localIsActive(localID) }
 	for iface, ips := range expectations {
+		if !stillActive() {
+			m.logger.Info("ENFORCE: this node is no longer Active; abandoning the rest of this pass so its release can run")
+			return
+		}
 		var missing []string
 		m.logger.Debug("ENFORCE: Checking interface for missing IPs", "iface", iface, "expectedIPs", ips)
 		for _, ip := range ips {
@@ -468,7 +481,9 @@ func (m *IPMonitor) enforceExpectations() {
 				func(iface, ip string) error {
 					m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(claim.Status))
 					return network.BringIPup(iface, ip)
-				}, network.SendGARPBatch)
+				}, func(iface string, ips []string) ([]string, error) {
+					return network.SendGARPBatchWhile(iface, ips, stillActive)
+				})
 
 			for _, attempt := range attempts {
 				if attempt.Err != nil {
@@ -486,8 +501,13 @@ func (m *IPMonitor) enforceExpectations() {
 				// On this logger rather than packages/network's, which nothing calls
 				// SetLevel on — a line reported there cannot reach the journal at any
 				// logging_level (#61's lesson, #33's positive control).
-				m.logger.Debug("ENFORCE: skipped announcing addresses this node no longer holds",
-					"iface", iface, "count", len(skipped), "of", len(missing))
+				if !stillActive() {
+					m.logger.Info("ENFORCE: stopped announcing; this node is no longer Active",
+						"iface", iface, "skipped", len(skipped), "of", len(missing))
+				} else {
+					m.logger.Debug("ENFORCE: skipped announcing addresses this node no longer holds",
+						"iface", iface, "count", len(skipped), "of", len(missing))
+				}
 			}
 		} else {
 			m.logger.Debug("ENFORCE: No missing IPs for interface", "iface", iface)
@@ -500,6 +520,10 @@ func (m *IPMonitor) enforceExpectations() {
 	// just added — a secondary, since the static was there first — is not read in
 	// a stale listing. The whole configured set is what counts as floating here,
 	// not just the expected one: see clusterFloatingIPsByInterface.
+	if !stillActive() {
+		m.logger.Info("ENFORCE: this node is no longer Active; skipping the reseat so its release can run")
+		return
+	}
 	floatingByIface := clusterFloatingIPsByInterface(cfg, localID)
 	for iface, ips := range expectations {
 		m.keepFloatingIPsSecondary(iface, append(floatingByIface[iface], ips...))

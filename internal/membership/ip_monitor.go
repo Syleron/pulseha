@@ -621,6 +621,17 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	return true
 }
 
+// localIsActive reports whether the local member is Active now. Read fresh, for
+// a pass that has to notice a demotion that lands while it is still running
+// (GitHub #281). False when the member cannot be found.
+func (m *IPMonitor) localIsActive(localID string) bool {
+	if m.members == nil {
+		return false
+	}
+	member := m.members.GetMemberByID(localID)
+	return member != nil && member.GetStatus() == StatusActive
+}
+
 // localActiveSince is when the local member last became Active, or zero when it
 // cannot be read. Zero predates every release, so it changes nothing.
 func (m *IPMonitor) localActiveSince() time.Time {
