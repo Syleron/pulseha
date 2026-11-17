@@ -3352,6 +3352,9 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	var demotions []pendingIPWork
 	// The IPs the consolidated Active must bring up, likewise run after s.Unlock().
 	var activation *pendingIPWork
+	// Whether this node is the one the switch consolidates onto; decides when its
+	// own monitor refresh runs, after s.Unlock() (GitHub #272).
+	localIsTarget := false
 
 	// Update mode in config
 	s.config.Pulse.Mode = req.Mode
@@ -3467,6 +3470,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			if len(activeIPs) > 0 {
 				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
 			}
+			localIsTarget = activeNode.IsLocal()
 
 			// In active-passive the active node is the leader; peers accept
 			// this along with the bumped epoch below.
@@ -3480,8 +3484,14 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// broadcasts from peers that still carry the pre-switch epoch.
 	s.clusterEpoch += 2
 
-	// Update local monitor expectations based on new role
-	s.refreshLocalMonitorExpectedIPs()
+	// The local monitor refresh is not called here, under s.Lock(): it runs in the
+	// goroutine below (GitHub #272). On the node the switch consolidates onto, the
+	// refresh finds its peers' share missing and brings it up through
+	// bringIPsOnNodeUp, which reads the config through currentConfig() and so takes
+	// s.RLock() — a re-acquisition of the lock this goroutine holds, which wedged the
+	// daemon with every address still up while the peer, never told of the switch,
+	// took the whole group too. It is also a bring-up, and every other bring-up on
+	// this path already waits for the lock to drop (defects #4/#8).
 
 	// Hand the new mode to the broadcaster as well as sending it directly below.
 	// The direct send is one unretried pass per peer with its result discarded, so
@@ -3513,6 +3523,13 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// daemon — including the health checks peers use to decide it is still alive
 	// (docs/TEST-PLAN.md defects #4/#8).
 	go func() {
+		// A node giving up the group releases first, before anything else moves, so
+		// the new Active never claims an address this node still holds. A node
+		// taking the group refreshes last, below, after its peers have released.
+		if !localIsTarget {
+			s.refreshLocalMonitorExpectedIPs()
+		}
+
 		// Propagate the new mode and the statuses it implies together, and before
 		// any address moves. Peers that know only half of it behave as if the
 		// switch never happened: still in active-active, still Active, still
@@ -3537,6 +3554,10 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 				s.logger.Error("Failed to bring up IPs on active node during mode switch",
 					"hostname", activation.member.Hostname, "error", err)
 			}
+		}
+
+		if localIsTarget {
+			s.refreshLocalMonitorExpectedIPs()
 		}
 	}()
 
