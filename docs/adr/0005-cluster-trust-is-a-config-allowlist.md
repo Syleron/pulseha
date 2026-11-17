@@ -214,7 +214,15 @@ plane, added to smooth a transition that happens once.
   the hash that detects divergence; unlike it, it is cluster-wide rather than node-owned, so a
   sync adopts it with the content. The same mechanism carries a certificate rotation: a node that
   republishes after a restart is held at the gate until it knows the cluster's version, so the
-  publish is minted above it rather than refused as stale.
+  publish is minted above it rather than refused as stale. *Amended 2026-11-17, from the
+  MC-LB-3-node-4/5 run:* a persisted version is only as good as its claim to describe the content
+  beside it, so the stamp also records a fingerprint of that content, and a restarted node
+  resumes the clock only from a file that still matches it. Mutations save content before they
+  mint, and a daemon killed between the two left the previous version against new content —
+  level with its peer by version, different by content, and with no majority in a two-node
+  cluster to settle it. A file that fails the check starts unversioned and adopts the cluster's
+  config, which is the pre-#123 behaviour and the right answer for a change nobody was told
+  had succeeded.
 - **`InsecureSkipVerify` goes, and does not come back** — meaning encryption without identity
   goes. It is what makes the current code look finished, and it would satisfy a scanner and stop
   no attacker. *Amended from building it (step 4):* the flag itself is set, paired in the same
