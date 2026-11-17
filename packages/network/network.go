@@ -396,6 +396,44 @@ func addressAbsentFrom(iface, ip string) bool {
 	return !exists || on != iface
 }
 
+// SendGARPBatchWhile is SendGARPBatch for a caller whose reason to announce can
+// lapse mid-batch: once keepGoing reports false, no further announcement starts.
+// The ones already running — at most one wave of garpFanout — finish, and the
+// rest come back as skipped, not failed.
+//
+// For the IP monitor's enforce pass (GitHub #281). It places a whole group and
+// then announces it, ~16s for 118 addresses, and a demotion's cleanup is queued
+// behind that pass (#63's coalescing, which is right to keep passes from
+// overlapping). So a node demoted mid-announcement kept every address until the
+// last wave finished, all of them up on both nodes meanwhile. Announcing an
+// address the node is about to release helps no one.
+//
+// keepGoing is asked immediately before each announcement, the same place the
+// absence check runs and for the same reason: a decision taken once up front
+// would be acted on for the length of the batch.
+func SendGARPBatchWhile(iface string, ips []string, keepGoing func() bool) (skipped []string, err error) {
+	if len(ips) == 0 {
+		return nil, nil
+	}
+	if exists, _ := InterfaceExist(iface); !exists {
+		log.Error("Unable to GARP as the network interface does not exist", "iface", iface)
+		return nil, errors.New("network interface does not exist")
+	}
+	return sendGARPBatch(iface, ips, SendGARP, stopWhen(keepGoing, addressAbsentFrom))
+}
+
+// stopWhen extends a batch's skip check: an address is also skipped once
+// keepGoing reports false. keepGoing is asked first, being the cheaper; a nil
+// keepGoing never stops.
+func stopWhen(keepGoing func() bool, absent absentFunc) absentFunc {
+	return func(iface, ip string) bool {
+		if keepGoing != nil && !keepGoing() {
+			return true
+		}
+		return absent != nil && absent(iface, ip)
+	}
+}
+
 // sendGARPBatch is the fan-out half of SendGARPBatch, with the announcement and
 // the liveness check injected. The real ones exec arping and read netlink, so
 // this is where the concurrency bound, the skipping and the failure reporting can

@@ -84,6 +84,10 @@ func (s *Server) receivingHandoff(localID string) bool {
 	return g.orchestrating && g.target == localID && time.Now().Before(g.until)
 }
 
+// HandoffInProgress is handoffInProgress for the health checker, whose automatic
+// elections have to respect the guard too (GitHub #286).
+func (s *Server) HandoffInProgress() string { return s.handoffInProgress() }
+
 // handoffInProgress returns the target of a live handoff this node is part of,
 // or "" when there is none.
 func (s *Server) handoffInProgress() string {

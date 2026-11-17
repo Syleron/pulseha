@@ -16,8 +16,10 @@ import (
 	"github.com/syleron/pulseha/packages/utils"
 	"github.com/syleron/pulseha/rpc"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type Client struct {
@@ -86,6 +88,7 @@ func New() (*Client, error) {
 	conn, err := grpc.NewClient(
 		"unix://"+config.CLI_SOCKET_PATH,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(explainCLIErrors(config.CLI_SOCKET_PATH)),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to CLI socket %s: %v", config.CLI_SOCKET_PATH, err)
@@ -739,4 +742,74 @@ func printJoinedInMaintenance(m *rpc.Member) {
 	fmt.Printf("       pulsectl group assign --group <name> --node-id %s --interface <iface>\n", m.NodeId)
 	fmt.Printf("  2. bring it out of maintenance:\n")
 	fmt.Printf("       pulsectl node maintenance --disable --node-id %s\n", m.NodeId)
+}
+
+// cliError is a CLI-socket error reworded for the operator reading it. It keeps
+// the original gRPC status through GRPCStatus, so status.Code(err) and
+// status.FromError still see the code a caller may branch on; only the text a
+// person reads changes.
+type cliError struct {
+	st  *status.Status
+	msg string
+}
+
+func (e *cliError) Error() string              { return e.msg }
+func (e *cliError) GRPCStatus() *status.Status { return e.st }
+
+// explainCLIError turns a gRPC error from the daemon's CLI socket into one an
+// operator can act on (GitHub #19).
+//
+// With the daemon down, every pulsectl command printed `rpc error: code =
+// Unavailable desc = connection error: desc = "transport: Error while dialing:
+// dial unix …: connect: no such file or directory"` — the one useful fact last,
+// behind three layers of transport wording. The failures an operator meets here
+// are few and each has a next step, so each gets a sentence that names it. Any
+// other error is the daemon's own refusal, and its own words are kept, without
+// the wrapper.
+func explainCLIError(socket string, err error) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return err
+	}
+	desc := st.Message()
+	var msg string
+	switch st.Code() {
+	case codes.Unavailable:
+		switch {
+		case strings.Contains(desc, "no such file or directory"):
+			msg = fmt.Sprintf("cannot reach the PulseHA daemon: its socket %s does not exist. "+
+				"Is the daemon running? (systemctl status pulseha)", socket)
+		case strings.Contains(desc, "connection refused"):
+			msg = fmt.Sprintf("cannot reach the PulseHA daemon: nothing is listening on %s. "+
+				"The daemon is not running, or is still starting. (systemctl status pulseha)", socket)
+		case strings.Contains(desc, "permission denied"):
+			msg = fmt.Sprintf("cannot reach the PulseHA daemon: permission denied on %s. "+
+				"Run pulsectl as root (sudo pulsectl …).", socket)
+		default:
+			msg = fmt.Sprintf("cannot reach the PulseHA daemon at %s: %s", socket, desc)
+		}
+	case codes.DeadlineExceeded:
+		msg = "the PulseHA daemon did not answer in time; it may be busy or stuck. " +
+			"Check its log (journalctl -t pulseha)."
+	case codes.Unimplemented:
+		msg = "the PulseHA daemon does not support this command; pulsectl and pulseha " +
+			"may be different versions (" + desc + ")"
+	default:
+		msg = desc
+	}
+	return &cliError{st: st, msg: msg}
+}
+
+// explainCLIErrors applies explainCLIError to every call made on the CLI socket.
+// Installed only on the connection New makes: a peer connection made by Connect
+// gets none, because the daemon reads those errors' codes and transport text
+// itself, and they are logged, not shown.
+func explainCLIErrors(socket string) grpc.UnaryClientInterceptor {
+	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn,
+		invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
+		return explainCLIError(socket, invoker(ctx, method, req, reply, cc, opts...))
+	}
 }

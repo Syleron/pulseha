@@ -48,6 +48,10 @@ type stubServer struct {
 	heldBack      map[string]bool
 	announceFails bool
 
+	// handoff is what HandoffInProgress reports: the target of a handoff this
+	// node is part of, or "" for none.
+	handoff string
+
 	// sequence interleaves demotions and announcements in call order, because
 	// consolidation's correctness depends on which came last: an announcement made
 	// before the demotions is overwritten on the segment by the demoted node's own
@@ -83,6 +87,8 @@ func (s *stubServer) GetLeaderLeaseUntil() time.Time  { return time.Time{} }
 func (s *stubServer) RefreshLocalMonitorExpectedIPs() {}
 
 func (s *stubServer) RequestConfigReconcile() { s.configReconciles++ }
+
+func (s *stubServer) HandoffInProgress() string { return s.handoff }
 
 func (s *stubServer) BroadcastVoteRequest(sessionID string, voteType, subject, description string,
 	timeoutSeconds int64) error {

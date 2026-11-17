@@ -75,6 +75,9 @@ type ServerReference interface {
 	AnnounceNodeIPs(nodeID string) error
 	// Re-broadcast of the current config, for the periodic reconcile below
 	RequestConfigReconcile()
+	// The target of a live handoff this node is part of — orchestrating it, or
+	// demoted by it — or "" when there is none (GitHub #286).
+	HandoffInProgress() string
 	// Addresses orphan redistribution must leave alone, because the Witness
 	// says a peer this node cannot see is still serving them, or a Ruling took
 	// them from this node. Never blocks; empty without a Witness (ADR-0006).
@@ -459,7 +462,28 @@ func (h *HealthChecker) performHealthChecks() {
 		// The scheduled deep check, or the single immediate retry a node earns
 		// when it first becomes unresolved. Per member, not per pass: one slow
 		// peer must not drag every other node onto the expensive path.
-		if doDeepCheck || h.membershipRetry[member.ID] {
+		deep := doDeepCheck || h.membershipRetry[member.ID]
+
+		// An active-passive peer whose role is unknown but which answers TCP is
+		// asked for its role now rather than on the fifth cycle (GitHub #276).
+		// Only the deep check can recover the role, and until it does this node
+		// reads "no Active" — which is how a daemon one second into a restart
+		// elected itself and demoted a healthy Active holding all 118 addresses.
+		// Gated on the dial so a down peer stays on the cheap path: the deep
+		// check's 2s deadline runs under this lock. A peer the last deep check
+		// rejected or could not resolve already has its own handling below.
+		var dialed, dialReachable bool
+		if !deep && wasUnknown && passCfg != nil && passCfg.Pulse.Mode == "active-passive" &&
+			!h.membershipCheckFailed[member.ID] && !h.membershipUnresolved[member.ID] {
+			dialed = true
+			dialReachable = h.checkNodeConnectivity(member)
+			deep = dialReachable
+			if deep {
+				h.logger.Debugf("Node %s answers but its role is unknown; asking for it now", member.Hostname)
+			}
+		}
+
+		if deep {
 			// One-shot. A node that stays unresolved falls back to the
 			// scheduled cadence and is held Unknown by the cheap branch below,
 			// which costs nothing.
@@ -504,7 +528,11 @@ func (h *HealthChecker) performHealthChecks() {
 			}
 		} else {
 			h.logger.Debugf("About to check connectivity for %s (IP:%s Port:%s)", member.Hostname, member.IP, member.Port)
-			isReachable = h.checkNodeConnectivity(member)
+			if dialed {
+				isReachable = dialReachable // already dialled above; do not pay for a refusal twice
+			} else {
+				isReachable = h.checkNodeConnectivity(member)
+			}
 			// A node the last deep check placed in a different cluster stays
 			// unreachable however well it answers a TCP dial -- and so does one
 			// whose deep check could not be completed. A listening socket
@@ -535,7 +563,7 @@ func (h *HealthChecker) performHealthChecks() {
 		if !isReachable {
 			// Mark node as unknown when unreachable
 			previousStatus := member.Status
-			member.Status = StatusUnknown
+			member.setStatusLocked(StatusUnknown)
 			member.Latency = "N/A"
 			member.mu.Unlock()
 
@@ -588,17 +616,17 @@ func (h *HealthChecker) performHealthChecks() {
 			// In particular, reachability alone must neither promote a Passive
 			// nor demote an existing Active (including when auto_failback is on).
 			if member.Status == StatusUnknown && reportedRole != StatusUnknown {
-				member.Status = member.admitLocked(reportedRole)
+				member.setStatusLocked(reportedRole)
 				statusChanges = append(statusChanges, fmt.Sprintf("%s reports %s after recovery",
 					member.Hostname, StatusToString(reportedRole)))
 			}
 		} else if wasUnknown && autoFailback {
-			member.Status = member.admitLocked(recoveredStatus(mode))
+			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
-			// Through admitLocked: in active-active the recovery default is
-			// Active, which is the one status a returning Witness must not get.
-			member.Status = member.admitLocked(recoveredStatus(mode))
+			// setStatusLocked applies the Witness role: in active-active the
+			// recovery default is Active, which a returning Witness must not get.
+			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
 				member.Hostname, StatusToString(member.Status)))
 		}
@@ -922,7 +950,7 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		member.mu.Lock()
 		oldNodeID := member.ID
 		activeIPsCopy := append([]string{}, activeIPs...)
-		member.Status = StatusUnknown
+		member.setStatusLocked(StatusUnknown)
 		member.mu.Unlock()
 
 		// Elect a new active node and transfer IPs
@@ -1656,7 +1684,7 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 				dst.ActiveIPs = append(dst.ActiveIPs, ip)
 			}
 		}
-		dst.Status = StatusActive
+		dst.setStatusLocked(StatusActive)
 		dst.mu.Unlock()
 		moved = true
 	}
@@ -2363,6 +2391,24 @@ func (h *HealthChecker) tryAutomaticPromotion(candidate *Member) bool {
 	if h.findActiveNode() != nil {
 		return false
 	}
+
+	// No automatic promotion from a node that is part of a handoff in progress
+	// (GitHub #286). #266's guard is held by the node orchestrating a handoff and
+	// by the node it demoted, and is enforced by voters, who probe the other
+	// members and refuse while any reports a handoff. A cluster of fewer than three
+	// takes no vote (ADR-0002), so on two nodes nothing read it: the demoted node,
+	// usually the coordinator, saw no Active — the target's status is broadcast only
+	// once its transfer finishes — and elected itself ~0.3s after its MakePassive,
+	// in 2 of 3 handoffs on the lab pair. Read here, before any vote, it holds at
+	// every cluster size. The guard lapses after handoffWindow and clears once
+	// another member is seen Active, so a handoff that dies part-way does not block
+	// elections for good.
+	if target := server.HandoffInProgress(); target != "" {
+		h.logger.Info("ELECTION: holding off; this node is part of a handoff in progress",
+			"handoff_to", target, "candidate", candidate.Hostname)
+		return false
+	}
+
 	recovered, authorized := h.votedElectionCandidate(candidate)
 	if !authorized || h.findActiveNode() != nil {
 		h.logger.Warn("ELECTION: Automatic promotion not authorized", "candidate", candidate.ID)

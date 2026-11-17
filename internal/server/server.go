@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -137,6 +138,13 @@ func callerAddr(ctx context.Context) string {
 type Server struct {
 	// Optional inventory seam for deterministic failure tests; nil reads the kernel.
 	ipVerificationSnapshot func() (ipStateLookup, error)
+
+	// Optional seam for the shutdown release in Stop; nil is network.BringIPdown.
+	releaseIP func(iface, ip string) error
+
+	// Test hook run after a promotion's address transfer, before its final
+	// broadcast; nil in the daemon.
+	afterPromotionTransfer func()
 
 	voteMu         pulselock.Mutex
 	voteState      *persistentVotes
@@ -277,13 +285,18 @@ type Server struct {
 	// stayed at 0 and broadcast unversioned, which the receiver applies
 	// unconditionally. Adopting the version on apply closes both.
 	//
-	// In-memory only and never persisted: the appliance rewrites config.json out
-	// from under us (defect #3), so a number on disk would be wrong exactly when
-	// that happens. The cost is that a just-restarted node reads 0 until its first
-	// full ConfigSync, so a mutation issued on it in that window is rejected by
-	// peers as stale. That is logged (see broadcastConfigToPeersOnce) rather than
-	// silent, and it is the correct answer: a node that is behind must not push a
-	// config, because ConfigSync applies one wholesale.
+	// The in-memory copy is the truth while the daemon runs; it is mirrored to
+	// disk beside the content it describes (config.Config.Stamp) whenever either
+	// moves, and seeded from there on start. It used to be in-memory only, on the
+	// reasoning that the appliance rewrites config.json out from under us (defect
+	// #3) and a number on disk would be wrong exactly then -- which it is, in the
+	// harmless direction (see config.Config.Stamp). What that cost was every
+	// ordinary restart: the node read 0 until its first full ConfigSync, and a
+	// mutation issued in that window -- lb_api issues one on every start -- was
+	// rejected by peers as stale and then reverted or left diverged (#123). A
+	// node that is behind still must not push, because ConfigSync applies a
+	// config wholesale; so the node now finds out whether it is behind, and pulls
+	// if so, before it accepts a mutation. See config_currency.go.
 	//
 	// Atomic rather than lock-guarded because every group mutation calls
 	// markConfigDirty while holding s.Lock() through a defer — taking the write
@@ -295,6 +308,11 @@ type Server struct {
 	// concurrent mutations differently from its peers, which is the divergence the
 	// pair exists to prevent.
 	configStamp atomic.Pointer[configStamp]
+
+	// currency is the gate that holds config mutations until this node knows
+	// its config is the cluster's current one, and the single-flight state of
+	// the pull that settles it (#123, config_currency.go).
+	currency configCurrency
 
 	// broadcastTrigger coalesces config broadcasts. It has capacity 1 and is
 	// signalled rather than written to: a single broadcaster goroutine drains
@@ -412,6 +430,18 @@ func NewServer(cfg *config.Config, logger *log.Logger, memberList *membership.Me
 		broadcastStop:    make(chan struct{}),
 	}
 
+	// Resume the config clock where the last run left it rather than at zero
+	// (#123) -- but only from a file whose content is still the content that
+	// version was written against. Anything else leaves the clock empty, which is
+	// the previous behaviour and which the startup pull then corrects.
+	if persisted, reason := resumableStamp(cfg); reason == "" {
+		s.configStamp.Store(&configStamp{version: persisted.Version, origin: persisted.Origin})
+	} else if !persisted.IsZero() {
+		s.logger.Warn("CONFIG_STARTUP: not resuming the config version on disk; "+
+			"starting unversioned so the startup pull adopts the cluster's config",
+			"version", persisted.Version, "origin", persisted.Origin, "reason", reason)
+	}
+
 	// Set server reference in health checker
 	healthCheck.SetServerReference(s)
 
@@ -448,6 +478,15 @@ func (s *Server) Start() error {
 	// Owns every outbound config push, so that concurrent mutations coalesce
 	// into one ordered broadcast instead of racing each other (defect #5).
 	s.startConfigBroadcaster()
+
+	// Find out whether the config on disk is the cluster's current one before
+	// any mutation is taken against it (#123). The appliance's first mutation
+	// arrives within a second of this returning, so the gate has to be shut
+	// here, in the same critical section that opens the CLI socket below, and
+	// not from a goroutine that might lose the race to it.
+	if s.config.ClusterCheck() && s.config.NodeCount() > 1 {
+		s.startStartupConfigSync()
+	}
 
 	// Load initial members from config
 	s.logger.Debug("Loading initial members from configuration...")
@@ -826,20 +865,30 @@ func (s *Server) Stop() {
 		}
 	}
 
-	// Best-effort: drop configured VIPs without taking the server lock to avoid deadlocks during shutdown
-	for iface, ips := range ifaceToIPs {
-		for _, ip := range ips {
-			_ = network.BringIPdown(iface, ip)
-		}
-	}
-
-	// Stop background workers first (no server lock needed)
+	// Stop everything that places addresses before releasing them (GitHub #273).
+	// The IP monitor answers each delete below with "expected IP removed from
+	// Active node; restoring", so releasing while it ran put every address
+	// straight back: the process exited holding the whole group and the peer
+	// took it over too, with every address on both nodes for 10-13s. Stop waits
+	// for the monitor's goroutines, so nothing of it outlives this call.
 	if s.healthCheck != nil {
 		s.healthCheck.Stop()
 	}
 	if s.ipMonitor != nil {
 		s.ipMonitor.Stop()
 	}
+
+	// Best-effort: drop configured VIPs without taking the server lock to avoid deadlocks during shutdown
+	release := s.releaseIP
+	if release == nil {
+		release = network.BringIPdown
+	}
+	for iface, ips := range ifaceToIPs {
+		for _, ip := range ips {
+			_ = release(iface, ip)
+		}
+	}
+
 	if s.quorumManager != nil {
 		s.quorumManager.Stop()
 	}
@@ -1143,6 +1192,13 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 	s.logger.Debugf("Join request details - NodeID: %s, BindIP: %s, BindPort: %s, Token provided: %v",
 		req.NodeId, req.BindIp, req.BindPort, req.Token != "")
 
+	// A join is a config mutation on this node, and one taken against a stale
+	// config is one the peers refuse and this node then reverts -- a member
+	// admitted and forgotten. Held at the currency gate like any other (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.JoinResponse{Success: false, Message: err.Error()}, nil
+	}
+
 	// A member with no address is a member nobody can reach, and recording one
 	// puts it in every peer's config by propagation (#114). The joining node
 	// resolves its own address before it asks, so an empty value here means a
@@ -1394,108 +1450,6 @@ func (s *Server) HandleNodeJoin(ctx context.Context, req *rpc.JoinRequest) (*rpc
 		Message:       "Successfully joined cluster",
 		ClusterConfig: configBytes,
 	}, nil
-}
-
-// HandleNodeLeave handles the node leave RPC call
-func (s *Server) HandleNodeLeave(ctx context.Context, req *rpc.LeaveRequest) (*rpc.LeaveResponse, error) {
-	// Validate
-	if req == nil || req.NodeId == "" {
-		return &rpc.LeaveResponse{Success: false, Message: "missing node_id"}, nil
-	}
-	nodeID := req.NodeId
-
-	// Resolve local node ID
-	localNodeID, err := s.config.GetLocalNodeUUID()
-	if err != nil {
-		return &rpc.LeaveResponse{Success: false, Message: "Unable to get local node: " + err.Error()}, nil
-	}
-
-	// Fast path: remote removal (not local)
-	if nodeID != localNodeID {
-		// Remove from member list and config under lock
-		s.Lock()
-		if err := s.memberList.RemoveMember(nodeID); err != nil {
-			s.Unlock()
-			s.logger.Error("Failed to remove member", "error", err)
-			return &rpc.LeaveResponse{Success: false, Message: "Failed to remove member: " + err.Error()}, nil
-		}
-		delete(s.config.Nodes, nodeID)
-		s.Unlock()
-		return &rpc.LeaveResponse{Success: true, Message: fmt.Sprintf("Successfully removed node %s from the cluster", nodeID)}, nil
-	}
-
-	// Local leave: gather peers and VIPs without holding the server lock
-	var peers []struct{ ip, port string }
-	ifaceToIPs := make(map[string][]string)
-	func() {
-		s.RLock()
-		defer s.RUnlock()
-		for id, n := range s.config.Nodes {
-			if id == localNodeID || n == nil {
-				continue
-			}
-			peers = append(peers, struct{ ip, port string }{ip: n.IP, port: n.Port})
-		}
-		if node := s.config.Nodes[localNodeID]; node != nil {
-			for iface, groups := range node.IPGroups {
-				var ips []string
-				for _, g := range groups {
-					if gips, ok := s.config.Groups[g]; ok {
-						ips = append(ips, gips...)
-					}
-				}
-				if len(ips) > 0 {
-					copied := make([]string, len(ips))
-					copy(copied, ips)
-					ifaceToIPs[iface] = copied
-				}
-			}
-		}
-	}()
-
-	// Notify peers best-effort (no server lock held)
-	for _, p := range peers {
-		remoteClient, err := client.New()
-		if err != nil {
-			continue
-		}
-		defer remoteClient.Close()
-		if err := s.dialPeer(remoteClient, p.ip, p.port); err != nil {
-			continue
-		}
-		pctx, pcancel := context.WithTimeout(context.Background(), 2*time.Second)
-		_, _ = remoteClient.Server().Remove(pctx, &rpc.RemoveRequest{NodeId: localNodeID})
-		pcancel()
-	}
-
-	// Tear down VIPs best-effort directly via network package to avoid nested locks
-	for iface, ips := range ifaceToIPs {
-		for _, ip := range ips {
-			_ = network.BringIPdown(iface, ip)
-		}
-	}
-
-	// Now mutate local state under lock
-	s.Lock()
-	// Clear member list
-	s.memberList.Clear()
-	// Wipe cluster configuration
-	s.config.Nodes = make(map[string]*config.Node)
-	s.config.Groups = make(map[string][]string)
-	s.config.Pulse.LocalNode = ""
-	s.config.Pulse.ClusterToken = ""
-	_ = s.config.Save()
-	// Stop cluster gRPC; keep CLI alive
-	if s.grpcServer != nil {
-		s.grpcServer.GracefulStop()
-		s.grpcServer, s.grpcServerTLS = nil, false
-	}
-	if s.healthCheck != nil {
-		s.healthCheck.Stop()
-	}
-	s.Unlock()
-
-	return &rpc.LeaveResponse{Success: true, Message: "Successfully left the cluster"}, nil
 }
 
 // deriveMemberStatus maps a member's stored health, plus how many floating IPs
@@ -1997,6 +1951,47 @@ func stillHeldIPs(ips []string) ([]string, error) {
 //   - provablyDown: the transport itself failed in a way that means no daemon is listening.
 //     Anything indeterminate (deadline, local fault, a peer that answers but
 //     declines) is reported as NOT provably down, so the caller stays conservative.
+// rollBackUnverifiedAdditions drops from the monitor the addresses a BringUpIP
+// could not verify. It forgets them rather than releasing them (GitHub #265): an
+// addition that did not take is not a release, and recording it as one made the
+// Active refuse its own addresses for the 60s grace window. The restore paths may
+// retry them at once.
+func (s *Server) rollBackUnverifiedAdditions(iface string, failed []string) {
+	s.ipMonitor.ForgetExpectedIPs(iface, failed)
+}
+
+// errIncumbentIsActive is confirmPeerReleasedIPs' answer for a peer that is
+// reachable and reports itself Active (GitHub #276).
+var errIncumbentIsActive = errors.New("incumbent is reachable and reports itself Active")
+
+// peerRoleProbeTimeout bounds the role question confirmPeerReleasedIPs asks
+// before MakePassive. The health checker's deep check uses the same 2s.
+const peerRoleProbeTimeout = 2 * time.Second
+
+// peerReportsActive asks nodeID for its role with the health-check RPC and
+// reports whether it answered, as itself and in this cluster, that it is
+// Active. Anything less — an error, a rejection, a foreign token, an
+// unidentified reply from an older binary — is not an answer, and the caller
+// carries on exactly as it did before it asked.
+func (s *Server) peerReportsActive(ctx context.Context, c *client.Client, nodeID string) bool {
+	localID, err := s.config.GetLocalNodeUUID()
+	if err != nil {
+		return false
+	}
+	token := s.config.Pulse.ClusterToken
+
+	hcCtx, cancel := context.WithTimeout(ctx, peerRoleProbeTimeout)
+	defer cancel()
+	resp, err := c.Server().HealthCheck(hcCtx, &rpc.HealthCheckRequest{NodeId: localID, ClusterToken: token})
+	if err != nil || resp == nil || !resp.Success || resp.NodeId != nodeID {
+		return false
+	}
+	if token != "" && resp.ClusterToken != "" && resp.ClusterToken != token {
+		return false
+	}
+	return resp.Status == rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE
+}
+
 func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (released bool, provablyDown bool, err error) {
 	node := s.config.Nodes[nodeID]
 	if node == nil {
@@ -2050,6 +2045,16 @@ func (s *Server) confirmPeerReleasedIPs(ctx context.Context, nodeID string) (rel
 		return false, true, fmt.Errorf("no daemon reachable at %s: %w", dialAddr, dialErr)
 	}
 	_ = probe.Close()
+
+	// Ask before demanding (GitHub #276). This step exists for an incumbent that may still hold
+	// the group while this node cannot see its role, and "Unknown" covers two cases: a peer that
+	// is gone, and one whose role this node has simply not learned yet — every peer, for the
+	// first cycles after this daemon starts. For the second, MakePassive was not a confirmation
+	// but a demotion: a node one second into a restart told the healthy Active to drop all 118
+	// addresses, and it did. A peer that answers and says it is Active is the Active.
+	if s.peerReportsActive(ctx, remoteClient, nodeID) {
+		return false, false, fmt.Errorf("%s: %w", nodeID, errIncumbentIsActive)
+	}
 
 	resp, err := remoteClient.Server().MakePassive(ctx, &rpc.MakePassiveRequest{NodeId: nodeID})
 	if err != nil {
@@ -2332,6 +2337,38 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				continue
 			}
 
+			// The "unreachable" incumbent answered, as the Active (GitHub #276). This node's view
+			// was stale — on a restart, its peers' roles are unknown for the first cycles — so the
+			// election that brought it here was run against a healthy Active. Stand down, and
+			// record what the peer said so the next health check finds the Active rather than
+			// electing again. Nothing has been broadcast on this path, so there is nothing to undo.
+			//
+			// An operator's forced promotion is the exception: there the takeover is the intent,
+			// and the incumbent is demoted the way Step 1 demotes a known Active.
+			if errors.Is(err, errIncumbentIsActive) {
+				if !forceDemote {
+					s.logger.Warn("PROMOTE_ASYNC: Aborting promotion - the incumbent is reachable and reports itself Active",
+						"incumbent", id, "target", targetNodeID)
+					s.restoreMemberStates(originalStates)
+					if mm := s.memberList.GetMemberByID(id); mm != nil {
+						mm.SetStatus(membership.StatusActive)
+					}
+					return
+				}
+				s.logger.Warn("PROMOTE_ASYNC: Forced promotion over a reachable Active; demoting it", "incumbent", id)
+				dCtx, dCancel := context.WithTimeout(context.Background(), s.demotionTimeout())
+				dResp, dErr := s.MakePassive(dCtx, &rpc.MakePassiveRequest{NodeId: id, HandoffTo: targetNodeID})
+				dCancel()
+				if dErr == nil && dResp != nil && dResp.Success {
+					continue
+				}
+				if dErr == nil {
+					dErr = fmt.Errorf("demotion not confirmed: %v", dResp)
+				}
+				err = dErr
+				provablyDown = false
+			}
+
 			// A transport failure is evidence of unreachability only. A reachable
 			// but wedged peer blocks takeover even when a majority is available.
 			stillAlive := !provablyDown
@@ -2466,6 +2503,24 @@ func (s *Server) performPromotionAsync(targetNodeID string, ips []string, forceD
 				s.logger.Info("PROMOTE_ASYNC: IP failover completed successfully")
 			}
 		}
+	}
+
+	if s.afterPromotionTransfer != nil {
+		s.afterPromotionTransfer()
+	}
+
+	// Step 4 announces a promotion the cluster may already have overruled (GitHub #276). The
+	// transfer above takes seconds for a large group — 16.7s for 118 addresses on the lab pair —
+	// and a ConfigSync can demote the target while it runs. Broadcasting it Active afterwards, at
+	// a fresh epoch, re-asserted a promotion the cluster had demoted 11s earlier and put the
+	// group back on both nodes. The target's current role is the answer to whether this
+	// promotion still stands.
+	if got := member.GetStatus(); got != membership.StatusActive {
+		s.logger.Warn("PROMOTE_ASYNC: Promotion was overruled during the address transfer; not broadcasting it",
+			"target_node", targetNodeID,
+			"status_now", membership.StatusToString(got),
+			"elapsed_time", time.Since(startTime).String())
+		return
 	}
 
 	// Step 4: Broadcast final cluster state
@@ -3321,6 +3376,12 @@ type pendingIPWork struct {
 // SetMode handles changing the cluster operation mode
 func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.SetModeResponse, error) {
 	s.logger.Infof("Received request to change cluster mode to: %s", req.Mode)
+	// Held at the currency gate until this node knows its config is the
+	// cluster's current one, and refused if it is not: a change the peers would
+	// reject as superseded is refused here, to the caller, instead (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.SetModeResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3350,6 +3411,9 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	var demotions []pendingIPWork
 	// The IPs the consolidated Active must bring up, likewise run after s.Unlock().
 	var activation *pendingIPWork
+	// Whether this node is the one the switch consolidates onto; decides when its
+	// own monitor refresh runs, after s.Unlock() (GitHub #272).
+	localIsTarget := false
 
 	// Update mode in config
 	s.config.Pulse.Mode = req.Mode
@@ -3466,6 +3530,7 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 			if len(activeIPs) > 0 {
 				activation = &pendingIPWork{member: activeNode, ips: activeIPs}
 			}
+			localIsTarget = activeNode.IsLocal()
 
 			// In active-passive the active node is the leader; peers accept
 			// this along with the bumped epoch below.
@@ -3480,8 +3545,14 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	s.clusterEpoch += 2
 	s.publishConvergenceLocked()
 
-	// Update local monitor expectations based on new role
-	s.refreshLocalMonitorExpectedIPs()
+	// The local monitor refresh is not called here, under s.Lock(): it runs in the
+	// goroutine below (GitHub #272). On the node the switch consolidates onto, the
+	// refresh finds its peers' share missing and brings it up through
+	// bringIPsOnNodeUp, which reads the config through currentConfig() and so takes
+	// s.RLock() — a re-acquisition of the lock this goroutine holds, which wedged the
+	// daemon with every address still up while the peer, never told of the switch,
+	// took the whole group too. It is also a bring-up, and every other bring-up on
+	// this path already waits for the lock to drop (defects #4/#8).
 
 	// Hand the new mode to the broadcaster as well as sending it directly below.
 	// The direct send is one unretried pass per peer with its result discarded, so
@@ -3513,6 +3584,13 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 	// daemon — including the health checks peers use to decide it is still alive
 	// (docs/TEST-PLAN.md defects #4/#8).
 	go func() {
+		// A node giving up the group releases first, before anything else moves, so
+		// the new Active never claims an address this node still holds. A node
+		// taking the group refreshes last, below, after its peers have released.
+		if !localIsTarget {
+			s.refreshLocalMonitorExpectedIPs()
+		}
+
 		// Propagate the new mode and the statuses it implies together, and before
 		// any address moves. Peers that know only half of it behave as if the
 		// switch never happened: still in active-active, still Active, still
@@ -3537,6 +3615,10 @@ func (s *Server) SetMode(ctx context.Context, req *rpc.SetModeRequest) (*rpc.Set
 				s.logger.Error("Failed to bring up IPs on active node during mode switch",
 					"hostname", activation.member.Hostname, "error", err)
 			}
+		}
+
+		if localIsTarget {
+			s.refreshLocalMonitorExpectedIPs()
 		}
 	}()
 
@@ -3681,6 +3763,10 @@ func (s *Server) groupIPsForNode(nodeID string) []string {
 // CreateGroup implements the CLI.CreateGroup RPC method
 func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (*rpc.CreateGroupResponse, error) {
 	s.logger.Infof("Received CreateGroup request for group: %s (caller: %s)", req.Name, callerAddr(ctx))
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.CreateGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3726,6 +3812,18 @@ func (s *Server) CreateGroup(ctx context.Context, req *rpc.CreateGroupRequest) (
 // AddIPToGroup implements the CLI.AddIPToGroup RPC method
 func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest) (*rpc.AddIPToGroupResponse, error) {
 	s.logger.Infof("Received AddIPToGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
+	// Held at the currency gate until this node knows its config is the
+	// cluster's current one, and refused if it is not: a change the peers would
+	// reject as superseded is refused here, to the caller, instead (#123).
+	//
+	// This is the mutation the appliance makes on every daemon start: lb_api's
+	// reconcile re-adds the floating addresses within a second of the socket
+	// opening, inside the window where this node had not yet learned the
+	// cluster's config version. Before the lock, because the pull the gate waits
+	// on applies the peer's config under it.
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.AddIPToGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -4091,6 +4189,11 @@ func (s *Server) bringUpGroupIPOnPeers(targets []peerBringUpTarget, ips []string
 func (s *Server) RemoveIPFromGroup(ctx context.Context, req *rpc.RemoveIPFromGroupRequest) (*rpc.RemoveIPFromGroupResponse, error) {
 	s.logger.Infof("Received RemoveIPFromGroup request for group: %s, IP: %s (caller: %s)", req.GroupName, req.Ip, callerAddr(ctx))
 
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.RemoveIPFromGroupResponse{Success: false, Message: err.Error()}, nil
+	}
+
 	done, exactIP, targets, warnings := s.beginIPRemoval(req)
 	if done != nil {
 		return done, nil
@@ -4325,6 +4428,10 @@ func (s *Server) commitIPRemoval(groupName, exactIP string) error {
 // AssignGroupToNode implements the CLI.AssignGroupToNode RPC method
 func (s *Server) AssignGroupToNode(ctx context.Context, req *rpc.AssignGroupRequest) (*rpc.AssignGroupResponse, error) {
 	s.logger.Infof("Received AssignGroupToNode request for group: %s", req.GroupName)
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.AssignGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -4465,6 +4572,11 @@ type DeleteGroupResponse struct {
 // success, which is #40's operator-visible lie returning at a different site.
 func (s *Server) UnassignGroupFromNode(ctx context.Context, req *rpc.UnassignGroupRequest) (*rpc.UnassignGroupResponse, error) {
 	s.logger.Infof("Received UnassignGroupFromNode request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.UnassignGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 
 	done, targets := s.commitGroupUnassign(req)
 	if done != nil {
@@ -4668,6 +4780,11 @@ func (s *Server) planGroupUnassignRelease(groupName, nodeID, iface string) []ipR
 // for docs/TEST-PLAN.md defect #59.
 func (s *Server) DeleteGroup(ctx context.Context, req *rpc.DeleteGroupRequest) (*rpc.DeleteGroupResponse, error) {
 	s.logger.Infof("Received DeleteGroup request for group: %s (caller: %s)", req.GroupName, callerAddr(ctx))
+
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.DeleteGroupResponse{Success: false, Message: err.Error()}, nil
+	}
 
 	done, targets, warnings := s.beginGroupDeletion(req)
 	if done != nil {
@@ -5585,6 +5702,10 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 	// adopting would pull a repair for a difference that is already being fixed.
 	if !isFullConfig {
 		s.noteConfigDivergence(senderID, incomingConfigHash)
+		// The version on the same envelope is the other detector: a sender
+		// above this node's version is ahead of it, with no majority to
+		// consult, and this node pulls from it (#123).
+		s.noteConfigVersion(senderID, incomingStamp)
 	}
 
 	// The epoch this node held *before* this sync is what decides whether the
@@ -5686,12 +5807,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// Kept whatever its value, empty included: an empty local certificate
 		// means this node has not published yet, which is a fact about this node
 		// that a peer cannot know better.
+		//
+		// Keeping a certificate the incoming config does not carry is a change to
+		// that config, and has to be published as one (GitHub #268): see
+		// reassertOwnCert below.
+		reassertOwnCert := false
 		if prevLocalID != "" {
 			if mine, ok := cur.Nodes[prevLocalID]; ok && mine != nil {
 				if incoming, ok := newConfig.Nodes[prevLocalID]; ok && incoming != nil {
 					if incoming.TLSCert != mine.TLSCert {
 						s.logger.Debug("CONFIG_SYNC: keeping this node's own certificate over the sender's copy",
 							"sender", senderID)
+						reassertOwnCert = mine.TLSCert != ""
 					}
 					incoming.TLSCert = mine.TLSCert
 					// Node-owned for the same reason: only this node knows where
@@ -5861,6 +5988,14 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 			}
 		}
 
+		// The stamp this content is about to be held at travels to disk with it
+		// (#123), by the same rule adoptConfigStamp applies below: never lower
+		// than what is held, and unchanged by an unversioned payload.
+		newConfig.Stamp = persistedStampAfter(incomingStamp, s.loadConfigStamp())
+		if content, err := sharedConfigHash(newConfig); err == nil {
+			newConfig.Stamp.Content = content
+		}
+
 		// Persist and update our configuration
 		s.logger.Debug("CONFIG_SYNC: Saving synchronized configuration")
 		if err := newConfig.Save(); err != nil {
@@ -5896,6 +6031,29 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// mutation minted its version against the stamp this sync was about to
 		// overwrite, so the next reconcile silently reverted it.
 		s.adoptConfigStamp(incomingStamp)
+
+		// The config just installed is not the one the sender holds: it carries
+		// this node's certificate where the sender's carried another value or none
+		// (GitHub #268). Left there it is a local change no one ever receives.
+		// Nodes started together each publish their certificate as version 1; the
+		// tie-break hands every node the highest origin's config, which carries
+		// only that origin's certificate; and every other node's re-publish was a
+		// re-send of the version everyone already held, so its certificate never
+		// travelled — the cluster sat at `held=1 heldOrigin=03` indefinitely, the
+		// tls_mode=required flip was refused and the Witness was never trusted.
+		//
+		// So it is minted as this node's next version, on top of the one just
+		// adopted, in the same critical section as the swap so no mutation lands
+		// between. It cannot ping-pong: a peer applying it finds its own
+		// certificate either already carried (nothing owed) or not (it publishes
+		// once in turn), and each node's value only has to travel once. An empty
+		// local certificate is not re-published — that would wipe the cluster's
+		// copy for a node that simply has not published yet.
+		if reassertOwnCert {
+			s.logger.Info("CONFIG_SYNC: publishing this node's certificate, which the adopted config did not carry",
+				"sender", senderID, "adopted_version", incomingStamp.version, "adopted_origin", incomingStamp.origin)
+			s.markConfigDirty()
+		}
 
 		// Update convergence metadata if newer. Also under the lock: the config
 		// broadcaster reads s.clusterEpoch under RLock, so writing it after the
@@ -6344,6 +6502,14 @@ func (s *Server) UpdateConfig(ctx context.Context, req *rpc.UpdateConfigRequest)
 		return &rpc.UpdateConfigResponse{Success: resp.Success, Message: resp.Message}, nil
 	}
 
+	// A cluster-scoped key has to propagate, so it waits at the currency gate
+	// like a group mutation (#123); a node-scoped one is this node's alone.
+	if scope == scopeCluster {
+		if err := s.awaitConfigCurrent(ctx); err != nil {
+			return &rpc.UpdateConfigResponse{Success: false, Message: err.Error()}, nil
+		}
+	}
+
 	s.Lock()
 	defer s.Unlock()
 
@@ -6603,6 +6769,10 @@ func (s *Server) setMaintenanceLocal(ctx context.Context, localID string, enable
 // assignments above the new capacity are not evicted; the active-active
 // reconcile loop simply stops placing new IPs on the node.
 func (s *Server) SetCapacity(ctx context.Context, req *rpc.SetCapacityRequest) (*rpc.SetCapacityResponse, error) {
+	// See AddIPToGroup for the gate (#123).
+	if err := s.awaitConfigCurrent(ctx); err != nil {
+		return &rpc.SetCapacityResponse{Success: false, Message: err.Error()}, nil
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -7081,7 +7251,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// Drop only unconfirmed additions from the monitor cache. Confirmed partial
 	// placement remains recorded and can be retried without rolling back ownership.
 	if len(failed) > 0 {
-		s.ipMonitor.RemoveExpectedIPs(req.Iface, failed)
+		s.rollBackUnverifiedAdditions(req.Iface, failed)
 	}
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
@@ -7148,8 +7318,25 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		VerificationVersion: ipVerificationVersion, VerifiedIps: verified, FailedIps: failed}, nil
 }
 
-// BringDownIP implements the Server.BringDownIP RPC for remote IP removal
+// BringDownIP implements the Server.BringDownIP RPC for remote IP removal. A
+// release requested over the RPC is a release this node was told to make, so the
+// addresses are protected from its own restore paths (defect #60).
 func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
+	return s.bringDownIP(ctx, req, true)
+}
+
+// bringDownIP is BringDownIP with the release protection made explicit.
+//
+// protect=false is for a node releasing addresses because it is not the Active,
+// on its own initiative — the VIP reconcile pass after a start or a demotion.
+// The protection guards an Active node's restore paths against a config that has
+// not caught up with a release it was told to make (#60); a node that is not
+// Active restores nothing, so on this path the protection has no effect until
+// the node becomes Active again, and then it is the defect: a restarted Active
+// whose startup cleanup released the group was made Active a millisecond later
+// and refused its own group for the whole grace window (GitHub #265, 61s on the
+// lab pair). The release happens either way; only the record is skipped.
+func (s *Server) bringDownIP(ctx context.Context, req *rpc.DownIpRequest, protect bool) (*rpc.DownIpResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -7176,7 +7363,11 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 	//
 	// Still before the bring-downs, as it was: the expectation has to be gone
 	// first, or the restore paths put the address straight back (#60).
-	s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+	if protect {
+		s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+	} else {
+		s.ipMonitor.ForgetExpectedIPs(req.Iface, normalized)
+	}
 
 	// One snapshot for the whole request. See releaseRequestedIPs for why the
 	// filter belongs here rather than in the caller; the nil on failure is
@@ -7929,6 +8120,13 @@ func (s *Server) BroadcastClusterState(memberStates map[string]membership.Member
 	} else if hash != "" {
 		payload["config_hash"] = hash
 	}
+	// And the version, so a peer that is behind can tell without a majority
+	// (#123). Same keys as a full config's; an older binary reads them and uses
+	// them only on a full config, which this is not.
+	if stamp := s.loadConfigStamp(); !stamp.isEmpty() {
+		payload["config_version"] = stamp.version
+		payload["config_origin"] = stamp.origin
+	}
 
 	localID, _ := s.config.GetLocalNodeUUID()
 
@@ -8148,7 +8346,25 @@ func (s *Server) markConfigDirty() {
 	if err != nil {
 		origin = ""
 	}
-	s.nextConfigStamp(origin)
+	stamp := s.nextConfigStamp(origin)
+	// Mirrored to disk so a restart resumes this clock instead of starting at
+	// zero (#123). A failed write is a stamp one behind on the next start, which
+	// the startup pull corrects; it is not a reason to fail a mutation whose
+	// content has already been saved and is about to be broadcast.
+	if !stamp.isEmpty() {
+		persisted := config.Stamp{Version: stamp.version, Origin: stamp.origin}
+		// The fingerprint ties the version to the content it was minted for, so
+		// a restart can tell whether the file still holds that content. A hash
+		// that cannot be computed is left empty, which only means the next start
+		// does not resume this version -- the safe direction.
+		if content, err := sharedConfigHash(s.config); err == nil {
+			persisted.Content = content
+		}
+		if err := s.config.SaveStamp(persisted); err != nil {
+			s.logger.Warn("CONFIG_VERSION: could not persist the config version; "+
+				"the next start will resume one behind", "version", stamp.version, "error", err)
+		}
+	}
 	s.requestConfigBroadcast()
 }
 
@@ -8469,6 +8685,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 	// but they must also not be mistaken for peers that accepted the config.
 	var permanentlyRejected []string
 
+	// The peer that answered superseded, if any: this node is behind it, and
+	// pulls from it once the pass is over (#123).
+	aheadPeer := ""
+
 	for attempt := 1; attempt <= maxAttempts && len(pending) > 0; attempt++ {
 		// A newer broadcast is already queued; it carries everything this one
 		// would have delivered, so stop rather than compete with it.
@@ -8500,18 +8720,23 @@ func (s *Server) broadcastConfigToPeersOnce() {
 					"peer", id, "attempt", attempt, "version", stamp.version, "error", err)
 			case resp != nil && resp.Message == supersededConfigMessage:
 				// This node's config is older than the cluster's, so the change it
-				// just made will not propagate — the next sync will overwrite it.
-				// Warn, because the mutation reported success to the operator and
-				// is about to be undone: defect #38's signature seen from the
-				// sending end. Reachable when a node is mutated between its restart
-				// and its first full ConfigSync, while configVersion still reads 0.
+				// just made will not propagate. Warn, because if this was a mutation
+				// it reported success to the operator and is about to be undone:
+				// defect #38's signature seen from the sending end. It used to say
+				// "will be reverted by the next sync", and on a Passive node no sync
+				// ever came (#123); now the node pulls the peer's config itself, so
+				// the revert is seconds away rather than indefinite, and the gate is
+				// shut against further mutations until it lands.
 				//
 				// Only the peer-is-ahead case reaches here. A peer that holds this
 				// exact version answers configAlreadyHeldMessage instead and falls
 				// into the default arm below as the plain accept it is.
 				s.logger.Warn("CONFIG_BROADCAST: peer holds a newer config; this node's "+
-					"change will not propagate and will be reverted by the next sync",
+					"change will not propagate; pulling the peer's config",
 					"peer", id, "version", stamp.version)
+				if aheadPeer == "" {
+					aheadPeer = id
+				}
 				delete(pending, id)
 			case resp != nil && !resp.Success && isPermanentRejection(resp.Message):
 				// The payload itself is unusable to this peer, so re-sending the same
@@ -8538,6 +8763,10 @@ func (s *Server) broadcastConfigToPeersOnce() {
 				delete(pending, id)
 			}
 		}
+	}
+
+	if aheadPeer != "" {
+		s.startConfigPull(aheadPeer, configStaleSuperseded, 0)
 	}
 
 	// A permanent rejection is not propagation, so it is recorded like any other
@@ -8763,6 +8992,51 @@ func (s *Server) adoptConfigStamp(incoming configStamp) {
 	}
 }
 
+// persistedStampAfter is adoptConfigStamp's rule as a pure function, for the
+// stamp ConfigSync writes to disk with the content it applies: the incoming
+// stamp when it is newer, the held one otherwise, and the held one when the
+// payload is unversioned.
+// resumableStamp returns the stamp a starting server may resume its clock from,
+// or why it may not. An empty reason means resume.
+//
+// A persisted version is a claim about the content beside it, and the claim is
+// checked rather than trusted. Every mutation saves its content before it mints
+// the version for it (config.SaveStamp says why), so a daemon that dies in
+// between -- killed, or wedged and then killed, as #117's deadlock was on
+// 2026-11-17 -- leaves the previous version against the new content; and the
+// appliance rewriting config.json (#3) can keep the key against content it
+// changed. Either way the restarted node would be level with its peer by version
+// and different by content, and with one peer there is no majority to say which
+// is right, so the pair never converged. Starting unversioned instead puts the
+// node behind every peer, and the startup pull adopts the cluster's config: the
+// change that never reached a peer is lost, which is what its caller was told,
+// since none was ever answered success for it.
+func resumableStamp(cfg *config.Config) (config.Stamp, string) {
+	persisted := cfg.PersistedStamp()
+	if persisted.IsZero() {
+		return persisted, "the config carries no version"
+	}
+	if persisted.Content == "" {
+		return persisted, "the version records no fingerprint of its content"
+	}
+	content, err := sharedConfigHash(cfg)
+	if err != nil {
+		return persisted, "the config could not be fingerprinted: " + err.Error()
+	}
+	if content != persisted.Content {
+		return persisted, "the config changed after this version was written"
+	}
+	return persisted, ""
+}
+
+func persistedStampAfter(incoming, held configStamp) config.Stamp {
+	chosen := held
+	if !incoming.isEmpty() && configIsNewer(incoming, held) {
+		chosen = incoming
+	}
+	return config.Stamp{Version: chosen.version, Origin: chosen.origin}
+}
+
 // broadcastConfigAndStates pushes the config and the member states it implies to
 // every peer in one ConfigSync.
 //
@@ -8941,6 +9215,15 @@ func (s *Server) PublishLocalCertificate() {
 	cert := s.localCertificatePEM()
 	if cert == "" {
 		s.logger.Debug("No certificate to publish yet", "dir", clustertls.CertDirOr(s.certDir))
+		return
+	}
+
+	// A publish is a config mutation, and it runs two seconds after Start --
+	// inside the window the startup pull is closing (#123). Waiting here costs
+	// nothing on an ordinary start; skipping it would mint a version against a
+	// config about to be replaced.
+	if err := s.awaitConfigCurrent(context.Background()); err != nil {
+		s.logger.Warn("Not publishing this node's certificate yet", "error", err)
 		return
 	}
 

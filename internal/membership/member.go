@@ -126,12 +126,41 @@ type Member struct {
 	ActiveIPs []string // IPs currently hosted by this member
 	Capacity  int      // Node capacity for weighted distribution
 
+	// activeSince is when this member last moved into Active from any other
+	// status; zero if it never has through setStatusLocked. The IP monitor uses it
+	// to tell a release that is still current from one the node has since been
+	// promoted past (GitHub #265). Written only by setStatusLocked, under mu.
+	activeSince time.Time
+
 	// witness is this member's role, copied from its config entry, and it is
 	// what keeps a Witness out of every decision whatever its status says. A
 	// Witness that is down is StatusUnknown, which several decision paths still
 	// consider, so the status alone cannot be the guard (ADR-0006). Read with
 	// IsWitness; written only from config, under mu.
 	witness bool
+}
+
+// setStatusLocked is the one place a member's status changes, so that a move
+// into Active is recorded however it arrives — an election, a handoff, a config
+// sync, a mode switch. Re-stating Active is not a move and leaves the moment
+// alone. The caller holds m.mu.
+//
+// It is also where a Witness's role is held: whatever is written, a Witness is
+// given only Witness or Unknown (admitLocked, ADR-0006). One write point, so one
+// place for both rules.
+func (m *Member) setStatusLocked(s MemberStatus) {
+	s = m.admitLocked(s)
+	if s == StatusActive && m.Status != StatusActive {
+		m.activeSince = time.Now()
+	}
+	m.Status = s
+}
+
+// ActiveSince returns when this member last became Active; see activeSince.
+func (m *Member) ActiveSince() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.activeSince
 }
 
 // IsWitness reports whether this member is the cluster's Witness. The role,
@@ -516,7 +545,7 @@ func (m *Member) GetStatus() MemberStatus {
 func (m *Member) SetStatus(status MemberStatus) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Status = m.admitLocked(status)
+	m.setStatusLocked(status)
 }
 
 // MarkUnreachable records that this member is no longer known to hold any
@@ -540,7 +569,7 @@ func (m *Member) claimLocked() Claim {
 
 func (m *Member) setClaimLocked(c Claim) {
 	c = c.copyIPs()
-	m.Status = m.admitLocked(c.Status)
+	m.setStatusLocked(c.Status)
 	m.ActiveIPs = c.ActiveIPs
 	if m.witness {
 		// A Witness claims no addresses, whatever it was handed.
@@ -852,7 +881,7 @@ func (m *Member) EnterMaintenance() error {
 	if m.Status == StatusActive {
 		m.ActiveIPs = nil
 	}
-	m.Status = m.admitLocked(StatusMaintenance)
+	m.setStatusLocked(StatusMaintenance)
 	return nil
 }
 
@@ -864,7 +893,7 @@ func (m *Member) ExitMaintenance() error {
 	if m.Status != StatusMaintenance {
 		return nil
 	}
-	m.Status = StatusPassive
+	m.setStatusLocked(StatusPassive)
 	return nil
 }
 

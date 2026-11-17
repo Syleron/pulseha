@@ -200,6 +200,29 @@ plane, added to smooth a transition that happens once.
   publishes about itself, living in the same structure as the operator's settings. `ConfigSync`
   preserves node-local fields already, and this is the first that is node-*owned* rather than
   node-local — a distinction that does not exist today and will need one.
+- **The second field that is not configuration is the config clock itself.** *Added 2026-11-13,
+  from #123.* `config_stamp` is the server's Lamport clock over the config -- the version, and the
+  node whose mutation produced the content -- persisted beside the content it describes. It used
+  to live only in memory, so every restart began at version 0 and the first mutation after a
+  restart (which lb_api makes on every start) was refused by every peer as superseded. The
+  ordering rule is unchanged: strictly greater wins, equal versions are broken on origin, and a
+  node that is behind must not push. What changed is that the clock survives a restart, that a
+  node pulls from any peer it has evidence is ahead of it -- at startup, on a superseded answer,
+  or on an envelope carrying a higher version, with no majority consulted because a higher
+  version is not an opinion -- and that a mutation on a node that is not yet current is refused
+  to its caller rather than accepted and reverted. Like `tls_cert`, the stamp is excluded from
+  the hash that detects divergence; unlike it, it is cluster-wide rather than node-owned, so a
+  sync adopts it with the content. The same mechanism carries a certificate rotation: a node that
+  republishes after a restart is held at the gate until it knows the cluster's version, so the
+  publish is minted above it rather than refused as stale. *Amended 2026-11-17, from the
+  MC-LB-3-node-4/5 run:* a persisted version is only as good as its claim to describe the content
+  beside it, so the stamp also records a fingerprint of that content, and a restarted node
+  resumes the clock only from a file that still matches it. Mutations save content before they
+  mint, and a daemon killed between the two left the previous version against new content —
+  level with its peer by version, different by content, and with no majority in a two-node
+  cluster to settle it. A file that fails the check starts unversioned and adopts the cluster's
+  config, which is the pre-#123 behaviour and the right answer for a change nobody was told
+  had succeeded.
 - **`InsecureSkipVerify` goes, and does not come back** — meaning encryption without identity
   goes. It is what makes the current code look finished, and it would satisfy a scanner and stop
   no attacker. *Amended from building it (step 4):* the flag itself is set, paired in the same

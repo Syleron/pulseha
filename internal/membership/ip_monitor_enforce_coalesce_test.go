@@ -90,7 +90,7 @@ func waitForEnforceIdle(t *testing.T, m *IPMonitor, within time.Duration) {
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		m.enforceMu.Lock()
-		idle := !m.enforceRunning && !m.enforcePending
+		idle := !m.run.enforceRunning && !m.run.enforcePending
 		m.enforceMu.Unlock()
 		if idle {
 			return

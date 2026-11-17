@@ -29,6 +29,17 @@ import (
 // clears the protection immediately.
 const releaseGraceWindow = 60 * time.Second
 
+// reseatGraceWindow is how long an address being reseated as a secondary (docs/
+// TEST-PLAN.md defect #116) is protected from the netlink watcher's restore.
+//
+// A reseat is a delete and an immediate add, and the delete's event reaches the
+// watcher some time after the add has already landed. The watcher's restore would
+// then log a warning and fail with EEXIST — harmless, but a false alarm on every
+// reseat. The window only has to cover the event's delivery, so it is seconds;
+// a reseat whose add genuinely failed clears the record itself, and the enforce
+// pass places the address the way it places any missing one.
+const reseatGraceWindow = 5 * time.Second
+
 // IPMonitor monitors IP addresses on interfaces and ensures they match the expected configuration
 type IPMonitor struct {
 	pulselock.RWMutex
@@ -40,20 +51,29 @@ type IPMonitor struct {
 	// without its mask, since a release and an expectation are not guaranteed to
 	// spell the same address the same way.
 	releasedIPs map[string]map[string]time.Time
-	// now is time.Now, indirected so the grace window can be tested without
-	// waiting a minute.
-	now      func() time.Time
-	stopChan chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
+	// reseatingIPs records, per interface, the addresses the enforce pass is
+	// deleting and adding straight back to seat them behind the interface's own
+	// address, and the moment each record stops applying. Same shape and keying
+	// as releasedIPs, for the same reader: the watcher's restore path.
+	reseatingIPs map[string]map[string]time.Time
+	// now is time.Now, indirected so the grace windows can be tested without
+	// waiting them out.
+	now func() time.Time
 
-	// enforceMu guards the two flags below, and is deliberately not the monitor's
-	// own RWMutex: every setter that triggers a pass — UpdateExpectedIPs,
-	// AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce with m.Lock() still
-	// held by a defer, so taking that lock here would wedge the writer.
-	enforceMu      pulselock.Mutex
-	enforceRunning bool
-	enforcePending bool
+	// run is the current Start..Stop lifetime of the monitor's goroutines; see
+	// ipMonitorRun. Guarded by enforceMu. Replaced only by a Start after Stop.
+	run *ipMonitorRun
+
+	// stopWaitLimit bounds how long Stop waits for the monitor's goroutines.
+	// Zero means defaultStopWaitLimit; tests shorten it.
+	stopWaitLimit time.Duration
+
+	// enforceMu guards run and the coalescing flags inside it, and is deliberately
+	// not the monitor's own RWMutex: every setter that triggers a pass —
+	// UpdateExpectedIPs, AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce
+	// with m.Lock() still held by a defer, so taking that lock here would wedge the
+	// writer.
+	enforceMu pulselock.Mutex
 	// enforce is the pass itself, indirected so the coalescing above can be tested
 	// on any platform — enforceExpectations needs netlink, and is a no-op off Linux.
 	enforce func()
@@ -68,16 +88,57 @@ type IPMonitor struct {
 	running atomic.Bool
 }
 
+// ipMonitorRun is one lifetime of the monitor's goroutines — the watcher, the
+// periodic reconcile and any enforce pass — from a Start (or construction) to a
+// Stop.
+//
+// A run is what makes the monitor restartable (GitHub #274). `cluster leave`
+// stops the monitor and the daemon keeps running, so a node can join a cluster
+// again; the monitor is built once, in NewServer, and a Stop that could not be
+// undone left a rejoined node with no watcher, no enforce pass and no periodic
+// reconcile. Each run has its own stop channel and its own WaitGroup, and every
+// goroutine is handed the run it belongs to rather than reading the monitor's
+// current one, because Stop's wait is bounded (GitHub #273): a goroutine of a
+// stopped run can still be finishing when the next run starts. It must see its
+// own run stopped, not the new one open, and Stop must never Wait on a
+// WaitGroup the next run is already adding to.
+type ipMonitorRun struct {
+	stop chan struct{}
+	wg   sync.WaitGroup
+
+	// The coalescing flags (defect #63), per run so a stopped run's pass that is
+	// still finishing cannot swallow a trigger meant for the new one. Guarded by
+	// the monitor's enforceMu.
+	enforceRunning bool
+	enforcePending bool
+}
+
+func newIPMonitorRun() *ipMonitorRun {
+	return &ipMonitorRun{stop: make(chan struct{})}
+}
+
+// stopped reports whether this run has been stopped.
+func (r *ipMonitorRun) stopped() bool {
+	select {
+	case <-r.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewIPMonitor creates a new IP monitor
 func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 	m := &IPMonitor{
-		members:     members,
-		logger:      logger,
-		expectedIPs: make(map[string][]string),
-		releasedIPs: make(map[string]map[string]time.Time),
-		now:         time.Now,
-		stopChan:    make(chan struct{}),
-		done:        make(chan struct{}),
+		members:      members,
+		logger:       logger,
+		expectedIPs:  make(map[string][]string),
+		releasedIPs:  make(map[string]map[string]time.Time),
+		reseatingIPs: make(map[string]map[string]time.Time),
+		now:          time.Now,
+		// A monitor that has never been started still runs enforce passes when
+		// triggered; this is the run they belong to until a Start replaces it.
+		run: newIPMonitorRun(),
 	}
 	m.enforce = m.enforceExpectations
 	return m
@@ -108,6 +169,25 @@ func (m *IPMonitor) Start() error {
 		return nil
 	}
 
+	// Starting again after a Stop is a new run (GitHub #274). Swapped before the
+	// expectations are initialised, so the pass that initialisation triggers
+	// belongs to the new run.
+	m.enforceMu.Lock()
+	restarted := m.run.stopped()
+	if restarted {
+		m.run = newIPMonitorRun()
+	}
+	m.enforceMu.Unlock()
+	if restarted {
+		// What the previous run expected and was told to release is about the
+		// membership it was stopped for leaving. A rejoined node acting on it would
+		// refuse its new cluster's addresses or chase its old one's.
+		m.expectedIPs = make(map[string][]string)
+		m.releasedIPs = make(map[string]map[string]time.Time)
+		m.reseatingIPs = make(map[string]map[string]time.Time)
+		m.logger.Info("IP monitor: starting again after a stop; the previous run's expectations and release records are cleared")
+	}
+
 	// Initialize the expected IPs from the current member
 	if err := m.initializeExpectedIPs(); err != nil {
 		// Left not-running deliberately, so a later call retries. This is the no-cluster-yet
@@ -115,14 +195,30 @@ func (m *IPMonitor) Start() error {
 		return fmt.Errorf("failed to initialize expected IPs: %v", err)
 	}
 
+	// Under enforceMu so the Add cannot race a Stop's Wait on this run.
+	m.enforceMu.Lock()
+	r := m.run
+	if r.stopped() {
+		m.enforceMu.Unlock()
+		return fmt.Errorf("IP monitor was stopped while it was starting")
+	}
+	r.wg.Add(2)
+	m.enforceMu.Unlock()
+
 	// Marked before the goroutines start, not after: a concurrent caller that got past the
 	// outer check must not be able to spawn its own pair while this one is still launching.
 	m.running.Store(true)
 
 	// Start platform-specific event monitoring (pure event-driven)
-	go m.monitorLoop()
+	go func() {
+		defer r.wg.Done()
+		m.monitorLoop(r.stop)
+	}()
 	// Start periodic reconcile as a safety net
-	go m.periodicReconcile()
+	go func() {
+		defer r.wg.Done()
+		m.periodicReconcile(r.stop)
+	}()
 
 	m.logger.Info("IP monitor started")
 	return nil
@@ -160,23 +256,31 @@ func (m *IPMonitor) TriggerEnforce() {
 		return
 	}
 	m.logger.Debug("TRIGGER: TriggerEnforce called")
-	if m.stopRequested() {
+
+	m.enforceMu.Lock()
+	r := m.run
+	// Checked under enforceMu, which Stop closes the run's channel under, so a pass
+	// cannot start after Stop has begun waiting for the ones in flight (GitHub #273).
+	if r.stopped() {
+		m.enforceMu.Unlock()
 		m.logger.Debug("TRIGGER: Skipping enforce - monitor stopped")
 		return
 	}
-
-	m.enforceMu.Lock()
-	if m.enforceRunning {
-		m.enforcePending = true
+	if r.enforceRunning {
+		r.enforcePending = true
 		m.enforceMu.Unlock()
 		m.logger.Debug("TRIGGER: enforce pass already running, queued a follow-up")
 		return
 	}
-	m.enforceRunning = true
+	r.enforceRunning = true
+	r.wg.Add(1)
 	m.enforceMu.Unlock()
 
 	m.logger.Debug("TRIGGER: Launching enforceExpectations goroutine")
-	go m.runEnforcePasses()
+	go func() {
+		defer r.wg.Done()
+		m.runEnforcePasses(r)
+	}()
 }
 
 // runEnforcePasses runs the pass, then runs it once more for however many
@@ -190,17 +294,20 @@ func (m *IPMonitor) TriggerEnforce() {
 // the two locks acyclic: the writers acquire m's write lock and then enforceMu
 // inside TriggerEnforce, and the pass itself acquires m's locks with enforceMu
 // released. Holding it over the pass would order them both ways round.
-func (m *IPMonitor) runEnforcePasses() {
+//
+// r is the run this goroutine was started for, not the monitor's current one: a
+// pass outliving its run's Stop must end with that run (GitHub #274).
+func (m *IPMonitor) runEnforcePasses(r *ipMonitorRun) {
 	for {
 		m.enforce()
 
 		m.enforceMu.Lock()
-		queued := m.enforcePending
-		m.enforcePending = false
-		// A monitor that has stopped abandons the queued pass. Stop is a teardown,
+		queued := r.enforcePending
+		r.enforcePending = false
+		// A run that has stopped abandons the queued pass. Stop is a teardown,
 		// and TriggerEnforce already refuses to start a pass past it.
-		if !queued || m.stopRequested() {
-			m.enforceRunning = false
+		if !queued || r.stopped() {
+			r.enforceRunning = false
 			m.enforceMu.Unlock()
 			return
 		}
@@ -209,26 +316,62 @@ func (m *IPMonitor) runEnforcePasses() {
 	}
 }
 
-// stopRequested reports whether Stop has been called.
-func (m *IPMonitor) stopRequested() bool {
-	select {
-	case <-m.stopChan:
+// Stopped reports whether the current run has been stopped, i.e. Stop was called
+// and no Start has followed it.
+func (m *IPMonitor) Stopped() bool {
+	if m == nil {
 		return true
-	default:
-		return false
 	}
+	m.enforceMu.Lock()
+	defer m.enforceMu.Unlock()
+	return m.run.stopped()
 }
 
-// Stop stops the IP monitor
+// defaultStopWaitLimit bounds Stop's wait. An enforce pass placing and
+// announcing a large group takes seconds; one wedged on the kernel must not hold
+// a daemon shutdown past systemd's stop timeout, because a SIGKILLed daemon
+// releases nothing.
+const defaultStopWaitLimit = 10 * time.Second
+
+// Stop stops the IP monitor and waits, up to stopWaitLimit, for its goroutines
+// to finish.
+//
+// The wait is the point. Server.Stop releases the node's floating IPs straight
+// after this returns, and anything of the monitor still running — the watcher
+// answering a delete, or an enforce pass already placing — puts them back, so
+// the process exits holding the group while the peer takes it over (GitHub #273).
+//
+// Must not be called from one of the monitor's own goroutines: it would wait on
+// itself until the limit.
 func (m *IPMonitor) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		close(m.stopChan)
-		m.running.Store(false)
+	// Under enforceMu so no goroutine can be added to this run after it is closed.
+	// A second Stop finds the run already closed and only waits.
+	m.enforceMu.Lock()
+	r := m.run
+	if !r.stopped() {
+		close(r.stop)
+	}
+	m.enforceMu.Unlock()
+	m.running.Store(false)
+
+	limit := m.stopWaitLimit
+	if limit <= 0 {
+		limit = defaultStopWaitLimit
+	}
+	finished := make(chan struct{})
+	go func() {
+		r.wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
 		m.logger.Info("IP monitor stopped")
-	})
+	case <-time.After(limit):
+		m.logger.Warn("IP monitor: stopped waiting for its goroutines; one may still restore an address", "waited", limit)
+	}
 }
 
 // UpdateExpectedIPs updates the list of expected IPs for an interface
@@ -341,6 +484,37 @@ func (m *IPMonitor) RemoveExpectedIPs(iface string, ips []string) {
 	m.TriggerEnforce()
 }
 
+// ForgetExpectedIPs drops expectations without recording them as released.
+//
+// For a removal that is not a release this node was told to make (GitHub #265):
+// an addition that did not take, and a node that is not the Active clearing up
+// on its own initiative (Server.bringDownIP with protect=false).
+// RemoveExpectedIPs' release record exists to stop a node undoing a release it
+// was told to make; recording an unverified bring-up as one made the Active
+// refuse its own addresses for the whole grace window — 74s on the lab pair,
+// after a NetworkManager re-apply had taken them down at the instant BringUpIP
+// verified them. Here the restore paths are welcome to try again.
+func (m *IPMonitor) ForgetExpectedIPs(iface string, ips []string) {
+	if m == nil {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	toRemove := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		toRemove[ip] = true
+	}
+	var updated []string
+	for _, ip := range m.expectedIPs[iface] {
+		if !toRemove[ip] {
+			updated = append(updated, ip)
+		}
+	}
+	m.expectedIPs[iface] = updated
+	m.logger.Info("Dropped IPs from interface expectations without a release record", "iface", iface, "ips", ips, "remaining", updated)
+}
+
 // markReleasedLocked records that this node has been told to give up these
 // addresses on iface, so its own restore paths leave them alone until either the
 // config agrees or the grace window runs out.
@@ -405,6 +579,10 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	if m == nil {
 		return false
 	}
+	// Read before the monitor's own lock, so it adds no edge to the lock order:
+	// this takes the member list's lock and then a member's.
+	activeSince := m.localActiveSince()
+
 	m.Lock()
 	defer m.Unlock()
 
@@ -417,6 +595,22 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 	if !ok {
 		return false
 	}
+	// A release recorded before this node's latest move to Active is a release of
+	// a role it has since been given back (GitHub #265). The agreed Active then
+	// refused its own group for the rest of the window — 61-78s dark on the lab
+	// pairs, with status and elections reading healthy throughout — after a
+	// demotion crossed a promotion, a restart's startup cleanup, or a demotion
+	// handed over by config sync. Defect #60's node is Active when told to release
+	// and stays Active, so its release is newer than its promotion and still holds.
+	if markedAt := expiry.Add(-releaseGraceWindow); markedAt.Before(activeSince) {
+		delete(released, key)
+		if len(released) == 0 {
+			delete(m.releasedIPs, iface)
+		}
+		m.logger.Info("IP monitor: release protection predates this node's promotion to Active; restoring is allowed",
+			"ip", ip, "iface", iface)
+		return false
+	}
 	if !expiry.After(m.timeNow()) {
 		delete(released, key)
 		if len(released) == 0 {
@@ -425,6 +619,152 @@ func (m *IPMonitor) restoreSuppressed(iface, ip string) bool {
 		return false
 	}
 	return true
+}
+
+// localIsActive reports whether the local member is Active now. Read fresh, for
+// a pass that has to notice a demotion that lands while it is still running
+// (GitHub #281). False when the member cannot be found.
+func (m *IPMonitor) localIsActive(localID string) bool {
+	if m.members == nil {
+		return false
+	}
+	member := m.members.GetMemberByID(localID)
+	return member != nil && member.GetStatus() == StatusActive
+}
+
+// localActiveSince is when the local member last became Active, or zero when it
+// cannot be read. Zero predates every release, so it changes nothing.
+func (m *IPMonitor) localActiveSince() time.Time {
+	if m.members == nil {
+		return time.Time{}
+	}
+	cfg := m.members.Config()
+	if cfg == nil {
+		return time.Time{}
+	}
+	localID, err := cfg.GetLocalNodeUUID()
+	if err != nil {
+		return time.Time{}
+	}
+	member := m.members.GetMemberByID(localID)
+	if member == nil {
+		return time.Time{}
+	}
+	return member.ActiveSince()
+}
+
+// markReseating records that the enforce pass is about to delete and re-add ips
+// on iface, so the watcher leaves the delete alone for reseatGraceWindow.
+func (m *IPMonitor) markReseating(iface string, ips []string) {
+	if m == nil || len(ips) == 0 {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+	if m.reseatingIPs == nil {
+		m.reseatingIPs = make(map[string]map[string]time.Time)
+	}
+	now := m.timeNow()
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		reseating = make(map[string]time.Time, len(ips))
+		m.reseatingIPs[iface] = reseating
+	}
+	for ip, expiry := range reseating {
+		if !expiry.After(now) {
+			delete(reseating, ip)
+		}
+	}
+	expiry := now.Add(reseatGraceWindow)
+	for _, ip := range ips {
+		reseating[ipWithoutMask(ip)] = expiry
+	}
+}
+
+// clearReseating drops the reseat protection for ips on iface, for an address
+// whose re-add failed: it is genuinely down, and the watcher must be free to put
+// it back.
+func (m *IPMonitor) clearReseating(iface string, ips []string) {
+	if m == nil || len(ips) == 0 {
+		return
+	}
+	m.Lock()
+	defer m.Unlock()
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		return
+	}
+	for _, ip := range ips {
+		delete(reseating, ipWithoutMask(ip))
+	}
+	if len(reseating) == 0 {
+		delete(m.reseatingIPs, iface)
+	}
+}
+
+// reseatSuppressed reports whether a removal of ip on iface is the enforce
+// pass's own reseat rather than an address gone missing.
+func (m *IPMonitor) reseatSuppressed(iface, ip string) bool {
+	if m == nil {
+		return false
+	}
+	m.Lock()
+	defer m.Unlock()
+
+	reseating, ok := m.reseatingIPs[iface]
+	if !ok {
+		return false
+	}
+	key := ipWithoutMask(ip)
+	expiry, ok := reseating[key]
+	if !ok {
+		return false
+	}
+	if !expiry.After(m.timeNow()) {
+		delete(reseating, key)
+		if len(reseating) == 0 {
+			delete(m.reseatingIPs, iface)
+		}
+		return false
+	}
+	return true
+}
+
+// clusterFloatingIPsByInterface returns every configured floating IP on each of
+// the local node's interfaces: the whole of every group assigned to the
+// interface, whoever currently holds it.
+//
+// This is the set of addresses that are PulseHA's rather than the interface's
+// own. It is wider than the expectation set on purpose, because two passes need
+// the wider answer: a Passive node releases all of it, and the reseat of #116
+// must not mistake a surplus floating IP on its way out for a static address to
+// put first. A node the config has no entry for gets an empty map.
+//
+// Read under the config's own lock and copied out, like reclaimInputs: cfg.Nodes
+// and cfg.Groups are maps the join handler writes under cfg.Lock(), and the
+// Passive branch used to read them bare — the race `make testrace` reported on
+// the join test the moment the Active branch started reading them too. The
+// lock is not reentrant, so no caller may hold it.
+func clusterFloatingIPsByInterface(cfg *config.Config, localID string) map[string][]string {
+	byIface := make(map[string][]string)
+	if cfg == nil {
+		return byIface
+	}
+	cfg.Lock()
+	defer cfg.Unlock()
+
+	localNodeCfg, ok := cfg.Nodes[localID]
+	if !ok || localNodeCfg == nil || localNodeCfg.IPGroups == nil {
+		return byIface
+	}
+	for iface, groups := range localNodeCfg.IPGroups {
+		for _, groupName := range groups {
+			if groupIPs, exists := cfg.Groups[groupName]; exists {
+				byIface[iface] = append(byIface[iface], groupIPs...)
+			}
+		}
+	}
+	return byIface
 }
 
 // RestorableIPs is restorableIPs for the one restore path outside this package.

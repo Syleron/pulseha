@@ -15,9 +15,9 @@ import (
 )
 
 // startMonitorLoop uses netlink address subscription for event-driven reconciliation
-func (m *IPMonitor) monitorLoop() {
+func (m *IPMonitor) monitorLoop(stop <-chan struct{}) {
 	updates := make(chan netlink.AddrUpdate, 32)
-	if err := netlink.AddrSubscribe(updates, m.stopChan); err != nil {
+	if err := netlink.AddrSubscribe(updates, stop); err != nil {
 		m.logger.Error("IP monitor: failed to subscribe to netlink addr updates", "error", err)
 		return
 	}
@@ -26,7 +26,7 @@ func (m *IPMonitor) monitorLoop() {
 
 	for {
 		select {
-		case <-m.stopChan:
+		case <-stop:
 			return
 		case upd, ok := <-updates:
 			if !ok {
@@ -108,6 +108,20 @@ func (m *IPMonitor) monitorLoop() {
 						_ = netlink.AddrAdd(targetLink, addrObj)
 					}
 					m.logger.Info("IP monitor: moved IP to correct interface", "ip", changedIP, "from", iface, "to", correctIface)
+					continue
+				}
+				// An IPv4 address that is not a floating IP arriving on an interface
+				// PulseHA manages is, in practice, NetworkManager re-adding the
+				// interface's static — the second half of the sequence that leaves
+				// a floating IP primary over it (docs/TEST-PLAN.md defect #116).
+				// The enforce pass is what repairs that, and a trigger here makes
+				// the repair take the pass's latency rather than up to a tick of
+				// health checks sourced from the wrong address. Triggers coalesce,
+				// so the burst of adds a profile re-apply produces costs one pass.
+				if _, floating := allExpected[changedIP]; !floating && upd.LinkAddress.IP.To4() != nil {
+					m.logger.Debug("IP monitor: an address that is not a floating IP was added on a managed interface; running the enforce pass",
+						"ip", changedIP, "iface", iface)
+					m.TriggerEnforce()
 				}
 				continue
 			}
@@ -154,6 +168,12 @@ func (m *IPMonitor) monitorLoop() {
 					// (docs/TEST-PLAN.md defect #60).
 					if m.restoreSuppressed(iface, exp) {
 						m.logger.Info("IP monitor: expected IP was released on request; not restoring", "ip", exp, "iface", iface)
+						break
+					}
+					// The enforce pass's own delete, with the add already behind it
+					// by the time this event is read (defect #116).
+					if m.reseatSuppressed(iface, exp) {
+						m.logger.Debug("IP monitor: expected IP is being reseated as a secondary address; not restoring", "ip", exp, "iface", iface)
 						break
 					}
 					m.logger.Warn("IP monitor: expected IP removed from Active node; restoring", "ip", exp, "iface", iface, "status", currentClaim.Status)
@@ -230,13 +250,13 @@ func (m *IPMonitor) restoreIP(iface string, ip string) {
 }
 
 // periodicReconcile runs a lightweight reconcile loop to enforce expected IPs
-func (m *IPMonitor) periodicReconcile() {
+func (m *IPMonitor) periodicReconcile(stop <-chan struct{}) {
 	// Run every 30s; exit on stop
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {
-		case <-m.stopChan:
+		case <-stop:
 			return
 		case <-t.C:
 			// Through the same gate as every other caller rather than calling the
@@ -366,20 +386,7 @@ func (m *IPMonitor) enforceExpectations() {
 
 		// CRITICAL: Passive nodes must remove ALL cluster floating IPs, not just expected IPs
 		// This prevents split-brain IP conflicts when a node loses active status
-		// Build a complete list of all floating IPs from cluster groups
-		allClusterIPs := make(map[string][]string) // iface -> IPs
-
-		// Get local node config to know which interfaces map to which groups
-		localNodeCfg, ok := cfg.Nodes[localID]
-		if ok && localNodeCfg != nil && localNodeCfg.IPGroups != nil {
-			for iface, groups := range localNodeCfg.IPGroups {
-				for _, groupName := range groups {
-					if groupIPs, exists := cfg.Groups[groupName]; exists {
-						allClusterIPs[iface] = append(allClusterIPs[iface], groupIPs...)
-					}
-				}
-			}
-		}
+		allClusterIPs := clusterFloatingIPsByInterface(cfg, localID) // iface -> IPs
 
 		m.logger.Info("ENFORCE: Passive node checking all cluster IPs for cleanup", "clusterIPs", allClusterIPs)
 
@@ -418,7 +425,20 @@ func (m *IPMonitor) enforceExpectations() {
 
 	// Active node: bring up missing IPs
 	m.logger.Info("ENFORCE: Node is Active, ensuring expected IPs are present", "status", StatusToString(claim.Status))
+
+	// Whether this node is still the Active, read fresh rather than from the
+	// pass's claim snapshot (GitHub #281). Placing a large group and announcing it
+	// takes ~16s for 118 addresses, and a demotion's cleanup is queued behind this
+	// pass, so a node demoted mid-pass kept every address until the pass finished.
+	// Once it is no longer Active the pass starts nothing new: no further
+	// interface is placed, no further announcement begins, and it returns so the
+	// queued cleanup runs.
+	stillActive := func() bool { return m.localIsActive(localID) }
 	for iface, ips := range expectations {
+		if !stillActive() {
+			m.logger.Info("ENFORCE: this node is no longer Active; abandoning the rest of this pass so its release can run")
+			return
+		}
 		var missing []string
 		m.logger.Debug("ENFORCE: Checking interface for missing IPs", "iface", iface, "expectedIPs", ips)
 		for _, ip := range ips {
@@ -461,7 +481,9 @@ func (m *IPMonitor) enforceExpectations() {
 				func(iface, ip string) error {
 					m.logger.Info("ENFORCE: About to bring up IP on Active node", "ip", ip, "iface", iface, "status", StatusToString(claim.Status))
 					return network.BringIPup(iface, ip)
-				}, network.SendGARPBatch)
+				}, func(iface string, ips []string) ([]string, error) {
+					return network.SendGARPBatchWhile(iface, ips, stillActive)
+				})
 
 			for _, attempt := range attempts {
 				if attempt.Err != nil {
@@ -479,12 +501,32 @@ func (m *IPMonitor) enforceExpectations() {
 				// On this logger rather than packages/network's, which nothing calls
 				// SetLevel on — a line reported there cannot reach the journal at any
 				// logging_level (#61's lesson, #33's positive control).
-				m.logger.Debug("ENFORCE: skipped announcing addresses this node no longer holds",
-					"iface", iface, "count", len(skipped), "of", len(missing))
+				if !stillActive() {
+					m.logger.Info("ENFORCE: stopped announcing; this node is no longer Active",
+						"iface", iface, "skipped", len(skipped), "of", len(missing))
+				} else {
+					m.logger.Debug("ENFORCE: skipped announcing addresses this node no longer holds",
+						"iface", iface, "count", len(skipped), "of", len(missing))
+				}
 			}
 		} else {
 			m.logger.Debug("ENFORCE: No missing IPs for interface", "iface", iface)
 		}
+	}
+
+	// Every expected address is up; now make sure none of them is the address the
+	// kernel prefers over the interface's own (docs/TEST-PLAN.md defect #116).
+	// After the placement loop rather than before it, so an address this pass has
+	// just added — a secondary, since the static was there first — is not read in
+	// a stale listing. The whole configured set is what counts as floating here,
+	// not just the expected one: see clusterFloatingIPsByInterface.
+	if !stillActive() {
+		m.logger.Info("ENFORCE: this node is no longer Active; skipping the reseat so its release can run")
+		return
+	}
+	floatingByIface := clusterFloatingIPsByInterface(cfg, localID)
+	for iface, ips := range expectations {
+		m.keepFloatingIPsSecondary(iface, append(floatingByIface[iface], ips...))
 	}
 
 	// An Active node must also give up what is no longer its to hold. The Active
@@ -513,6 +555,58 @@ func (m *IPMonitor) enforceExpectations() {
 	m.releaseUnassignedIPs(localID, expectations)
 
 	m.logger.Debug("ENFORCE: Completed enforceExpectations")
+}
+
+// keepFloatingIPsSecondary reseats the floating IPs on iface that have become the
+// primary address of their subnet behind the interface's own address.
+//
+// How a floating IP gets there, and why it matters, is the comment at the top of
+// packages/network/primary.go. In short: NetworkManager re-applying a profile
+// deletes and re-adds the static, promote_secondaries hands primary to the
+// floating IP in the gap, and from then on every health check on that subnet is
+// sourced from the floating IP — which in DR mode the real servers answer to
+// themselves. The static has to be first, and only a delete and re-add of the
+// floating IP puts it there.
+//
+// The watcher is told about each address immediately before its delete, and only
+// about an address that is actually being reseated, because the delete is one it
+// would otherwise restore with a warning. Telling it about the whole floating set
+// up front, as this first did, suppressed its restore of every floating IP for
+// reseatGraceWindow after every pass. An address whose re-add failed has its protection
+// cleared and is placed again here, once, the way the pass places any missing
+// address; the next pass covers it after that.
+func (m *IPMonitor) keepFloatingIPsSecondary(iface string, floating []string) {
+	if len(floating) == 0 {
+		return
+	}
+	reseated, err := network.ReseatFloatingIPs(iface, floating, func(ip string) {
+		m.markReseating(iface, []string{ip})
+	})
+	for _, ip := range reseated {
+		m.logger.Warn("ENFORCE: floating IP had become the primary address of its subnet; "+
+			"reseated it behind the interface's own address",
+			"ip", ip, "iface", iface)
+	}
+	if err == nil {
+		return
+	}
+	m.logger.Error("ENFORCE: could not keep every floating IP secondary", "iface", iface, "error", err)
+	// Whichever addresses the reseat left down are among the floating set; the
+	// cheap, correct move is to let the restore paths see them again and to try
+	// each one once now.
+	m.clearReseating(iface, floating)
+	for _, ip := range floating {
+		ipOnly, _ := utils.GetCIDR(ip)
+		if ipOnly == nil {
+			continue
+		}
+		if exists, on, cerr := network.CheckIfIPExists(ipOnly.String()); cerr == nil && exists && on == iface {
+			continue
+		}
+		if upErr := network.BringIPup(iface, ip); upErr != nil {
+			m.logger.Error("ENFORCE: failed to re-place a floating IP after its reseat", "ip", ip, "iface", iface, "error", upErr)
+		}
+	}
 }
 
 // releaseUnassignedIPs brings down cluster floating IPs this node is holding but
