@@ -5629,12 +5629,18 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// Kept whatever its value, empty included: an empty local certificate
 		// means this node has not published yet, which is a fact about this node
 		// that a peer cannot know better.
+		//
+		// Keeping a certificate the incoming config does not carry is a change to
+		// that config, and has to be published as one (GitHub #268): see
+		// reassertOwnCert below.
+		reassertOwnCert := false
 		if prevLocalID != "" {
 			if mine, ok := cur.Nodes[prevLocalID]; ok && mine != nil {
 				if incoming, ok := newConfig.Nodes[prevLocalID]; ok && incoming != nil {
 					if incoming.TLSCert != mine.TLSCert {
 						s.logger.Debug("CONFIG_SYNC: keeping this node's own certificate over the sender's copy",
 							"sender", senderID)
+						reassertOwnCert = mine.TLSCert != ""
 					}
 					incoming.TLSCert = mine.TLSCert
 				}
@@ -5844,6 +5850,29 @@ func (s *Server) ConfigSync(ctx context.Context, req *rpc.ConfigSyncRequest) (*r
 		// mutation minted its version against the stamp this sync was about to
 		// overwrite, so the next reconcile silently reverted it.
 		s.adoptConfigStamp(incomingStamp)
+
+		// The config just installed is not the one the sender holds: it carries
+		// this node's certificate where the sender's carried another value or none
+		// (GitHub #268). Left there it is a local change no one ever receives.
+		// Nodes started together each publish their certificate as version 1; the
+		// tie-break hands every node the highest origin's config, which carries
+		// only that origin's certificate; and every other node's re-publish was a
+		// re-send of the version everyone already held, so its certificate never
+		// travelled — the cluster sat at `held=1 heldOrigin=03` indefinitely, the
+		// tls_mode=required flip was refused and the Witness was never trusted.
+		//
+		// So it is minted as this node's next version, on top of the one just
+		// adopted, in the same critical section as the swap so no mutation lands
+		// between. It cannot ping-pong: a peer applying it finds its own
+		// certificate either already carried (nothing owed) or not (it publishes
+		// once in turn), and each node's value only has to travel once. An empty
+		// local certificate is not re-published — that would wipe the cluster's
+		// copy for a node that simply has not published yet.
+		if reassertOwnCert {
+			s.logger.Info("CONFIG_SYNC: publishing this node's certificate, which the adopted config did not carry",
+				"sender", senderID, "adopted_version", incomingStamp.version, "adopted_origin", incomingStamp.origin)
+			s.markConfigDirty()
+		}
 
 		// Update convergence metadata if newer. Also under the lock: the config
 		// broadcaster reads s.clusterEpoch under RLock, so writing it after the
