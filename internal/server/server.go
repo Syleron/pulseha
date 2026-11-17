@@ -1959,6 +1959,15 @@ func stillHeldIPs(ips []string) ([]string, error) {
 //   - provablyDown: the transport itself failed in a way that means no daemon is listening.
 //     Anything indeterminate (deadline, local fault, a peer that answers but
 //     declines) is reported as NOT provably down, so the caller stays conservative.
+// rollBackUnverifiedAdditions drops from the monitor the addresses a BringUpIP
+// could not verify. It forgets them rather than releasing them (GitHub #265): an
+// addition that did not take is not a release, and recording it as one made the
+// Active refuse its own addresses for the 60s grace window. The restore paths may
+// retry them at once.
+func (s *Server) rollBackUnverifiedAdditions(iface string, failed []string) {
+	s.ipMonitor.ForgetExpectedIPs(iface, failed)
+}
+
 // errIncumbentIsActive is confirmPeerReleasedIPs' answer for a peer that is
 // reachable and reports itself Active (GitHub #276).
 var errIncumbentIsActive = errors.New("incumbent is reachable and reports itself Active")
@@ -7113,7 +7122,7 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 	// Drop only unconfirmed additions from the monitor cache. Confirmed partial
 	// placement remains recorded and can be retried without rolling back ownership.
 	if len(failed) > 0 {
-		s.ipMonitor.RemoveExpectedIPs(req.Iface, failed)
+		s.rollBackUnverifiedAdditions(req.Iface, failed)
 	}
 
 	// In active-active mode: if the local node is Passive/Unknown, this BringUpIP
@@ -7180,8 +7189,25 @@ func (s *Server) BringUpIP(ctx context.Context, req *rpc.UpIpRequest) (*rpc.UpIp
 		VerificationVersion: ipVerificationVersion, VerifiedIps: verified, FailedIps: failed}, nil
 }
 
-// BringDownIP implements the Server.BringDownIP RPC for remote IP removal
+// BringDownIP implements the Server.BringDownIP RPC for remote IP removal. A
+// release requested over the RPC is a release this node was told to make, so the
+// addresses are protected from its own restore paths (defect #60).
 func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.DownIpResponse, error) {
+	return s.bringDownIP(ctx, req, true)
+}
+
+// bringDownIP is BringDownIP with the release protection made explicit.
+//
+// protect=false is for a node releasing addresses because it is not the Active,
+// on its own initiative — the VIP reconcile pass after a start or a demotion.
+// The protection guards an Active node's restore paths against a config that has
+// not caught up with a release it was told to make (#60); a node that is not
+// Active restores nothing, so on this path the protection has no effect until
+// the node becomes Active again, and then it is the defect: a restarted Active
+// whose startup cleanup released the group was made Active a millisecond later
+// and refused its own group for the whole grace window (GitHub #265, 61s on the
+// lab pair). The release happens either way; only the record is skipped.
+func (s *Server) bringDownIP(ctx context.Context, req *rpc.DownIpRequest, protect bool) (*rpc.DownIpResponse, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -7208,7 +7234,11 @@ func (s *Server) BringDownIP(ctx context.Context, req *rpc.DownIpRequest) (*rpc.
 	//
 	// Still before the bring-downs, as it was: the expectation has to be gone
 	// first, or the restore paths put the address straight back (#60).
-	s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+	if protect {
+		s.ipMonitor.RemoveExpectedIPs(req.Iface, normalized)
+	} else {
+		s.ipMonitor.ForgetExpectedIPs(req.Iface, normalized)
+	}
 
 	// One snapshot for the whole request. See releaseRequestedIPs for why the
 	// filter belongs here rather than in the caller; the nil on failure is

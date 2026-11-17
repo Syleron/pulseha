@@ -556,7 +556,7 @@ func (h *HealthChecker) performHealthChecks() {
 		if !isReachable {
 			// Mark node as unknown when unreachable
 			previousStatus := member.Status
-			member.Status = StatusUnknown
+			member.setStatusLocked(StatusUnknown)
 			member.Latency = "N/A"
 			member.mu.Unlock()
 
@@ -609,15 +609,15 @@ func (h *HealthChecker) performHealthChecks() {
 			// In particular, reachability alone must neither promote a Passive
 			// nor demote an existing Active (including when auto_failback is on).
 			if member.Status == StatusUnknown && reportedRole != StatusUnknown {
-				member.Status = reportedRole
+				member.setStatusLocked(reportedRole)
 				statusChanges = append(statusChanges, fmt.Sprintf("%s reports %s after recovery",
 					member.Hostname, StatusToString(reportedRole)))
 			}
 		} else if wasUnknown && autoFailback {
-			member.Status = recoveredStatus(mode)
+			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
-			member.Status = recoveredStatus(mode)
+			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
 				member.Hostname, StatusToString(member.Status)))
 		}
@@ -941,7 +941,7 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 		member.mu.Lock()
 		oldNodeID := member.ID
 		activeIPsCopy := append([]string{}, activeIPs...)
-		member.Status = StatusUnknown
+		member.setStatusLocked(StatusUnknown)
 		member.mu.Unlock()
 
 		// Elect a new active node and transfer IPs
@@ -1658,7 +1658,7 @@ func (h *HealthChecker) rebalanceActiveActive(members map[string]*Member) bool {
 				dst.ActiveIPs = append(dst.ActiveIPs, ip)
 			}
 		}
-		dst.Status = StatusActive
+		dst.setStatusLocked(StatusActive)
 		dst.mu.Unlock()
 		moved = true
 	}
