@@ -63,6 +63,16 @@ type IPMonitor struct {
 	stopOnce sync.Once
 	done     chan struct{}
 
+	// wg counts the monitor's goroutines — the watcher, the periodic reconcile
+	// and any enforce pass — so Stop can wait them out. Every Add happens under
+	// enforceMu after checking stopChan, and Stop closes stopChan under the same
+	// mutex, so no goroutine can be added once Stop has begun waiting.
+	wg sync.WaitGroup
+
+	// stopWaitLimit bounds how long Stop waits for the monitor's goroutines.
+	// Zero means defaultStopWaitLimit; tests shorten it.
+	stopWaitLimit time.Duration
+
 	// enforceMu guards the two flags below, and is deliberately not the monitor's
 	// own RWMutex: every setter that triggers a pass — UpdateExpectedIPs,
 	// AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce with m.Lock() still
@@ -132,14 +142,31 @@ func (m *IPMonitor) Start() error {
 		return fmt.Errorf("failed to initialize expected IPs: %v", err)
 	}
 
+	// A stopped monitor cannot be restarted: stopChan stays closed, so the loops
+	// would exit at once. Checked under enforceMu so the Add below cannot race
+	// Stop's Wait (see wg).
+	m.enforceMu.Lock()
+	if m.stopRequested() {
+		m.enforceMu.Unlock()
+		return fmt.Errorf("IP monitor has been stopped")
+	}
+	m.wg.Add(2)
+	m.enforceMu.Unlock()
+
 	// Marked before the goroutines start, not after: a concurrent caller that got past the
 	// outer check must not be able to spawn its own pair while this one is still launching.
 	m.running.Store(true)
 
 	// Start platform-specific event monitoring (pure event-driven)
-	go m.monitorLoop()
+	go func() {
+		defer m.wg.Done()
+		m.monitorLoop()
+	}()
 	// Start periodic reconcile as a safety net
-	go m.periodicReconcile()
+	go func() {
+		defer m.wg.Done()
+		m.periodicReconcile()
+	}()
 
 	m.logger.Info("IP monitor started")
 	return nil
@@ -177,12 +204,15 @@ func (m *IPMonitor) TriggerEnforce() {
 		return
 	}
 	m.logger.Debug("TRIGGER: TriggerEnforce called")
+
+	m.enforceMu.Lock()
+	// Checked under enforceMu, which Stop closes stopChan under, so a pass cannot
+	// start after Stop has begun waiting for the ones in flight (GitHub #273).
 	if m.stopRequested() {
+		m.enforceMu.Unlock()
 		m.logger.Debug("TRIGGER: Skipping enforce - monitor stopped")
 		return
 	}
-
-	m.enforceMu.Lock()
 	if m.enforceRunning {
 		m.enforcePending = true
 		m.enforceMu.Unlock()
@@ -190,10 +220,14 @@ func (m *IPMonitor) TriggerEnforce() {
 		return
 	}
 	m.enforceRunning = true
+	m.wg.Add(1)
 	m.enforceMu.Unlock()
 
 	m.logger.Debug("TRIGGER: Launching enforceExpectations goroutine")
-	go m.runEnforcePasses()
+	go func() {
+		defer m.wg.Done()
+		m.runEnforcePasses()
+	}()
 }
 
 // runEnforcePasses runs the pass, then runs it once more for however many
@@ -236,16 +270,57 @@ func (m *IPMonitor) stopRequested() bool {
 	}
 }
 
-// Stop stops the IP monitor
+// Stopped reports whether Stop has been called.
+func (m *IPMonitor) Stopped() bool {
+	if m == nil {
+		return true
+	}
+	return m.stopRequested()
+}
+
+// defaultStopWaitLimit bounds Stop's wait. An enforce pass placing and
+// announcing a large group takes seconds; one wedged on the kernel must not hold
+// a daemon shutdown past systemd's stop timeout, because a SIGKILLed daemon
+// releases nothing.
+const defaultStopWaitLimit = 10 * time.Second
+
+// Stop stops the IP monitor and waits, up to stopWaitLimit, for its goroutines
+// to finish.
+//
+// The wait is the point. Server.Stop releases the node's floating IPs straight
+// after this returns, and anything of the monitor still running — the watcher
+// answering a delete, or an enforce pass already placing — puts them back, so
+// the process exits holding the group while the peer takes it over (GitHub #273).
+//
+// Must not be called from one of the monitor's own goroutines: it would wait on
+// itself until the limit.
 func (m *IPMonitor) Stop() {
 	if m == nil {
 		return
 	}
 	m.stopOnce.Do(func() {
+		// Under enforceMu so no goroutine can be added after this (see wg).
+		m.enforceMu.Lock()
 		close(m.stopChan)
+		m.enforceMu.Unlock()
 		m.running.Store(false)
-		m.logger.Info("IP monitor stopped")
 	})
+
+	limit := m.stopWaitLimit
+	if limit <= 0 {
+		limit = defaultStopWaitLimit
+	}
+	finished := make(chan struct{})
+	go func() {
+		m.wg.Wait()
+		close(finished)
+	}()
+	select {
+	case <-finished:
+		m.logger.Info("IP monitor stopped")
+	case <-time.After(limit):
+		m.logger.Warn("IP monitor: stopped waiting for its goroutines; one may still restore an address", "waited", limit)
+	}
 }
 
 // UpdateExpectedIPs updates the list of expected IPs for an interface
