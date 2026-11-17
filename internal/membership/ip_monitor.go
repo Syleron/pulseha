@@ -58,28 +58,22 @@ type IPMonitor struct {
 	reseatingIPs map[string]map[string]time.Time
 	// now is time.Now, indirected so the grace windows can be tested without
 	// waiting them out.
-	now      func() time.Time
-	stopChan chan struct{}
-	stopOnce sync.Once
-	done     chan struct{}
+	now func() time.Time
 
-	// wg counts the monitor's goroutines — the watcher, the periodic reconcile
-	// and any enforce pass — so Stop can wait them out. Every Add happens under
-	// enforceMu after checking stopChan, and Stop closes stopChan under the same
-	// mutex, so no goroutine can be added once Stop has begun waiting.
-	wg sync.WaitGroup
+	// run is the current Start..Stop lifetime of the monitor's goroutines; see
+	// ipMonitorRun. Guarded by enforceMu. Replaced only by a Start after Stop.
+	run *ipMonitorRun
 
 	// stopWaitLimit bounds how long Stop waits for the monitor's goroutines.
 	// Zero means defaultStopWaitLimit; tests shorten it.
 	stopWaitLimit time.Duration
 
-	// enforceMu guards the two flags below, and is deliberately not the monitor's
-	// own RWMutex: every setter that triggers a pass — UpdateExpectedIPs,
-	// AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce with m.Lock() still
-	// held by a defer, so taking that lock here would wedge the writer.
-	enforceMu      pulselock.Mutex
-	enforceRunning bool
-	enforcePending bool
+	// enforceMu guards run and the coalescing flags inside it, and is deliberately
+	// not the monitor's own RWMutex: every setter that triggers a pass —
+	// UpdateExpectedIPs, AddExpectedIPs, RemoveExpectedIPs — calls TriggerEnforce
+	// with m.Lock() still held by a defer, so taking that lock here would wedge the
+	// writer.
+	enforceMu pulselock.Mutex
 	// enforce is the pass itself, indirected so the coalescing above can be tested
 	// on any platform — enforceExpectations needs netlink, and is a no-op off Linux.
 	enforce func()
@@ -94,6 +88,45 @@ type IPMonitor struct {
 	running atomic.Bool
 }
 
+// ipMonitorRun is one lifetime of the monitor's goroutines — the watcher, the
+// periodic reconcile and any enforce pass — from a Start (or construction) to a
+// Stop.
+//
+// A run is what makes the monitor restartable (GitHub #274). `cluster leave`
+// stops the monitor and the daemon keeps running, so a node can join a cluster
+// again; the monitor is built once, in NewServer, and a Stop that could not be
+// undone left a rejoined node with no watcher, no enforce pass and no periodic
+// reconcile. Each run has its own stop channel and its own WaitGroup, and every
+// goroutine is handed the run it belongs to rather than reading the monitor's
+// current one, because Stop's wait is bounded (GitHub #273): a goroutine of a
+// stopped run can still be finishing when the next run starts. It must see its
+// own run stopped, not the new one open, and Stop must never Wait on a
+// WaitGroup the next run is already adding to.
+type ipMonitorRun struct {
+	stop chan struct{}
+	wg   sync.WaitGroup
+
+	// The coalescing flags (defect #63), per run so a stopped run's pass that is
+	// still finishing cannot swallow a trigger meant for the new one. Guarded by
+	// the monitor's enforceMu.
+	enforceRunning bool
+	enforcePending bool
+}
+
+func newIPMonitorRun() *ipMonitorRun {
+	return &ipMonitorRun{stop: make(chan struct{})}
+}
+
+// stopped reports whether this run has been stopped.
+func (r *ipMonitorRun) stopped() bool {
+	select {
+	case <-r.stop:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewIPMonitor creates a new IP monitor
 func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 	m := &IPMonitor{
@@ -103,8 +136,9 @@ func NewIPMonitor(members *MemberList, logger *log.Logger) *IPMonitor {
 		releasedIPs:  make(map[string]map[string]time.Time),
 		reseatingIPs: make(map[string]map[string]time.Time),
 		now:          time.Now,
-		stopChan:     make(chan struct{}),
-		done:         make(chan struct{}),
+		// A monitor that has never been started still runs enforce passes when
+		// triggered; this is the run they belong to until a Start replaces it.
+		run: newIPMonitorRun(),
 	}
 	m.enforce = m.enforceExpectations
 	return m
@@ -135,6 +169,25 @@ func (m *IPMonitor) Start() error {
 		return nil
 	}
 
+	// Starting again after a Stop is a new run (GitHub #274). Swapped before the
+	// expectations are initialised, so the pass that initialisation triggers
+	// belongs to the new run.
+	m.enforceMu.Lock()
+	restarted := m.run.stopped()
+	if restarted {
+		m.run = newIPMonitorRun()
+	}
+	m.enforceMu.Unlock()
+	if restarted {
+		// What the previous run expected and was told to release is about the
+		// membership it was stopped for leaving. A rejoined node acting on it would
+		// refuse its new cluster's addresses or chase its old one's.
+		m.expectedIPs = make(map[string][]string)
+		m.releasedIPs = make(map[string]map[string]time.Time)
+		m.reseatingIPs = make(map[string]map[string]time.Time)
+		m.logger.Info("IP monitor: starting again after a stop; the previous run's expectations and release records are cleared")
+	}
+
 	// Initialize the expected IPs from the current member
 	if err := m.initializeExpectedIPs(); err != nil {
 		// Left not-running deliberately, so a later call retries. This is the no-cluster-yet
@@ -142,15 +195,14 @@ func (m *IPMonitor) Start() error {
 		return fmt.Errorf("failed to initialize expected IPs: %v", err)
 	}
 
-	// A stopped monitor cannot be restarted: stopChan stays closed, so the loops
-	// would exit at once. Checked under enforceMu so the Add below cannot race
-	// Stop's Wait (see wg).
+	// Under enforceMu so the Add cannot race a Stop's Wait on this run.
 	m.enforceMu.Lock()
-	if m.stopRequested() {
+	r := m.run
+	if r.stopped() {
 		m.enforceMu.Unlock()
-		return fmt.Errorf("IP monitor has been stopped")
+		return fmt.Errorf("IP monitor was stopped while it was starting")
 	}
-	m.wg.Add(2)
+	r.wg.Add(2)
 	m.enforceMu.Unlock()
 
 	// Marked before the goroutines start, not after: a concurrent caller that got past the
@@ -159,13 +211,13 @@ func (m *IPMonitor) Start() error {
 
 	// Start platform-specific event monitoring (pure event-driven)
 	go func() {
-		defer m.wg.Done()
-		m.monitorLoop()
+		defer r.wg.Done()
+		m.monitorLoop(r.stop)
 	}()
 	// Start periodic reconcile as a safety net
 	go func() {
-		defer m.wg.Done()
-		m.periodicReconcile()
+		defer r.wg.Done()
+		m.periodicReconcile(r.stop)
 	}()
 
 	m.logger.Info("IP monitor started")
@@ -206,27 +258,28 @@ func (m *IPMonitor) TriggerEnforce() {
 	m.logger.Debug("TRIGGER: TriggerEnforce called")
 
 	m.enforceMu.Lock()
-	// Checked under enforceMu, which Stop closes stopChan under, so a pass cannot
-	// start after Stop has begun waiting for the ones in flight (GitHub #273).
-	if m.stopRequested() {
+	r := m.run
+	// Checked under enforceMu, which Stop closes the run's channel under, so a pass
+	// cannot start after Stop has begun waiting for the ones in flight (GitHub #273).
+	if r.stopped() {
 		m.enforceMu.Unlock()
 		m.logger.Debug("TRIGGER: Skipping enforce - monitor stopped")
 		return
 	}
-	if m.enforceRunning {
-		m.enforcePending = true
+	if r.enforceRunning {
+		r.enforcePending = true
 		m.enforceMu.Unlock()
 		m.logger.Debug("TRIGGER: enforce pass already running, queued a follow-up")
 		return
 	}
-	m.enforceRunning = true
-	m.wg.Add(1)
+	r.enforceRunning = true
+	r.wg.Add(1)
 	m.enforceMu.Unlock()
 
 	m.logger.Debug("TRIGGER: Launching enforceExpectations goroutine")
 	go func() {
-		defer m.wg.Done()
-		m.runEnforcePasses()
+		defer r.wg.Done()
+		m.runEnforcePasses(r)
 	}()
 }
 
@@ -241,17 +294,20 @@ func (m *IPMonitor) TriggerEnforce() {
 // the two locks acyclic: the writers acquire m's write lock and then enforceMu
 // inside TriggerEnforce, and the pass itself acquires m's locks with enforceMu
 // released. Holding it over the pass would order them both ways round.
-func (m *IPMonitor) runEnforcePasses() {
+//
+// r is the run this goroutine was started for, not the monitor's current one: a
+// pass outliving its run's Stop must end with that run (GitHub #274).
+func (m *IPMonitor) runEnforcePasses(r *ipMonitorRun) {
 	for {
 		m.enforce()
 
 		m.enforceMu.Lock()
-		queued := m.enforcePending
-		m.enforcePending = false
-		// A monitor that has stopped abandons the queued pass. Stop is a teardown,
+		queued := r.enforcePending
+		r.enforcePending = false
+		// A run that has stopped abandons the queued pass. Stop is a teardown,
 		// and TriggerEnforce already refuses to start a pass past it.
-		if !queued || m.stopRequested() {
-			m.enforceRunning = false
+		if !queued || r.stopped() {
+			r.enforceRunning = false
 			m.enforceMu.Unlock()
 			return
 		}
@@ -260,22 +316,15 @@ func (m *IPMonitor) runEnforcePasses() {
 	}
 }
 
-// stopRequested reports whether Stop has been called.
-func (m *IPMonitor) stopRequested() bool {
-	select {
-	case <-m.stopChan:
-		return true
-	default:
-		return false
-	}
-}
-
-// Stopped reports whether Stop has been called.
+// Stopped reports whether the current run has been stopped, i.e. Stop was called
+// and no Start has followed it.
 func (m *IPMonitor) Stopped() bool {
 	if m == nil {
 		return true
 	}
-	return m.stopRequested()
+	m.enforceMu.Lock()
+	defer m.enforceMu.Unlock()
+	return m.run.stopped()
 }
 
 // defaultStopWaitLimit bounds Stop's wait. An enforce pass placing and
@@ -298,13 +347,15 @@ func (m *IPMonitor) Stop() {
 	if m == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		// Under enforceMu so no goroutine can be added after this (see wg).
-		m.enforceMu.Lock()
-		close(m.stopChan)
-		m.enforceMu.Unlock()
-		m.running.Store(false)
-	})
+	// Under enforceMu so no goroutine can be added to this run after it is closed.
+	// A second Stop finds the run already closed and only waits.
+	m.enforceMu.Lock()
+	r := m.run
+	if !r.stopped() {
+		close(r.stop)
+	}
+	m.enforceMu.Unlock()
+	m.running.Store(false)
 
 	limit := m.stopWaitLimit
 	if limit <= 0 {
@@ -312,7 +363,7 @@ func (m *IPMonitor) Stop() {
 	}
 	finished := make(chan struct{})
 	go func() {
-		m.wg.Wait()
+		r.wg.Wait()
 		close(finished)
 	}()
 	select {
