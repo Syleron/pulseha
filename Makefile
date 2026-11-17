@@ -3,10 +3,8 @@
 # every rule below file-shadowable): build.sh generates PHP proto stubs into
 # ./test/, and that directory silently turned `make test` into
 # "make: 'test' is up to date" — a green run that executed no tests at all.
-.PHONY: default all build buildrace netcore hcping hcserial genemailalerts \
-	get tools cli protos test testrace integration-test \
-	quiet-integration-test test-all clean install install-netcore \
-	install-hcping install-hcserial install-genemailalerts
+.PHONY: default all build buildrace get tools cli protos test testrace \
+	integration-test quiet-integration-test test-all clean install
 
 VERSION=`git describe --tags`
 BUILD=`git rev-parse HEAD`
@@ -20,14 +18,6 @@ build: get
 	 env GOOS=linux GOARCH=amd64 go build ${LDFLAGS} -v -o ./cmd/pulseha/bin/pulseha ./cmd/pulseha
 buildrace: get
 	 env GOOS=linux GOARCH=amd64 go build -race ${LDFLAGS} -v -o ./cmd/pulseha/bin/pulseha ./cmd/pulseha
-netcore: get
-	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/netcore/bin/networking.so ./plugins/netcore
-hcping: get
-	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/hcPing/bin/hcping.so ./plugins/hcPing
-hcserial: get
-	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/hcSerial/bin/hcserial.so ./plugins/hcSerial
-genemailalerts: get
-	 env GOOS=linux GOARCH=amd64 go build -buildmode=plugin -o ./plugins/genEmailAlerts/bin/genemail.so ./plugins/genEmailAlerts
 get:
 	 go mod download
 # Installs the protoc plugins that `protos` needs on PATH. Run once, or after
@@ -86,23 +76,34 @@ clean:
 	go clean -modcache
 	rm -f ./rpc/*.pb.go
 	rm -f ./rpc/*/*.pb.go
+# Install layout (GitHub #92). The defaults are where pulseha.service expects
+# things, so a plain `make install` behaves as it always has.
+#
+#   DESTDIR  stage the whole tree under another root, for packaging:
+#            `make install DESTDIR=/tmp/pkgroot`. A staged install is not live,
+#            so systemd is not reloaded.
+#   PREFIX   move the binaries (SBINDIR defaults to $(PREFIX)/sbin). The
+#            installed unit's ExecStart is rewritten to point at them.
+#
+# The plugin targets and /usr/local/lib/pulseha that used to sit here went
+# with the plugin system: ./plugins no longer exists, so every one of them
+# failed.
+DESTDIR ?=
+PREFIX ?= /usr/local
+SBINDIR ?= $(PREFIX)/sbin
+SYSCONFDIR ?= /etc
+SYSTEMDUNITDIR ?= /etc/systemd/system
+
 install:
 ifneq ($(shell uname),Linux)
-	echo "Install only available on Linux"
-	exit 1
+	@echo "Install only available on Linux"
+	@exit 1
 endif
-	cp ./cmd/pulseha/bin/pulseha /usr/local/sbin/
-	cp ./cmd/pulsectl/bin/pulsectl /usr/local/sbin/
-	#chmod +x /etc/pulsectl/pulse
-	if [ ! -d "/etc/pulseha/" ]; then mkdir /etc/pulseha/; fi
-	if [ ! -d "/usr/local/lib/pulseha" ]; then mkdir /usr/local/lib/pulseha; fi
-	cp pulseha.service /etc/systemd/system/
+	install -d -m 0755 $(DESTDIR)$(SBINDIR) $(DESTDIR)$(SYSCONFDIR)/pulseha $(DESTDIR)$(SYSTEMDUNITDIR)
+	install -m 0755 ./cmd/pulseha/bin/pulseha $(DESTDIR)$(SBINDIR)/pulseha
+	install -m 0755 ./cmd/pulsectl/bin/pulsectl $(DESTDIR)$(SBINDIR)/pulsectl
+	sed 's#^ExecStart=/usr/local/sbin/pulseha#ExecStart=$(SBINDIR)/pulseha#' pulseha.service > $(DESTDIR)$(SYSTEMDUNITDIR)/pulseha.service
+	chmod 0644 $(DESTDIR)$(SYSTEMDUNITDIR)/pulseha.service
+ifeq ($(DESTDIR),)
 	systemctl daemon-reload
-install-netcore:
-	 cp ./plugins/netcore/bin/networking.so /usr/local/lib/pulseha
-install-hcping:
-	 cp ./plugins/hcPing/bin/hcping.so /usr/local/lib/pulseha
-install-hcserial:
-	 cp ./plugins/hcSerial/bin/hcserial.so /usr/local/lib/pulseha
-install-genemailalerts:
-	 cp ./plugins/genEmailAlerts/bin/genemail.so /usr/local/lib/pulseha
+endif
