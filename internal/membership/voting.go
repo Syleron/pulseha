@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/syleron/pulseha/internal/quorum"
+	"github.com/syleron/pulseha/packages/config"
 )
 
 // requestQuorumDecision returns the recovered proposal, which can differ from
@@ -33,14 +34,8 @@ func (h *HealthChecker) requestQuorumDecision(kind quorum.VoteType, subject, des
 		return nil, false
 	}
 	cfg.Lock()
-	ids := make([]string, 0, len(cfg.Nodes))
-	for id, node := range cfg.Nodes {
-		if id != "" && node != nil {
-			ids = append(ids, id)
-		}
-	}
+	ids := config.CountedNodeIDs(cfg.Nodes)
 	cfg.Unlock()
-	sort.Strings(ids)
 	return result, slices.Equal(ids, result.MemberIDs)
 }
 
@@ -50,7 +45,7 @@ func (h *HealthChecker) approvedRedistribution(ips []string) ([]string, bool) {
 		return nil, false
 	}
 	cfg.Lock()
-	size := len(cfg.Nodes)
+	size := config.CountedNodeCount(cfg.Nodes)
 	cfg.Unlock()
 	if size > 0 && size < 3 {
 		return ips, true
@@ -88,8 +83,9 @@ func (h *HealthChecker) votedElectionCandidate(candidate *Member) (*Member, bool
 		return nil, false
 	}
 	cfg.Lock()
-	size := len(cfg.Nodes)
-	configured := cfg.Nodes[candidate.ID] != nil
+	size := config.CountedNodeCount(cfg.Nodes)
+	// A Witness is configured but is never a candidate, whatever its status.
+	configured := cfg.Nodes[candidate.ID] != nil && !cfg.Nodes[candidate.ID].IsWitness()
 	cfg.Unlock()
 	if !configured || candidate.GetStatus() != StatusPassive {
 		return nil, false
