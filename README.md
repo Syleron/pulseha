@@ -5,109 +5,111 @@
 /_/   \_,_/_/___/\__/_//_/_/ |_|
 ```
 
-PulseHA is a powerful high availability cluster management system designed to provide automated failover and IP address management across multiple nodes in a cluster. It offers both daemon and CLI tools for comprehensive cluster management.
+PulseHA is a high availability cluster daemon for Linux. It keeps groups of floating IP
+addresses up on the right node of a cluster, moves them when a node fails, and announces the
+move to the network.
 
 ## Architecture Overview
 
-PulseHA consists of two main components:
+PulseHA consists of two programs:
 
-- **`pulseha`** - The main high availability daemon that runs on each cluster node
-- **`pulsectl`** - The dedicated CLI tool for cluster management and administration
+- **`pulseha`**: the daemon. One runs on every node; the daemons health-check each other,
+  elect an Active node, and place the floating IPs.
+- **`pulsectl`**: the CLI. It talks to the local daemon over a Unix socket and is how you
+  create clusters, manage groups and inspect state.
 
-## Why PulseHA
-
-PulseHA attempts to solve high availability with a more simple approach but without restricting functionality with the use of additional custom plugins. It provides enterprise-grade HA capabilities with an intuitive interface and robust testing framework.
+Nodes talk to each other over gRPC on each node's bind address and port, optionally over TLS
+(see [Cluster TLS](#cluster-tls)).
 
 ## Features
 
-### Core High Availability
-- **Multiple Operating Modes**
-  - Active-Passive: Traditional HA setup with one active node and multiple passive backups
-  - Active-Active: Distributed load across multiple active nodes with intelligent IP distribution
+### High availability
+- **Two modes**
+  - **Active-passive:** one Active node holds every floating IP. The others are Passive and
+    take over if it fails.
+  - **Active-active:** every healthy node is Active and holds a share of the group's
+    addresses. A failed node's share is redistributed, and nodes that recover are given
+    addresses back.
+- **Automatic failover.** Each node health-checks the others every `hcs_interval`. An
+  Active node not heard from for `fo_limit` is failed over.
+- **Automatic failback** (`auto_failback`).
+- **Quorum** on clusters of three or more nodes, so a minority side of a partition cannot
+  claim addresses the majority still serves. Two-node clusters are a deliberate exception;
+  see [Quorum](#quorum).
+- **Maintenance mode and per-node capacity** to take a node out of service, or cap how many
+  addresses it may hold.
 
-- **Automatic Failover**
-  - Health monitoring of cluster nodes with configurable intervals
-  - Automatic IP redistribution on node failure
-  - Configurable failover thresholds and recovery settings
-  - Auto-failback capability when failed nodes recover
+### Floating IPs
+- Addresses are organised in **groups**, and a group is assigned to an interface on each node
+  that may hold it.
+- Moves are **announced** with gratuitous ARP (IPv4, `arping`) or unsolicited neighbour
+  advertisements (IPv6, `ndptool`).
+- The daemon **watches its interfaces** and restores an expected address that disappears.
+- A floating IP is **never left as the primary address of its subnet**, so health checks and
+  replies keep leaving from the interface's own address
+  ([ADR-0006](docs/adr/0006-a-floating-ip-is-never-the-primary-address-of-its-subnet.md)).
 
-### IP and Network Management
-- **Floating IP Group Management**
-  - Dynamic IP distribution based on node capacity and health
-  - Graceful IP failover and failback with minimal downtime
-  - GARP (Gratuitous ARP) support for immediate network updates
-  - Support for IPv4 and IPv6 addressing
+### Security
+- **Cluster join tokens.** A node can only join with the cluster's token.
+- **Optional mutual TLS** between nodes, with each node's certificate pinned through the
+  cluster config ([ADR-0005](docs/adr/0005-cluster-trust-is-a-config-allowlist.md)).
+- The config file is written with permissions `0600`.
 
-### Security and Communication
-- **Secure Cluster Communication**
-  - TLS encryption for all inter-node communication
-  - Certificate-based node authentication
-  - Secure cluster join tokens with expiration
-  - Role-based access control for cluster operations
-
-### Monitoring and Observability
-- **Comprehensive Logging**
-  - Configurable syslog integration with facility and tag support
-  - File-based logging with rotation support
-  - Multiple log levels (debug, info, warn, error)
-  - Structured logging for easy parsing and analysis
-
-- **Real-time Status Monitoring**
-  - Cluster health monitoring with detailed node status
-  - Latency measurements and performance tracking
-  - JSON and human-readable output formats
-  - Webhook notifications for status changes
-
-### Advanced Features
-- **Quorum-Based Decision Making**
-  - Prevents a minority side of a partition from claiming addresses the majority still serves
-  - Automatic: a majority is `(N/2)+1`, recalculated as nodes join and leave
-  - Automatic leader election and consensus protocols
-  - Not applied below three nodes — see [Quorum](#quorum)
-
-- **Plugin Architecture**
-  - Extensible plugin system for custom integrations
-  - Pre-built plugins for common use cases
-  - API hooks for external monitoring systems
+### Logging
+- To syslog (local or remote, with a configurable facility and tag), to a file, or both.
+- Four levels: `debug`, `info`, `warn`, `error`.
 
 ## Installation
 
-### Binary Installation
+PulseHA runs on Linux. The daemon must run as root, because it adds and removes addresses on
+network interfaces.
+
+### From source
 
 ```bash
-# Clone the repository
 git clone https://github.com/syleron/pulseha.git
 cd pulseha
 
-# Build the daemon
-go build -o pulseha cmd/pulseha/main.go
+# rpc/*.pb.go is generated, not committed. With protoc on PATH, install the Go
+# plugins once ($(go env GOPATH)/bin must be on PATH too), then generate
+make tools
+make protos
 
-# Build the CLI tool
-go build -o pulsectl cmd/pulsectl/main.go
+# Build the daemon and the CLI (both into ./cmd/*/bin/)
+make build cli
 
-# Install binaries (optional). /usr/local/sbin is where pulseha.service runs the
-# daemon from; `make install` (below) puts both binaries and the unit there.
-sudo cp pulseha /usr/local/sbin/
-sudo cp pulsectl /usr/local/sbin/
+# Install both into /usr/local/sbin, the systemd unit into /etc/systemd/system,
+# create /etc/pulseha, and reload systemd
+sudo make install
+sudo systemctl enable --now pulseha
 ```
 
-### Docker Installation
+`make install` also supports packaging:
 
 ```bash
-# Pull the official Docker image
-docker pull syleron/pulseha:latest
-
-# Or build from source
-docker build -t pulseha .
+# Stage the install under another root. Nothing is written outside it and systemd is not
+# reloaded. PREFIX moves the binaries (default /usr/local) and the unit's ExecStart follows.
+make install DESTDIR=/tmp/pkgroot PREFIX=/usr
 ```
+
+To build without `make`, `go build -o pulseha ./cmd/pulseha` and
+`go build -o pulsectl ./cmd/pulsectl` work once `rpc/*.pb.go` has been generated.
 
 ## Configuration
 
-PulseHA uses a JSON configuration file stored by default in:
-- Production: `/etc/pulseha/config.json`
-- Development: `~/.pulseha/config.json`
+The daemon keeps its configuration in a JSON file:
 
-### Core Configuration Options
+| Running as | Config file | CLI socket |
+|---|---|---|
+| root (normal) | `/etc/pulseha/config.json` | `/var/run/pulseha/pulseha.sock` |
+| a user that cannot write `/etc/pulseha` | `~/.pulseha/config.json` | `~/.pulseha/pulseha.sock` |
+
+The daemon writes a default config on first start. The cluster sections (`nodes`,
+`floating_ip_groups`) are filled in by `cluster create`, `cluster join` and the `group`
+commands. Change settings with `pulsectl config set` rather than by editing the file: a
+setting that applies to the whole cluster is then propagated to every node.
+
+### Example
 
 ```json
 {
@@ -115,165 +117,161 @@ PulseHA uses a JSON configuration file stored by default in:
     "hcs_interval": 1000,
     "fos_interval": 5000,
     "fo_limit": 10000,
-    "local_node": "",
-    "cluster_token": "",
+    "local_node": "<this node's ID>",
+    "cluster_token": "<set by cluster create>",
     "logging_level": "info",
     "auto_failback": true,
-    "log_to_file": true,
+    "log_to_file": false,
     "log_file_location": "/etc/pulseha/pulseha.log",
     "log_to_syslog": true,
     "syslog_network": "",
     "syslog_address": "",
-    "syslog_facility": "LOG_LOCAL0",
+    "syslog_facility": "LOG_DAEMON",
     "syslog_tag": "pulseha",
     "mode": "active-passive",
-    "quorum_enabled": false,
-    "quorum_min_nodes": 2,
-    "quorum_majority": true
+    "nm_address_ownership": false
   },
-  "floating_ip_groups": {},
-  "nodes": {},
-  "plugins": {}
+  "floating_ip_groups": {
+    "web": ["192.168.1.100/24", "192.168.1.101/24"]
+  },
+  "nodes": {
+    "<node ID>": {
+      "hostname": "node1",
+      "bind_address": "192.168.1.10",
+      "bind_port": "8080",
+      "group_assignments": { "eth0": ["web"] }
+    }
+  }
 }
 ```
 
-### Configuration Parameters
+### Settings
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `hcs_interval` | Health check interval in milliseconds | 1000 |
-| `fos_interval` | Failover interval in milliseconds | 5000 |
-| `fo_limit` | Failure threshold before triggering failover | 10000 |
-| `logging_level` | Log level (debug, info, warn, error) | info |
-| `log_to_syslog` | Enable syslog logging | true |
-| `syslog_facility` | Syslog facility (LOG_LOCAL0-7, LOG_USER, etc.) | LOG_LOCAL0 |
-| `mode` | Cluster mode (active-passive, active-active) | active-passive |
-| `quorum_enabled` | Enable quorum-based decisions | false |
+Each setting applies either to the **cluster** (`config set` propagates it to every node) or to
+the **node** it is set on.
 
-> **Security Note:** Configuration files are written with permissions `0600` to restrict access to the owner only.
+| Key | Scope | Default | Meaning |
+|---|---|---|---|
+| `mode` | cluster | `active-passive` | `active-passive` or `active-active`. Prefer `pulsectl cluster mode set`. |
+| `hcs_interval` | cluster | `1000` | Health-check interval, ms. Minimum 1000. |
+| `fo_limit` | cluster | `10000` | How long, in ms, an Active node can go unheard from before it is failed over. Minimum 1000, and not less than `fos_interval`. |
+| `fos_interval` | cluster | `5000` | Failover interval, ms. Validated (minimum 1000, at most `fo_limit`) but not otherwise used by the current daemon. |
+| `auto_failback` | cluster | `true` | Hand addresses back to a node that recovers. |
+| `tls_mode` | cluster | `permissive` | `permissive` or `required`. See [Cluster TLS](#cluster-tls). |
+| `logging_level` | node | `info` | `debug`, `info`, `warn` or `error`. |
+| `log_to_syslog` | node | `true` | Log to syslog. |
+| `syslog_network` | node | `""` | `""` for the local syslog, or `udp` / `tcp` for a remote one. |
+| `syslog_address` | node | `""` | Remote syslog `host:port`, with `syslog_network`. |
+| `syslog_facility` | node | `LOG_INFO` | One of `LOG_LOCAL0`–`LOG_LOCAL7`, `LOG_USER`, `LOG_DAEMON`, `LOG_SYSLOG`. Any other value, including the default `LOG_INFO`, which is a severity rather than a facility, logs with facility 0 (`kern`). Set one explicitly. |
+| `syslog_tag` | node | `pulseha` | Syslog tag. |
+| `log_to_file` | node | `false` | Also log to `log_file_location`. There is no built-in rotation; use `logrotate` with `copytruncate`. |
+| `log_file_location` | node | `<config dir>/pulseha.log` | Log file path. |
+| `nm_address_ownership` | node | `false` | Treat an address on a managed interface that no NetworkManager profile claims as one PulseHA placed, and release it when no group configures it. |
+
+Per-node entries under `nodes` also carry `maintenance`, `capacity` (maximum floating IPs this
+node may hold; `0` is unlimited) and `tls_cert`. Use `pulsectl node maintenance` and
+`pulsectl node capacity` for the first two; the daemon manages `tls_cert` itself.
+
+```bash
+pulsectl config all              # every setting (--json for machine-readable output)
+pulsectl config get fo_limit     # one setting
+pulsectl config set fo_limit 15000
+```
+
+`config get` knows `mode`, `logging_level`, `log_to_file`, `log_to_syslog`, `hcs_interval`,
+`fos_interval`, `fo_limit`, `auto_failback` and `nm_address_ownership`. `config set` accepts
+every key in the table above.
 
 ## Usage
 
-### Daemon Management
+### The daemon
 
 ```bash
-# Start the PulseHA daemon
-sudo pulseha
-
-# Start as systemd service
-sudo systemctl start pulseha
-sudo systemctl enable pulseha
-
-# Check daemon status
+sudo systemctl enable --now pulseha
 sudo systemctl status pulseha
+journalctl -t pulseha -f           # follow the daemon's log
 ```
 
-### Cluster Operations
-
-#### Creating a Cluster
+### Creating and joining a cluster
 
 ```bash
-# Create a new cluster in active-passive mode
+# On the first node: create the cluster (port defaults to 8080)
 pulsectl cluster create --bind-ip 192.168.1.10
+pulsectl cluster create --bind-ip 192.168.1.10 --bind-port 9443 --mode active-active
 
-# Create cluster in active-active mode
-pulsectl cluster create --bind-ip 192.168.1.10 --active-active
+# Print the join token
+pulsectl cluster token
+pulsectl cluster token --regenerate   # new token, synced to every node
 
-# Create cluster with custom port
-pulsectl cluster create --bind-ip 192.168.1.10 --bind-port 8080
+# On each other node: join through any existing member
+pulsectl cluster join --address 192.168.1.10:8080 --token <TOKEN> --bind-ip 192.168.1.11
 ```
 
-#### Joining a Cluster
+`--node-id` on `create` and `join` sets the node's ID instead of generating one, which lets a
+node that leaves and rejoins keep its identity.
+
+**A node that joins starts in maintenance mode** and takes no addresses until you assign it a
+group and take it out of maintenance:
 
 ```bash
-# Join an existing cluster using hostname
-pulsectl cluster join --address node1.example.com --token <CLUSTER_TOKEN>
-
-# Join using IP address and port
-pulsectl cluster join --address 192.168.1.10:8080 --token <CLUSTER_TOKEN>
-
-# Join with custom local bind settings
-pulsectl cluster join --address node1.example.com --token <TOKEN> --bind-ip 192.168.1.11 --bind-port 8080
+pulsectl group assign --group web --node-id <NEW NODE ID> --interface eth0
+pulsectl node maintenance --disable --node-id <NEW NODE ID>
 ```
 
-#### Managing Cluster Mode
+To remove the local node from its cluster: `pulsectl cluster leave`. To remove another node:
+`pulsectl node remove --node-id <ID>`.
+
+### Cluster mode
 
 ```bash
-# View current cluster mode
-pulsectl cluster mode
-
-# Set cluster to active-passive mode
-pulsectl cluster mode set --mode active-passive
-
-# Set cluster to active-active mode
+pulsectl status                                    # the current mode is shown at the top
 pulsectl cluster mode set --mode active-active
+pulsectl cluster mode set --mode active-passive    # consolidates every address onto one node
 ```
 
-### IP Group Management
-
-#### Creating and Managing Groups
+### Floating IP groups
 
 ```bash
-# Create a new IP group
-pulsectl group create --name web-servers
+pulsectl group create web
+pulsectl group add-ip --group web --ip 192.168.1.100/24
+pulsectl group remove-ip --group web --ip 192.168.1.100/24
 
-# List all IP groups
-pulsectl group list
+# A group is held only on nodes it is assigned to, on the interface named here
+pulsectl group assign   --group web --node-id <ID> --interface eth0
+pulsectl group unassign --group web --node-id <ID> --interface eth0
 
-# List groups in JSON format
-pulsectl group list --json
-
-# Delete a group
-pulsectl group delete --name web-servers
+pulsectl group list            # --json for machine-readable output
+pulsectl group delete web      # --force to delete a group that is still assigned
 ```
 
-#### IP Assignment
+Node IDs are shown by `pulsectl status`.
+
+### Nodes
 
 ```bash
-# Add IP addresses to a group
-pulsectl group add-ip --group web-servers --ip 192.168.1.100
-pulsectl group add-ip --group web-servers --ip 192.168.1.101
+pulsectl node promote --node-id <ID>       # make this node the Active (active-passive)
+pulsectl node promote --node-id <ID> --force   # even if the current Active cannot be demoted
+pulsectl node demote  --node-id <ID>
 
-# Remove IP from group
-pulsectl group remove-ip --group web-servers --ip 192.168.1.100
+pulsectl node maintenance --node-id <ID>            # take a node out of service
+pulsectl node maintenance --disable --node-id <ID>  # and back in
+pulsectl node capacity 50 --node-id <ID>            # cap the addresses it may hold (0 = no cap)
 
-# Assign group to a node's interface
-pulsectl group assign --group web-servers --node node1 --interface eth0
-
-# Unassign group from node
-pulsectl group unassign --group web-servers --node node1
+pulsectl cluster network resync            # re-read the node's interfaces
 ```
 
-### Monitoring and Status
+`maintenance` and `capacity` act on the local node when `--node-id` is omitted.
 
-#### Cluster Status
+### Status
 
 ```bash
-# View detailed cluster status
-pulsectl status
-
-# View status in JSON format
+pulsectl status          # cluster health, mode, and every node's status, latency and addresses
 pulsectl status --json
-
-# Monitor status continuously
 watch pulsectl status
 ```
 
-#### Node Management
-
-```bash
-# List all nodes
-pulsectl node list
-
-# View specific node details
-pulsectl node show --hostname node1.example.com
-
-# Promote node to active (active-passive mode)
-pulsectl node promote --hostname node1.example.com
-
-# Remove node from cluster
-pulsectl node remove --hostname node1.example.com
-```
+A node's status is `Active`, `Passive`, `Standby` (active-active only: healthy but holding no
+addresses), `Maintenance` or `Unknown` (not reachable).
 
 ### Quorum
 
@@ -303,40 +301,29 @@ If you need a single-owner guarantee, run three or more nodes. See
 [ADR-0002](docs/adr/0002-two-node-availability-over-safety.md) for the full reasoning and the
 options that were rejected.
 
-## CLI Tool
+### Cluster TLS
 
-PulseHA uses **`pulsectl`** as the dedicated command-line interface for all cluster management operations:
+Each node generates a certificate at start and publishes it into the cluster config.
+`tls_mode` decides whether nodes require TLS from each other:
 
-```bash
-# All cluster operations use pulsectl
-pulsectl status
-pulsectl cluster create --bind-ip 192.168.1.10
-pulsectl group list
-pulsectl node promote --hostname node1
-```
+- **`permissive`** (default): connections between nodes stay plaintext, while every node
+  publishes its certificate into the cluster config.
+- **`required`**: every connection between nodes is mutually authenticated against the
+  certificates in the cluster config.
 
-This provides a clean separation between:
-- **`pulseha`** - The daemon service (runs continuously)
-- **`pulsectl`** - The management CLI tool (for administration)
+Switch with `pulsectl config set tls_mode required`. The daemon refuses the switch until every
+node is reachable and has published a certificate, because a node that requires TLS cannot talk
+to one that does not serve it. The certificates are kept in `~/.pulseha/certs`, which for the
+daemon running as root is `/root/.pulseha/certs`.
 
-## Logging Configuration
+## Logging
 
-PulseHA supports multiple logging destinations with flexible configuration:
-
-### Syslog Integration
 ```json
-{
-  "pulseha": {
-    "log_to_syslog": true,
-    "syslog_network": "",
-    "syslog_address": "",
-    "syslog_facility": "LOG_LOCAL0",
-    "syslog_tag": "pulseha"
-  }
-}
+{ "pulseha": { "log_to_syslog": true, "syslog_facility": "LOG_DAEMON", "syslog_tag": "pulseha" } }
 ```
 
-### Remote Syslog
+Remote syslog:
+
 ```json
 {
   "pulseha": {
@@ -349,251 +336,156 @@ PulseHA supports multiple logging destinations with flexible configuration:
 }
 ```
 
-### File Logging
-```json
-{
-  "pulseha": {
-    "log_to_file": true,
-    "log_file_location": "/var/log/pulseha/pulseha.log"
-  }
-}
-```
-
-## Advanced Configuration
-
-### Performance Tuning
+To a file as well:
 
 ```json
-{
-  "pulseha": {
-    "hcs_interval": 500,
-    "fos_interval": 2000,
-    "fo_limit": 5000
-  }
-}
+{ "pulseha": { "log_to_file": true, "log_file_location": "/var/log/pulseha/pulseha.log" } }
 ```
 
-## Failover Logic
+All of these are node settings, so set them on each node:
+`pulsectl config set syslog_facility LOG_DAEMON`.
 
-### Health Checking Process
+## Tuning
 
-1. **Regular Health Checks**: Each node performs health checks on all other nodes at configurable intervals
-2. **Connection Verification**: TCP connectivity tests ensure nodes are reachable
-3. **Latency Measurement**: Response times are tracked for performance monitoring
-4. **IP Verification**: Floating IPs are tested for proper functionality
+Detection is driven by `hcs_interval` (how often nodes check each other) and `fo_limit` (how
+long an Active node may be unheard from). Both have a floor of 1000 ms. A faster but still
+valid setting:
 
-### Active-Passive Failover
+```bash
+pulsectl config set hcs_interval 1000
+pulsectl config set fo_limit 3000
+```
 
-1. **Primary Failure**: When the active node fails, all floating IPs move to a standby node
-2. **Automatic Promotion**: The standby node becomes active and assumes all IP addresses
-3. **GARP Announcements**: Network switches are updated via Gratuitous ARP
-4. **Service Continuity**: Applications continue with minimal interruption
+Lowering `fo_limit` makes failover quicker and also makes a busy or briefly unreachable Active
+more likely to be failed over unnecessarily.
 
-### Active-Active Failover
+## Failover
 
-1. **Partial Failure**: Only affected IPs are redistributed when a node fails
-2. **Load Balancing**: IPs are distributed across remaining healthy nodes
-3. **Gradual Recovery**: Failed nodes gradually receive IPs back when recovering
+### Health checking
+
+1. Every node checks every other node each `hcs_interval`, with a TCP connection to its bind
+   port.
+2. Every fifth check, it makes a gRPC health check that confirms the peer is in the same
+   cluster and reports its role. In active-passive it also does this straight away for a
+   reachable peer whose role it does not yet know.
+3. A peer that fails a check is marked `Unknown`. An Active node unheard from for `fo_limit`
+   is failed over.
+
+### Active-passive
+
+1. When the Active fails, the election coordinator picks a Passive node to promote. On three
+   or more nodes the promotion needs a majority vote.
+2. The promoted node brings up every floating IP of the groups assigned to it, then announces
+   them.
+3. A node that becomes Passive releases every floating IP it holds.
+
+### Active-active
+
+1. When a node fails, only its addresses are redistributed, to the healthy nodes the group is
+   assigned to, respecting `capacity`.
+2. A node that recovers, or joins, is given addresses back as the coordinator rebalances.
 
 ## Testing
 
-PulseHA includes comprehensive testing capabilities:
-
-### Unit and Integration Tests
 ```bash
-# Run all tests
-go test ./...
-
-# Run specific test suites
-go test ./tests/unit/...
-go test ./tests/integration/...
-
-# Run with verbose output
-go test -v ./tests/integration/syslog_logging_test.go
+make test                    # unit tests: internal, cmd, packages, tests/unit
+make testrace                # the same under -race (run it on Linux: see below)
+make integration-test        # tests/integration
+go test -v ./tests/integration/... -run Syslog
 ```
 
-### Docker Test Environment
+Some code is Linux-only (`//go:build linux`), so a race run on macOS does not compile it. Run
+`make testrace` on Linux, or in a container:
+
 ```bash
-# Start the local 3-node Docker test cluster
+docker run --rm -v "$PWD":/src -w /src golang:1.26 make testrace
+```
+
+A local three-node cluster for manual testing:
+
+```bash
 cd docker/test
 ./start-cluster.sh
 ```
 
-### Production Testing
-```bash
-# Test cluster functionality
-pulsectl status
-pulsectl group create --name test-group
-pulsectl group add-ip --group test-group --ip 192.168.1.200
-```
+## Deployment
 
-## Deployment Examples
+### systemd
 
-### Systemd Service
-
-Create `/etc/systemd/system/pulseha.service`:
-
-```ini
-[Unit]
-Description=PulseHA High Availability Daemon
-After=network.target
-
-[Service]
-Type=simple
-User=pulseha
-Group=pulseha
-ExecStart=/usr/local/bin/pulseha
-Restart=always
-RestartSec=5
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
-```
-
-### Docker Compose
-
-```yaml
-version: '3.8'
-services:
-  pulseha-node1:
-    image: syleron/pulseha:latest
-    container_name: pulseha-node1
-    hostname: node1
-    network_mode: host
-    privileged: true
-    volumes:
-      - /etc/pulseha:/etc/pulseha
-      - /var/log/pulseha:/var/log/pulseha
-    environment:
-      - PULSEHA_BIND_IP=192.168.1.10
-      - PULSEHA_NODE_ID=node1
-```
+`make install` installs [`pulseha.service`](pulseha.service). It runs `/usr/local/sbin/pulseha`
+as root, restarts it on failure, and logs to the journal (`journalctl -t pulseha`).
 
 ## Troubleshooting
 
-### Common Issues
+**`pulsectl` says it cannot reach the daemon.** Check `systemctl status pulseha`. The
+message names the socket it tried.
 
-**Cluster Formation Problems:**
+**A node does not join or does not appear.**
 ```bash
-# Check daemon logs
-journalctl -u pulseha -f
-
-# Verify network connectivity
-pulsectl node list
-telnet <node-ip> 8080
+journalctl -t pulseha -f
+pulsectl status                   # is the node listed? is it Unknown?
+nc -zv <node-ip> <bind-port>      # can this node reach the other's bind port?
 ```
+A node that has just joined is in maintenance mode until you take it out (see
+[Creating and joining a cluster](#creating-and-joining-a-cluster)).
 
-**IP Failover Issues:**
+**Addresses are not where you expect.**
 ```bash
-# Check IP group assignments
-pulsectl group list --json
-
-# Verify interface configuration
+pulsectl status          # which node is Active, and what each node holds
+pulsectl group list      # are the groups assigned to the right interfaces?
 ip addr show
-pulsectl status
 ```
 
-**Syslog Not Working:**
-```bash
-# Check syslog configuration
-grep pulseha /var/log/syslog
-systemctl status rsyslog
+**Nothing reaches syslog.** Check `syslog_facility` is one of the values listed under
+[Settings](#settings), then `grep pulseha /var/log/syslog` and `systemctl status rsyslog`.
 
-# Test manual syslog
-logger -t pulseha "Test message"
-```
-
-### Debug Mode
-
-Enable debug logging for detailed troubleshooting:
-
-```json
-{
-  "pulseha": {
-    "logging_level": "debug"
-  }
-}
-```
+**More detail:** `pulsectl config set logging_level debug` on the node in question.
 
 ## Development
 
-### Project Structure
+### Project structure
 
 ```
 pulseha/
 ├── cmd/
-│   ├── pulseha/              # Main daemon with embedded CLI
-│   └── pulsectl/             # Dedicated CLI tool
+│   ├── pulseha/          # the daemon
+│   └── pulsectl/         # the CLI
 ├── internal/
-│   ├── cli/                  # Shared CLI commands
-│   ├── client/               # gRPC client implementation
-│   ├── membership/           # Cluster membership management
-│   ├── server/               # gRPC server implementation
-│   ├── ipam/                 # IP address management
-│   └── quorum/               # Quorum and consensus logic
+│   ├── cli/              # pulsectl's commands
+│   ├── client/           # gRPC client (CLI socket and peers)
+│   ├── clustertls/       # inter-node TLS credentials
+│   ├── ipam/             # placement of addresses across nodes
+│   ├── membership/       # members, health checks, elections, the IP monitor
+│   ├── quorum/           # quorum voting
+│   └── server/           # the daemon's gRPC server and orchestration
 ├── packages/
-│   ├── config/               # Configuration management
-│   ├── logging/              # Logging infrastructure
-│   ├── network/              # Network operations
-│   ├── security/             # TLS and certificate management
-│   └── utils/                # Utility functions
-├── rpc/                      # Protocol buffer definitions
-├── tests/
-│   ├── unit/                 # Unit tests
-│   ├── integration/          # Integration tests
-│   └── testutils/            # Test utilities and mocks
-└── docker/
-    └── test/                 # Docker test environment
+│   ├── config/           # configuration file and validation
+│   ├── network/          # interface address and announcement operations
+│   ├── pulselock/        # instrumented mutexes (ADR-0003)
+│   ├── security/         # certificate generation
+│   └── ...               # client, jsonHelper, language, osStat, utils
+├── rpc/                  # protobuf definitions (generated code is not committed)
+├── tests/                # unit, integration, testutils
+├── docker/test/          # Docker test cluster and rig scripts
+└── docs/                 # ADRs, the test plan, design notes
 ```
 
-### Building from Source
-
-```bash
-# Install dependencies
-go mod download
-
-# Build daemon
-make build
-
-# Build CLI
-make cli
-
-# Install the binaries, the systemd unit and /etc/pulseha, then reload systemd
-sudo make install
-
-# Or stage the install under another root for packaging. Nothing is written
-# outside it and systemd is not reloaded. PREFIX moves the binaries
-# (default /usr/local) and the unit's ExecStart follows them.
-make install DESTDIR=/tmp/pkgroot PREFIX=/usr
-
-# Run tests
-make test
-
-# Run integration tests
-make integration-test
-```
+Design decisions are recorded in [`docs/adr`](docs/adr). The cluster test plan, and the record
+of every defect it has found, is [`docs/TEST-PLAN.md`](docs/TEST-PLAN.md).
 
 ### Contributing
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Make your changes
-4. Add tests for new functionality
-5. Ensure all tests pass (`make test`)
-6. Commit your changes (`git commit -m 'Add amazing feature'`)
-7. Push to the branch (`git push origin feature/amazing-feature`)
-8. Open a Pull Request
+1. Fork the repository and create a branch from `dev`.
+2. Make your change, with tests.
+3. Run `make test`, and `make testrace` on Linux.
+4. Open a pull request against `dev`.
 
 ## License
 
-This project is licensed under the GNU Affero General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU Affero General Public License v3.0 - see the
+[LICENSE](LICENSE) file for details.
 
 ## Support
 
-- **Documentation**: [GitHub Wiki](https://github.com/syleron/pulseha/wiki)
 - **Issues**: [GitHub Issues](https://github.com/syleron/pulseha/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/syleron/pulseha/discussions)
-
-For questions, feature requests, and contributions, please visit our [GitHub repository](https://github.com/syleron/pulseha).
