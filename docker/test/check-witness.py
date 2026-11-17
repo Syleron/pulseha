@@ -171,26 +171,11 @@ try:
             path.write_text(json.dumps(cfg))
             docker('cp', str(path), name+':/etc/pulseha/config.json')
 
-    # Certificates are seeded rather than left to the daemons to publish. Each
-    # daemon publishes its certificate into the cluster config at start, and
-    # nodes that start from the same file each make that publish config version
-    # 1 under their own origin; ConfigSync ignores an equal version from another
-    # origin, so the certificates never converge and the Witness path is never
-    # trusted. That is a ConfigSync defect that predates the Witness: #268.
-    # Remove this seeding once it is fixed, and this rig becomes its regression.
-    # Here each daemon runs once to mint its identity -- stable across restarts
-    # (EnsureCertificates) -- and every config is then written already holding
-    # all three, the state the publishes should have converged to.
-    write_configs()
-    for name in names:
-        docker('exec', '-d', name, 'sh', '-c', 'exec pulseha > /tmp/mint.log 2>&1')
-    time.sleep(6)
-    for i, name in enumerate(names, 1):
-        execute(i, 'pkill', '-KILL', '-x', 'pulseha', check=False)
-    time.sleep(1)
-    for i in (1, 2, 3):
-        nodes[ids[i-1]]['tls_cert'] = execute(i, 'cat', '/root/.pulseha/certs/pulseha.crt').strip()
-        execute(i, 'sh', '-c', 'ip addr del %s/24 dev %s 2>/dev/null; true' % (fip, ifaces[i]) if i != WITNESS else 'true')
+    # Every daemon starts at once from configs that name no certificate, and
+    # each publishes its own. That is the case #268 described -- every publish is
+    # config version 1 under its own origin, and before the fix the certificates
+    # never converged -- so the Witness reading as arbitrating below is also that
+    # fix's regression on real daemons.
     write_configs()
     for name in names:
         docker('exec', '-d', name, 'sh', '-c', 'exec pulseha > /tmp/daemon.log 2>&1')
