@@ -361,3 +361,84 @@ func TestAddIPToGroupBringsTheAddressUpOnTheOwnerOnly(t *testing.T) {
 		}
 	})
 }
+
+// Regression for GitHub #289: an address AddIPToGroup brings up on this node has
+// to be announced. Without the announcement, neighbours that last learned the
+// address from another node's MAC keep sending its traffic there until their ARP
+// entries age out, so the address is up here and unreachable.
+//
+// The announcer blocks until the handler has returned. That also checks the
+// announcement is off the request path: an announcement made inside the handler,
+// under s.Lock(), would deadlock here instead of passing.
+func TestAddIPToGroupAnnouncesLocalBringUp(t *testing.T) {
+	s := newAddIPTestServer(t)
+	s.placeAddedIP = func(iface, ip string) (bool, string) { return true, "" }
+
+	type call struct {
+		iface string
+		ips   []string
+	}
+	returned := make(chan struct{})
+	calls := make(chan call, 4)
+	s.announceIPs = func(iface string, ips []string) ([]string, error) {
+		<-returned
+		calls <- call{iface, slices.Clone(ips)}
+		return nil, nil
+	}
+
+	resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
+		GroupName: "group1",
+		Ip:        "10.0.0.9/24",
+	})
+	close(returned)
+	if err != nil || !resp.Success {
+		t.Fatalf("AddIPToGroup: err=%v resp=%+v", err, resp)
+	}
+
+	select {
+	case got := <-calls:
+		if got.iface != "pulseha-no-such-interface" || !slices.Equal(got.ips, []string{"10.0.0.9/24"}) {
+			t.Errorf("announced %v on %q, want [10.0.0.9/24] on the group's interface", got.ips, got.iface)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the address brought up locally was never announced")
+	}
+
+	select {
+	case extra := <-calls:
+		t.Errorf("announced more than once: extra %v on %q", extra.ips, extra.iface)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// The negative control for the test above: an address that did not come up
+// here is not announced. Announcing it would only produce a skipped address in
+// the log, but if it were announced, the test above would pass whether or not
+// the placement result was checked.
+func TestAddIPToGroupDoesNotAnnounceFailedBringUp(t *testing.T) {
+	s := newAddIPTestServer(t)
+	s.placeAddedIP = func(iface, ip string) (bool, string) { return false, "placement failed" }
+
+	announced := make(chan struct{}, 1)
+	s.announceIPs = func(iface string, ips []string) ([]string, error) {
+		announced <- struct{}{}
+		return nil, nil
+	}
+
+	resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
+		GroupName: "group1",
+		Ip:        "10.0.0.9/24",
+	})
+	if err != nil || !resp.Success {
+		t.Fatalf("AddIPToGroup: err=%v resp=%+v", err, resp)
+	}
+	if !slices.Contains(resp.Warnings, "placement failed") {
+		t.Errorf("warnings %v do not carry the placement failure", resp.Warnings)
+	}
+
+	select {
+	case <-announced:
+		t.Error("announced an address that was not brought up")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

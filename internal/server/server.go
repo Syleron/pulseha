@@ -142,6 +142,11 @@ type Server struct {
 	// Optional seam for the shutdown release in Stop; nil is network.BringIPdown.
 	releaseIP func(iface, ip string) error
 
+	// Optional seams for AddIPToGroup's local bring-up and its announcement; nil
+	// are bringUpAddedIPLocally and network.SendGARPBatch.
+	placeAddedIP func(iface, ip string) (placed bool, warning string)
+	announceIPs  func(iface string, ips []string) (skipped []string, err error)
+
 	// Test hook run after a promotion's address transfer, before its final
 	// broadcast; nil in the daemon.
 	afterPromotionTransfer func()
@@ -3794,9 +3799,11 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	// Broadcast updated config to peers
 	s.markConfigDirty()
 
-	// Bring the address up locally now — a netlink add with no announcement, so
-	// it is cheap — and collect the peers for the asynchronous fan-out below.
+	// Bring the address up locally now and collect the peers for the
+	// asynchronous fan-out below. The local add is a netlink call; its
+	// announcement is sent after the lock is released (see announceAddedIP).
 	localBroughtUp := false
+	var announceOn []string
 	var peerTargets []peerBringUpTarget
 	for nodeID, node := range s.config.Nodes {
 		for iface, groups := range node.IPGroups {
@@ -3824,49 +3831,40 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 				}
 
 				// This is the local node, bring up the IP locally
-				s.logger.Infof("Bringing up IP %s on interface %s", ipToUse, iface)
-
-				// Check if interface exists
-				exists, _ := network.InterfaceExist(iface)
-				if !exists {
-					warnings = append(warnings, fmt.Sprintf("Interface %s does not exist on local node", iface))
-					continue
+				place := s.placeAddedIP
+				if place == nil {
+					place = s.bringUpAddedIPLocally
 				}
-
-				// Unconditionally add the IP to the expected IPs for the local monitor
-				s.ipMonitor.AddExpectedIPs(iface, []string{ipToUse})
-
-				// Check if IP is already present; treat as success if on target iface
-				ipObj, _ := utils.GetCIDR(ipToUse)
-				if ipObj != nil {
-					exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
-					if err != nil {
-						warnings = append(warnings, fmt.Sprintf("Failed to check if IP exists: %v", err))
-						continue
-					}
-					if exists {
-						if existingIface == iface {
-							// Already configured on desired iface; mark success and update expected IPs
-							localBroughtUp = true
-							s.logger.Infof("IP %s already present on interface %s; treating as success", ipToUse, iface)
-							continue
-						}
-						// Present on a different iface; try to bring it down there first
-						if derr := network.BringIPdown(existingIface, ipToUse); derr != nil {
-							warnings = append(warnings, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ipToUse, existingIface, derr))
-							continue
-						}
-					}
+				placed, warning := place(iface, ipToUse)
+				if warning != "" {
+					warnings = append(warnings, warning)
 				}
-
-				if err := network.BringIPup(iface, ipToUse); err != nil {
-					warnings = append(warnings, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ipToUse, iface, err))
-					continue
+				if placed {
+					localBroughtUp = true
+					announceOn = append(announceOn, iface)
 				}
-				localBroughtUp = true
-				s.logger.Infof("Successfully brought up IP %s on interface %s", ipToUse, iface)
 			}
 		}
+	}
+
+	// Announce the address wherever it came up here (GitHub #289). Before this
+	// change the add path was the one way an address reached a node without an
+	// announcement. When the address was last announced from another node's MAC,
+	// for example after a failover onto a peer that has since released it,
+	// neighbours kept sending it there until their ARP entries aged out. During
+	// that time the address was up here and unreachable.
+	//
+	// Off the request path and outside s.Lock(): one arping burst takes about
+	// four seconds (see network.garpTimeout), and holding the server lock that
+	// long would stall every other RPC. Letting it outlive the handler is safe
+	// because SendGARPBatch re-reads the kernel before it announces, so an
+	// address removed in the meantime is skipped, not announced.
+	//
+	// "Already present" counts as placed and is announced too. Nothing records
+	// whether whoever placed it announced it, and an extra announcement costs
+	// one ARP burst.
+	for _, iface := range announceOn {
+		go s.announceAddedIP(iface, ipToUse)
 	}
 
 	// Track the IP on the local member so status and the active-active
@@ -3912,6 +3910,67 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		Message:  fmt.Sprintf("successfully added IP %s to group %s", ipToUse, req.GroupName),
 		Warnings: warnings,
 	}, nil
+}
+
+// bringUpAddedIPLocally places a newly added group address on iface on this
+// node. It reports whether the address is now held there (including when it
+// already was) and gives a warning for the caller when it could not be placed.
+// It does not announce the address. AddIPToGroup does that outside the lock.
+func (s *Server) bringUpAddedIPLocally(iface, ip string) (placed bool, warning string) {
+	s.logger.Infof("Bringing up IP %s on interface %s", ip, iface)
+
+	if exists, _ := network.InterfaceExist(iface); !exists {
+		return false, fmt.Sprintf("Interface %s does not exist on local node", iface)
+	}
+
+	// Unconditionally add the IP to the expected IPs for the local monitor
+	s.ipMonitor.AddExpectedIPs(iface, []string{ip})
+
+	// Check if IP is already present; treat as success if on target iface
+	if ipObj, _ := utils.GetCIDR(ip); ipObj != nil {
+		exists, existingIface, err := network.CheckIfIPExists(ipObj.String())
+		if err != nil {
+			return false, fmt.Sprintf("Failed to check if IP exists: %v", err)
+		}
+		if exists {
+			if existingIface == iface {
+				s.logger.Infof("IP %s already present on interface %s; treating as success", ip, iface)
+				return true, ""
+			}
+			// Present on a different iface; try to bring it down there first
+			if derr := network.BringIPdown(existingIface, ip); derr != nil {
+				return false, fmt.Sprintf("Failed to remove existing IP %s from interface %s: %v", ip, existingIface, derr)
+			}
+		}
+	}
+
+	if err := network.BringIPup(iface, ip); err != nil {
+		return false, fmt.Sprintf("Failed to bring up IP %s on interface %s: %v", ip, iface, err)
+	}
+	s.logger.Infof("Successfully brought up IP %s on interface %s", ip, iface)
+	return true, ""
+}
+
+// announceAddedIP sends a gratuitous ARP (or unsolicited NA) for an address
+// AddIPToGroup has just placed on iface (GitHub #289). Announcing is advisory,
+// as it is on every other bring-up path. The address is already up, so a
+// failure here is logged and does not fail the add.
+func (s *Server) announceAddedIP(iface, ip string) {
+	announce := s.announceIPs
+	if announce == nil {
+		announce = network.SendGARPBatch
+	}
+	skipped, err := announce(iface, []string{ip})
+	if err != nil {
+		s.logger.Warn("AddIPToGroup: failed to announce added IP", "iface", iface, "ip", ip, "error", err)
+		return
+	}
+	if len(skipped) > 0 {
+		// Logged here rather than in packages/network, whose logger never has its
+		// level set, so a Debug line there could not reach the journal (#61).
+		s.logger.Debug("AddIPToGroup: skipped announcing an address this node no longer holds",
+			"iface", iface, "ip", ip)
+	}
 }
 
 // peerBringUpQueue returns the batcher, creating it on first use.
