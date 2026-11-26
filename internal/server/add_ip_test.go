@@ -362,83 +362,168 @@ func TestAddIPToGroupBringsTheAddressUpOnTheOwnerOnly(t *testing.T) {
 	})
 }
 
+// announceCall is one call the stub announcer saw.
+type announceCall struct {
+	iface string
+	ips   []string
+}
+
+// stubAddedIPSeams replaces AddIPToGroup's local placement and announcement.
+// place answers for the placement, and every announcement is recorded on the
+// returned channel. Recording is all the stub does, so a test asserts what was
+// announced and never touches netlink or arping.
+func stubAddedIPSeams(s *Server, place func(iface, ip string) (bool, string)) (placed chan string, calls chan announceCall) {
+	placed = make(chan string, 8)
+	calls = make(chan announceCall, 8)
+	s.placeAddedIP = func(iface, ip string) (bool, string) {
+		placed <- ip
+		return place(iface, ip)
+	}
+	s.announceIPs = func(iface string, ips []string) ([]string, error) {
+		calls <- announceCall{iface, slices.Clone(ips)}
+		return nil, nil
+	}
+	return placed, calls
+}
+
+// addIPWithin runs AddIPToGroup and fails the test if it has not returned
+// within d. A regression that made the handler wait on the announcement then
+// fails here, by name, instead of hanging until go test's timeout.
+func addIPWithin(t *testing.T, s *Server, d time.Duration, req *rpc.AddIPToGroupRequest) *rpc.AddIPToGroupResponse {
+	t.Helper()
+	type result struct {
+		resp *rpc.AddIPToGroupResponse
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		resp, err := s.AddIPToGroup(context.Background(), req)
+		done <- result{resp, err}
+	}()
+	select {
+	case r := <-done:
+		if r.err != nil || !r.resp.Success {
+			t.Fatalf("AddIPToGroup: err=%v resp=%+v", r.err, r.resp)
+		}
+		return r.resp
+	case <-time.After(d):
+		t.Fatalf("AddIPToGroup did not return within %v: the handler is waiting on the announcement", d)
+		return nil
+	}
+}
+
 // Regression for GitHub #289: an address AddIPToGroup brings up on this node has
 // to be announced. Without the announcement, neighbours that last learned the
 // address from another node's MAC keep sending its traffic there until their ARP
 // entries age out, so the address is up here and unreachable.
 //
-// The announcer blocks until the handler has returned. That also checks the
-// announcement is off the request path: an announcement made inside the handler,
-// under s.Lock(), would deadlock here instead of passing.
+// The announced form is the normalised one, the same string the config and the
+// IP monitor hold. SendGARPBatch's absence check expects CIDR form, so an
+// address added without a mask must be announced with the mask it was given.
+//
+// The announcer is held until the handler has returned, which checks the
+// announcement is off the request path: an announcement made in the handler
+// would make addIPWithin fail.
 func TestAddIPToGroupAnnouncesLocalBringUp(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, ip, want string
+	}{
+		{"active-active", "active-active", "10.0.0.9/24", "10.0.0.9/24"},
+		{"active-passive", "active-passive", "10.0.0.9/24", "10.0.0.9/24"},
+		{"no mask given", "active-active", "10.0.0.9", "10.0.0.9/32"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newAddIPTestServer(t)
+			s.config.Pulse.Mode = tc.mode
+
+			returned := make(chan struct{})
+			calls := make(chan announceCall, 4)
+			s.placeAddedIP = func(iface, ip string) (bool, string) { return true, "" }
+			s.announceIPs = func(iface string, ips []string) ([]string, error) {
+				<-returned
+				calls <- announceCall{iface, slices.Clone(ips)}
+				return nil, nil
+			}
+
+			addIPWithin(t, s, 5*time.Second, &rpc.AddIPToGroupRequest{GroupName: "group1", Ip: tc.ip})
+			close(returned)
+
+			select {
+			case got := <-calls:
+				if got.iface != "pulseha-no-such-interface" || !slices.Equal(got.ips, []string{tc.want}) {
+					t.Errorf("announced %v on %q, want [%s] on the group's interface", got.ips, got.iface, tc.want)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the address brought up locally was never announced")
+			}
+			select {
+			case extra := <-calls:
+				t.Errorf("announced more than once: extra %v on %q", extra.ips, extra.iface)
+			case <-time.After(100 * time.Millisecond):
+			}
+
+			// A placed address is on the local member's claim. Without it, status
+			// and the active-active reconciler treat the address as orphaned.
+			if ips := s.memberList.GetMemberByID("local-node").GetActiveIPs(); !slices.Contains(ips, tc.want) {
+				t.Errorf("local member's ActiveIPs = %v, want it to include %s", ips, tc.want)
+			}
+		})
+	}
+}
+
+// A Passive node given an address in active-active is serving it, so it is
+// promoted to Active along with the claim. Otherwise ENFORCE strips the address
+// it was just given.
+func TestAddIPToGroupPromotesPassiveLocalOwnerInActiveActive(t *testing.T) {
 	s := newAddIPTestServer(t)
-	s.placeAddedIP = func(iface, ip string) (bool, string) { return true, "" }
+	stubAddedIPSeams(s, func(string, string) (bool, string) { return true, "" })
+	setMemberLoad(t, s, "local-node", membership.StatusPassive, 0)
 
-	type call struct {
-		iface string
-		ips   []string
-	}
-	returned := make(chan struct{})
-	calls := make(chan call, 4)
-	s.announceIPs = func(iface string, ips []string) ([]string, error) {
-		<-returned
-		calls <- call{iface, slices.Clone(ips)}
-		return nil, nil
-	}
+	addIPWithin(t, s, 5*time.Second, &rpc.AddIPToGroupRequest{GroupName: "group1", Ip: "10.0.0.9/24"})
 
-	resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
-		GroupName: "group1",
-		Ip:        "10.0.0.9/24",
-	})
-	close(returned)
-	if err != nil || !resp.Success {
-		t.Fatalf("AddIPToGroup: err=%v resp=%+v", err, resp)
-	}
-
-	select {
-	case got := <-calls:
-		if got.iface != "pulseha-no-such-interface" || !slices.Equal(got.ips, []string{"10.0.0.9/24"}) {
-			t.Errorf("announced %v on %q, want [10.0.0.9/24] on the group's interface", got.ips, got.iface)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("the address brought up locally was never announced")
-	}
-
-	select {
-	case extra := <-calls:
-		t.Errorf("announced more than once: extra %v on %q", extra.ips, extra.iface)
-	case <-time.After(100 * time.Millisecond):
+	if got := s.memberList.GetMemberByID("local-node").GetStatus(); got != membership.StatusActive {
+		t.Errorf("local status = %v, want Active once it holds an address", got)
 	}
 }
 
 // The negative control for the test above: an address that did not come up
-// here is not announced. Announcing it would only produce a skipped address in
-// the log, but if it were announced, the test above would pass whether or not
-// the placement result was checked.
+// here is not announced, and it is not claimed. Announcing it could tell the
+// segment this node holds an address it does not: SendGARPBatch announces an
+// address whose state it cannot read rather than drop it.
 func TestAddIPToGroupDoesNotAnnounceFailedBringUp(t *testing.T) {
 	s := newAddIPTestServer(t)
-	s.placeAddedIP = func(iface, ip string) (bool, string) { return false, "placement failed" }
+	_, calls := stubAddedIPSeams(s, func(string, string) (bool, string) { return false, "placement failed" })
 
-	announced := make(chan struct{}, 1)
-	s.announceIPs = func(iface string, ips []string) ([]string, error) {
-		announced <- struct{}{}
-		return nil, nil
-	}
-
-	resp, err := s.AddIPToGroup(context.Background(), &rpc.AddIPToGroupRequest{
-		GroupName: "group1",
-		Ip:        "10.0.0.9/24",
-	})
-	if err != nil || !resp.Success {
-		t.Fatalf("AddIPToGroup: err=%v resp=%+v", err, resp)
-	}
+	resp := addIPWithin(t, s, 5*time.Second, &rpc.AddIPToGroupRequest{GroupName: "group1", Ip: "10.0.0.9/24"})
 	if !slices.Contains(resp.Warnings, "placement failed") {
 		t.Errorf("warnings %v do not carry the placement failure", resp.Warnings)
 	}
 
 	select {
-	case <-announced:
-		t.Error("announced an address that was not brought up")
+	case got := <-calls:
+		t.Errorf("announced %v on %q, an address that was not brought up", got.ips, got.iface)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if ips := s.memberList.GetMemberByID("local-node").GetActiveIPs(); slices.Contains(ips, "10.0.0.9/24") {
+		t.Errorf("local member's ActiveIPs = %v, want the unplaced address left off", ips)
+	}
+}
+
+// When a peer owns the address, this node neither places nor announces it.
+// Announcing it here as well would advertise the address from two MACs.
+func TestAddIPToGroupLeavesAPeerOwnedAddressAlone(t *testing.T) {
+	s := newAddIPTestServer(t, "127.0.0.1:1")
+	placed, calls := stubAddedIPSeams(s, func(string, string) (bool, string) { return true, "" })
+	setMemberLoad(t, s, "local-node", membership.StatusActive, 7)
+	setMemberLoad(t, s, "a-peer", membership.StatusActive, 0)
+
+	addIPWithin(t, s, 5*time.Second, &rpc.AddIPToGroupRequest{GroupName: "group1", Ip: "10.0.0.21/24"})
+
+	select {
+	case ip := <-placed:
+		t.Errorf("placed %s locally; a-peer owns it", ip)
+	case got := <-calls:
+		t.Errorf("announced %v on %q locally; a-peer owns it", got.ips, got.iface)
 	case <-time.After(200 * time.Millisecond):
 	}
 }

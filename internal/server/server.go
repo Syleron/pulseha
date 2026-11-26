@@ -190,6 +190,11 @@ type Server struct {
 	peerBringUpMu pulselock.Mutex
 	peerBringUp   *peerBringUpBatcher
 
+	// addedIPAnnounce sends AddIPToGroup's local announcements one batch at a
+	// time (GitHub #289). Lazily built for the same reason as peerBringUp.
+	addedIPAnnounceMu pulselock.Mutex
+	addedIPAnnounce   *addedIPAnnouncer
+
 	// vipReconcile coalesces the post-load VIP reconcile, which loadInitialMembers
 	// schedules on every full ConfigSync (defect #65). Lazily built for the same
 	// reason as peerBringUp.
@@ -3800,8 +3805,9 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	s.markConfigDirty()
 
 	// Bring the address up locally now and collect the peers for the
-	// asynchronous fan-out below. The local add is a netlink call; its
-	// announcement is sent after the lock is released (see announceAddedIP).
+	// asynchronous fan-out below. The local add is a netlink call. Its
+	// announcement is queued and sent from another goroutine, which never
+	// takes s.Lock() (see addedIPAnnouncer).
 	localBroughtUp := false
 	var announceOn []string
 	var peerTargets []peerBringUpTarget
@@ -3837,6 +3843,12 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 				}
 				placed, warning := place(iface, ipToUse)
 				if warning != "" {
+					// Logged as well as returned: the caller may not keep the
+					// warning, and the line below still says the add succeeded.
+					// The IP monitor already expects the address (unless the
+					// interface is missing), so its ENFORCE pass retries it.
+					s.logger.Warn("AddIPToGroup: local bring-up failed",
+						"iface", iface, "ip", ipToUse, "reason", warning)
 					warnings = append(warnings, warning)
 				}
 				if placed {
@@ -3847,24 +3859,36 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 		}
 	}
 
-	// Announce the address wherever it came up here (GitHub #289). Before this
-	// change the add path was the one way an address reached a node without an
-	// announcement. When the address was last announced from another node's MAC,
-	// for example after a failover onto a peer that has since released it,
-	// neighbours kept sending it there until their ARP entries aged out. During
-	// that time the address was up here and unreachable.
+	// Announce the address wherever it came up here (GitHub #289). Every path
+	// that moves an address onto a node announces it, and this one has to as
+	// well. An address added here may have been announced from another node's
+	// MAC not long ago, for example after a failover onto a peer that has since
+	// released it. Without an announcement, neighbours keep sending it there
+	// until their ARP entries age out, and the address is up here and
+	// unreachable. restoreIP in the IP monitor is the one silent placement left,
+	// and it puts an address back on the node that already held it.
 	//
-	// Off the request path and outside s.Lock(): one arping burst takes about
-	// four seconds (see network.garpTimeout), and holding the server lock that
-	// long would stall every other RPC. Letting it outlive the handler is safe
-	// because SendGARPBatch re-reads the kernel before it announces, so an
-	// address removed in the meantime is skipped, not announced.
+	// docs/TEST-PLAN.md #33 had left this path silent on purpose, for two
+	// reasons. A brand-new address has no stale ARP entry to correct: #289 shows
+	// that an address new to this group can still have one. And #39's ~30ms
+	// per add depends on the add not announcing: the announcement is queued and
+	// sent from another goroutine, so the request does not wait on it.
+	//
+	// That goroutine never takes s.Lock(). One arping takes about four seconds
+	// (capped at ten by network.garpTimeout), and holding the server lock that
+	// long would stall every other RPC. SendGARPBatch re-reads the kernel before
+	// each announcement and skips an address this node no longer holds, so a
+	// release in the meantime normally means no announcement. It does not stop
+	// an arping that has already started.
 	//
 	// "Already present" counts as placed and is announced too. Nothing records
 	// whether whoever placed it announced it, and an extra announcement costs
 	// one ARP burst.
-	for _, iface := range announceOn {
-		go s.announceAddedIP(iface, ipToUse)
+	if len(announceOn) > 0 {
+		announcer := s.addedIPAnnounceQueue()
+		for _, iface := range announceOn {
+			announcer.Add(iface, ipToUse)
+		}
 	}
 
 	// Track the IP on the local member so status and the active-active
@@ -3915,7 +3939,11 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 // bringUpAddedIPLocally places a newly added group address on iface on this
 // node. It reports whether the address is now held there (including when it
 // already was) and gives a warning for the caller when it could not be placed.
-// It does not announce the address. AddIPToGroup does that outside the lock.
+//
+// Once the interface exists, the address is added to the IP monitor's expected
+// set before placement, and that is not undone when placement fails. The
+// monitor's ENFORCE pass therefore retries a failed placement. It does not
+// announce the address: AddIPToGroup queues that on addedIPAnnouncer.
 func (s *Server) bringUpAddedIPLocally(iface, ip string) (placed bool, warning string) {
 	s.logger.Infof("Bringing up IP %s on interface %s", ip, iface)
 
@@ -3951,25 +3979,38 @@ func (s *Server) bringUpAddedIPLocally(iface, ip string) (placed bool, warning s
 	return true, ""
 }
 
-// announceAddedIP sends a gratuitous ARP (or unsolicited NA) for an address
-// AddIPToGroup has just placed on iface (GitHub #289). Announcing is advisory,
-// as it is on every other bring-up path. The address is already up, so a
-// failure here is logged and does not fail the add.
-func (s *Server) announceAddedIP(iface, ip string) {
+// addedIPAnnounceQueue returns the announcer, creating it on first use. Lazily,
+// for the reason peerBringUpQueue gives.
+func (s *Server) addedIPAnnounceQueue() *addedIPAnnouncer {
+	s.addedIPAnnounceMu.Lock()
+	defer s.addedIPAnnounceMu.Unlock()
+	if s.addedIPAnnounce == nil {
+		s.addedIPAnnounce = newAddedIPAnnouncer(s.announceAddedIPs)
+	}
+	return s.addedIPAnnounce
+}
+
+// announceAddedIPs sends a gratuitous ARP (or unsolicited NA) for addresses
+// AddIPToGroup has placed on iface (GitHub #289). It is addedIPAnnouncer's send
+// hook. Announcing is advisory, as it is on every other path that announces.
+// The addresses are already up, so a failure is logged and does not undo the
+// add.
+func (s *Server) announceAddedIPs(iface string, ips []string) {
 	announce := s.announceIPs
 	if announce == nil {
 		announce = network.SendGARPBatch
 	}
-	skipped, err := announce(iface, []string{ip})
+	skipped, err := announce(iface, ips)
 	if err != nil {
-		s.logger.Warn("AddIPToGroup: failed to announce added IP", "iface", iface, "ip", ip, "error", err)
-		return
+		s.logger.Warn("AddIPToGroup: failed to announce added IPs",
+			"iface", iface, "count", len(ips), "error", err)
 	}
 	if len(skipped) > 0 {
 		// Logged here rather than in packages/network, whose logger never has its
-		// level set, so a Debug line there could not reach the journal (#61).
-		s.logger.Debug("AddIPToGroup: skipped announcing an address this node no longer holds",
-			"iface", iface, "ip", ip)
+		// level set, so a Debug line there could not reach the journal
+		// (docs/TEST-PLAN.md #61's lesson).
+		s.logger.Debug("AddIPToGroup: skipped announcing addresses this node no longer holds",
+			"iface", iface, "count", len(skipped), "of", len(ips))
 	}
 }
 
