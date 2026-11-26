@@ -1,7 +1,9 @@
 package server
 
 import (
+	"fmt"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,5 +103,68 @@ func TestAddedIPAnnouncerRestartsAfterDraining(t *testing.T) {
 			}
 			time.Sleep(time.Millisecond)
 		}
+	}
+}
+
+// Adds that overlap a running drain loop, from many goroutines at once. Every
+// address is announced exactly once, whichever batch it lands in. This is the
+// test the race detector needs: the tests above order each Add against the
+// drain loop with their own channels, so they would pass with Add unlocked.
+func TestAddedIPAnnouncerConcurrentAdds(t *testing.T) {
+	const workers, perWorker = 8, 50
+	var mu sync.Mutex
+	got := make(map[string]int)
+	var inFlight, maxInFlight atomic.Int32
+	a := newAddedIPAnnouncer(func(iface string, ips []string) {
+		n := inFlight.Add(1)
+		for m := maxInFlight.Load(); n > m && !maxInFlight.CompareAndSwap(m, n); m = maxInFlight.Load() {
+		}
+		mu.Lock()
+		for _, ip := range ips {
+			got[iface+" "+ip]++
+		}
+		mu.Unlock()
+		time.Sleep(100 * time.Microsecond)
+		inFlight.Add(-1)
+	})
+
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				a.Add("eth0", fmt.Sprintf("10.%d.%d.1/24", w, i))
+			}
+		}(w)
+	}
+	wg.Wait()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		mu.Lock()
+		n := len(got)
+		mu.Unlock()
+		a.mu.Lock()
+		idle := !a.running
+		a.mu.Unlock()
+		if n == workers*perWorker && idle {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("announced %d of %d addresses; drain running=%v", n, workers*perWorker, !idle)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for key, n := range got {
+		if n != 1 {
+			t.Errorf("%s announced %d times, want once", key, n)
+		}
+	}
+	if m := maxInFlight.Load(); m != 1 {
+		t.Errorf("max concurrent sends = %d, want 1", m)
 	}
 }
