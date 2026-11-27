@@ -236,6 +236,12 @@ pulsectl group create web
 pulsectl group add-ip --group web --ip 192.168.1.100/24
 pulsectl group remove-ip --group web --ip 192.168.1.100/24
 
+# Refuse the address if another host on the segment already answers for it.
+# An ARP probe from the group's interface on this node, so IPv4 only, and not
+# for a network that answers ARP for every address (cloud virtual networks,
+# proxy ARP): there it refuses everything.
+pulsectl group add-ip --group web --ip 192.168.1.100/24 --verify-unused
+
 # A group is held only on nodes it is assigned to, on the interface named here
 pulsectl group assign   --group web --node-id <ID> --interface eth0
 pulsectl group unassign --group web --node-id <ID> --interface eth0

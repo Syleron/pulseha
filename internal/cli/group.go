@@ -56,8 +56,9 @@ func newGroupCreateCmd() *cobra.Command {
 
 func newGroupAddIPCmd() *cobra.Command {
 	var (
-		group string
-		ip    string
+		group        string
+		ip           string
+		verifyUnused bool
 	)
 
 	cmd := &cobra.Command{
@@ -70,7 +71,7 @@ func newGroupAddIPCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			if err := client.AddIPToGroup(group, ip); err != nil {
+			if err := client.AddIPToGroup(group, ip, verifyUnused); err != nil {
 				fmt.Printf("Failed to add IP to group: %v\n", err)
 				os.Exit(1)
 			}
@@ -80,6 +81,9 @@ func newGroupAddIPCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&group, "group", "", "Name of the group to add the IP to")
 	cmd.Flags().StringVar(&ip, "ip", "", "IP address to add to the group (with optional subnet mask)")
+	cmd.Flags().BoolVar(&verifyUnused, "verify-unused", false,
+		"Refuse the address if another host on the segment already answers for it "+
+			"(IPv4; not for networks that answer ARP for every address)")
 	cmd.MarkFlagRequired("group")
 	cmd.MarkFlagRequired("ip")
 
