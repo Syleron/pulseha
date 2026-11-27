@@ -78,6 +78,10 @@ type ServerReference interface {
 	// The target of a live handoff this node is part of — orchestrating it, or
 	// demoted by it — or "" when there is none (GitHub #286).
 	HandoffInProgress() string
+	// Addresses orphan redistribution must leave alone, because the Witness
+	// says a peer this node cannot see is still serving them, or a Ruling took
+	// them from this node. Never blocks; empty without a Witness (ADR-0006).
+	WitnessHeldBack() map[string]bool
 }
 
 // reconcileConfigAcrossPeers re-broadcasts the coordinator's config once a
@@ -129,7 +133,7 @@ func (h *HealthChecker) Coordinator() string {
 	if h.members == nil {
 		return ""
 	}
-	return clusterCoordinator(h.members.MembersSnapshot(), h.failoverGrace())
+	return clusterCoordinator(h.members.CandidatesSnapshot(), h.failoverGrace())
 }
 
 // HealthCheck represents the result of a health check
@@ -620,6 +624,8 @@ func (h *HealthChecker) performHealthChecks() {
 			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s restored to %s", member.Hostname, StatusToString(member.Status)))
 		} else if member.Status == StatusUnknown {
+			// setStatusLocked applies the Witness role: in active-active the
+			// recovery default is Active, which a returning Witness must not get.
 			member.setStatusLocked(recoveredStatus(mode))
 			statusChanges = append(statusChanges, fmt.Sprintf("%s recovered to %s",
 				member.Hostname, StatusToString(member.Status)))
@@ -881,7 +887,7 @@ func (h *HealthChecker) checkForActiveNodeFailure() {
 
 	h.nextReconcileCycle()
 
-	members := h.members.MembersSnapshot()
+	members := h.members.CandidatesSnapshot()
 	config := h.members.Config()
 
 	// Find the active node
@@ -1561,6 +1567,23 @@ func (h *HealthChecker) redistributeOrphanedIPs(members map[string]*Member) bool
 	}
 
 	orphaned := orphanedGroupIPs(cfg.Groups, hosted)
+	// An address is orphaned when no node this one can see holds it. The Witness
+	// can see further: what it says a peer is still serving is not orphaned, only
+	// cut off from here, and taking it would make an overlap to rule on.
+	if h.server != nil {
+		if held := h.server.WitnessHeldBack(); len(held) > 0 {
+			kept := orphaned[:0]
+			for _, ip := range orphaned {
+				if !held[ip] {
+					kept = append(kept, ip)
+				}
+			}
+			if dropped := len(orphaned) - len(kept); dropped > 0 {
+				h.logger.Info("ACTIVE_CHECK: leaving addresses the Witness says are still served", "count", dropped)
+			}
+			orphaned = kept
+		}
+	}
 	if len(orphaned) == 0 {
 		return false
 	}
@@ -1863,7 +1886,7 @@ func (h *HealthChecker) electNewActiveNode() {
 // findElectionCoordinator returns the ID of the node that should coordinate elections
 func (h *HealthChecker) findElectionCoordinator() string {
 	var coordinatorID string
-	for nodeID, member := range h.members.MembersSnapshot() {
+	for nodeID, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		member.mu.Unlock()
@@ -1883,7 +1906,7 @@ func (h *HealthChecker) selectBestCandidate() *Member {
 	var bestCandidate *Member
 	var bestScore float64 = -1
 
-	for _, member := range h.members.MembersSnapshot() {
+	for _, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		latencyStr := member.Latency
@@ -2158,6 +2181,13 @@ func (h *HealthChecker) probeClusterMembership(member *Member) (membershipVerdic
 			role = StatusPassive
 		case rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE:
 			role = StatusMaintenance
+		case rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS:
+			// Without this a Witness that answers is a peer whose role is
+			// unknown, which is re-asked every cycle and held Unknown (#276's
+			// path): it never reads as up, so it never reads as arbitrating.
+			// Safe to accept from anyone, since setStatusLocked gives Witness
+			// only to a member whose config makes it one (ADR-0006).
+			role = StatusWitness
 		}
 	}
 	return membershipConfirmed, role
@@ -2297,7 +2327,7 @@ func (h *HealthChecker) calculateElectionBackoffWithRole(localNodeID string) (ti
 
 	// Get list of all available nodes that could participate in election
 	var availableNodes []string
-	for _, member := range h.members.MembersSnapshot() {
+	for _, member := range h.members.CandidatesSnapshot() {
 		member.mu.Lock()
 		status := member.Status
 		nodeID := member.ID

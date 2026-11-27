@@ -34,6 +34,7 @@ func TestMemberStatusOrdinalsMatchTheProto(t *testing.T) {
 		{"Active", StatusActive, rpc.MemberStatusEnum_MEMBER_STATUS_ACTIVE},
 		{"Passive", StatusPassive, rpc.MemberStatusEnum_MEMBER_STATUS_PASSIVE},
 		{"Maintenance", StatusMaintenance, rpc.MemberStatusEnum_MEMBER_STATUS_MAINTENANCE},
+		{"Witness", StatusWitness, rpc.MemberStatusEnum_MEMBER_STATUS_WITNESS},
 	} {
 		if int(tc.got) != int(tc.want) {
 			t.Errorf("membership.Status%s = %d, but the proto sends it as %d (%s); "+
@@ -49,7 +50,7 @@ func TestMemberStatusOrdinalsMatchTheProto(t *testing.T) {
 // StatusPartialActive, which is the failure the reservation exists to prevent.
 func TestMemberStatusThreeIsUnusedSoTheProtoReservationHolds(t *testing.T) {
 	const reservedPartialActive = 3
-	for _, st := range []MemberStatus{StatusUnknown, StatusActive, StatusPassive, StatusMaintenance} {
+	for _, st := range []MemberStatus{StatusUnknown, StatusActive, StatusPassive, StatusMaintenance, StatusWitness} {
 		if int(st) == reservedPartialActive {
 			t.Errorf("%s occupies ordinal 3, which the proto reserves for the removed "+
 				"PARTIAL_ACTIVE; an older peer would decode it as that status",

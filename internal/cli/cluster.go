@@ -62,6 +62,7 @@ func newClusterJoinCmd() *cobra.Command {
 		bindIP   string
 		bindPort string
 		nodeID   string
+		witness  bool
 	)
 
 	cmd := &cobra.Command{
@@ -72,7 +73,7 @@ func newClusterJoinCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return client.JoinClusterWithNodeID(address, token, bindIP, bindPort, nodeID)
+			return client.JoinClusterAs(address, token, bindIP, bindPort, nodeID, witness)
 		},
 	}
 
@@ -81,6 +82,8 @@ func newClusterJoinCmd() *cobra.Command {
 	cmd.Flags().StringVar(&bindIP, "bind-ip", "", "Local IP address to bind to (optional)")
 	cmd.Flags().StringVar(&bindPort, "bind-port", "", "Local port to bind to (optional)")
 	cmd.Flags().StringVar(&nodeID, "node-id", "", "Custom node ID (UUID) for this node")
+	cmd.Flags().BoolVar(&witness, "witness", false,
+		"Join as the cluster's Witness: never serves, never counted, and fixed until this node leaves")
 	cmd.MarkFlagRequired("address")
 	cmd.MarkFlagRequired("token")
 

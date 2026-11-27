@@ -93,10 +93,56 @@ func TestCanPromoteWithoutConfirmedRelease(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := canPromoteWithoutConfirmedRelease(tc.peerStillAlive, tc.haveQuorum, tc.forceDemote)
+			got := canPromoteWithoutConfirmedRelease(tc.peerStillAlive, tc.haveQuorum, tc.forceDemote, witnessSilent)
 			if got != tc.want {
 				t.Errorf("canPromoteWithoutConfirmedRelease(peerStillAlive=%v, haveQuorum=%v, forceDemote=%v) = %v, want %v",
 					tc.peerStillAlive, tc.haveQuorum, tc.forceDemote, got, tc.want)
+			}
+		})
+	}
+}
+
+// The Witness's answer joins the same decision. Unreachable from here is the
+// question it settles: dead, or only cut off from this node (ADR-0006).
+func TestCanPromoteWithTheWitnessAnswer(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		alive   bool
+		quorum  bool
+		force   bool
+		witness witnessAnswer
+		want    bool
+	}{
+		// Tier 1: cut off, not dead. Force does not override a peer that is
+		// alive and holding, which is what the Witness has just established.
+		{"a peer serving the Witness is not claimed", false, true, false, witnessPeerServing, false},
+		{"force does not override a peer serving the Witness", false, true, true, witnessPeerServing, false},
+
+		// Tier 2: the Witness asked and nobody answered. Normal failover.
+		{"a peer the Witness cannot see is claimed", false, true, false, witnessPeerNotVisible, true},
+		{"a peer that answers the Witness but is not serving is claimed", false, true, false, witnessPeerIdle, true},
+
+		// Tier 3: no answer from the Witness is today's behaviour, unchanged.
+		{"a silent Witness changes nothing", false, true, false, witnessSilent, true},
+
+		// The hold-down: a Fenced node does not re-promote on a brief silence.
+		{"a Fenced node waits out a brief silence", false, true, false, witnessSilentWhileFenced, false},
+		{"an operator can cut the hold-down short", false, true, true, witnessSilentWhileFenced, true},
+
+		// A wedged peer -- accepts a connection, answers nothing -- is the TC-6
+		// rule, and only one answer lifts it: a trusted Witness that asked the
+		// peer itself and got nothing either. A frozen box holds the address
+		// while answering nobody, and in a pair a takeover is the only way out.
+		{"a wedged peer the Witness cannot see either is claimed", true, true, false, witnessPeerNotVisible, true},
+		{"a wedged peer serving the Witness is not claimed", true, true, false, witnessPeerServing, false},
+		{"a wedged peer with a silent Witness is not claimed", true, true, false, witnessSilent, false},
+		{"a wedged peer idle to the Witness is not claimed", true, true, false, witnessPeerIdle, false},
+		{"a wedged peer is not claimed during a hold-down", true, true, false, witnessSilentWhileFenced, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := canPromoteWithoutConfirmedRelease(tc.alive, tc.quorum, tc.force, tc.witness); got != tc.want {
+				t.Errorf("canPromoteWithoutConfirmedRelease(alive=%v, quorum=%v, force=%v, witness=%s) = %v, want %v",
+					tc.alive, tc.quorum, tc.force, tc.witness, got, tc.want)
 			}
 		})
 	}

@@ -391,6 +391,13 @@ more likely to be failed over unnecessarily.
    assigned to, respecting `capacity`.
 2. A node that recovers, or joins, is given addresses back as the coordinator rebalances.
 
+### Two-Node Clusters and the Witness
+
+A two-node cluster that loses the link between its nodes serves from both rather than risk
+serving from neither. A third box joined as a **Witness** ends that when it can see which node
+should keep the addresses. See [docs/witness.md](docs/witness.md) for what it does, the
+topology it needs, and how to set it up.
+
 ## Testing
 
 ```bash

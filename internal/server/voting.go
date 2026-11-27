@@ -38,15 +38,9 @@ func (s *Server) voteConfig() (*config.Config, error) {
 	return &cfg, err
 }
 
+// votingMembers is the electorate, which never includes the Witness (ADR-0006).
 func votingMembers(cfg *config.Config) []string {
-	ids := make([]string, 0, len(cfg.Nodes))
-	for id, node := range cfg.Nodes {
-		if id != "" && node != nil {
-			ids = append(ids, id)
-		}
-	}
-	slices.Sort(ids)
-	return ids
+	return config.CountedNodeIDs(cfg.Nodes)
 }
 
 // verifyVoter binds a claimed identity to the certificate in required mode.

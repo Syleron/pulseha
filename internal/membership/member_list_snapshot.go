@@ -13,6 +13,34 @@ func (m *MemberList) MembersSnapshot() map[string]*Member {
 	return snapshot
 }
 
+// CandidatesSnapshot is MembersSnapshot without the Witness: the members that can
+// serve, coordinate or be chosen for anything. Every election, coordinator and
+// placement path reads this one, so none of them can see a Witness in any
+// status -- up, or down and reading StatusUnknown, which several of them would
+// otherwise consider (ADR-0006).
+//
+// MembersSnapshot remains for whatever has to see every member: the health
+// checker that watches the Witness, the status report, the state broadcast.
+func (m *MemberList) CandidatesSnapshot() map[string]*Member {
+	m.RLock()
+	defer m.RUnlock()
+	return m.candidatesLocked()
+}
+
+// candidatesLocked is CandidatesSnapshot for callers already holding the list
+// lock. It takes each member's own lock briefly to read the role, the same order
+// getAvailableNodes has always taken them in.
+func (m *MemberList) candidatesLocked() map[string]*Member {
+	snapshot := make(map[string]*Member, len(m.Members))
+	for id, member := range m.Members {
+		if member == nil || member.IsWitness() {
+			continue
+		}
+		snapshot[id] = member
+	}
+	return snapshot
+}
+
 // DropClients closes each member's cached client so the next use dials afresh.
 //
 // Distinct from Member.Close, which is for a member being permanently removed and
