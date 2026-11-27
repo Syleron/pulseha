@@ -147,6 +147,10 @@ type Server struct {
 	placeAddedIP func(iface, ip string) (placed bool, warning string)
 	announceIPs  func(iface string, ips []string) (skipped []string, err error)
 
+	// Optional seam for AddIPToGroup's duplicate address probe; nil is
+	// network.AddressHeldElsewhere.
+	probeAddedIP func(iface, ip string) (holder string, held bool, err error)
+
 	// Test hook run after a promotion's address transfer, before its final
 	// broadcast; nil in the daemon.
 	afterPromotionTransfer func()
@@ -3678,6 +3682,17 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	if err := s.awaitConfigCurrent(ctx); err != nil {
 		return &rpc.AddIPToGroupResponse{Success: false, Message: err.Error()}, nil
 	}
+	// When the caller asks, refuse an address another host already answers for,
+	// before anything is committed and before the lock: the probe waits on the
+	// wire for about a second. See addedIPHeldElsewhere.
+	probeWarning := ""
+	if req.GetVerifyUnused() {
+		var refusal string
+		refusal, probeWarning = s.addedIPHeldElsewhere(req.GroupName, req.Ip)
+		if refusal != "" {
+			return &rpc.AddIPToGroupResponse{Success: false, Message: refusal}, nil
+		}
+	}
 	s.Lock()
 	defer s.Unlock()
 
@@ -3696,6 +3711,9 @@ func (s *Server) AddIPToGroup(ctx context.Context, req *rpc.AddIPToGroupRequest)
 	// Validate IP address and ensure it has a subnet mask
 	ipToUse := req.Ip
 	var warnings []string
+	if probeWarning != "" {
+		warnings = append(warnings, probeWarning)
+	}
 
 	// A floating IP has exactly one owner in either mode, so the bring-up below
 	// goes to exactly one node. In active-passive that is the Active node. In

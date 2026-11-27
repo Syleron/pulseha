@@ -553,13 +553,15 @@ func (c *Client) SetClusterMode(mode string) error {
 	return nil
 }
 
-// AddIPToGroup adds an IP to a group
-func (c *Client) AddIPToGroup(groupName, ip string) error {
+// AddIPToGroup adds an IP to a group. With verifyUnused the daemon refuses an
+// address another host on the segment already answers for.
+func (c *Client) AddIPToGroup(groupName, ip string, verifyUnused bool) error {
 	r, err := c.Send(
 		SendAddIPToGroup,
 		&rpc.AddIPToGroupRequest{
-			GroupName: groupName,
-			Ip:        ip,
+			GroupName:    groupName,
+			Ip:           ip,
+			VerifyUnused: verifyUnused,
 		},
 	)
 	if err != nil {

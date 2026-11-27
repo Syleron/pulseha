@@ -398,6 +398,15 @@ message CreateGroupResponse {
 message AddIPToGroupRequest {
     string group_name = 1;
     string ip = 2;
+    // Refuse the address if another host on the group's segment already answers
+    // for it, instead of bringing it up and announcing it over that host.
+    //
+    // Off unless asked for. The check is an ARP probe, and it is only as good as
+    // the segment's ARP: a network that answers for every address (a cloud
+    // provider's virtual network, a router running proxy ARP) would have every
+    // address refused. The caller knows what it is deployed on; the daemon does
+    // not.
+    bool verify_unused = 3;
 }
 
 message AddIPToGroupResponse {
